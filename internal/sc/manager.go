@@ -605,6 +605,7 @@ func (m *Manager) Probe(via, destination string) (ProbeResult, error) {
 		result.Result = "reachable"
 	} else {
 		result.Result = "http_error"
+		return result, fmt.Errorf("%s path returned HTTP %d; request is not healthy", via, resp.StatusCode)
 	}
 	return result, nil
 }

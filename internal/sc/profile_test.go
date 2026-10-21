@@ -2,6 +2,8 @@ package sc
 
 import (
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -125,5 +127,23 @@ func TestRejectSymlinkedPrivateState(t *testing.T) {
 	m := New(filepath.Join(dir, "state"), "", "", 0)
 	if _, e := m.List(); e == nil {
 		t.Fatal("symlinked state accepted")
+	}
+}
+
+// HTTP errors must never become CLI/JSON success. This is particularly important
+// because sing-box may return HTTP 502 when a VLESS upstream disappears.
+func TestDirectProbeHTTPFailureIsFailure(t *testing.T) {
+	failed := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusBadGateway) }))
+	defer failed.Close()
+	m := New(t.TempDir(), "", "", 0)
+	result, e := m.Probe("direct", failed.URL)
+	if e == nil || result.Code != 502 || result.Result != "http_error" {
+		t.Fatalf("HTTP 502 must be reported as failure: result=%+v err=%v", result, e)
+	}
+	passed := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) }))
+	defer passed.Close()
+	success, e := m.Probe("direct", passed.URL)
+	if e != nil || success.Code != 200 || success.Result != "reachable" {
+		t.Fatalf("unexpected healthy path result=%+v err=%v", success, e)
 	}
 }

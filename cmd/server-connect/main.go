@@ -31,7 +31,8 @@ func output(j bool, value any, err error) int {
 	if j {
 		out := envelope{OK: err == nil, Data: value}
 		if err != nil {
-			out.Data = nil
+			// Preserve safe partial diagnostic data (HTTP status/path/timing),
+			// while the failure remains explicit in ok=false and exit code.
 			out.Error = &apiError{Code: "operation_failed", Message: err.Error()}
 		}
 		if e := json.NewEncoder(os.Stdout).Encode(out); e != nil {
