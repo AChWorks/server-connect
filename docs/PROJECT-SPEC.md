@@ -1,6 +1,6 @@
 # Server Connect — Project Specification
 
-- Status: **Canonical product intent / pre-implementation**
+- Status: **Canonical product intent / initial Proxy Only candidate under development**
 - Repository: **AChWorks/server-connect**
 - Owner: **AChWorks**
 - Authoritative for: **purpose, accepted behavior, safety invariants, scope, and delivery criteria**.
@@ -18,8 +18,8 @@ A configuration working in Windows v2rayN/Karing is useful compatibility evidenc
 
 ## 2. Required outcomes
 
-1. **One simple offline installation:** download an architecture/OS-appropriate complete trusted release on another machine, upload to a folder such as /root/server-connect/, and execute one documented local installation command. First-run, core start, profile import, routing, guard operation, recovery, and uninstall must not demand foreign Internet or GitHub. No hidden fetches or missing unbundled required artifacts.
-2. **Easy daily use:** menu and stable noninteractive CLI support import/validate/list/select/test profiles; Connect, Disconnect, Status, Diagnostics, Recovery, and Offline Update. Switching off removes the product's networking effects. Machine callers use structured output, never scrape interactive menus.
+1. **Two easy one-command installation paths:** Online: on a connected host, a trusted one-line bootstrap automatically fetches and authenticates the compatible manager, pinned sing-box, and needed prerequisites before installing. Offline: download the complete authenticated OS/architecture-specific bundle elsewhere, copy one folder to the host, and run one local command with **zero attempted external downloads**. Both paths use the same installer, state, validation and lifecycle. Runtime operations, recovery and offline updates must work without foreign Internet or GitHub.
+2. **Easy daily use:** menu and stable noninteractive CLI support import/validate/list/select/test profiles; Connect, Disconnect, Status, Diagnostics, Recovery, and Online/Offline Update. Switching off removes the product's networking effects. Machine callers use structured output, never scrape interactive menus.
 3. **Choice of traffic scope:** allow **Direct** (default), **Proxy Only** for selected applications/downloads/updates, **Selective Tunnel** for chosen foreign traffic while retaining domestic/direct and protected hosting/management flows, and **Broad Tunnel** for a larger user-selected outbound scope. Not every mode needs host-wide TUN.
 4. **First connectivity core:** **sing-box**, with an immutable validated version per distribution bundle. Reuse upstream VPN/data-plane implementation; do not build a novel tunnel protocol or packet-forwarding engine. Additional upstream cores/protocols require demonstrated compatibility gaps and bounded adapters, not a speculative plugin framework.
 5. **Real-world profile compatibility:** first support validated sing-box profiles and a demonstrably compatible VLESS link/import journey. Do not claim all v2rayN/Karing, WireGuard, OpenVPN or L2TP formats work before adapter-specific evidence. Optional additional protocols remain replaceable, not mandatory MVP dependencies.
@@ -85,12 +85,12 @@ Retries/failover must be bounded with cooldown/backoff and no unbounded reconnec
 
 ## 7. Packaging and lifecycle
 
-- Distribute a **self-contained, signed/independently authenticated, versioned offline bundle** tailored to supported OS/architecture and documented prerequisites. Include the manager, pinned sing-box executable, required rules/config/templates and all necessary compatible local packages for the advertised target; a shared generic installer may not guess missing downloads.
-- One folder + one command UX (example target, not yet runnable): extract into /root/server-connect/ and run **sudo bash /root/server-connect/install.sh --offline**.
-- Installer does not fetch dependencies; missing/unverifiable material is an explicit pre-mutation error. Preflight kernel/TUN/systemd/route-firewall tools, OS and architectural support; explicitly distinguish unsupported from broken.
-- Keep runtime credentials/config/state apart from replaceable binaries, support staged offline updates and independently verified executable provenance. A checksum in the same untrusted archive is not an independent authenticity guarantee.
+- **Online path:** one documented command fetches a trusted bootstrap on a connected host; it downloads and verifies immutable, compatible release artifacts plus any required prerequisites, then invokes the **same local installer** used offline. No unverified/latest-at-random dependency execution, and no silent host network reconfiguration. An inaccessible remote source fails explicitly with an offline alternative.
+- **Offline path:** a self-contained, independently authenticated, versioned bundle carries manager, pinned sing-box, rules/templates and all otherwise-required local packages for the supported OS/architecture. One folder + one command UX (target example, not yet runnable): **sudo bash /root/server-connect/install.sh --offline**. Offline mode makes **no DNS/HTTP/package-download attempt**; a missing prerequisite fails before mutation.
+- One shared installer performs preflight, verification, staging, activation, update, uninstall and rollback for both paths; network acquisition is only a pre-verification input phase of online mode. Detect unsupported OS/architecture, kernel/TUN/systemd/network-tool availability and conflicts rather than guessing or altering global routing.
+- Keep runtime credentials/config/state apart from replaceable binaries, support staged online and offline updates and independently verified executable provenance. A checksum in the same untrusted archive is not an independent authenticity guarantee.
 - Startup/shutdown/update/uninstall must preserve unrelated network and application state; ordinary uninstall should preserve operator credentials/config unless explicitly purged.
-- Stable releases require evidence of install, disconnect, offline update, interrupted apply, reboot and rollback on a supported real representative Linux host.
+- Stable releases require evidence of both installation paths, disconnect, online/offline update, interrupted apply, reboot and rollback on a supported real representative Linux host.
 
 ## 8. Scope, reuse and non-goals
 
@@ -102,7 +102,7 @@ Retries/failover must be bounded with cooldown/backoff and no unbounded reconnec
 
 ## 9. Validation and delivery contract
 
-A release requires independently inspectable evidence of **all accepted product outcomes**: authenticated offline installation/update on the exact advertised OS/arch; safe Direct and opt-in Proxy Only behavior; routed connectivity preserving domestic, management and hosting paths; both activation and ongoing-health recovery; operator-selected (never universally mandatory) foreign-origin checks; and representative resource measurements.
+A release requires independently inspectable evidence of **all accepted product outcomes**: authenticated online and offline installation/update on the exact advertised OS/arch; safe Direct and opt-in Proxy Only behavior; routed connectivity preserving domestic, management and hosting paths; both activation and ongoing-health recovery; operator-selected (never universally mandatory) foreign-origin checks; and representative resource measurements.
 
 The precise scenarios, negative cases, evidence grades, and exact-artifact criteria are **owned by [ACCEPTANCE.md](ACCEPTANCE.md)**. A separate [release-gate Issue](https://github.com/AChWorks/server-connect/issues/5) tracks remaining release-specific work and authorization; it must not duplicate the full matrix. Passing simulations, source tests or a Windows connection is not evidence of working Iran-datacenter connectivity or safe installed-host routing. A healthy VPN cannot guarantee passage over a fully isolated underlying network.
 

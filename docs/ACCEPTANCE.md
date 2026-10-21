@@ -1,6 +1,6 @@
 # Test and release acceptance
 
-**Current status: all implementation, packaging, and live network tests are NOT_RUN.** No published executable exists. This is a **test contract**, not a claimed test report.
+**Current status: initial source/core tests are in development; no signed public release, foreign VPN field test, or complete installed-host acceptance has been established.** PR/CI/test logs own exact candidate evidence. This is a **test contract**, not a claimed test report.
 
 ## Evidence grades
 
@@ -16,7 +16,8 @@ Record exact commit SHA, artifact digest, sing-box version, OS/kernel/arch, base
 
 | Scenario | What must be demonstrated | Minimum evidence |
 | --- | --- | --- |
-| Offline first install | Whole package works with foreign Internet/GitHub blocked and refuses absent prerequisites without host mutation | Packaged isolated host, exact artifact |
+| Online one-line install | Connected disposable host automatically acquires compatible pinned manager/core and prerequisites; verifies publisher/artifact identity before installation, then runs the shared installer without host network takeover | Real connected Linux host, full fetch/verify/install trace, artifact identity |
+| Offline first install | Whole package works with foreign Internet/GitHub blocked, attempts **no** DNS/HTTP/package fetch and refuses absent prerequisites without host mutation | Packaged isolated host, exact artifact |
 | Direct baseline | Install, off, disable, reboot, uninstall leave server networking/SSH/sites untouched except clearly owned state | Real Linux host state diff |
 | Import/profile | Known compatible sing-box/VLESS profile validates; malformed/malicious/unsupported inputs fail without secret exposure | Unit + real-core integration |
 | Proxy Only | Selected APT/download/WordPress test client can access foreign test service; unselected host traffic unchanged; no product-owned stale client proxy settings after disconnect/core failure | Real Linux core, application configuration and packet-route check |
@@ -31,7 +32,7 @@ Record exact commit SHA, artifact digest, sing-box version, OS/kernel/arch, base
 | False failure | One blocked Ping, broken single foreign website, transient DNS issue do not spuriously tear down healthy profile | Deterministic + actual profile |
 | Fail-closed exceptions | Selected VPN-required flows cannot silently egress direct while other hosting/domestic/management paths recover | Packet trace / rules inspection |
 | Ingress optional | When not selected, blocked foreign site does not prevent download-only use; when required, external nonce reaches origin (not CDN cache) | Independent external test + origin receipt |
-| Package update/uninstall | Offline update preserves user profiles and offers supported recovery; uninstall does not erase unrelated firewall/routes | Exact release + host evidence |
+| Package update/uninstall | Both online and offline update use the same verified artifact/install transaction, preserve profiles and offer recovery; uninstall does not erase unrelated firewall/routes | Exact release + host evidence |
 | Performance | Compare steady/peak CPU, memory, latency, throughput and recovery overhead in Direct, Proxy, Tunnel | Same representative VM/host and workload |
 | Host coexistence | No blind modification of actual aaPanel, SSH, Fail2Ban, Docker, existing VPN/STL or provider network configs | Snapshot + scoped before/after diff |
 

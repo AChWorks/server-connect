@@ -1,6 +1,6 @@
 # Architecture and integration boundaries
 
-- **Status:** design contract; no implementation or installed system is claimed.
+- **Status:** authoritative design contract; an initial Proxy Only source candidate is under development. Host-wide guarded routing is not implemented or accepted.
 - **Product requirements:** [PROJECT-SPEC.md](PROJECT-SPEC.md) — canonical.
 
 ## 1. Shape
@@ -16,7 +16,7 @@ Server Connect control plane
    |-- reachability/diagnostics + routing policy planning
    |-- transaction coordinator + owned network resources
    |-- independent Activation Guard and Runtime Health Guard
-   |-- offline installer/updater lifecycle
+   |-- online fetch + offline bundle -> shared installer/updater lifecycle
      |
      +--> sing-box (pinned third-party core)
      |       | Proxy Only (loopback) or guarded TUN
@@ -67,7 +67,7 @@ Keep implementation concepts separate, not necessarily separate processes:
 - Routing planner/applier: exact resource identities, validate/plan/apply/undo.
 - Guards: activation transaction, runtime proof/failure resolution, and a minimal independent liveness/recovery trigger for **health-guard failure itself**; no unmonitored host-wide interception.
 - Host inspector: Linux/network/systemd/aaPanel coexistence evidence without taking ownership.
-- Offline lifecycle: signed bundle verification, installation, update and owned-state cleanup.
+- Shared lifecycle: optional online acquisition + complete offline bundle both feed identical release verification, install, update and owned-state cleanup.
 - Terminal/CLI: commands, concise operator errors, structured machine results.
 
 Do not introduce public Go libraries, generic plugin registries, distributed orchestration, databases or additional always-on services by default. Keep a simple replaceable boundary around sing-box instead of baking a provider-specific format into every command.
@@ -76,7 +76,7 @@ Do not introduce public Go libraries, generic plugin registries, distributed orc
 
 - Target initially Debian/Ubuntu with systemd and supported Linux TUN/network facilities, **subject to an explicit tested OS/kernel/arch matrix** before any release. No promise of every Debian/Ubuntu or arbitrary Linux version.
 - Integrate native host tools carefully; avoid global NetworkManager, resolv.conf or arbitrary iptables/nftables ownership assumptions.
-- Offline packaging must carry every required runtime artifact for the advertised target; no hidden GitHub/API dependency.
+- Offline packaging must carry every required runtime artifact for the advertised target; no hidden GitHub/API dependency. Online bootstrap may explicitly download and verify prerequisites only on the connected path, before handing identical artifacts to the shared installer.
 - The standalone packaging, validation, and state-recovery requirements are owned by this repository's [offline distribution](OFFLINE-DISTRIBUTION.md), [acceptance](ACCEPTANCE.md), and [safety](SAFETY-RECOVERY.md) contracts. No private framework or governance repository is a runtime or contributor prerequisite.
 - Existing [STL](https://github.com/ach1992/simple-tun-link) is a separate point-to-point Link product; [SSO](https://github.com/ach1992/simple-server-optimizer) is a separate tuning/host utility. Neither owns global server VPN routing or is modified here.
 
