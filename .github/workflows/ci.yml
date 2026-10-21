@@ -1,0 +1,69 @@
+name: Candidate QA
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: server-connect-qa-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  source-and-real-core:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      GOPROXY: 'off'
+      GOTOOLCHAIN: 'local'
+    steps:
+      - name: Checkout source without write credentials
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Pinned Go toolchain
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.27.1'
+          cache: false
+      - name: Download and verify genuine upstream core (test/build only)
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p build/ci
+          curl --fail --location --show-error --silent --retry 2 --connect-timeout 15 --max-time 150 \
+            --output build/ci/sing-box.tar.gz \
+            https://github.com/SagerNet/sing-box/releases/download/v1.14.3/sing-box-1.14.3-linux-amd64.tar.gz
+          echo 'e2bdf179c15a3652955dc44867e33ca0965c9c9b91b34267dcc5a5d639a5feee  build/ci/sing-box.tar.gz' | sha256sum --check
+          tar -xzf build/ci/sing-box.tar.gz -C build/ci
+          build/ci/sing-box-1.14.3-linux-amd64/sing-box version
+      - name: Unit tests, pinned-core local VLESS integration, static Go checks
+        shell: bash
+        env:
+          SC_TEST_SINGBOX: ${{ github.workspace }}/build/ci/sing-box-1.14.3-linux-amd64/sing-box
+        run: |
+          set -euo pipefail
+          go vet ./...
+          go test ./... -count=1 -timeout=100s -v
+          sh -n bundle/install.sh scripts/package.sh scripts/bootstrap-online.sh
+      - name: Local QA artifact and digest-verified online acquisition smoke
+        shell: bash
+        run: |
+          set -euo pipefail
+          scripts/package.sh "$PWD/build/ci/sing-box.tar.gz"
+          mkdir -p build/ci/http
+          cp dist/server-connect-0.1.0-dev-debian13-amd64-local-qa.tar.gz build/ci/http/bundle.tar.gz
+          DIGEST=$(sha256sum build/ci/http/bundle.tar.gz | cut -d' ' -f1)
+          python3 -m http.server 19179 --bind 127.0.0.1 --directory build/ci/http >/dev/null 2>&1 &
+          HTTP_PID=$!
+          trap 'kill "$HTTP_PID" 2>/dev/null || true' EXIT
+          sleep 1
+          scripts/bootstrap-online.sh --archive-url http://127.0.0.1:19179/bundle.tar.gz --sha256 "$DIGEST" --verify-only
+          if scripts/bootstrap-online.sh --archive-url http://127.0.0.1:19179/bundle.tar.gz --sha256 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa --verify-only;then
+            echo 'Digest mismatch unexpectedly accepted' >&2
+            exit 1
+          fi
+          echo 'QA-only build/acquisition passed; no public binary published.'

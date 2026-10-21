@@ -314,10 +314,12 @@ func (m *Manager) unitActive() (string, error) {
 	if e != nil && state != "inactive" && state != "failed" && state != "unknown" {
 		return "unknown", errors.New("systemd service state unavailable")
 	}
-	if state == "active" {
-		return "active", nil
+	switch state {
+	case "active", "inactive", "failed":
+		return state, nil
+	default:
+		return "unknown", errors.New("systemd returned unknown service state")
 	}
-	return "inactive", nil
 }
 func (m *Manager) systemctl(args ...string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
@@ -346,6 +348,9 @@ func (m *Manager) Status() (Status, error) {
 		}
 		if s.Desired == "direct" && observed == "active" {
 			status.Health = "unexpected_active_service"
+		}
+		if s.Desired == "direct" && observed == "failed" {
+			status.Health = "historical_proxy_failure_direct_unaffected"
 		}
 		return nil
 	})
@@ -581,7 +586,7 @@ func (m *Manager) Probe(via, destination string) (ProbeResult, error) {
 	if via == "proxy" {
 		px, e := m.proxyURL()
 		if e != nil {
-			return ProbeResult{}, e
+			return ProbeResult{Path: via, Result: "unavailable"}, e
 		}
 		t.Proxy = http.ProxyURL(px)
 	}
