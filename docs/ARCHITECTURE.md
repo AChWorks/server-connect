@@ -77,7 +77,7 @@ Do not introduce public Go libraries, generic plugin registries, distributed orc
 - Target initially Debian/Ubuntu with systemd and supported Linux TUN/network facilities, **subject to an explicit tested OS/kernel/arch matrix** before any release. No promise of every Debian/Ubuntu or arbitrary Linux version.
 - Integrate native host tools carefully; avoid global NetworkManager, resolv.conf or arbitrary iptables/nftables ownership assumptions.
 - Offline packaging must carry every required runtime artifact for the advertised target; no hidden GitHub/API dependency.
-- Koinon Linux distribution, validation and external-effect safety contracts apply to relevant failure surfaces. This component intentionally consumes **no AChrix Foundation**: AChrix targets a different application family.
+- The standalone packaging, validation, and state-recovery requirements are owned by this repository's [offline distribution](OFFLINE-DISTRIBUTION.md), [acceptance](ACCEPTANCE.md), and [safety](SAFETY-RECOVERY.md) contracts. No private framework or governance repository is a runtime or contributor prerequisite.
 - Existing [STL](https://github.com/ach1992/simple-tun-link) is a separate point-to-point Link product; [SSO](https://github.com/ach1992/simple-server-optimizer) is a separate tuning/host utility. Neither owns global server VPN routing or is modified here.
 
 ## 7. Evolution gates

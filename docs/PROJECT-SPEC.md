@@ -1,7 +1,7 @@
 # Server Connect — Project Specification
 
 - Status: **Canonical product intent / pre-implementation**
-- Repository: **AChWorks/server-connect** (private)
+- Repository: **AChWorks/server-connect**
 - Owner: **AChWorks**
 - Authoritative for: **purpose, accepted behavior, safety invariants, scope, and delivery criteria**.
 - Not authoritative for: live work (GitHub Issues/PRs), build identity (Git), released artifacts (Releases), installed-host state, or secrets.
@@ -95,7 +95,7 @@ Retries/failover must be bounded with cooldown/backoff and no unbounded reconnec
 ## 8. Scope, reuse and non-goals
 
 - **Independent AChWorks Linux CLI component** with its own lifecycle and protected state; it is not a new Foundation.
-- **sing-box** is the initial external core. **STL** manages independent point-to-point private Links and does not own arbitrary system-wide VPN policy. **SSO** manages server tuning and is not the connectivity manager. Optional integration can occur later only for a proven real use case. AChrix is not a fit for this Linux CLI host-control workload.
+- **sing-box** is the initial external core. **STL** manages independent point-to-point private links and does not own arbitrary system-wide VPN policy. **SSO** manages server tuning and is not the connectivity manager. Both products have separate release and operating boundaries; integrate only when a real use case warrants it.
 - No new VPN protocol, custom packet-forwarder, universal plugin framework, multi-server orchestrator, customer-facing hosting panel, mandatory SaaS, or automatic DNS/mirror rewriting in MVP.
 - DNS diagnosis and official signed mirror suggestions may later be added; do not treat them as required activation behaviors. Inbound hosting/relay integration is optional and must earn scope with practical use and safety evidence.
 - No obligation to support every OS, protocol, country-route feed, arbitrary network topology, or Windows client; publish only tested compatibility.
@@ -114,4 +114,4 @@ The precise scenarios, negative cases, evidence grades, and exact-artifact crite
 - GitHub Issues own **uncompleted work**, dependency order and release gates; PRs/CI own evidence. A replacement MASTER starts from current main, relevant Issues/PRs/CI and this document rather than chat history.
 - Core version, manager language, final target OS/arch matrix, measured performance, and real field VPN/provider reliability remain **implementation/validation decisions**, not fictitious accepted test results. Do not widen support claims before proofs.
 
-Relevant upstream contracts: [Koinon new-project intake](https://github.com/AChWorks/koinon/blob/main/docs/workflows/new-project-intake.md), [Linux distribution](https://github.com/AChWorks/koinon/blob/main/docs/contracts/linux-tool-distribution.md), [validation](https://github.com/AChWorks/koinon/blob/main/docs/contracts/validation-evidence.md), [external-effect safety](https://github.com/AChWorks/koinon/blob/main/docs/contracts/external-effect-safety.md).
+The contracts needed to implement this public project are self-contained in the repository documents linked above; access to another organization's private documentation is not a prerequisite.

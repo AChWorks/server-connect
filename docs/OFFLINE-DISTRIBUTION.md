@@ -57,7 +57,7 @@ A bundle may support additional optional cores **only when tested and intentiona
 
 The implementation must publish a table of supported distro release, architecture, kernel/network primitives, package prerequisites and file formats, derived from **tested** packaged artifacts. Before this exists, do not advertise Debian/Ubuntu versions, protocol combinations or CPU memory requirements as production-compatible.
 
-Linux system support and distribution follow [Koinon Linux Tool Distribution Contract](https://github.com/AChWorks/koinon/blob/main/docs/contracts/linux-tool-distribution.md). Package/security claims require [ACCEPTANCE.md](ACCEPTANCE.md) evidence.
+Package and security claims require the tested, exact-artifact evidence defined by [ACCEPTANCE.md](ACCEPTANCE.md); no external private contract is required to implement or validate the offline installer.
 
 ## 5. Failure states and safe assistance
 

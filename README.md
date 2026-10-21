@@ -1,39 +1,50 @@
 # Server Connect
 
-**Offline-first, fail-safe Linux server connectivity manager (planned; not yet installable).**
+**Status: Design and planning — no installable release is available yet.**
 
-Server Connect is a private AChWorks project for Linux hosting administrators. In ordinary conditions the host stays **Direct**. When desired, the operator can import a validated VPN/proxy profile, use only selected applications through a proxy, or activate guarded split/broader outbound routing without intentionally breaking domestic access, SSH, aaPanel or hosted sites.
+Server Connect is an **offline-first Linux server connectivity manager** for administrators of hosting servers, including Iran-based servers running aaPanel, WordPress, and other web services. Its goal is to provide simple, controlled access to external networks when direct connections are unavailable, without disrupting SSH, domestic routes, hosted websites, or other server workloads.
 
-**First upstream core:** sing-box. **Critical differentiator:** rollback both during activation and when an active VPN path later fails. Offline installation is a first-class requirement, not an afterthought.
+The initial connectivity engine is **sing-box**. Rather than reinventing VPN protocols, Server Connect will manage compatible connection profiles, selective proxy/tunnel routing, safe activation, continuous connection health checks, and automatic recovery when a configured route fails.
 
-فارسی: این پروژه برای مدیریت آسان و امن اتصال‌های بین‌المللی سرورهای Linux ایران طراحی شده است. در حال حاضر **هیچ نسخه نصب‌شدنی منتشر نشده** و فایل یا دستور نصب واقعی وجود ندارد.
+## Planned operating modes
 
-## Product map / source of truth
-
-| Need | Read |
+| Mode | Intended behavior |
 | --- | --- |
-| Accepted goals, behavior, constraints, non-goals | [Project specification](docs/PROJECT-SPEC.md) — canonical |
-| Components, boundaries and third-party reuse | [Architecture](docs/ARCHITECTURE.md) |
-| Activation confirmation, recovery and health guard | [Safety & recovery](docs/SAFETY-RECOVERY.md) |
-| One-folder offline installation and package trust | [Offline distribution](docs/OFFLINE-DISTRIBUTION.md) |
-| What must be physically tested before release | [Acceptance](docs/ACCEPTANCE.md) |
-| Contributors / replacement Master rules | [AGENTS.md](AGENTS.md) |
-| Current work and implementation results | [Repository Issues](https://github.com/AChWorks/server-connect/issues), PRs, CI and releases |
+| **Direct** | Keep the existing server network unchanged; the default when no profile is active. |
+| **Proxy Only** | Use a local proxy for explicitly selected downloads, updates, or applications without changing the host's default route. |
+| **Selective Tunnel** | Route selected external traffic through the active profile while preserving domestic and protected management/service paths. |
+| **Broad Tunnel** | Route a wider, explicitly chosen set of outbound traffic through the profile, with host safety exceptions. |
 
-**No VPN endpoints, paid profiles, private keys, credentials, site/customer data or operator secrets belong in this repository.**
+A tunnel-affecting change must pass a guarded activation and an operator confirmation window before it is committed. If an active profile stops working, independent health/recovery mechanisms must restore the selected safe network policy. **Checking whether websites are reachable from abroad is optional**, depending on the operator's goal; a client VPN alone does not grant public inbound connectivity.
 
-## Intended user journey (not implemented)
+These are **accepted design requirements, not implemented or tested capabilities**. A profile that works in Windows v2rayN/Karing may not be reachable from a particular Linux datacenter. No VPN protocol can restore international connectivity when the underlying network has no usable path.
 
-1. Download one verified, compatible complete offline release bundle on a trusted networked machine.
-2. Copy it to a private folder on the target Linux server and execute its documented **local** installer once.
-3. Start a simple terminal menu; import and validate a compatible sing-box/VLESS profile.
-4. Choose Direct, Proxy Only, Selective Tunnel or Broad Tunnel; pick failure and probe policy.
-5. A route-affecting mode is temporary until independently checked and confirmed; if later connectivity degrades, the guard restores the selected safe network policy.
+## Planned installation experience
 
-Foreign reachability of customer websites is **optional and selected by the operator**, not a mandatory condition for using a VPN to download updates.
+The goal is a verified, self-contained release bundle that can be downloaded on another device, copied onto a Linux server, and installed with **one local command**, including when the target server cannot access GitHub or foreign package repositories. Bundled binaries, dependency checks, updates, and recovery must work offline for each advertised supported system.
 
-## Project limits
+**There is no installer, executable release, or supported host matrix yet.** Do not treat example paths or commands in the design documents as functional installation instructions.
 
-This project manages its own host-network changes, **not** a new VPN protocol, a mandatory cloud service, the aaPanel web stack or other AChWorks repositories. A client VPN does **not** automatically grant inbound public connectivity. Successful Windows configuration use does not prove that the same remote endpoint works from a specific Iran datacenter.
+## Documentation and project status
 
-Only advertise OS/protocol/performance support after exact-version, offline-package and real host evidence. No production deployment is authorized by the creation of this repository.
+| Source | Responsibility |
+| --- | --- |
+| [Project specification](docs/PROJECT-SPEC.md) | **Canonical** product goals, behavior, constraints, and non-goals |
+| [Architecture](docs/ARCHITECTURE.md) | Component boundaries, host resource ownership, and upstream reuse |
+| [Safety and recovery](docs/SAFETY-RECOVERY.md) | Guarded activation, health monitoring, rollback, and crash/reboot safety |
+| [Offline distribution](docs/OFFLINE-DISTRIBUTION.md) | Complete local bundle, release trust, installation, and update behavior |
+| [Acceptance criteria](docs/ACCEPTANCE.md) | Reproducible test matrix and evidence needed before release |
+| [Contributor instructions](AGENTS.md) | Engineering, review, and project-continuity rules |
+| [GitHub Issues](https://github.com/AChWorks/server-connect/issues) | Current work, dependencies, and release acceptance |
+
+**Development starts with [Issue #1 — Offline-first sing-box Proxy Only](https://github.com/AChWorks/server-connect/issues/1)**. Implement and validate it on disposable Linux hosts before advancing to host-wide routing. No production server change is authorized by this repository.
+
+## Boundaries and security
+
+Server Connect owns only its own host changes. It must not take over unrelated firewall rules, SSH settings, aaPanel services, other tunnels, or customer applications. It is **not** a VPN provider, public relay network, reverse proxy, or new packet-forwarding engine.
+
+Do not commit real VPN subscriptions, endpoints containing credentials, customer details, secrets, private keys, or runtime state.
+
+## License status
+
+The repository is publicly readable, but **no software license has been selected**. Public visibility does not grant general rights to reuse or redistribute the code. Any open-source license or binary redistribution policy requires an explicit project-owner decision.
