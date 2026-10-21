@@ -138,8 +138,14 @@ if [ ! -d "$release" ]; then
  install -m 0644 "$SOURCE_DIR/bin/libcronet.so" "$stage/bin/libcronet.so"
  install -m 0644 "$SOURCE_DIR/THIRD-PARTY-LICENSES/sing-box-LICENSE" "$stage/THIRD-PARTY-LICENSES/sing-box-LICENSE"
  printf 'AChWorks/server-connect\n' > "$stage/.owner";chmod 0644 "$stage/.owner"
+ # mktemp creates 0700 directories; the unprivileged systemd DynamicUser
+ # must traverse the root-owned executable release directory after install.
+ chmod 0755 "$stage"
  mv -- "$stage" "$release"
 fi
+# An exact, identity-verified prior candidate may have the old 0700 mode.
+# Correct only the verified product-owned release, never a foreign tree.
+chmod 0755 "$release"
 if [ ! -d "$STATE" ]; then install -d -m 0700 "$STATE";fi
 if [ ! -d "$STATE/profiles" ]; then install -d -m 0700 "$STATE/profiles";fi
 check_dir "$STATE/profiles"
