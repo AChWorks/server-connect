@@ -4,7 +4,7 @@
 - Repository: **AChWorks/server-connect** (private)
 - Owner: **AChWorks**
 - Authoritative for: **purpose, accepted behavior, safety invariants, scope, and delivery criteria**.
-Not authoritative for: live work (GitHub Issues/PRs), build identity (Git), released artifacts (Releases), installed-host state, or secrets.
+- Not authoritative for: live work (GitHub Issues/PRs), build identity (Git), released artifacts (Releases), installed-host state, or secrets.
 
 ## 1. Mission and users
 

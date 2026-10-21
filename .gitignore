@@ -1,0 +1,19 @@
+# Private runtime state, secrets, local environments and release outputs
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+*.p12
+*.pfx
+*.secret
+*.log
+profiles-private/
+secrets/
+state/
+dist/
+build/
+tmp/
+*.tar
+*.tar.gz
+*.zip

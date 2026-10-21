@@ -1,0 +1,44 @@
+schemaVersion: achworks.dev/v1alpha1
+kind: Component
+
+metadata:
+  name: server-connect
+  title: Server Connect
+  description: Offline-first, fail-safe Linux server connectivity manager.
+
+spec:
+  type: linux-server-utility
+  lifecycle: planned
+  system: server-connect
+  ownership: AChWorks
+
+  technology:
+    languages: []
+    frameworks: []
+    runtimes:
+      - Linux
+      - sing-box
+
+  capabilities:
+    provides:
+      - offline-first-connectivity-management
+      - managed-outbound-routing
+      - safe-activation-and-network-recovery
+    consumes:
+      - sing-box
+
+  interfaces:
+    - type: cli
+      name: server-connect
+      contract: docs/PROJECT-SPEC.md
+
+  dependencies: []
+
+  documentation:
+    path: docs/
+
+  source:
+    repository: AChWorks/server-connect
+    url: https://github.com/AChWorks/server-connect
+
+  extensions: {}
