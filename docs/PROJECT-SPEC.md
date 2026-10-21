@@ -25,7 +25,7 @@ A configuration working in Windows v2rayN/Karing is useful compatibility evidenc
 5. **Real-world profile compatibility:** first support validated sing-box profiles and a demonstrably compatible VLESS link/import journey. Do not claim all v2rayN/Karing, WireGuard, OpenVPN or L2TP formats work before adapter-specific evidence. Optional additional protocols remain replaceable, not mandatory MVP dependencies.
 6. **Host safety:** preserve direct Iranian networking, site availability, SSH, aaPanel and third-party services; prevent proxy recursion, accidental route hijacks, asymmetric reply routing, DNS/IPv6 bypasses, and unowned firewall mutations. Only manage exactly attributed resources; do not assume all network state is product-owned.
 7. **Bounded, independent rollback on activation:** host-affecting network changes require pre-armed, crash/reboot-aware **Activation Guard**. Default confirmation window: **10 minutes, operator-configurable**. A successful command/session is not proof of reachability.
-8. **Automatic recovery during ongoing use:** independent **Runtime Health Guard** detects an unusable active profile by **path-bound real probes**, not a single ICMP ping or a direct-path false positive. On confirmed failure the product promptly removes/undoes its failed routing effects and returns to the last safe, independently valid baseline (by default ordinary Direct routing), applying any explicitly configured fail-closed policy for selected traffic.
+8. **Automatic recovery during ongoing use:** independent **Runtime Health Guard** detects an unusable active profile by **path-bound real probes**, not a single ICMP ping or a direct-path false positive. On confirmed failure the product promptly removes/undoes its failed routing effects and returns to the last safe, independently valid baseline (by default ordinary Direct routing), applying any explicitly configured fail-closed policy for selected traffic. A failed, stalled or unexpectedly disabled health supervisor must not leave a routed VPN running indefinitely without protection.
 9. **Flexible acceptance and failure policy:** users choose purpose-specific probes, thresholds, failure response and, where relevant, confirmation of foreign access to hosted sites. **Public ingress from abroad is not required for a downloads/updates-only use case.** If ingress is selected as an acceptance condition, prove a fresh uncached foreign request reached the real origin; operator confirmation alone or a cached CDN response is insufficient.
 10. **Low footprint:** no permanent global routing change while off; do not require an external dashboard, cloud controller, always-on data plane when unused, or broad new runtime dependencies. Quantify performance on representative hosts rather than promising an unmeasured memory/CPU budget.
 
@@ -42,12 +42,14 @@ Policies apply to **outbound connectivity**. Incoming public traffic from abroad
 
 The tool must let users keep the website/SSH ingress goal out of scope, test it optionally, or make it an explicit acceptance gate for a hosting-oriented activation. Paid-gateway/IP-allowlisted APIs, SMTP and other applications may need independent route and fail-closed policy.
 
+**Proxy Only** must also be safe when the VPN core stops: prefer opt-in per-command/application proxy settings. If Server Connect itself creates persistent application-level proxy settings, it must remove or restore exactly those owned changes on disconnect, failure and uninstall; never overwrite operator-managed settings or leave clients unintentionally pointing at a dead local proxy.
+
 ## 4. Safety invariants
 
 - Fresh install and post-uninstall baseline is **Direct with no product-owned host-wide interception**. A verified explicitly persistent active configuration may be restored after reboot only under the same safety checks; a pending/unverified activation must not silently become committed.
 - **Preflight -> snapshot/journal -> arm independent recovery -> verify guard armed -> apply narrow changes -> path-specific verify -> operator confirmation when required -> commit.** No risky apply if a trustworthy recoverable baseline cannot be captured.
 - Resource attribution and ownership checks cover routes, rules, interfaces, local listeners, firewall/nftables fragments, resolver modifications (if ever separately authorized), service units and credentials. Do not flush tables, overwrite the global firewall, alter aaPanel/Fail2Ban/Docker/STL resources, stop foreign services, or reset host networking blindly.
-- Capture and preserve the existing management/control path, the route to the VPN endpoint (underlay), and established inbound connection reply behavior. Model conntrack, policy routing, IPv4/IPv6, reverse path filtering, DNS, MTU and third-party networking as risks to test, not universal guesses.
+- Capture and preserve the existing management/control path, the route to the VPN endpoint (underlay), and established inbound connection reply behavior. Bootstrap endpoint addressing/DNS must be possible on a path available **before** establishing the VPN; tunneled DNS policy must not create loops or require unowned global resolver rewrites. Model conntrack, policy routing, IPv4/IPv6, reverse path filtering, DNS, MTU and third-party networking as risks to test, not universal guesses.
 - State-changing operations use stable operation identity, durable atomic records, exclusive ownership/locking, idempotent observe/repair behavior and explicit **UNKNOWN/CONFLICT** states; no blind replay after ambiguous effects.
 - Rollback means **restore the owned network delta to a verified safe baseline**, not magically restore lost international Internet, and not overwrite third-party changes made while a profile was active. Conflict/uncertain ownership must remain visible and conservatively contained.
 - No credentials, VLESS URLs, provider subscriptions or private keys in Git, logs, diagnostic exports or release bundles. Installed private state and operator configuration have restrictive permissions.
@@ -72,7 +74,7 @@ The safeguard must be implemented independently of the upstream sing-box process
 
 While a profile is enabled, monitor whether **its intended path is actually usable**. Evidence includes live process/interface/route state, authenticated TCP/TLS/HTTPS probes forced through the chosen outbound, distinct targets where sensible, and independent diagnostics for DNS and domestic/control connectivity. A single failed site or ping is insufficient to declare a dead VPN. No silent direct fallback on probes.
 
-Initial configurable *candidates* (not performance guarantees): check every **15 seconds**, allow **30 seconds** connection grace, and classify confirmed failure after **three** consecutive unsuccessful probe rounds. Fatal process exit or loss of owned interface may bypass ordinary grace after identity verification.
+Probe intervals, startup grace and failure thresholds are operator-tunable; suggested initial values and exceptional fast-recovery cases are owned by [SAFETY-RECOVERY.md](SAFETY-RECOVERY.md), subject to actual field validation rather than fixed performance promises.
 
 On confirmed failure: stop using the bad profile, recover product-owned network changes promptly, verify local/direct management and domestic reachability, record reason/operation ID, and apply the operator-selected policy:
 - **restore_direct** (default): recover ordinary host routing; foreign connectivity might remain unavailable;
@@ -100,19 +102,9 @@ Retries/failover must be bounded with cooldown/backoff and no unbounded reconnec
 
 ## 9. Validation and delivery contract
 
-A project candidate is ready for user-host release only with evidence of:
-- **Offline** first installation/update on each advertised OS/arch, including no foreign network/GitHub, package authenticity and prerequisite failure handling.
-- **Direct** pristine baseline and complete owned-state restoration after disconnect/uninstall/reboot.
-- Real compatible **VLESS/sing-box** profile import and outbound probes from an actual Linux target; Windows success alone insufficient.
-- **Proxy Only** use without touching site/SSH host routing.
-- **Selective/Broad** correctness for Iranian routes, VPN endpoint underlay, established/new inbound SSH and HTTP(S), IPv4/IPv6 and DNS, fail-open/fail-closed policy, and third-party aaPanel/Fail2Ban/Docker network coexistence where claimed.
-- **Activation Guard:** unconfirmed expiry, stale/wrong confirmation, loss of SSH, concurrent request, crash and reboot recover reliably.
-- **Runtime Health Guard:** stopped core, broken upstream, partial DNS failure, unreachable one probe, confirmed multiple-probe outage, recovery/fallback, no routing leaks or flapping.
-- **Optional ingress proof:** when selected, an external independent request with nonce and origin observation, not a CDN cache hit or unverifiable user's click.
-- Representative CPU/RAM/latency/throughput before/after, with honest environmental limits.
-- Independent high-assurance code review and real disposable-host integration before consequential production host-network changes.
+A release requires independently inspectable evidence of **all accepted product outcomes**: authenticated offline installation/update on the exact advertised OS/arch; safe Direct and opt-in Proxy Only behavior; routed connectivity preserving domestic, management and hosting paths; both activation and ongoing-health recovery; operator-selected (never universally mandatory) foreign-origin checks; and representative resource measurements.
 
-Tests must distinguish unit/simulation, actual Linux namespace or VM, live tunnel/datacenter, installed artifact, and customer production. No simulated check is evidence of public-network passage. A healthy VPN cannot guarantee a hostile/fully isolated external network path.
+The precise scenarios, negative cases, evidence grades, and exact-artifact criteria are **owned by [ACCEPTANCE.md](ACCEPTANCE.md)**. A separate [release-gate Issue](https://github.com/AChWorks/server-connect/issues/5) tracks remaining release-specific work and authorization; it must not duplicate the full matrix. Passing simulations, source tests or a Windows connection is not evidence of working Iran-datacenter connectivity or safe installed-host routing. A healthy VPN cannot guarantee passage over a fully isolated underlying network.
 
 ## 10. Truth and implementation handoff
 

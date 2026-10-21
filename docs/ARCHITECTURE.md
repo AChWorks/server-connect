@@ -45,11 +45,11 @@ Separate **desired**, **observed**, **pending/uncertain**, and **last verified s
 ## 3. Routes and process behavior
 
 1. **Direct:** no product-owned host-wide routes or firewall changes. Clean-off is a real product feature.
-2. **Proxy Only:** an explicit local SOCKS/HTTP endpoint (prefer loopback or Unix socket); users/apps opt in. This must not silently alter global DNS or the host default route.
+2. **Proxy Only:** an explicit local SOCKS/HTTP endpoint (prefer loopback or Unix socket); users/apps opt in. Prefer per-invocation application/environment proxy selection. When an application proxy file is product-managed, its prior exact content/absence and owner must be recorded and its owned change undone on disable/core failure. Never take over operator-owned proxy settings or silently alter global DNS/default routes.
 3. **Selective Tunnel:** user-selected foreign routes via TUN/policy routing, domestic/direct routes retained; protect VPN endpoint underlay and ingress reply behavior.
 4. **Broad Tunnel:** wider outbound scope, still preserving positively established host/control/underlay exemptions; never equate it with unconditional default-route replacement.
 
-For routed modes, plan/observe exact Linux route tables, ip rules, marks, IPv4/IPv6 and active packet-filter authority before applying. An Iranian geo-IP list alone is not a correct routing model for established inbound connections, private networks or control-plane traffic; require live-route/connection-aware checks. Separate the **route to the remote VPN server** from traffic carried inside that VPN.
+For routed modes, plan/observe exact Linux route tables, ip rules, marks, IPv4/IPv6 and active packet-filter authority before applying. An Iranian geo-IP list alone is not a correct routing model for established inbound connections, private networks or control-plane traffic; require live-route/connection-aware checks. Separate the **route to the remote VPN server** from traffic carried inside that VPN. Before any tunnel, resolve or pin its endpoint using a pre-existing reachable underlay path; foreign name resolution for applications using the tunnel must respect the selected routing/DNS policy without silently replacing the host's shared resolver.
 
 If a needed assumption is unprovable (routing owner, baseline, MTU/IPv6 behavior, firewall coexistence, initial management access), stop with a precise diagnostic rather than apply speculative host-wide changes.
 
@@ -65,7 +65,7 @@ Keep implementation concepts separate, not necessarily separate processes:
 - Profile parser/adapter: accepted input, secret handling, compatibility validation.
 - Core runner: exact pinned sing-box executable and state; future alternative adapter only after observed need.
 - Routing planner/applier: exact resource identities, validate/plan/apply/undo.
-- Guards: activation transaction and runtime proof/failure resolution, independently runnable from the sing-box core.
+- Guards: activation transaction, runtime proof/failure resolution, and a minimal independent liveness/recovery trigger for **health-guard failure itself**; no unmonitored host-wide interception.
 - Host inspector: Linux/network/systemd/aaPanel coexistence evidence without taking ownership.
 - Offline lifecycle: signed bundle verification, installation, update and owned-state cleanup.
 - Terminal/CLI: commands, concise operator errors, structured machine results.

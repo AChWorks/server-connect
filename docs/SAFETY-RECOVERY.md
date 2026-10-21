@@ -43,6 +43,8 @@ On reboot, do not blindly reapply an unconfirmed TUN. Recover the prior durable 
 
 Independent lightweight supervisory logic runs while a profile actively changes network routing. It observes core process/service, exact owned interface/rules, path-constrained real HTTPS/TCP probes and separately domestic/control connectivity. A healthy process or ICMP echo is not enough. A direct Internet request that bypasses the profile may **not** count as VPN health.
 
+**Guard liveness is also an observed safety property.** An independently recoverable watchdog/supervisor (prefer a native, narrowly owned service/timer rather than a second full daemon) must detect an unexpectedly stopped, hung or disabled Runtime Health Guard while a host-wide route remains active. Failure to restore trustworthy observation within a bounded, tested interval must initiate safe owned-delta recovery instead of leaving an unmonitored dead route. Guard restart alone is not proof of route health; any conflicting or uncertain recovery must be reported explicitly. Neither this mechanism nor any local script can promise recovery after complete OS/kernel/provider failure.
+
 Initial suggested defaults, operator-tunable and subject to physical validation:
 - Health interval: 15 seconds.
 - Startup grace: 30 seconds.
@@ -63,7 +65,7 @@ Backoff, retry count, eligibility for reconnect, cooldown and alerting are adjus
 
 - Apply and undo only identity-verified owned changes; on conflict with modified foreign/host state, refuse destructive cleanup and report **UNCERTAIN** with actionable console-safe diagnostics.
 - Detect if another manager changed an overlapping interface/route during the trial; do not replay an obsolete snapshot that overwrites newer external state.
-- Test interruption between every meaningful mutation stage, failed fsync/journal/lock, process killing, disarmed timer, reboot during trial and reboot after committed activity.
+- Test interruption between every meaningful mutation stage, failed fsync/journal/lock, process killing, disabled/hung health supervisor, disarmed timer, reboot during trial and reboot after committed activity.
 - Local diagnostics must preserve original failure category: DNS, TCP, TLS, profile transport, route, firewall, interface, service, changed host baseline, insufficient permissions or probe endpoint failure.
 - Protect opaque operation identifiers and provenance without logging bearer tokens, credentials, full VLESS links or private keys.
 - Keep health state bounded and diagnosable; service restart does not magically attest that outbound traffic works.

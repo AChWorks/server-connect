@@ -19,14 +19,15 @@ Record exact commit SHA, artifact digest, sing-box version, OS/kernel/arch, base
 | Offline first install | Whole package works with foreign Internet/GitHub blocked and refuses absent prerequisites without host mutation | Packaged isolated host, exact artifact |
 | Direct baseline | Install, off, disable, reboot, uninstall leave server networking/SSH/sites untouched except clearly owned state | Real Linux host state diff |
 | Import/profile | Known compatible sing-box/VLESS profile validates; malformed/malicious/unsupported inputs fail without secret exposure | Unit + real-core integration |
-| Proxy Only | Selected APT/download/WordPress test client can access foreign test service; unselected host traffic unchanged | Real Linux core and packet-route check |
-| VPN endpoint underlay | No recursive tunnel path; mixed Iran/private/foreign destinations take expected route | Linux network path observation |
+| Proxy Only | Selected APT/download/WordPress test client can access foreign test service; unselected host traffic unchanged; no product-owned stale client proxy settings after disconnect/core failure | Real Linux core, application configuration and packet-route check |
+| VPN endpoint underlay and bootstrap DNS | Endpoint is addressable before VPN is active; no recursive tunnel path or resolver loop; Iran/private/foreign traffic uses expected route | Offline/restricted-DNS simulation and real Linux path observation |
 | Selective/Broad routing | Inbound SSH (existing/new), web requests and responses, IPv4/IPv6, DNS and aaPanel coexist across connect/off | Disposable hosting VM + selected field |
 | Activation expiry | 600-second/default or shorter test-configured expiry without new approved control connection returns to baseline | systemd and route journal check |
 | Activation confirmation | Fresh bound SSH/console identity accepted; stale/replayed/cross-operation confirmation rejected | Real SSH, negative tests |
 | Crash/uncertain | Kill manager or sing-box between mutation stages, concurrent apply, fsync failure and foreign rule conflict do not clobber unowned resources | Fault injection + host state diff |
 | Reboot while pending | Uncommitted route effects are not silently persisted; recovery reconciles journal | Real reboot from installed artifact |
 | Runtime failure | Core exit, unreachable VPN endpoint, simulated packet drop, multi-probe outage return network to valid operator policy | Path-bound probe and host route evidence |
+| Guard liveness failure | Stop/hang/disable Runtime Health Guard while routed VPN remains; an independent bounded recovery mechanism prevents indefinite unmanaged interception | Real systemd/service supervision and host route recovery evidence |
 | False failure | One blocked Ping, broken single foreign website, transient DNS issue do not spuriously tear down healthy profile | Deterministic + actual profile |
 | Fail-closed exceptions | Selected VPN-required flows cannot silently egress direct while other hosting/domestic/management paths recover | Packet trace / rules inspection |
 | Ingress optional | When not selected, blocked foreign site does not prevent download-only use; when required, external nonce reaches origin (not CDN cache) | Independent external test + origin receipt |
@@ -39,7 +40,7 @@ Record exact commit SHA, artifact digest, sing-box version, OS/kernel/arch, base
 Before implementing the complete menu or speculative protocols, demonstrate:
 1. A pinned genuine sing-box VLESS profile can run **Proxy Only** on a disposable Linux host.
 2. A representative app's request can be forced through it, verified independently from a Direct request.
-3. Stopping sing-box or losing foreign network access cannot affect ordinary host routes or SSH in this mode.
+3. Stopping sing-box or losing foreign network access cannot affect ordinary host routes or SSH in this mode; any product-owned app proxy settings are restored rather than left pointing to an unavailable local port.
 4. The exact files required for the supported target can be installed with foreign networking disabled.
 
 Then advance to guarded Selective Tunnel with independent recovery; do not deploy an unguarded system-wide TUN just to accelerate a demo.
