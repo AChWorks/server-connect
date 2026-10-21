@@ -106,6 +106,12 @@ func TestRealPinnedCoreProxyOnly(t *testing.T) {
 	upstream := startCore(t, core, srvFile, upstreamPort)
 	client := startCore(t, core, cliFile, proxyPort)
 	_ = client
+	if e := checkLocalAuth(proxyPort, "test-proxy-password"); e != nil {
+		t.Fatalf("real SOCKS5 auth readiness failed: %v", e)
+	}
+	if e := checkLocalAuth(proxyPort, "wrong-password"); e == nil {
+		t.Fatal("incorrect local proxy password accepted")
+	}
 	proxyURL, _ := url.Parse("http://sc:test-proxy-password@127.0.0.1:" + strconv.Itoa(proxyPort))
 	viaProxy := &http.Client{Transport: &http.Transport{Proxy: http.ProxyURL(proxyURL)}, Timeout: 4 * time.Second}
 	viaDirect := &http.Client{Transport: &http.Transport{Proxy: nil}, Timeout: 4 * time.Second}

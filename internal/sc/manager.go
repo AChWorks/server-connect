@@ -372,6 +372,78 @@ func (m *Manager) password() (string, error) {
 	}
 	return string(b), nil
 }
+
+// checkLocalAuth proves that the selected local listener speaks SOCKS5 and
+// accepts the manager's private credentials, without opening foreign traffic.
+func checkLocalAuth(port int, password string) error {
+	address := net.JoinHostPort("127.0.0.1", strconv.Itoa(port))
+	conn, err := net.DialTimeout("tcp", address, 350*time.Millisecond)
+	if err != nil {
+		return errors.New("authenticated loopback listener unavailable")
+	}
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(900 * time.Millisecond))
+	if _, err = conn.Write([]byte{5, 1, 2}); err != nil {
+		return errors.New("SOCKS5 greeting failed")
+	}
+	reply := make([]byte, 2)
+	if _, err = io.ReadFull(conn, reply); err != nil || reply[0] != 5 || reply[1] != 2 {
+		return errors.New("SOCKS5 listener does not require expected authentication")
+	}
+	if len(password) > 255 {
+		return errors.New("proxy authentication length unsupported")
+	}
+	authentication := append([]byte{1, 2, 's', 'c', byte(len(password))}, []byte(password)...)
+	if _, err = conn.Write(authentication); err != nil {
+		return errors.New("proxy authentication handshake failed")
+	}
+	if _, err = io.ReadFull(conn, reply); err != nil || reply[0] != 1 || reply[1] != 0 {
+		return errors.New("proxy authentication rejected")
+	}
+	return nil
+}
+
+func (m *Manager) waitReady(port int, password string) error {
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		active, err := m.unitActive()
+		if err != nil {
+			return err
+		}
+		if active != "active" {
+			return errors.New("sing-box service exited before its listener became ready")
+		}
+		if checkLocalAuth(port, password) == nil {
+			time.Sleep(150 * time.Millisecond)
+			after, _ := m.unitActive()
+			if after == "active" {
+				return nil
+			}
+			return errors.New("sing-box service exited immediately after listener readiness")
+		}
+		time.Sleep(125 * time.Millisecond)
+	}
+	return errors.New("sing-box authenticated loopback listener readiness timeout")
+}
+
+// Ready is a local-only readiness check; it does not claim upstream health.
+func (m *Manager) Ready() error {
+	return m.withLock(func() error {
+		s, e := m.load()
+		if e != nil {
+			return e
+		}
+		if s.Desired != "proxy" {
+			return errors.New("proxy mode is not desired")
+		}
+		b, e := readRegular(filepath.Join(m.Dir, "proxy-auth"))
+		if e != nil {
+			return e
+		}
+		return m.waitReady(s.Port, string(b))
+	})
+}
+
 func (m *Manager) Connect() error {
 	if e := EnsureCore(m.Core); e != nil {
 		return e
@@ -391,7 +463,11 @@ func (m *Manager) Connect() error {
 		if s.Desired == "proxy" {
 			status, _ := m.unitActive()
 			if status == "active" {
-				return nil
+				b, e := readRegular(filepath.Join(m.Dir, "proxy-auth"))
+				if e != nil {
+					return e
+				}
+				return m.waitReady(s.Port, string(b))
 			}
 		}
 		pass, e := m.password()
@@ -413,14 +489,24 @@ func (m *Manager) Connect() error {
 		if e = put(target, cfg); e != nil {
 			return e
 		}
-		if e = m.systemctl("enable", "--now"); e != nil {
+		startErr := m.systemctl("enable", "--now")
+		if startErr == nil {
+			startErr = m.waitReady(s.Port, pass)
+		}
+		if startErr != nil {
 			stopErr := m.systemctl("stop")
-			_ = m.systemctl("disable")
-			if stopErr != nil {
-				return fmt.Errorf("start failed and stop unverified: %w", e)
+			disableErr := m.systemctl("disable")
+			if stopErr != nil || disableErr != nil {
+				return fmt.Errorf("proxy activation failed and cleanup is incomplete: %w", startErr)
 			}
-			_ = os.Remove(target)
-			return e
+			if e = os.Remove(target); e != nil && !os.IsNotExist(e) {
+				return fmt.Errorf("proxy activation failed; runtime cleanup error: %w", e)
+			}
+			s.Desired = "direct"
+			if e = m.save(s); e != nil {
+				return fmt.Errorf("proxy activation failed; state cleanup error: %w", e)
+			}
+			return startErr
 		}
 		s.Desired = "proxy"
 		if e = m.save(s); e != nil {

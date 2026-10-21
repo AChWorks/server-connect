@@ -157,31 +157,62 @@ if [ -e "$STATE/runtime.json" ]; then
  "$release/bin/sing-box" check -c "$STATE/runtime.json" >/dev/null 2>&1 || die 'candidate rejected existing runtime; no service change applied'
 fi
 
+unit_backup=''
+if [ -f "$UNIT" ]; then
+ unit_backup=$(mktemp "$PREFIX/.unit-backup.XXXXXXXX") || die 'cannot reserve unit backup'
+ install -m 0644 "$UNIT" "$unit_backup"
+fi
+remove_backup() {
+ if [ -n "$unit_backup" ] && [ -f "$unit_backup" ]; then rm -f -- "$unit_backup";fi
+}
+trap remove_backup EXIT HUP INT TERM
+rollback_candidate() {
+ say 'candidate failed; restoring previous owned release and unit'
+ systemctl stop server-connect.service || say 'WARNING: stop of failed candidate was not confirmed'
+ if [ -n "$previous" ]; then
+  ln -s "$previous" "$PREFIX/.restore.$$" && mv -Tf -- "$PREFIX/.restore.$$" "$PREFIX/current" || say 'WARNING: prior release link restoration failed'
+ else
+  rm -f -- "$PREFIX/current"
+ fi
+ if [ -n "$unit_backup" ]; then
+  install -m 0644 "$unit_backup" "$UNIT" || say 'WARNING: unit restoration failed'
+  sha256sum "$UNIT" | cut -d' ' -f1 > "$PREFIX/unit.sha256" || say 'WARNING: unit identity restoration failed'
+ else
+  rm -f -- "$UNIT" "$PREFIX/unit.sha256"
+ fi
+ systemctl daemon-reload || say 'WARNING: systemd reload failed during recovery'
+ if [ "$was_active" = yes ]; then
+  if systemctl start server-connect.service; then
+   "$PREFIX/current/bin/server-connect" ready --json >/dev/null || say 'WARNING: previous proxy readiness was not restored'
+  else
+   say 'WARNING: previous proxy service restart failed'
+  fi
+ fi
+}
 if [ "$was_active" = yes ]; then
  systemctl stop server-connect.service || die 'cannot stop owned running service; update aborted'
 fi
 link_temp="$PREFIX/.current.$$"
-ln -s "releases/$release_name" "$link_temp" || die 'cannot stage release symlink'
+ln -s "releases/$release_name" "$link_temp" || { rollback_candidate;die 'cannot stage release symlink'; }
 if ! mv -Tf -- "$link_temp" "$PREFIX/current"; then
- rm -f "$link_temp"
+ rm -f -- "$link_temp"
+ rollback_candidate
  die 'cannot activate release link'
 fi
-if [ ! -e "$COMMAND" ]; then ln -s "$PREFIX/current/bin/server-connect" "$COMMAND" || die 'cannot create owned executable link';fi
-install -m 0644 "$SOURCE_DIR/server-connect.service" "$UNIT"
+if [ ! -e "$COMMAND" ]; then
+ ln -s "$PREFIX/current/bin/server-connect" "$COMMAND" || { rollback_candidate;die 'cannot create owned executable link'; }
+fi
+install -m 0644 "$SOURCE_DIR/server-connect.service" "$UNIT" || { rollback_candidate;die 'cannot install unit'; }
 sha256sum "$UNIT" | cut -d' ' -f1 > "$PREFIX/unit.sha256"
 chmod 0644 "$PREFIX/unit.sha256"
 if ! systemctl daemon-reload; then
- if [ -n "$previous" ]; then ln -s "$previous" "$link_temp"; mv -Tf "$link_temp" "$PREFIX/current";fi
- die 'systemd reload failed; previous release restored if available'
+ rollback_candidate
+ die 'systemd reload failed; previous owned unit/release restoration attempted'
 fi
 if [ "$was_active" = yes ]; then
- if ! systemctl start server-connect.service; then
-  systemctl stop server-connect.service || true
-  if [ -n "$previous" ]; then
-   ln -s "$previous" "$link_temp";mv -Tf "$link_temp" "$PREFIX/current"
-   systemctl start server-connect.service || say 'previous core restart failed; check service via console'
-  fi
-  die 'updated service start failed; prior release restored when available'
+ if ! systemctl start server-connect.service || ! "$PREFIX/current/bin/server-connect" ready --json >/dev/null; then
+  rollback_candidate
+  die 'updated service readiness failed; previous owned unit/release restoration attempted'
  fi
 fi
 say "local verified payload installed at $release; Direct preserved unless an owned proxy was already active"

@@ -146,6 +146,9 @@ func run(j bool, m *sc.Manager, args []string) int {
 			e = m.Remove(args[0])
 		}
 		return output(j, map[string]any{"profile_id": args[0], "action": name}, e)
+	case "ready":
+		e := m.Ready()
+		return output(j, map[string]any{"local_listener_ready": e == nil, "upstream_reachability": "not_tested"}, e)
 	case "connect":
 		e := m.Connect()
 		return output(j, "Proxy Only connection requested; use probe to verify upstream reachability", e)
@@ -203,6 +206,7 @@ Commands:
   select ID                  Select a saved profile (disconnect first)
   remove ID                  Remove an inactive profile
   connect                    Start authenticated loopback Proxy Only
+  ready                      Verify owned authenticated listener (not upstream)
   disconnect                 Stop and disable product-owned local proxy service
   status [--json]            Desired/observed service state, not fake VPN health
   probe --via proxy|direct --url https://example.org
