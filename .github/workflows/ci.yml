@@ -66,4 +66,18 @@ jobs:
             echo 'Digest mismatch unexpectedly accepted' >&2
             exit 1
           fi
+          # Even a digest-matching download must not unpack traversal entries.
+          python3 - <<'PYQA'
+          import io,tarfile
+          with tarfile.open('build/ci/http/traversal.tar.gz','w:gz') as tar:
+              body=b'not a trusted release'
+              entry=tarfile.TarInfo('server-connect/../../escape')
+              entry.size=len(body)
+              tar.addfile(entry,io.BytesIO(body))
+          PYQA
+          BAD_DIGEST=$(sha256sum build/ci/http/traversal.tar.gz | cut -d' ' -f1)
+          if scripts/bootstrap-online.sh --archive-url http://127.0.0.1:19179/traversal.tar.gz --sha256 "$BAD_DIGEST" --verify-only;then
+            echo 'Unsafe archive traversal unexpectedly accepted' >&2
+            exit 1
+          fi
           echo 'QA-only build/acquisition passed; no public binary published.'

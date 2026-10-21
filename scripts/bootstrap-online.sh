@@ -28,10 +28,18 @@ if ! curl --fail --location --silent --show-error --connect-timeout 15 --max-tim
  exit 1
 fi
 printf '%s  %s\n' "$digest" "$work/bundle.tar.gz" | sha256sum --quiet --check - || { echo 'Publisher-supplied independent digest mismatch' >&2;exit 1; }
-# Archive bytes were verified before extraction; enforce fixed bundle layout too.
-if ! tar -tzf "$work/bundle.tar.gz" | LC_ALL=C grep -Ev '^server-connect(/|$)' >/dev/null;then :;else echo 'Unexpected archive path; refusing extraction' >&2; exit 1;fi
+# Do not let an archive member escape the private extraction directory.
+# An accepted top-level prefix alone does not reject server-connect/../../etc.
+if ! tar -tzf "$work/bundle.tar.gz" | LC_ALL=C awk '
+  BEGIN {seen=0; invalid=0}
+  {
+    seen++
+    if ($0 !~ /^server-connect\// || $0 ~ /(^|\/)\.\.(\/|$)/ || $0 ~ /(^|\/)\.(\/|$)/ || $0 ~ /\/\// || $0 ~ /\\/ || $0 ~ /[[:cntrl:]]/) invalid=1
+  }
+  END {if (seen==0 || invalid) exit 1}
+';then echo 'Unsafe archive entry; refusing extraction' >&2;exit 1;fi
 if tar -tvzf "$work/bundle.tar.gz" | LC_ALL=C grep -E '^[lh]' >/dev/null;then echo 'Archive contains link entries; refusing extraction' >&2; exit 1;fi
-tar -xzf "$work/bundle.tar.gz" -C "$work" --no-same-owner
+tar -xzf "$work/bundle.tar.gz" -C "$work" --no-same-owner --no-same-permissions
 [ -f "$work/server-connect/install.sh" ] && [ ! -L "$work/server-connect/install.sh" ] || { echo 'Missing local installer' >&2;exit 1; }
 if [ "$verify_only" = yes ];then
  echo 'Online fetch, trusted digest and archive layout: verified. Installation was not attempted.'
