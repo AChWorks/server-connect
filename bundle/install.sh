@@ -90,7 +90,9 @@ if [ "$ACTION" = --uninstall ]; then
  fi
  systemctl stop server-connect.service || die 'cannot stop owned proxy; uninstall aborted'
  systemctl disable server-connect.service || die 'cannot disable owned proxy; uninstall aborted'
- systemctl reset-failed server-connect.service || say 'WARNING: failed owned service state could not be cleared'
+ if systemctl is-failed --quiet server-connect.service; then
+  systemctl reset-failed server-connect.service || say 'WARNING: failed owned service state could not be cleared'
+ fi
  rm -f -- "$COMMAND" "$UNIT" "$PREFIX/current" "$PREFIX/unit.sha256" "$PREFIX/.owner"
  systemctl daemon-reload || die 'unit removed but daemon-reload failed; inspect systemd'
  if [ -d "$PREFIX/releases" ] && [ ! -L "$PREFIX/releases" ]; then
