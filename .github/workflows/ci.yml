@@ -75,6 +75,11 @@ jobs:
           DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends iproute2
           test -x /usr/bin/ip
           go test ./internal/sc -run '^TestPreflight' -count=1 -v
+          # GitHub's checkout is runner-owned inside this container. Trust
+          # only this ephemeral checkout for Go VCS stamping (do not disable it).
+          export GIT_CONFIG_COUNT=1
+          export GIT_CONFIG_KEY_0=safe.directory
+          export GIT_CONFIG_VALUE_0="$GITHUB_WORKSPACE"
           go build -o build/ci/server-connect-cli ./cmd/server-connect
           build/ci/server-connect-cli --json host-preflight --endpoint 127.0.0.1 \
             --management-peer 127.0.0.2 > build/ci/host-preflight.json
