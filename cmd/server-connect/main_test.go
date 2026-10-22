@@ -173,15 +173,136 @@ func TestUnderlayDNSCLIRejectsMissingAndAmbiguousInputs(t *testing.T) {
 		_ = writer.Close()
 		os.Stdout = old
 		var response struct {
-			OK    bool `json:"ok"`
+			OK    bool            `json:"ok"`
+			Data  json.RawMessage `json:"data"`
 			Error struct {
 				Code string `json:"code"`
 			} `json:"error"`
 		}
 		err = json.NewDecoder(reader).Decode(&response)
 		_ = reader.Close()
-		if err != nil || exit == 0 || response.OK || response.Error.Code != "invalid_arguments" {
-			t.Fatalf("invalid explicit resolver input was accepted: %v exit=%d response=%+v err=%v", args, exit, response, err)
+		if err != nil || exit == 0 || response.OK || response.Error.Code != "invalid_arguments" || len(response.Data) != 0 {
+			t.Fatalf("invalid explicit resolver input emitted fake report: %v exit=%d response=%+v err=%v", args, exit, response, err)
 		}
+	}
+}
+
+// PRE-validation failures have no structured route observations: omit data
+// instead of serializing a zero-value report with read_only:false.
+func TestUnderlayTCPInvalidArgumentsOmitDiagnosticData(t *testing.T) {
+	m := sc.New(filepath.Join(t.TempDir(), "state"), "", 0)
+	for _, tc := range []struct {
+		name string
+		args []string
+	}{
+		{"missing_endpoint", []string{"underlay-tcp", "--port", "443"}},
+		{"malformed_endpoint", []string{"underlay-tcp", "--endpoint", "fake.remote.invalid", "--port", "443"}},
+		{"zero_port", []string{"underlay-tcp", "--endpoint", "127.0.0.1", "--port", "0"}},
+		{"oversized_port", []string{"underlay-tcp", "--endpoint", "127.0.0.1", "--port", "65536"}},
+		{"hostname_syntax", []string{"underlay-tcp", "--endpoint", "127.0.0.1", "--port", "443", "--hostname", "invalid@@name"}},
+		{"empty_hostname", []string{"underlay-tcp", "--endpoint", "127.0.0.1", "--port", "443", "--hostname="}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			old := os.Stdout
+			reader, writer, err := os.Pipe()
+			if err != nil {
+				t.Fatal(err)
+			}
+			os.Stdout = writer
+			exit := run(true, m, tc.args)
+			_ = writer.Close()
+			os.Stdout = old
+			defer reader.Close()
+			var got struct {
+				OK    bool            `json:"ok"`
+				Data  json.RawMessage `json:"data"`
+				Error struct {
+					Code    string `json:"code"`
+					Message string `json:"message"`
+				} `json:"error"`
+			}
+			if err := json.NewDecoder(reader).Decode(&got); err != nil {
+				t.Fatal(err)
+			}
+			if exit == 0 || got.OK || got.Error.Code != "invalid_arguments" || len(got.Data) != 0 {
+				t.Fatalf("invalid input emitted fake route evidence: %+v exit=%d", got, exit)
+			}
+			if strings.Contains(got.Error.Message, "fake.remote.invalid") || strings.Contains(got.Error.Message, "invalid@@name") {
+				t.Fatal("input echoed into a machine-visible failure")
+			}
+		})
+	}
+	if _, err := os.Stat(m.Dir); !os.IsNotExist(err) {
+		t.Fatal("invalid underlay arguments touched protected state")
+	}
+}
+
+func TestUnderlayTCPValidArgumentsRetainSafePartialFailureReport(t *testing.T) {
+	m := sc.New(filepath.Join(t.TempDir(), "state"), "", 0)
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := os.Stdout
+	os.Stdout = writer
+	// This is a syntactically valid request, even on hosts without iproute2.
+	exit := run(true, m, []string{"underlay-tcp", "--endpoint", "127.0.0.1", "--port", "1"})
+	_ = writer.Close()
+	os.Stdout = old
+	defer reader.Close()
+	var got struct {
+		OK   bool `json:"ok"`
+		Data struct {
+			Mode                 string `json:"mode"`
+			ReadOnly             bool   `json:"read_only"`
+			ActivationReady      bool   `json:"activation_ready"`
+			DNSBootstrapVerified bool   `json:"dns_bootstrap_verified"`
+			Outcome              string `json:"outcome"`
+		} `json:"data"`
+		Error *apiError `json:"error"`
+	}
+	if err := json.NewDecoder(reader).Decode(&got); err != nil {
+		t.Fatal(err)
+	}
+	if exit == 0 || got.OK || got.Data.Mode != "underlay_tcp_diagnostic" ||
+		!got.Data.ReadOnly || got.Data.ActivationReady || got.Data.DNSBootstrapVerified ||
+		got.Data.Outcome == "" || got.Error == nil {
+		t.Fatalf("runtime failure lost required truthful safety evidence: %+v exit=%d", got, exit)
+	}
+}
+
+// After valid underlay-dns arguments, even a refused DNS resolver retains
+// truthful partial safety evidence and a nonzero exit / structured error.
+func TestUnderlayDNSValidArgumentsRetainPartialFailure(t *testing.T) {
+	m := sc.New(filepath.Join(t.TempDir(), "state"), "", 0)
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := os.Stdout
+	os.Stdout = writer
+	exit := run(true, m, []string{"underlay-dns", "--hostname", "node.example.test",
+		"--endpoint", "198.51.100.9", "--resolver", "127.0.0.1", "--resolver-port", "1"})
+	_ = writer.Close()
+	os.Stdout = old
+	defer reader.Close()
+	var result struct {
+		OK   bool `json:"ok"`
+		Data struct {
+			Mode                 string `json:"mode"`
+			ReadOnly             bool   `json:"read_only"`
+			ActivationReady      bool   `json:"activation_ready"`
+			DNSBootstrapVerified bool   `json:"dns_bootstrap_verified"`
+			Outcome              string `json:"outcome"`
+		} `json:"data"`
+		Error *apiError `json:"error"`
+	}
+	if err := json.NewDecoder(reader).Decode(&result); err != nil {
+		t.Fatal(err)
+	}
+	if exit == 0 || result.OK || result.Error == nil ||
+		result.Data.Mode != "explicit_resolver_diagnostic" || !result.Data.ReadOnly ||
+		result.Data.ActivationReady || result.Data.DNSBootstrapVerified || result.Data.Outcome == "" {
+		t.Fatalf("DNS runtime error lost partial safety report: %+v exit=%d", result, exit)
 	}
 }

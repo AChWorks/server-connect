@@ -225,6 +225,11 @@ func run(j bool, m *sc.Manager, args []string) int {
 		} else {
 			report, err = sc.InspectUnderlayTCPWithHostname(*endpoint, *hostname, *port)
 		}
+		// No report exists when argument validation fails. Do not encode a
+		// zero-value struct with misleading read_only=false safety fields.
+		if report.Mode == "" {
+			return output(j, nil, err)
+		}
 		return output(j, report, err)
 	case "underlay-dns":
 		opts := flag.NewFlagSet(name, flag.ContinueOnError)
@@ -237,6 +242,9 @@ func run(j bool, m *sc.Manager, args []string) int {
 			return output(j, nil, sc.Fault("invalid_arguments", "invalid underlay-dns options"))
 		}
 		report, err := sc.InspectUnderlayDNS(*hostname, *endpoint, *resolver, *resolverPort)
+		if report.Mode == "" {
+			return output(j, nil, err) // Invalid arguments have no diagnostic evidence.
+		}
 		return output(j, report, err)
 	case "apt":
 		if j {

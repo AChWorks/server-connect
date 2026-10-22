@@ -53,11 +53,18 @@ literal is absent. It never silently substitutes another resolved address.
 The IP-only command remains a literal-only test and does not invoke DNS.
 
 Either form makes one bounded TCP connection attempt **with no application bytes**,
-using the current kernel route lookup and `SO_BINDTODEVICE` for that
-specific interface, and performs a second route lookup afterward. It rejects
-ambiguous/missing/down interfaces and **never falls back to an unbound socket**
-when interface binding fails. Unreachable/refused/timeouts produce a nonzero
-exit code and a machine-readable partial report (`ok: false`). The
+using a Linux kernel route lookup qualified by **TCP protocol, the exact
+destination port and the CLI process UID**, followed by `SO_BINDTODEVICE` on
+that selected interface. The **same flow-qualified route and the relevant
+policy rules** are checked again afterward. Source-dependent, source-port,
+mark, VRF, output-interface or unrecognized rule selectors are classified as
+`underlay_policy_unsupported` instead of guessing the socket's effective
+route. It rejects ambiguous/missing/down interfaces and **never falls back
+to an unbound socket** when binding fails. Unreachable/refused/timeouts
+produce a nonzero exit code and a machine-readable partial report
+(`ok: false`). Invalid endpoint/port/hostname arguments return an error
+**without a fabricated `data` report**; failures after the diagnostic starts
+retain `read_only: true` and bounded partial observations. The
 command does not depend on proxy environment variables, saved profiles or
 systemd services. The optional --hostname mode **does** use the current host
 name resolver and requires a DNS-style ASCII hostname with at least two labels;
@@ -86,10 +93,14 @@ silently trusting the host's current resolver or cached hostname data:
 
 Optionally set `--resolver-port 53` to target an explicitly selected nonstandard
 DNS service. This command validates the literal resolver and pinned endpoint,
-uses trusted native `/usr/bin/ip` to observe the current resolver route,
-and sends bounded standard DNS A/AAAA queries **only to that literal server**
-using `SO_BINDTODEVICE` on the observed interface. There is no unbound or
-host-resolver fallback. It refuses hosts-file-only answers, malformed inputs,
+uses trusted native `/usr/bin/ip` to observe UDP and TCP resolver routes
+for the **exact DNS port and process UID**, and sends bounded standard DNS
+A/AAAA queries **only to that literal server**, with `SO_BINDTODEVICE` on
+the selected interface. Differing UDP/TCP paths, unknown routing selectors,
+source/mark/VRF/source-port-sensitive policies, and post-query route changes
+fail closed. There is no unbound or host-resolver fallback. Invalid input
+omits `data` rather than reporting fictitious safety flags. It refuses
+hosts-file-only answers, malformed inputs,
 a missing/unreachable resolver, unsupported address results, route drift,
 and any response lacking the operator-pinned endpoint IP. Each failure has
 structured `ok: false` evidence without connecting to the VPN endpoint or

@@ -1,10 +1,12 @@
 package sc
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"net"
 	"net/netip"
+	"os"
 	"sort"
 	"strconv"
 	"sync/atomic"
@@ -40,6 +42,34 @@ type UnderlayDNSReport struct {
 	Limitations          []string `json:"limitations"`
 }
 
+// DNS may fall back from UDP to TCP. Each route uses the same kernel
+// flow selectors as the socket that net.Resolver will request.
+func resolverFlowRoute(ip netip.Addr, port, uid int, proto string) (underlayRoute, error) {
+	route, err := inspectUnderlayRoute(ip, "ipproto", proto, "dport", strconv.Itoa(port), "uid", strconv.Itoa(uid))
+	if err != nil {
+		return underlayRoute{}, err
+	}
+	if route.UID != nil && *route.UID != uint32(uid) {
+		return underlayRoute{}, Fault("underlay_policy_unsupported", "kernel DNS route contradicted the requested process UID")
+	}
+	return route, nil
+}
+
+// The standard Go resolver can retry UDP as TCP. Treat path divergence as
+// unsupported rather than advertising a single resolved interface for two
+// policy-routed socket flows.
+func matchingResolverTransportRoute(ip netip.Addr, port, uid int) (underlayRoute, error) {
+	udp, err := resolverFlowRoute(ip, port, uid, "udp")
+	if err != nil {
+		return underlayRoute{}, err
+	}
+	tcp, err := resolverFlowRoute(ip, port, uid, "tcp")
+	if err != nil || !sameUnderlayRoute(udp, tcp) {
+		return underlayRoute{}, Fault("underlay_policy_unsupported", "UDP and TCP DNS select different or unavailable kernel routes")
+	}
+	return udp, nil
+}
+
 // InspectUnderlayDNS resolves an absolute hostname exclusively through the
 // operator-supplied literal DNS server/port. Every resolver connection is bound
 // to the kernel-selected device using SO_BINDTODEVICE; neither host configured
@@ -71,6 +101,7 @@ func InspectUnderlayDNS(hostname, endpointIP, resolverIP string, resolverPort in
 		Outcome: "not_tested",
 		Limitations: []string{
 			"DNS results are not cryptographically authenticated; the operator must trust the selected resolver.",
+			"UDP and TCP route selection uses the exact DNS port and process UID; unsupported policy and differing paths are refused.",
 			"An interface-bound DNS reply today does not prove independent pre-VPN routing or DNS after a tunnel changes policy.",
 			"Host routes are observed non-atomically; endpoint reachability, SSH/ingress, ownership and independent activation/recovery guards are unverified.",
 			"Queries are sent to the explicitly selected resolver and can disclose the hostname to that server.",
@@ -80,9 +111,22 @@ func InspectUnderlayDNS(hostname, endpointIP, resolverIP string, resolverPort in
 		report.Outcome = "unavailable"
 		return report, err
 	}
-	before, err := inspectUnderlayRoute(resolver)
+	// Both UDP and TCP can carry this DNS resolution. Verify the
+	// actual flow-qualified kernel route for each protocol before dialing.
+	// Different paths or unmodeled selectors fail closed without any query.
+	if os.Getuid() != os.Geteuid() {
+		report.Outcome = "resolver_policy_unsupported"
+		return report, Fault("underlay_policy_unsupported", "real and effective user IDs differ")
+	}
+	policyBefore, err := inspectTCPPolicyRules(resolver)
 	if err != nil {
-		report.Outcome = "resolver_route_unavailable"
+		report.Outcome = "resolver_policy_unsupported"
+		return report, err
+	}
+	uid := os.Geteuid()
+	before, err := matchingResolverTransportRoute(resolver, resolverPort, uid)
+	if err != nil {
+		report.Outcome = "resolver_policy_unsupported"
 		return report, err
 	}
 	report.ResolverRouteDevice, report.ResolverRouteGateway, report.ResolverRouteSource =
@@ -129,10 +173,14 @@ func InspectUnderlayDNS(hostname, endpointIP, resolverIP string, resolverPort in
 	report.ResolverDialCount = boundDials.Load()
 	report.InterfaceBound = report.ResolverDialCount > 0 && failedBinds.Load() == 0
 
-	after, routeErr := inspectUnderlayRoute(resolver)
-	if routeErr != nil || !sameUnderlayRoute(before, after) {
+	afterUDP, udpErr := resolverFlowRoute(resolver, resolverPort, uid, "udp")
+	afterTCP, tcpErr := resolverFlowRoute(resolver, resolverPort, uid, "tcp")
+	policyAfter, policyErr := inspectTCPPolicyRules(resolver)
+	if udpErr != nil || tcpErr != nil || policyErr != nil ||
+		!sameUnderlayRoute(before, afterUDP) || !sameUnderlayRoute(before, afterTCP) ||
+		!bytes.Equal(policyBefore, policyAfter) {
 		report.Outcome = "route_changed_or_unavailable"
-		return report, Fault("underlay_unavailable", "resolver kernel route changed or became unavailable during DNS query")
+		return report, Fault("underlay_unavailable", "resolver UDP/TCP route or policy changed during DNS query")
 	}
 	report.RouteStable = true
 	// A hosts-file or local shortcut can resolve without our custom Dial.
