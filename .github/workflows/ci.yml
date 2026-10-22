@@ -70,6 +70,13 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # Docker job containers may run under an identity different from
+          # the runner-owned checkout. Trust ONLY this ephemeral checkout
+          # within this step, preserving Go VCS stamping and source identity.
+          export GIT_CONFIG_COUNT=1
+          export GIT_CONFIG_KEY_0=safe.directory
+          export GIT_CONFIG_VALUE_0="$GITHUB_WORKSPACE"
+          git status --porcelain
           scripts/package.sh "$PWD/build/ci/sing-box.tar.gz"
           mkdir -p build/ci/http
           cp dist/server-connect-0.1.0-dev-debian13-amd64-local-qa.tar.gz build/ci/http/bundle.tar.gz
