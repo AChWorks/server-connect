@@ -53,11 +53,18 @@ literal is absent. It never silently substitutes another resolved address.
 The IP-only command remains a literal-only test and does not invoke DNS.
 
 Either form makes one bounded TCP connection attempt **with no application bytes**,
-using the current kernel route lookup and `SO_BINDTODEVICE` for that
-specific interface, and performs a second route lookup afterward. It rejects
-ambiguous/missing/down interfaces and **never falls back to an unbound socket**
-when interface binding fails. Unreachable/refused/timeouts produce a nonzero
-exit code and a machine-readable partial report (`ok: false`). The
+using a Linux kernel route lookup qualified by **TCP protocol, the exact
+destination port and the CLI process UID**, followed by `SO_BINDTODEVICE` on
+that selected interface. The **same flow-qualified route and the relevant
+policy rules** are checked again afterward. Source-dependent, source-port,
+mark, VRF, output-interface or unrecognized rule selectors are classified as
+`underlay_policy_unsupported` instead of guessing the socket's effective
+route. It rejects ambiguous/missing/down interfaces and **never falls back
+to an unbound socket** when binding fails. Unreachable/refused/timeouts
+produce a nonzero exit code and a machine-readable partial report
+(`ok: false`). Invalid endpoint/port/hostname arguments return an error
+**without a fabricated `data` report**; failures after the diagnostic starts
+retain `read_only: true` and bounded partial observations. The
 command does not depend on proxy environment variables, saved profiles or
 systemd services. The optional --hostname mode **does** use the current host
 name resolver and requires a DNS-style ASCII hostname with at least two labels;

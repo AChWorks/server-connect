@@ -225,6 +225,11 @@ func run(j bool, m *sc.Manager, args []string) int {
 		} else {
 			report, err = sc.InspectUnderlayTCPWithHostname(*endpoint, *hostname, *port)
 		}
+		// No report exists when argument validation fails. Do not encode a
+		// zero-value struct with misleading read_only=false safety fields.
+		if report.Mode == "" {
+			return output(j, nil, err)
+		}
 		return output(j, report, err)
 	case "apt":
 		if j {
