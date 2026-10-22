@@ -66,11 +66,33 @@ func trustedAPTConfig() (string, error) {
 	return systemAPTConfig, nil
 }
 
-// The HTTPS method on the supported Debian 13 target is a root-owned link
-// to the same pinned native HTTP method. A protected /usr/bin/apt-get is not
-// sufficient when APT could delegate network I/O to a replaced handler.
-// Verify the actual on-disk acquisition handlers and path ancestry before
-// passing any private proxy descriptor to APT.
+// Debian 13 APT can launch native acquisition helpers beyond HTTP(S) for
+// PDiff updates, mirror lists, local sources and index signature verification.
+// An immutable parent directory alone does not establish the ownership/mode of
+// existing children. Keep the supported Debian 13 method inventory explicit:
+// custom transport packages and unexpected files fail closed rather than
+// executing an unverified helper with the selected proxy.
+var nativeAPTMethodExecutables = map[string]bool{
+	"http": true, "file": true, "gpgv": true,
+	"rred": true, "mirror": true, "copy": true, "cdrom": true,
+	"store": true, "sqv": true,
+}
+
+// APT method symlinks must stay within the same verified native directory.
+// Fixed, single-hop alias targets also prevent loops and directory traversal.
+var nativeAPTMethodAliases = map[string]string{
+	"https":        "http",
+	"mirror+http":  "mirror",
+	"mirror+https": "mirror",
+	"mirror+file":  "mirror",
+	"mirror+copy":  "mirror",
+}
+
+// Only the base transport/signature paths are required on every supported
+// installation. Other native Debian 13 handlers may be absent, but if they
+// exist they must pass the identical trust checks before any APT execution.
+var requiredAPTMethods = []string{"http", "https", "file", "gpgv"}
+
 func verifyNativeAPTMethods() error {
 	for _, dir := range []string{
 		"/", "/usr", "/usr/lib", "/usr/lib/apt", "/usr/lib/apt/methods",
@@ -80,22 +102,53 @@ func verifyNativeAPTMethods() error {
 			return Fault("apt_untrusted_executable", "native APT method directory ownership is unsafe")
 		}
 	}
-	for _, method := range []string{"http", "file", "gpgv"} {
-		path := "/usr/lib/apt/methods/" + method
+	return verifyNativeAPTMethodInventory("/usr/lib/apt/methods", 0)
+}
+
+// expectedUID is hardcoded to root at the sole production call site. It is
+// passed explicitly here to make the same filesystem checks testable without
+// privileged ownership changes on a disposable non-root test workspace.
+func verifyNativeAPTMethodInventory(dir string, expectedUID uint32) error {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return Fault("apt_untrusted_executable", "native APT acquisition method inventory unavailable")
+	}
+	seen := make(map[string]bool, len(entries))
+	for _, entry := range entries {
+		name := entry.Name()
+		target, alias := nativeAPTMethodAliases[name]
+		if !alias && !nativeAPTMethodExecutables[name] {
+			return Fault("apt_untrusted_executable", "unsupported APT acquisition method installed")
+		}
+		path := filepath.Join(dir, name)
 		info, err := os.Lstat(path)
-		if err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0111 == 0 ||
-			!aptRootOwnedNonWritable(info) {
-			return Fault("apt_untrusted_executable", "native APT acquisition method identity is unsafe")
+		if err != nil {
+			return Fault("apt_untrusted_executable", "native APT acquisition method identity unavailable")
+		}
+		owner, ok := info.Sys().(*syscall.Stat_t)
+		if !ok || owner.Uid != expectedUID {
+			return Fault("apt_untrusted_executable", "native APT acquisition method ownership is unsafe")
+		}
+		if alias {
+			relative, err := os.Readlink(path)
+			if info.Mode()&os.ModeSymlink == 0 || err != nil || relative != target {
+				return Fault("apt_untrusted_executable", "native APT method alias is untrusted")
+			}
+		} else if !info.Mode().IsRegular() || info.Mode().Perm()&0111 == 0 ||
+			info.Mode().Perm()&0022 != 0 || info.Mode()&(os.ModeSetuid|os.ModeSetgid) != 0 {
+			return Fault("apt_untrusted_executable", "native APT acquisition method permissions are unsafe")
+		}
+		seen[name] = true
+	}
+	for _, required := range requiredAPTMethods {
+		if !seen[required] {
+			return Fault("apt_untrusted_executable", "required native APT acquisition method missing")
 		}
 	}
-	https := "/usr/lib/apt/methods/https"
-	info, err := os.Lstat(https)
-	if err != nil || info.Mode()&os.ModeSymlink == 0 || !aptRootOwned(info) {
-		return Fault("apt_untrusted_executable", "native HTTPS acquisition method identity is unsafe")
-	}
-	relative, err := os.Readlink(https)
-	if err != nil || relative != "http" {
-		return Fault("apt_untrusted_executable", "native HTTPS method does not resolve to trusted HTTP method")
+	for alias, target := range nativeAPTMethodAliases {
+		if seen[alias] && !seen[target] {
+			return Fault("apt_untrusted_executable", "native APT method alias target is missing")
+		}
 	}
 	return nil
 }
