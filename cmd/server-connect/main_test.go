@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -66,5 +67,26 @@ func TestJSONErrorEnvelopeContainsSafeCategory(t *testing.T) {
 	}
 	if got.OK || got.Error.Code != "probe_http" || got.Data["path"] != "proxy" {
 		t.Fatalf("failure envelope invalid: %+v", got)
+	}
+}
+
+func TestMenuAptUpdateRequiresExplicitConfirmation(t *testing.T) {
+	manager := sc.New(filepath.Join(t.TempDir(), "state"), "", 0)
+	input, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = writer.Write([]byte("9\nNO\n0\n")); err != nil {
+		t.Fatal(err)
+	}
+	writer.Close()
+	old := os.Stdin
+	os.Stdin = input
+	defer func() { os.Stdin = old; input.Close() }()
+	if code := menu(manager); code != 0 {
+		t.Fatalf("menu exit: %d", code)
+	}
+	if _, err := os.Stat(manager.Dir); !os.IsNotExist(err) {
+		t.Fatal("canceled APT action unexpectedly touched protected product state")
 	}
 }

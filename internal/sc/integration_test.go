@@ -1,8 +1,12 @@
 package sc
 
 import (
+	"bytes"
+	"compress/gzip"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -12,6 +16,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 )
@@ -133,6 +138,13 @@ func TestRealPinnedCoreProxyOnly(t *testing.T) {
 	if status, e := get(viaDirect); e != nil || status != 200 {
 		t.Fatalf("direct path failed: status=%d err=%v", status, e)
 	}
+	if _, e := exec.LookPath("apt-get"); e == nil {
+		t.Run("RealAPTBoundToPinnedVLESS", func(t *testing.T) {
+			testAPTThroughCore(t, proxyURL)
+		})
+	} else {
+		t.Log("NOT_RUN: apt-get is not installed; only live VLESS HTTP acceptance ran")
+	}
 	if e := upstream.Process.Kill(); e != nil {
 		t.Fatal(e)
 	}
@@ -176,5 +188,110 @@ func TestPinnedCoreAcceptsSupportedVLESSConfigShapes(t *testing.T) {
 				t.Fatal(e)
 			}
 		})
+	}
+}
+
+// testAPTThroughCore runs a real distro APT HTTP transport over the active
+// pinned sing-box proxy, using an isolated unsigned *test-only* repository.
+// No APT installation, system source list or global cache is ever changed.
+func testAPTThroughCore(t *testing.T, proxyURL *url.URL) {
+	t.Helper()
+	packageIndex := []byte("Package: server-connect-ci-only\nVersion: 0.0.1\nArchitecture: amd64\nMaintainer: Disposable QA <qa@invalid.test>\nDescription: CI-only no-install package\n\n")
+	var zipped bytes.Buffer
+	zw := gzip.NewWriter(&zipped)
+	if _, err := zw.Write(packageIndex); err != nil {
+		t.Fatal(err)
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	zippedIndex := zipped.Bytes()
+	digest := sha256.Sum256(zippedIndex)
+	plainDigest := sha256.Sum256(packageIndex)
+	release := fmt.Sprintf("Origin: Server Connect CI\nLabel: SC disposable test\nSuite: qa\nCodename: qa\nArchitectures: amd64\nComponents: main\nDate: %s\nSHA256:\n %x %d main/binary-amd64/Packages\n %x %d main/binary-amd64/Packages.gz\n", time.Now().UTC().Format(time.RFC1123Z), plainDigest, len(packageIndex), digest, len(zippedIndex))
+	aptOrigin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/dists/qa/Release":
+			w.Write([]byte(release))
+		case "/dists/qa/main/binary-amd64/Packages.gz":
+			w.Write(zippedIndex)
+		case "/dists/qa/main/binary-amd64/Packages":
+			w.Write(packageIndex)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer aptOrigin.Close()
+	dir := t.TempDir()
+	for _, name := range []string{"lists", "lists/partial", "archives"} {
+		if err := os.MkdirAll(filepath.Join(dir, name), 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	source := filepath.Join(dir, "sources.list")
+	if err := os.WriteFile(source, []byte("deb [trusted=yes] "+aptOrigin.URL+" qa main\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	state := t.TempDir()
+	fd, err := privateAptConfig(state, proxyURL)
+	if err != nil {
+		t.Fatal("could not prepare anonymous APT credentials")
+	}
+	defer fd.Close()
+	args := []string{
+		"-c", "/proc/self/fd/3", "update",
+		"-o", "Dir::Etc::sourcelist=" + source,
+		"-o", "Dir::Etc::sourceparts=-",
+		"-o", "Dir::State::lists=" + filepath.Join(dir, "lists"),
+		"-o", "Dir::Cache::archives=" + filepath.Join(dir, "archives"),
+		"-o", "Dir::Cache::pkgcache=/dev/null",
+		"-o", "Dir::Cache::srcpkgcache=/dev/null",
+		"-o", "APT::Get::List-Cleanup=0",
+		"-o", "Debug::NoLocking=1",
+		"-o", "Debug::Acquire::http=1",
+	}
+	cmd := exec.Command("apt-get", args...)
+	cmd.Env = safeAptEnv()
+	cmd.ExtraFiles = []*os.File{fd}
+	// Debug::Acquire may print Proxy-Authorization: never reveal raw output.
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("isolated APT update failed (raw credential-bearing trace withheld): %v", err)
+	}
+	if !bytes.Contains(out, []byte("GET "+aptOrigin.URL+"/dists/qa/")) {
+		t.Fatal("APT debug trace does not show proxy-style absolute URI request")
+	}
+	if !strings.Contains(strings.ToLower(string(out)), "proxy-authorization:") {
+		t.Fatal("authenticated proxy request not observed in APT debug trace")
+	}
+	entries, err := os.ReadDir(state)
+	if err != nil || len(entries) != 0 {
+		t.Fatal("anonymous APT credentials left a file on disk")
+	}
+	listEntries, err := os.ReadDir(filepath.Join(dir, "lists"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, entry := range listEntries {
+		if strings.Contains(entry.Name(), "_Packages") {
+			found = true
+		}
+	}
+	if !found {
+		names := make([]string, 0, len(listEntries))
+		for _, entry := range listEntries {
+			names = append(names, entry.Name())
+		}
+		safeProgress := make([]string, 0)
+		for _, line := range strings.Split(string(out), "\n") {
+			for _, prefix := range []string{"Get:", "Ign:", "Err:", "W:", "E:", "Fetched "} {
+				if strings.HasPrefix(line, prefix) {
+					safeProgress = append(safeProgress, line)
+					break
+				}
+			}
+		}
+		t.Fatalf("APT package index missing: file_names=%v safe_progress=%v", names, safeProgress)
 	}
 }

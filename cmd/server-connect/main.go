@@ -190,6 +190,15 @@ func run(j bool, m *sc.Manager, args []string) int {
 		}
 		res, e := m.Probe(*via, *target)
 		return output(j, res, e)
+	case "apt":
+		if j {
+			return output(true, nil, sc.Fault("invalid_arguments", "apt streams child output and does not support JSON mode"))
+		}
+		code, err := m.Apt(args)
+		if err != nil {
+			return output(false, nil, err)
+		}
+		return code
 	case "exec":
 		if j {
 			return output(true, nil, errors.New("exec streams child output and does not support JSON mode"))
@@ -233,17 +242,19 @@ Commands:
   status [--json]            Desired/observed service state, not fake VPN health
   probe --via proxy|direct --url https://example.org
   exec -- curl -I https://example.org
+  apt -- apt-get update        One-command APT opt-in; no global apt changes
   version                    Show pinned versions
 
 Import VLESS links from stdin or a mode-0600 file, not shell argv. 'exec'
-sets proxy variables for only the selected child process, never APT or
-system-wide settings. No traffic is routed globally in this version.
+sets proxy variables for only the selected child process. 'apt' passes
+an anonymous private APT config to its chosen child, with no /etc/apt edits.
+Neither mode routes unrelated host traffic globally.
 `
 
 func menu(m *sc.Manager) int {
 	in := bufio.NewReader(os.Stdin)
 	for {
-		fmt.Println("\nServer Connect | 1 Status  2 Profiles  3 Import  4 Select  5 Connect  6 Test  7 Disconnect  8 Remove  0 Exit")
+		fmt.Println("\nServer Connect | 1 Status  2 Profiles  3 Import  4 Select  5 Connect  6 Test  7 Disconnect  8 Remove  9 APT Update  0 Exit")
 		fmt.Print("Choice: ")
 		raw, e := in.ReadString('\n')
 		if e != nil {
@@ -283,6 +294,19 @@ func menu(m *sc.Manager) int {
 			run(false, m, []string{"probe", "--via", via, "--url", strings.TrimSpace(u)})
 		case "7":
 			run(false, m, []string{"disconnect"})
+		case "9":
+			fmt.Print("APT update refreshes system package indexes using the selected proxy. Type UPDATE to confirm: ")
+			confirmation, err := in.ReadString('\n')
+			if err != nil || strings.TrimSpace(confirmation) != "UPDATE" {
+				fmt.Println("Canceled; no APT action taken")
+				continue
+			}
+			code, err := m.Apt([]string{"apt-get", "update"})
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "Error:", err)
+			} else if code != 0 {
+				fmt.Fprintf(os.Stderr, "APT exited with status %d\n", code)
+			}
 		default:
 			if _, e := strconv.Atoi(choice); e == nil {
 				fmt.Println("Unknown choice")
