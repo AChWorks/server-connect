@@ -190,6 +190,16 @@ func run(j bool, m *sc.Manager, args []string) int {
 		}
 		res, e := m.Probe(*via, *target)
 		return output(j, res, e)
+	case "host-preflight":
+		opts := flag.NewFlagSet(name, flag.ContinueOnError)
+		opts.SetOutput(io.Discard)
+		endpoint := opts.String("endpoint", "", "literal VPN endpoint IPv4 or IPv6 address")
+		management := opts.String("management-peer", "", "literal SSH/admin peer IPv4 or IPv6 address")
+		if e := opts.Parse(args); e != nil || len(opts.Args()) != 0 {
+			return output(j, nil, sc.Fault("invalid_arguments", "invalid host-preflight options"))
+		}
+		report, err := sc.InspectHostRoutes(*endpoint, *management)
+		return output(j, report, err)
 	case "apt":
 		if j {
 			return output(true, nil, sc.Fault("invalid_arguments", "apt streams child output and does not support JSON mode"))
@@ -243,6 +253,8 @@ Commands:
   probe --via proxy|direct --url https://example.org
   exec -- curl -I https://example.org
   apt -- apt-get update        Strict opt-in APT via trusted native binary
+  host-preflight [--endpoint IP] [--management-peer IP]
+                              Observe kernel routes/rules; no activation
   version                    Show pinned versions
 
 Import VLESS links from stdin or a mode-0600 file, not shell argv. 'exec'
@@ -250,13 +262,14 @@ sets proxy variables for only the selected child process. 'apt' passes
 an anonymous private APT config to a verified native APT child, with no
 /etc/apt edits. Combined -U/--update package operations are unsupported;
 run an explicit strict update first. Neither mode routes unrelated host
-traffic globally.
+traffic globally. Host preflight is observational: a route lookup does not
+prove connectivity, safety, routing ownership or readiness to activate TUN.
 `
 
 func menu(m *sc.Manager) int {
 	in := bufio.NewReader(os.Stdin)
 	for {
-		fmt.Println("\nServer Connect | 1 Status  2 Profiles  3 Import  4 Select  5 Connect  6 Test  7 Disconnect  8 Remove  9 APT Update  0 Exit")
+		fmt.Println("\nServer Connect | 1 Status  2 Profiles  3 Import  4 Select  5 Connect  6 Test  7 Disconnect  8 Remove  9 APT Update  10 Host Preflight  0 Exit")
 		fmt.Print("Choice: ")
 		raw, e := in.ReadString('\n')
 		if e != nil {
@@ -296,6 +309,8 @@ func menu(m *sc.Manager) int {
 			run(false, m, []string{"probe", "--via", via, "--url", strings.TrimSpace(u)})
 		case "7":
 			run(false, m, []string{"disconnect"})
+		case "10":
+			run(false, m, []string{"host-preflight"})
 		case "9":
 			fmt.Print("APT update refreshes system package indexes using the selected proxy. Type UPDATE to confirm: ")
 			confirmation, err := in.ReadString('\n')
