@@ -15,11 +15,28 @@ concurrency:
 jobs:
   source-and-real-core:
     runs-on: ubuntu-24.04
+    # Product APT execution policy is intentionally verified against the
+    # advertised Debian 13 environment. Ubuntu's APT layout is not equivalent.
+    container:
+      image: debian:trixie
+    defaults:
+      run:
+        shell: bash
     timeout-minutes: 15
     env:
       GOPROXY: 'off'
       GOTOOLCHAIN: 'local'
     steps:
+      - name: Prepare native Debian 13 APT and pinned-core test dependencies
+        run: |
+          set -euo pipefail
+          . /etc/os-release
+          test "$ID" = debian
+          test "$VERSION_ID" = 13
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ca-certificates curl git python3 tar gzip
+          apt-config --version
+          git --version
       - name: Checkout source without write credentials
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
