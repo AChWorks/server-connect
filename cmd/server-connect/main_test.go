@@ -3,6 +3,9 @@ package main
 import (
 	"encoding/json"
 	"io"
+	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -116,5 +119,95 @@ func TestUnknownCommandNeverEchoesPastedBearerURI(t *testing.T) {
 		if jsonMode && !strings.Contains(string(out), "unknown_command") {
 			t.Fatal("machine-readable error code missing")
 		}
+	}
+}
+
+func TestDiagnosePathCLIHonorsErrorsAndRedactsTargets(t *testing.T) {
+	healthy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer healthy.Close()
+	broken := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadGateway)
+	}))
+	defer broken.Close()
+	_, port, err := net.SplitHostPort(strings.TrimPrefix(broken.URL, "http://"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	urls := []string{healthy.URL + "/secret-local-path?token=secret-token", "http://localhost:" + port + "/private/report"}
+	m := sc.New(filepath.Join(t.TempDir(), "missing-state"), "", 0)
+	runAndCapture := func(args []string) (int, []byte) {
+		t.Helper()
+		reader, writer, err := os.Pipe()
+		if err != nil {
+			t.Fatal(err)
+		}
+		old := os.Stdout
+		os.Stdout = writer
+		code := run(true, m, args)
+		writer.Close()
+		os.Stdout = old
+		out, err := io.ReadAll(reader)
+		reader.Close()
+		if err != nil {
+			t.Fatal(err)
+		}
+		return code, out
+	}
+	args := []string{"diagnose-path", "--via", "direct", "--url", urls[0], "--url", urls[1]}
+	code, out := runAndCapture(args)
+	if code != 1 || strings.Contains(string(out), "secret-token") ||
+		strings.Contains(string(out), "private/report") {
+		t.Fatalf("diagnostic failure or secret reflection: exit=%d", code)
+	}
+	var envelope struct {
+		OK   bool `json:"ok"`
+		Data struct {
+			Assessment     string `json:"assessment"`
+			Path           string `json:"path"`
+			ReachableCount int    `json:"reachable_count"`
+			FailedCount    int    `json:"failed_count"`
+			Samples        []struct {
+				HTTPStatus int `json:"http_status"`
+			} `json:"samples"`
+		} `json:"data"`
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(out, &envelope); err != nil {
+		t.Fatal(err)
+	}
+	if envelope.OK || envelope.Error.Code != "probe_set_partial" || envelope.Data.Assessment != "mixed_results" ||
+		envelope.Data.Path != "direct" || envelope.Data.ReachableCount != 1 || envelope.Data.FailedCount != 1 ||
+		len(envelope.Data.Samples) != 2 || envelope.Data.Samples[1].HTTPStatus != 502 {
+		t.Fatalf("incorrect machine status: %+v", envelope)
+	}
+	if _, err := os.Stat(m.Dir); !os.IsNotExist(err) {
+		t.Fatalf("Direct diagnostics unexpectedly created a private state directory: %v", err)
+	}
+	_, healthyPort, err := net.SplitHostPort(strings.TrimPrefix(healthy.URL, "http://"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	code, out = runAndCapture([]string{"diagnose-path", "--via", "direct",
+		"--url", healthy.URL, "--url", "http://localhost:" + healthyPort + "/healthy"})
+	if code != 0 || !strings.Contains(string(out), `"ok":true`) ||
+		!strings.Contains(string(out), "all_targets_reachable") {
+		t.Fatalf("both successful direct responses were incorrectly rejected: exit=%d output=%s", code, out)
+	}
+	// Proxy mode must never claim a direct success when no owned proxy exists.
+	args[2] = "proxy"
+	code, out = runAndCapture(args)
+	if code != 1 || !strings.Contains(string(out), "probe_set_unreachable") ||
+		!strings.Contains(string(out), "no_targets_reachable") {
+		t.Fatalf("unavailable Proxy incorrectly used Direct: code=%d output=%s", code, out)
+	}
+	// A URL with inline credentials must be refused before any HTTP request.
+	code, out = runAndCapture([]string{"diagnose-path", "--via", "direct",
+		"--url", "https://operator:secret-token@one.example/api", "--url", "https://two.example"})
+	if code != 1 || !strings.Contains(string(out), "invalid_arguments") || strings.Contains(string(out), "secret-token") {
+		t.Fatalf("unsafe URI accepted or reflected: code=%d", code)
 	}
 }
