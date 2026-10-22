@@ -9,13 +9,17 @@ import (
 	"net/netip"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
+	"strings"
 	"syscall"
 	"time"
 )
 
 const nativeIPPath = "/usr/bin/ip"
 const hostSnapshotMaxBytes = 1 << 20
+const nativeIPCommandTimeout = 5 * time.Second
+const nativeIPPipeWaitDelay = 250 * time.Millisecond
 
 // HostRouteLookup records what the local Linux kernel would route, not
 // evidence that packets reach the target or that a tunnel is safe to activate.
@@ -47,9 +51,13 @@ func parsePreflightAddress(value, label string) (netip.Addr, error) {
 		return netip.Addr{}, nil
 	}
 	addr, err := netip.ParseAddr(value)
+	// GlobalUnicast includes RFC1918 IPv4 and IPv6 ULA, but excludes the
+	// IPv4 limited broadcast address. Loopback is intentionally supported.
+	// Reject both families' link-local destinations: this CLI does not take
+	// an interface scope and cannot unambiguously identify their route.
 	if err != nil || !addr.IsValid() || addr.Zone() != "" || addr.Is4In6() ||
-		addr.IsUnspecified() || addr.IsMulticast() {
-		return netip.Addr{}, Fault("invalid_arguments", label+" requires a literal unicast IPv4 or IPv6 address (no hostname or DNS lookup)")
+		(!addr.IsGlobalUnicast() && !addr.IsLoopback()) || addr.IsLinkLocalUnicast() {
+		return netip.Addr{}, Fault("invalid_arguments", label+" requires a literal unicast IPv4 or IPv6 address (no broadcast, link-local or DNS lookup)")
 	}
 	return addr, nil
 }
@@ -60,21 +68,47 @@ func trustedHostIPExecutable() error {
 	if runtime.GOOS != "linux" {
 		return Fault("host_preflight_unavailable", "host network inspection requires Linux")
 	}
-	for _, path := range []string{"/", "/usr", "/usr/bin", nativeIPPath} {
-		info, err := os.Lstat(path)
+	return verifyTrustedIPPath("/", nativeIPPath, 0)
+}
+
+// verifyTrustedIPPath checks each directory starting at root and the final
+// executable using Lstat, never following symlinks. The configurable owner
+// and root exist only to test the same production trust boundary with private
+// filesystem fixtures; production always specifies /usr/bin/ip and UID 0.
+func verifyTrustedIPPath(root, executable string, ownerUID uint32) error {
+	badPath := func() error {
+		return Fault("host_preflight_unavailable", "native iproute2 path is not trusted")
+	}
+	if !filepath.IsAbs(root) || !filepath.IsAbs(executable) ||
+		filepath.Clean(root) != root || filepath.Clean(executable) != executable {
+		return badPath()
+	}
+	relative, err := filepath.Rel(root, executable)
+	if err != nil || relative == "." || relative == ".." ||
+		strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+		return badPath()
+	}
+	parts := strings.Split(relative, string(filepath.Separator))
+	current := root
+	for i := 0; i <= len(parts); i++ {
+		if i > 0 {
+			current = filepath.Join(current, parts[i-1])
+		}
+		info, err := os.Lstat(current)
 		if err != nil {
-			return Fault("host_preflight_unavailable", "native iproute2 executable unavailable")
+			return badPath()
 		}
-		owner, ok := info.Sys().(*syscall.Stat_t)
-		if !ok || owner.Uid != 0 || info.Mode().Perm()&0022 != 0 {
-			return Fault("host_preflight_unavailable", "native iproute2 path is not trusted")
+		stat, ok := info.Sys().(*syscall.Stat_t)
+		if !ok || stat.Uid != ownerUID || info.Mode().Perm()&0022 != 0 {
+			return badPath()
 		}
-		if path == nativeIPPath {
-			if !info.Mode().IsRegular() || info.Mode().Perm()&0111 == 0 {
-				return Fault("host_preflight_unavailable", "native iproute2 executable unavailable")
+		if i < len(parts) {
+			if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+				return badPath()
 			}
-		} else if !info.IsDir() {
-			return Fault("host_preflight_unavailable", "native iproute2 directory is not trusted")
+		} else if !info.Mode().IsRegular() || info.Mode().Perm()&0111 == 0 ||
+			info.Mode()&(os.ModeSetuid|os.ModeSetgid) != 0 {
+			return Fault("host_preflight_unavailable", "native iproute2 executable unavailable or untrusted")
 		}
 	}
 	return nil
@@ -105,15 +139,30 @@ func decodeRouteArray(data []byte) (json.RawMessage, error) {
 }
 
 func nativeIPJSON(args ...string) (json.RawMessage, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), nativeIPCommandTimeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, nativeIPPath, args...)
+	// No production caller can select another executable.
+	return runIPJSONCommand(ctx, nativeIPPath, args...)
+}
+
+// runIPJSONCommand is shared with controlled process-lifecycle regression
+// fixtures; production always uses the fixed, previously trust-checked
+// /usr/bin/ip. WaitDelay bounds post-exit pipes held open by descendants.
+func runIPJSONCommand(ctx context.Context, executable string, args ...string) (json.RawMessage, error) {
+	cmd := exec.CommandContext(ctx, executable, args...)
+	cmd.WaitDelay = nativeIPPipeWaitDelay
 	// No inherited PATH, LD_*, APT or user-specific execution policy.
 	cmd.Env = []string{"LC_ALL=C", "LANG=C", "PATH=/usr/bin:/bin"}
 	var out boundedIPOutput
 	cmd.Stdout = &out
 	cmd.Stderr = io.Discard
 	if err := cmd.Run(); err != nil {
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			return nil, Fault("host_preflight_unavailable", "native route inspection timed out")
+		}
+		if errors.Is(err, exec.ErrWaitDelay) {
+			return nil, Fault("host_preflight_unavailable", "native route inspection output pipe did not close in time")
+		}
 		return nil, Fault("host_preflight_unavailable", "native route inspection failed; check iproute2 and permissions")
 	}
 	return decodeRouteArray(out.Bytes())
