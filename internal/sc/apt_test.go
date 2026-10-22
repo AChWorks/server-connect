@@ -438,3 +438,37 @@ func TestRealNativeAPTExecutableMethodPolicyPreflight(t *testing.T) {
 		t.Fatalf("safe disposable APT source/list configuration blocked: %v", err)
 	}
 }
+
+// Minimal and full Debian 13 images need not install the same optional
+// compressors. "false" is the native disabled form, not a custom executable
+// path or general-purpose policy exemption.
+func TestNativeAPTOptionalCompressorCompatibility(t *testing.T) {
+	proxy := "http://sc:never-expose@127.0.0.1:20807"
+	base := nativeAptDumpForTest() +
+		"Acquire::http::Proxy \"" + proxy + "\";\n" +
+		"Acquire::https::Proxy \"" + proxy + "\";\n"
+	for _, entry := range []string{
+		"APT::Compressor::lz4::Binary \"false\";\n",
+		"APT::Compressor::lz4::Binary \"lz4\";\n",
+		"APT::Compressor::zstd::Binary \"false\";\n",
+		"APT::Compressor::zstd::Binary \"zstd\";\n",
+		"APT::Compressor::bzip2::Binary \"false\";\n",
+		"APT::Compressor::bzip2::Binary \"bzip2\";\n",
+		"APT::Compressor::lzma::Binary \"xz\";\n",
+		"APT::Compressor::lzma::Binary \"false\";\n",
+	} {
+		if err := verifyAptDump(base+entry, proxy); err != nil {
+			t.Fatalf("native optional Debian compressor form rejected: %v", err)
+		}
+	}
+	for _, entry := range []string{
+		"APT::Compressor::lz4::Binary \"/tmp/untrusted\";\n",
+		"APT::Compressor::zstd::Binary \"curl\";\n",
+		"APT::Compressor::gzip::Binary \"bzip2\";\n",
+		"APT::Compressor::alien::Binary \"gzip\";\n",
+	} {
+		if err := verifyAptDump(base+entry, proxy); ErrorCode(err) != "apt_policy_conflict" {
+			t.Fatalf("untrusted compressor execution still allowed: %v", err)
+		}
+	}
+}

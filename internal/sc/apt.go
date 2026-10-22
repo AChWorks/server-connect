@@ -253,16 +253,19 @@ var nativeAPTBinConfig = map[string]string{
 	"dir::bin::lzma":       "/usr/bin/xz",
 }
 
-// Compressor binary configuration can also introduce external executables,
-// independent of the trusted APT acquisition methods directory.
-var nativeAPTCompressors = map[string]string{
-	"apt::compressor::.::binary":     "",
-	"apt::compressor::zstd::binary":  "zstd",
-	"apt::compressor::lz4::binary":   "false",
-	"apt::compressor::gzip::binary":  "gzip",
-	"apt::compressor::xz::binary":    "xz",
-	"apt::compressor::bzip2::binary": "false",
-	"apt::compressor::lzma::binary":  "xz",
+// APT marks unavailable optional native compressors as "false", depending
+// on which Debian packages are installed. Accept only each compressor's own
+// executable or its disabled representation; never custom executable names
+// or paths. This supports minimal and full Debian 13 installations without
+// weakening the acquisition-method trust boundary.
+var nativeAPTCompressors = map[string][]string{
+	"apt::compressor::.::binary":     {""},
+	"apt::compressor::zstd::binary":  {"zstd", "false"},
+	"apt::compressor::lz4::binary":   {"lz4", "false"},
+	"apt::compressor::gzip::binary":  {"gzip", "false"},
+	"apt::compressor::xz::binary":    {"xz", "false"},
+	"apt::compressor::bzip2::binary": {"bzip2", "false"},
+	"apt::compressor::lzma::binary":  {"xz", "false"},
 }
 
 func verifyAptDump(dump, expected string) error {
@@ -322,9 +325,18 @@ func verifyAptDump(dump, expected string) error {
 			seenBins[key] = true
 		}
 		if strings.HasPrefix(key, "apt::compressor::") && strings.HasSuffix(key, "::binary") {
-			want, ok := nativeAPTCompressors[key]
-			if !ok || len(fields) != 2 || fields[1] != "\""+want+"\";" {
-				return Fault("apt_policy_conflict", "APT compressor executable policy differs from native Debian layout")
+			nativeNames, known := nativeAPTCompressors[key]
+			approved := false
+			if known && len(fields) == 2 {
+				for _, name := range nativeNames {
+					if fields[1] == "\""+name+"\";" {
+						approved = true
+						break
+					}
+				}
+			}
+			if !approved {
+				return Fault("apt_policy_conflict", "APT compressor executable is not a supported native binary")
 			}
 		}
 		if key == "acquire::http::proxy" || key == "acquire::https::proxy" {
