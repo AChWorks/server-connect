@@ -268,6 +268,144 @@ func TestHostDriftSpecialRoutesAndEmptyFamiliesRemainSupported(t *testing.T) {
 	}
 }
 
+// Baseline validation runs before trusted native iproute2. The success
+// envelope must contain explicitly asserted safety flags, and each policy
+// rule must carry an actual priority and kernel action rather than [{}].
+func TestHostDriftRuleRecordsAndExplicitSafetyAssertions(t *testing.T) {
+	invalid := []struct {
+		name   string
+		mutate func(*HostPreflight)
+	}{
+		{"ipv4_rules_empty_object", func(p *HostPreflight) { p.IPv4Rules = json.RawMessage(`[{}]`) }},
+		{"ipv6_rules_empty_object", func(p *HostPreflight) { p.IPv6Rules = json.RawMessage(`[{}]`) }},
+		{"ipv4_rule_priority_only", func(p *HostPreflight) { p.IPv4Rules = json.RawMessage(`[{"priority":100}]`) }},
+		{"ipv6_rule_priority_only", func(p *HostPreflight) { p.IPv6Rules = json.RawMessage(`[{"priority":100,"src":"all"}]`) }},
+		{"ipv4_rule_no_priority", func(p *HostPreflight) { p.IPv4Rules = json.RawMessage(`[{"src":"all","table":"main"}]`) }},
+		{"ipv6_rule_no_priority", func(p *HostPreflight) { p.IPv6Rules = json.RawMessage(`[{"type":"unreachable","src":"all"}]`) }},
+		{"ipv4_rule_null_priority", func(p *HostPreflight) { p.IPv4Rules = json.RawMessage(`[{"priority":null,"table":"main"}]`) }},
+		{"ipv4_rule_string_priority", func(p *HostPreflight) { p.IPv4Rules = json.RawMessage(`[{"priority":"100","table":"main"}]`) }},
+		{"ipv4_rule_negative_priority", func(p *HostPreflight) { p.IPv4Rules = json.RawMessage(`[{"priority":-1,"table":"main"}]`) }},
+		{"ipv4_rule_fractional_priority", func(p *HostPreflight) { p.IPv4Rules = json.RawMessage(`[{"priority":1.5,"table":"main"}]`) }},
+		{"ipv4_rule_oversized_priority", func(p *HostPreflight) { p.IPv4Rules = json.RawMessage(`[{"priority":4294967296,"table":"main"}]`) }},
+		{"ipv4_rule_null_table", func(p *HostPreflight) { p.IPv4Rules = json.RawMessage(`[{"priority":1,"table":null}]`) }},
+		{"ipv4_rule_empty_table", func(p *HostPreflight) { p.IPv4Rules = json.RawMessage(`[{"priority":1,"table":"  "}]`) }},
+		{"ipv4_rule_zero_table", func(p *HostPreflight) { p.IPv4Rules = json.RawMessage(`[{"priority":1,"table":0}]`) }},
+		{"ipv4_rule_unknown_action", func(p *HostPreflight) { p.IPv4Rules = json.RawMessage(`[{"priority":1,"action":"unknown"}]`) }},
+		{"ipv4_rule_false_l3mdev", func(p *HostPreflight) { p.IPv4Rules = json.RawMessage(`[{"priority":1,"l3mdev":false}]`) }},
+		{"ipv4_rule_empty_goto", func(p *HostPreflight) { p.IPv4Rules = json.RawMessage(`[{"priority":1,"goto":null}]`) }},
+	}
+	for _, tc := range invalid {
+		t.Run(tc.name, func(t *testing.T) {
+			snapshot := driftFixture()
+			tc.mutate(&snapshot)
+			path := writeDriftBaseline(t, t.TempDir(), snapshot)
+			if _, err := readHostDriftBaseline(path); ErrorCode(err) != "invalid_baseline" {
+				t.Fatalf("accepted a structurally incomplete policy rule: %v", err)
+			}
+			report, err := InspectHostDrift(path)
+			if ErrorCode(err) != "invalid_baseline" || report.Mode != "" || strings.Contains(err.Error(), path) {
+				t.Fatalf("invalid policy rule reached native inspection or leaked private path: %+v %v", report, err)
+			}
+		})
+	}
+	for _, field := range []string{"snapshot_atomic", "activation_ready", "read_only", "mode"} {
+		t.Run("missing_"+field, func(t *testing.T) {
+			baseline := writeDriftBaseline(t, t.TempDir(), driftFixture())
+			bytes, err := os.ReadFile(baseline)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var envelope map[string]json.RawMessage
+			if err = json.Unmarshal(bytes, &envelope); err != nil {
+				t.Fatal(err)
+			}
+			var fields map[string]json.RawMessage
+			if err = json.Unmarshal(envelope["data"], &fields); err != nil {
+				t.Fatal(err)
+			}
+			delete(fields, field)
+			if envelope["data"], err = json.Marshal(fields); err != nil {
+				t.Fatal(err)
+			}
+			if bytes, err = json.Marshal(envelope); err != nil {
+				t.Fatal(err)
+			}
+			if err = os.WriteFile(baseline, bytes, 0600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err = readHostDriftBaseline(baseline); ErrorCode(err) != "invalid_baseline" {
+				t.Fatalf("accepted omitted mandatory %s assertion: %v", field, err)
+			}
+			report, err := InspectHostDrift(baseline)
+			if ErrorCode(err) != "invalid_baseline" || report.Mode != "" {
+				t.Fatalf("partial success envelope accepted: %+v %v", report, err)
+			}
+		})
+		t.Run("null_"+field, func(t *testing.T) {
+			baseline := writeDriftBaseline(t, t.TempDir(), driftFixture())
+			bytes, err := os.ReadFile(baseline)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var envelope map[string]json.RawMessage
+			if err = json.Unmarshal(bytes, &envelope); err != nil {
+				t.Fatal(err)
+			}
+			var fields map[string]json.RawMessage
+			if err = json.Unmarshal(envelope["data"], &fields); err != nil {
+				t.Fatal(err)
+			}
+			fields[field] = json.RawMessage("null")
+			if envelope["data"], err = json.Marshal(fields); err != nil {
+				t.Fatal(err)
+			}
+			if bytes, err = json.Marshal(envelope); err != nil {
+				t.Fatal(err)
+			}
+			if err = os.WriteFile(baseline, bytes, 0600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err = readHostDriftBaseline(baseline); ErrorCode(err) != "invalid_baseline" {
+				t.Fatalf("accepted null mandatory %s assertion: %v", field, err)
+			}
+		})
+	}
+}
+
+func TestHostDriftValidNativePolicyRuleShapes(t *testing.T) {
+	cases := []struct {
+		name  string
+		rules json.RawMessage
+	}{
+		{"empty", json.RawMessage(`[]`)},
+		{"ordinary", json.RawMessage(`[{"priority":0,"src":"all","table":"local"},{"priority":32766,"src":"all","table":"main"}]`)},
+		{"numeric_table", json.RawMessage(`[{"priority":100,"src":"all","table":100}]`)},
+		{"source_uid_and_mark", json.RawMessage(`[{"priority":100,"src":"192.0.2.0","srclen":24,"fwmark":"0x1","uid_start":0,"uid_end":1000,"table":"100"}]`)},
+		{"unreachable", json.RawMessage(`[{"priority":100,"type":"unreachable"}]`)},
+		{"blackhole", json.RawMessage(`[{"priority":100,"type":"blackhole","src":"all"}]`)},
+		{"prohibit", json.RawMessage(`[{"priority":100,"type":"prohibit"}]`)},
+		{"goto", json.RawMessage(`[{"priority":100,"goto":200}]`)},
+		{"nop", json.RawMessage(`[{"priority":100,"type":"nop"}]`)},
+		{"l3mdev", json.RawMessage(`[{"priority":100,"l3mdev":true}]`)},
+	}
+	for _, tc := range cases {
+		for _, family := range []string{"ipv4", "ipv6"} {
+			t.Run(family+"_"+tc.name, func(t *testing.T) {
+				s := driftFixture()
+				if family == "ipv4" {
+					s.IPv4Rules = tc.rules
+				} else {
+					s.IPv6Rules = tc.rules
+				}
+				path := writeDriftBaseline(t, t.TempDir(), s)
+				if _, err := readHostDriftBaseline(path); err != nil {
+					t.Fatalf("valid policy rule rejected: %v", err)
+				}
+			})
+		}
+	}
+}
+
 func TestHostDriftActualNativeIPv4IPv6RoutesRemainUnchanged(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("Linux required")

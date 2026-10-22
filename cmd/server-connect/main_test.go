@@ -636,6 +636,10 @@ func TestHostDriftCLIRejectsIncompleteBaselineWithoutFakeData(t *testing.T) {
 	}{
 		{"links_empty", "links", "[]"},
 		{"lookup_empty", "endpoint", `{"target":"127.0.0.1","family":"ipv4","kernel_route":[{}]}`},
+		{"ipv4_rules_empty", "ipv4_rules", `[{}]`},
+		{"ipv6_rules_missing_action", "ipv6_rules", `[{"priority":1}]`},
+		{"missing_snapshot_atomic", "snapshot_atomic", "__DELETE__"},
+		{"missing_activation_ready", "activation_ready", "__DELETE__"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			path := hostDriftRealChangedBaseline(t)
@@ -651,7 +655,11 @@ func TestHostDriftCLIRejectsIncompleteBaselineWithoutFakeData(t *testing.T) {
 			if err := json.Unmarshal(doc["data"], &data); err != nil {
 				t.Fatal(err)
 			}
-			data[tc.field] = json.RawMessage(tc.jsonValue)
+			if tc.jsonValue == "__DELETE__" {
+				delete(data, tc.field)
+			} else {
+				data[tc.field] = json.RawMessage(tc.jsonValue)
+			}
 			doc["data"], err = json.Marshal(data)
 			if err != nil {
 				t.Fatal(err)

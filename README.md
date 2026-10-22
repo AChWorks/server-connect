@@ -138,9 +138,12 @@ an explicit classified failure; they never silently print only a generic
 error. Route and link arrays ignore enumeration-order differences;
 policy-rule ordering remains significant. Invalid, oversized,
 symlinked, non-private or structurally incomplete baseline files are
-rejected **before** any kernel inspection (including empty link inventories
-or identity-free kernel route lookups); no baseline file paths or raw
-file content appear in errors or diagnostic output.
+rejected **before** any kernel inspection (including empty link inventories,
+identity-free kernel route lookups, policy rules lacking priority/action, or
+missing explicit `snapshot_atomic: false` and `activation_ready: false`
+assertions); no baseline file paths or raw file content appear in errors or
+diagnostic output. Legitimate empty route/rule families and Linux policy
+actions (lookup, goto, l3mdev and terminal rules) are supported.
 
 **Important:** both snapshots are non-atomic and the saved file is
 operator-provided, not a trusted/cryptographically authenticated kernel

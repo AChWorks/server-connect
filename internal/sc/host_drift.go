@@ -96,6 +96,20 @@ func readHostDriftBaseline(path string) (HostPreflight, error) {
 		!*envelope.OK || len(envelope.Error) != 0 || len(envelope.Data) == 0 {
 		return HostPreflight{}, bad()
 	}
+	// Decode safety assertions as pointers: decoding directly into bools
+	// silently treats missing or null fields as the safe-looking false
+	// values. A valid source must explicitly assert every safety field.
+	var assertions struct {
+		ReadOnly        *bool `json:"read_only"`
+		SnapshotAtomic  *bool `json:"snapshot_atomic"`
+		ActivationReady *bool `json:"activation_ready"`
+	}
+	if json.Unmarshal(envelope.Data, &assertions) != nil ||
+		assertions.ReadOnly == nil || !*assertions.ReadOnly ||
+		assertions.SnapshotAtomic == nil || *assertions.SnapshotAtomic ||
+		assertions.ActivationReady == nil || *assertions.ActivationReady {
+		return HostPreflight{}, bad()
+	}
 	var snapshot HostPreflight
 	if json.Unmarshal(envelope.Data, &snapshot) != nil || validateHostDriftSnapshot(snapshot) != nil {
 		return HostPreflight{}, bad()
@@ -119,10 +133,9 @@ func validateHostDriftSnapshot(snapshot HostPreflight) error {
 		!validHostDriftRoutes(snapshot.IPv6Routes, true) {
 		return bad()
 	}
-	for _, component := range []json.RawMessage{snapshot.IPv4Rules, snapshot.IPv6Rules} {
-		if _, err := decodeRouteArray(component); err != nil {
-			return bad()
-		}
+	if !validHostDriftPolicyRules(snapshot.IPv4Rules) ||
+		!validHostDriftPolicyRules(snapshot.IPv6Rules) {
+		return bad()
 	}
 	for _, lookup := range []*HostRouteLookup{snapshot.Endpoint, snapshot.ManagementPeer} {
 		if lookup == nil {
@@ -274,6 +287,77 @@ func validHostDriftLookupRoute(raw json.RawMessage, target netip.Addr) bool {
 	// even when it was selected through a default route.
 	dst, err := netip.ParseAddr(hostDriftString(route, "dst"))
 	return err == nil && dst == target
+}
+
+// Native 'ip -j rule show' gives every rule a numeric priority and a
+// lookup/action. Selectors alone (src, fwmark, UID, etc.) are not sufficient
+// evidence that a policy-rule record was successfully captured. Rule arrays
+// may legitimately be empty on some isolated Linux hosts.
+func validHostDriftRuleTable(raw json.RawMessage) bool {
+	var name *string
+	if json.Unmarshal(raw, &name) == nil && name != nil &&
+		*name != "" && strings.TrimSpace(*name) == *name {
+		return true
+	}
+	var number *uint32
+	return json.Unmarshal(raw, &number) == nil && number != nil && *number > 0
+}
+
+func validHostDriftPolicyRules(raw json.RawMessage) bool {
+	rows, ok := hostDriftObjects(raw)
+	if !ok {
+		return false
+	}
+	for _, rule := range rows {
+		// A pointer distinguishes priority 0 from an omitted/null priority.
+		var priority *uint32
+		if json.Unmarshal(rule["priority"], &priority) != nil || priority == nil {
+			return false
+		}
+		action := false
+		if value, exists := rule["table"]; exists {
+			if !validHostDriftRuleTable(value) {
+				return false
+			}
+			action = true
+		}
+		if value, exists := rule["lookup"]; exists {
+			if !validHostDriftRuleTable(value) {
+				return false
+			}
+			action = true
+		}
+		if value, exists := rule["goto"]; exists {
+			var gotoPriority *uint32
+			if json.Unmarshal(value, &gotoPriority) != nil || gotoPriority == nil || *gotoPriority == 0 {
+				return false
+			}
+			action = true
+		}
+		if value, exists := rule["l3mdev"]; exists {
+			var enabled *bool
+			if json.Unmarshal(value, &enabled) != nil || enabled == nil {
+				return false
+			}
+			if *enabled {
+				action = true
+			}
+		}
+		if _, exists := rule["type"]; exists {
+			ruleType := hostDriftString(rule, "type")
+			if ruleType == "" {
+				return false
+			}
+			switch ruleType {
+			case "blackhole", "unreachable", "prohibit", "nop", "nat":
+				action = true
+			}
+		}
+		if !action {
+			return false
+		}
+	}
+	return true
 }
 
 // Semantic fingerprints normalize object key order and whitespace. For links
