@@ -212,6 +212,52 @@ func run(j bool, m *sc.Manager, args []string) int {
 			return output(j, nil, err)
 		}
 		return output(j, report, err)
+	case "underlay-tcp":
+		opts := flag.NewFlagSet(name, flag.ContinueOnError)
+		opts.SetOutput(io.Discard)
+		endpoint := opts.String("endpoint", "", "pinned literal TCP endpoint IPv4 or IPv6")
+		hostname := opts.String("hostname", "", "optional hostname to resolve and verify matches the pinned endpoint IP")
+		port := opts.Int("port", 0, "explicit TCP destination port")
+		if e := opts.Parse(args); e != nil || len(opts.Args()) != 0 {
+			return output(j, nil, sc.Fault("invalid_arguments", "invalid underlay-tcp options"))
+		}
+		hostnameProvided := false
+		opts.Visit(func(f *flag.Flag) {
+			if f.Name == "hostname" {
+				hostnameProvided = true
+			}
+		})
+		if hostnameProvided && *hostname == "" {
+			return output(j, nil, sc.Fault("invalid_arguments", "explicit --hostname must not be empty"))
+		}
+		var report sc.UnderlayTCPReport
+		var err error
+		if !hostnameProvided {
+			report, err = sc.InspectUnderlayTCP(*endpoint, *port)
+		} else {
+			report, err = sc.InspectUnderlayTCPWithHostname(*endpoint, *hostname, *port)
+		}
+		// No report exists when argument validation fails. Do not encode a
+		// zero-value struct with misleading read_only=false safety fields.
+		if report.Mode == "" {
+			return output(j, nil, err)
+		}
+		return output(j, report, err)
+	case "underlay-dns":
+		opts := flag.NewFlagSet(name, flag.ContinueOnError)
+		opts.SetOutput(io.Discard)
+		hostname := opts.String("hostname", "", "absolute DNS-style hostname to verify")
+		endpoint := opts.String("endpoint", "", "literal VPN endpoint IPv4 or IPv6")
+		resolver := opts.String("resolver", "", "literal explicit DNS resolver IPv4 or IPv6")
+		resolverPort := opts.Int("resolver-port", 53, "explicit DNS resolver port")
+		if e := opts.Parse(args); e != nil || len(opts.Args()) != 0 {
+			return output(j, nil, sc.Fault("invalid_arguments", "invalid underlay-dns options"))
+		}
+		report, err := sc.InspectUnderlayDNS(*hostname, *endpoint, *resolver, *resolverPort)
+		if report.Mode == "" {
+			return output(j, nil, err) // Invalid arguments have no diagnostic evidence.
+		}
+		return output(j, report, err)
 	case "apt":
 		if j {
 			return output(true, nil, sc.Fault("invalid_arguments", "apt streams child output and does not support JSON mode"))
@@ -269,6 +315,10 @@ Commands:
                               Observe kernel routes/rules; no activation
   host-drift --baseline FILE Compare a prior private preflight JSON with now
                               Nonzero on drift; never authorizes activation
+  underlay-tcp --endpoint IP --port N [--hostname NAME]
+                              Optional hostname must resolve to pinned IP before interface-bound TCP probe
+  underlay-dns --hostname NAME --endpoint IP --resolver IP [--resolver-port 53]
+                              Query only the selected interface-bound resolver; never activates routing
   version                    Show pinned versions
 
 Import VLESS links from stdin or a mode-0600 file, not shell argv. 'exec'
@@ -280,12 +330,21 @@ traffic globally. Host preflight is observational: a route lookup does not
 prove connectivity, safety, routing ownership or readiness to activate TUN.
 Host drift compares separate, non-atomic network observations without changing
 the host, and is never an activation guard or a recovery journal.
+An explicit underlay-tcp probe binds a TCP socket to the kernel-selected
+interface and sends no application data. With --hostname, current host name
+resolution must include the explicit pinned --endpoint IP before TCP probing.
+This is not proof that resolver traffic bypassed a VPN or that DNS bootstrap,
+SSH/hosted ingress, VPN protocol, ownership or guards are safe.
+Underlay-dns explicitly queries only a pinned DNS resolver through the
+kernel-selected interface and checks its answers against the pinned endpoint.
+Even matching answers cannot guarantee future DNS/bootstrap behavior after
+routing changes, authenticate DNS, or authorize tunnel activation.
 `
 
 func menu(m *sc.Manager) int {
 	in := bufio.NewReader(os.Stdin)
 	for {
-		fmt.Println("\nServer Connect | 1 Status  2 Profiles  3 Import  4 Select  5 Connect  6 Test  7 Disconnect  8 Remove  9 APT Update  10 Host Preflight  0 Exit")
+		fmt.Println("\nServer Connect | 1 Status  2 Profiles  3 Import  4 Select  5 Connect  6 Test  7 Disconnect  8 Remove  9 APT Update  10 Host Preflight  11 Underlay TCP  12 Underlay DNS  13 Host Drift  0 Exit")
 		fmt.Print("Choice: ")
 		raw, e := in.ReadString('\n')
 		if e != nil {
@@ -327,6 +386,47 @@ func menu(m *sc.Manager) int {
 			run(false, m, []string{"disconnect"})
 		case "10":
 			run(false, m, []string{"host-preflight"})
+		case "11":
+			fmt.Print("Literal TCP endpoint IP (no DNS): ")
+			address, err := in.ReadString('\n')
+			if err != nil {
+				return 0
+			}
+			fmt.Print("Endpoint TCP port: ")
+			rawPort, err := in.ReadString('\n')
+			if err != nil {
+				return 0
+			}
+			fmt.Print("Optional DNS hostname to verify against pinned IP (blank to skip): ")
+			hostname, err := in.ReadString('\n')
+			if err != nil {
+				return 0
+			}
+			command := []string{"underlay-tcp", "--endpoint", strings.TrimSpace(address), "--port", strings.TrimSpace(rawPort)}
+			if h := strings.TrimSpace(hostname); h != "" {
+				command = append(command, "--hostname", h)
+			}
+			run(false, m, command)
+		case "12":
+			fmt.Print("Endpoint DNS hostname: ")
+			host, _ := in.ReadString('\n')
+			fmt.Print("Pinned endpoint IP: ")
+			endpoint, _ := in.ReadString('\n')
+			fmt.Print("Explicit resolver IP (DNS queries are sent to this resolver): ")
+			resolver, _ := in.ReadString('\n')
+			run(false, m, []string{"underlay-dns", "--hostname", strings.TrimSpace(host),
+				"--endpoint", strings.TrimSpace(endpoint), "--resolver", strings.TrimSpace(resolver)})
+		case "13":
+			fmt.Print("Private host-preflight JSON baseline path: ")
+			path, err := in.ReadString('\n')
+			if err != nil {
+				return 0
+			}
+			if strings.TrimSpace(path) == "" {
+				fmt.Println("Canceled; no baseline supplied")
+				continue
+			}
+			run(false, m, []string{"host-drift", "--baseline", strings.TrimSpace(path)})
 		case "9":
 			fmt.Print("APT update refreshes system package indexes using the selected proxy. Type UPDATE to confirm: ")
 			confirmation, err := in.ReadString('\n')

@@ -74,7 +74,7 @@ jobs:
           # host inspection tools only for their own real-kernel test.
           DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends iproute2
           test -x /usr/bin/ip
-          go test ./internal/sc -run '^(TestPreflight|TestHostDrift)' -count=1 -v
+          go test ./internal/sc -run '^(TestPreflight|TestUnderlay|TestHostDrift)' -count=1 -v
           go test ./cmd/server-connect -run '^TestHostDriftCLI' -count=1 -v
           # GitHub's checkout is runner-owned inside this container. Trust
           # only this ephemeral checkout for Go VCS stamping (do not disable it).
@@ -99,7 +99,7 @@ jobs:
           assert report['endpoint']['target'] == '127.0.0.1'
           assert report['management_peer']['target'] == '127.0.0.2'
           with open('build/ci/host-drift-ok.json') as source:
-              drift = json.load(source)
+              drift=json.load(source)
           assert drift['ok'] is True
           assert drift['data']['read_only'] is True
           assert drift['data']['activation_ready'] is False
@@ -119,7 +119,7 @@ jobs:
           python3 - <<'PYQA'
           import json
           with open('build/ci/host-drift-changed.json') as source:
-              drift = json.load(source)
+              drift=json.load(source)
           assert drift['ok'] is False
           assert drift['error']['code'] == 'host_drift_detected'
           assert drift['data']['changed'] is True
@@ -127,6 +127,26 @@ jobs:
           assert drift['data']['activation_ready'] is False
           assert drift['data']['current_observed'] is True
           assert sum(c['changed'] for c in drift['data']['components']) == 1
+          PYQA
+          # Invalid destinations must fail before any network activity.
+          if build/ci/server-connect-cli --json underlay-tcp --endpoint example.org --port 443 > build/ci/invalid-underlay.json; then
+            echo 'Non-literal underlay endpoint unexpectedly accepted' >&2
+            exit 1
+          fi
+          if build/ci/server-connect-cli --json underlay-tcp --endpoint 127.0.0.1 --hostname 'invalid@@host' --port 443 > build/ci/invalid-underlay-hostname.json; then
+            echo 'Invalid underlay hostname unexpectedly accepted' >&2
+            exit 1
+          fi
+          python3 - <<'PYQA'
+          import json
+          with open('build/ci/invalid-underlay.json') as source:
+              response=json.load(source)
+          assert response['ok'] is False
+          assert response['error']['code'] == 'invalid_arguments'
+          with open('build/ci/invalid-underlay-hostname.json') as source:
+              response=json.load(source)
+          assert response['ok'] is False
+          assert response['error']['code'] == 'invalid_arguments'
           PYQA
       - name: Local QA artifact and digest-verified online acquisition smoke
         shell: bash

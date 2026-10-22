@@ -37,6 +37,86 @@ The online bootstrap candidate at `scripts/bootstrap-online.sh` requires an expl
 
 On a Linux host with trusted native `/usr/bin/ip`, `server-connect --json host-preflight --endpoint 198.51.100.10 --management-peer 203.0.113.42` records actual IPv4/IPv6 routes, rules, links and kernel route lookups for **literal IPs**. Broadcast, multicast, unspecified, IPv4-mapped IPv6 and link-local addresses without a usable interface scope are rejected before native inspection; private IPv4, IPv6 ULA and loopback literals remain supported. It does not resolve DNS, touch state, enable a tunnel, change kernel networking or prove those peers are reachable. Both peer arguments are optional; supplying them is useful for future underlay and management-path planning. The report deliberately says `activation_ready: false` and `snapshot_atomic: false`: it is **not** an ownership journal, firewall inspection, activation authorization or replacement for the independent guards and SSH/reboot/field acceptance specified in Issue #2. This is a dependent development feature, not a released installation instruction.
 
+### Explicit underlay TCP diagnostic (Issue #2 dependent development)
+
+For a *known* literal TCP endpoint and port, run
+`server-connect --json underlay-tcp --endpoint 198.51.100.10 --port 443`.
+If the configured VPN endpoint also uses a DNS name, explicitly verify that
+the **current host resolver** includes the intended pinned IP *before* the
+TCP attempt:
+`server-connect --json underlay-tcp --endpoint 198.51.100.10 --hostname vpn.example.net --port 443`.
+The hostname check rejects malformed/ambiguous names, resolves an absolute
+DNS-style name (never silently adding a local search suffix), caps resolution
+to three seconds, checks A/AAAA records against the pinned literal, refuses
+oversized or unsuitable resolver results, and **does not connect** if that
+literal is absent. It never silently substitutes another resolved address.
+The IP-only command remains a literal-only test and does not invoke DNS.
+
+Either form makes one bounded TCP connection attempt **with no application bytes**,
+using a Linux kernel route lookup qualified by **TCP protocol, the exact
+destination port and the CLI process UID**, followed by `SO_BINDTODEVICE` on
+that selected interface. The **same flow-qualified route and the relevant
+policy rules** are checked again afterward. Source-dependent, source-port,
+mark, VRF, output-interface or unrecognized rule selectors are classified as
+`underlay_policy_unsupported` instead of guessing the socket's effective
+route. It rejects ambiguous/missing/down interfaces and **never falls back
+to an unbound socket** when binding fails. Unreachable/refused/timeouts
+produce a nonzero exit code and a machine-readable partial report
+(`ok: false`). Invalid endpoint/port/hostname arguments return an error
+**without a fabricated `data` report**; failures after the diagnostic starts
+retain `read_only: true` and bounded partial observations. The
+command does not depend on proxy environment variables, saved profiles or
+systemd services. The optional --hostname mode **does** use the current host
+name resolver and requires a DNS-style ASCII hostname with at least two labels;
+IP-only mode never invokes name resolution. Both must be explicitly invoked by
+the operator rather than automatically testing an arbitrary endpoint.
+
+**Scope limitation:** TCP reachability on the selected current interface
+is not proof of a safe unmodified pre-VPN underlay, VPN/TLS authentication,
+UDP/QUIC transport, endpoint DNS bootstrap, existing/new SSH reply paths,
+aaPanel ingress or any Activation/Runtime Guard. The hostname match uses
+the **host-configured resolver** (which may use local hosts records/caches
+or an already-tunneled DNS path). It cannot prove a DNS query succeeded
+over an independent Direct underlay. Pinning an IP does not guarantee the
+VPN client will use that address later; activation planning must independently
+protect actual resolver, endpoint and management paths. This diagnostic never
+mutates routes, firewall, resolver files or host state; `activation_ready`
+and `dns_bootstrap_verified` both remain **false**, even on success.
+Existing third-party routing is possible; observations are non-atomic.
+
+### Explicit resolver-bound DNS diagnostic (Issue #2, dependent development)
+
+The operator may separately check an **explicit DNS resolver path** rather than
+silently trusting the host's current resolver or cached hostname data:
+
+`server-connect --json underlay-dns --hostname vpn.example.net --endpoint 198.51.100.10 --resolver 1.1.1.1`
+
+Optionally set `--resolver-port 53` to target an explicitly selected nonstandard
+DNS service. This command validates the literal resolver and pinned endpoint,
+uses trusted native `/usr/bin/ip` to observe UDP and TCP resolver routes
+for the **exact DNS port and process UID**, and sends bounded standard DNS
+A/AAAA queries **only to that literal server**, with `SO_BINDTODEVICE` on
+the selected interface. Differing UDP/TCP paths, unknown routing selectors,
+source/mark/VRF/source-port-sensitive policies, and post-query route changes
+fail closed. There is no unbound or host-resolver fallback. Invalid input
+omits `data` rather than reporting fictitious safety flags. It refuses
+hosts-file-only answers, malformed inputs,
+a missing/unreachable resolver, unsupported address results, route drift,
+and any response lacking the operator-pinned endpoint IP. Each failure has
+structured `ok: false` evidence without connecting to the VPN endpoint or
+changing host DNS, system networking, profiles or services. Queries may reveal
+the supplied hostname to that resolver; invoke only with an operator-approved
+resolver.
+
+**Not an activation gate:** the resolver's response is not DNSSEC/TLS
+authenticated; an existing tunnel could still carry the interface-bound
+resolver traffic, and an eventual routing change could interrupt the route.
+Even a match leaves `read_only: true`, `dns_bootstrap_verified: false` and
+`activation_ready: false`. Independent route ownership, transaction
+journal, activation/recovery guards, management proofs and physical
+post-change tests are still mandatory. The exact CLI/API remains a development
+candidate, not a published stable release.
+
 ### Compare host routes and policy rules against a recorded baseline (Issue #2 development)
 
 Capture a baseline on the host *before* the intended maintenance or experiment;
