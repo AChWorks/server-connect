@@ -334,24 +334,38 @@ func validHostDriftPolicyRules(raw json.RawMessage) bool {
 			}
 			action = true
 		}
-		if value, exists := rule["l3mdev"]; exists {
-			var enabled *bool
-			if json.Unmarshal(value, &enabled) != nil || enabled == nil {
-				return false
-			}
-			if *enabled {
+		// iproute2 v6.15's ip/iprule.c uses JSON null for marker
+		// actions and "action" for terminal policies. "type" belongs to
+		// route serialization, not native "ip -j rule show" output.
+		if _, exists := rule["type"]; exists {
+			return false
+		}
+		for _, marker := range []string{"l3mdev", "nop", "masquerade"} {
+			if raw, exists := rule[marker]; exists {
+				if !bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+					return false
+				}
 				action = true
 			}
 		}
-		if _, exists := rule["type"]; exists {
-			ruleType := hostDriftString(rule, "type")
-			if ruleType == "" {
+		if raw, exists := rule["action"]; exists {
+			var name string
+			if json.Unmarshal(raw, &name) != nil {
 				return false
 			}
-			switch ruleType {
-			case "blackhole", "unreachable", "prohibit", "nop", "nat":
+			switch name {
+			case "blackhole", "unreachable", "prohibit", "throw", "anycast", "multicast", "xresolve":
 				action = true
+			default:
+				return false
 			}
+		}
+		if _, exists := rule["nat_gateway"]; exists {
+			ip, err := netip.ParseAddr(hostDriftString(rule, "nat_gateway"))
+			if err != nil || !ip.Is4() {
+				return false
+			}
+			action = true
 		}
 		if !action {
 			return false

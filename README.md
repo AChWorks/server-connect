@@ -142,8 +142,18 @@ rejected **before** any kernel inspection (including empty link inventories,
 identity-free kernel route lookups, policy rules lacking priority/action, or
 missing explicit `snapshot_atomic: false` and `activation_ready: false`
 assertions); no baseline file paths or raw file content appear in errors or
-diagnostic output. Legitimate empty route/rule families and Linux policy
-actions (lookup, goto, l3mdev and terminal rules) are supported.
+diagnostic output. Legitimate empty route/rule families and verified
+iproute2 6.15 policy-rule formats are supported: table/lookup, numeric
+goto, terminal `action` (`blackhole`, `unreachable`, `prohibit`,
+`throw`, `anycast`, `multicast`, `xresolve`), null-valued `nop`
+and `l3mdev`, and deprecated NAT markers (`masquerade: null` or
+`nat_gateway`). Route-style policy `type` and
+boolean-valued native action markers are rejected as incomplete evidence.
+These formats are based on
+[iproute2 v6.15 print_rule()](https://github.com/iproute2/iproute2/blob/v6.15.0/ip/iprule.c)
+and actual isolated Linux namespace captures; validation establishes only
+minimal shape, not baseline authenticity or compatibility with unverified
+future `iproute2` serializers.
 
 **Important:** both snapshots are non-atomic and the saved file is
 operator-provided, not a trusted/cryptographically authenticated kernel

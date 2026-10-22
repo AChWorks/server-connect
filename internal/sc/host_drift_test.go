@@ -2,7 +2,9 @@ package sc
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"net/netip"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -10,6 +12,7 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 )
 
 func driftFixture() HostPreflight {
@@ -372,7 +375,7 @@ func TestHostDriftRuleRecordsAndExplicitSafetyAssertions(t *testing.T) {
 	}
 }
 
-func TestHostDriftValidNativePolicyRuleShapes(t *testing.T) {
+func TestHostDriftSupportedPolicyRuleShapeFixtures(t *testing.T) {
 	cases := []struct {
 		name  string
 		rules json.RawMessage
@@ -381,12 +384,18 @@ func TestHostDriftValidNativePolicyRuleShapes(t *testing.T) {
 		{"ordinary", json.RawMessage(`[{"priority":0,"src":"all","table":"local"},{"priority":32766,"src":"all","table":"main"}]`)},
 		{"numeric_table", json.RawMessage(`[{"priority":100,"src":"all","table":100}]`)},
 		{"source_uid_and_mark", json.RawMessage(`[{"priority":100,"src":"192.0.2.0","srclen":24,"fwmark":"0x1","uid_start":0,"uid_end":1000,"table":"100"}]`)},
-		{"unreachable", json.RawMessage(`[{"priority":100,"type":"unreachable"}]`)},
-		{"blackhole", json.RawMessage(`[{"priority":100,"type":"blackhole","src":"all"}]`)},
-		{"prohibit", json.RawMessage(`[{"priority":100,"type":"prohibit"}]`)},
+		{"unreachable", json.RawMessage(`[{"priority":100,"src":"all","action":"unreachable"}]`)},
+		{"blackhole", json.RawMessage(`[{"priority":100,"src":"all","action":"blackhole"}]`)},
+		{"prohibit", json.RawMessage(`[{"priority":100,"src":"all","action":"prohibit"}]`)},
 		{"goto", json.RawMessage(`[{"priority":100,"goto":200}]`)},
-		{"nop", json.RawMessage(`[{"priority":100,"type":"nop"}]`)},
-		{"l3mdev", json.RawMessage(`[{"priority":100,"l3mdev":true}]`)},
+		{"nop", json.RawMessage(`[{"priority":100,"src":"all","nop":null}]`)},
+		{"l3mdev", json.RawMessage(`[{"priority":100,"src":"all","l3mdev":null}]`)},
+		{"throw", json.RawMessage(`[{"priority":100,"src":"all","action":"throw"}]`)},
+		{"anycast", json.RawMessage(`[{"priority":100,"src":"all","action":"anycast"}]`)},
+		{"multicast", json.RawMessage(`[{"priority":100,"src":"all","action":"multicast"}]`)},
+		{"xresolve", json.RawMessage(`[{"priority":100,"src":"all","action":"xresolve"}]`)},
+		{"nat_masquerade", json.RawMessage(`[{"priority":100,"src":"all","table":"main","masquerade":null}]`)},
+		{"nat_gateway", json.RawMessage(`[{"priority":100,"src":"all","table":"main","nat_gateway":"198.51.100.1"}]`)},
 	}
 	for _, tc := range cases {
 		for _, family := range []string{"ipv4", "ipv6"} {
@@ -404,6 +413,236 @@ func TestHostDriftValidNativePolicyRuleShapes(t *testing.T) {
 			})
 		}
 	}
+}
+
+// The fixture formats below are grounded in actual iproute2 6.15
+// "ip -j rule show" output, NOT the similarly named "ip -j route" schema.
+// See iproute2 v6.15.0 ip/iprule.c, print_rule().
+func TestHostDriftRejectsNonNativePolicyActionMarkers(t *testing.T) {
+	invalid := []struct {
+		name  string
+		rules json.RawMessage
+	}{
+		{"route_style_unreachable", json.RawMessage(`[{"priority":100,"type":"unreachable"}]`)},
+		{"route_style_blackhole", json.RawMessage(`[{"priority":100,"type":"blackhole"}]`)},
+		{"route_style_nop", json.RawMessage(`[{"priority":100,"type":"nop"}]`)},
+		{"route_style_nat", json.RawMessage(`[{"priority":100,"type":"nat"}]`)},
+		{"route_type_with_table", json.RawMessage(`[{"priority":100,"table":"main","type":"unreachable"}]`)},
+		{"bool_l3mdev", json.RawMessage(`[{"priority":100,"l3mdev":true}]`)},
+		{"false_l3mdev_with_table", json.RawMessage(`[{"priority":100,"table":"main","l3mdev":false}]`)},
+		{"bool_nop", json.RawMessage(`[{"priority":100,"nop":true}]`)},
+		{"invalid_nop_with_table", json.RawMessage(`[{"priority":100,"table":"main","nop":"noop"}]`)},
+		{"empty_action", json.RawMessage(`[{"priority":100,"action":""}]`)},
+		{"unknown_action", json.RawMessage(`[{"priority":100,"action":"arbitrary"}]`)},
+		{"unknown_action_with_table", json.RawMessage(`[{"priority":100,"table":"main","action":"arbitrary"}]`)},
+		{"masquerade_bool", json.RawMessage(`[{"priority":100,"masquerade":true}]`)},
+		{"nat_gateway_not_ip", json.RawMessage(`[{"priority":100,"nat_gateway":"example.invalid"}]`)},
+		{"nat_gateway_ipv6", json.RawMessage(`[{"priority":100,"nat_gateway":"2001:db8::1"}]`)},
+		{"malformed_nat_with_table", json.RawMessage(`[{"priority":100,"table":"main","nat_gateway":false}]`)},
+	}
+	for _, tc := range invalid {
+		for _, family := range []string{"ipv4", "ipv6"} {
+			t.Run(family+"_"+tc.name, func(t *testing.T) {
+				snap := driftFixture()
+				if family == "ipv4" {
+					snap.IPv4Rules = tc.rules
+				} else {
+					snap.IPv6Rules = tc.rules
+				}
+				path := writeDriftBaseline(t, t.TempDir(), snap)
+				if _, err := readHostDriftBaseline(path); ErrorCode(err) != "invalid_baseline" {
+					t.Fatalf("accepted impossible/native-invalid rule action as source evidence: %s err=%v", tc.name, err)
+				}
+				report, err := InspectHostDrift(path)
+				if report.Mode != "" || ErrorCode(err) != "invalid_baseline" || strings.Contains(err.Error(), path) {
+					t.Fatalf("invalid rule accepted or leaked source path: %+v %v", report, err)
+				}
+			})
+		}
+	}
+}
+
+// Exact iproute2 6.15 native JSON captured on Debian 13 in an isolated
+// unshare -Urn user/network namespace. Unlike synthetic per-action cases,
+// these fixed captures always run in GitHub CI even when namespaces are
+// disallowed there. Actual source: /usr/bin/ip -j -4/-6 rule show.
+func TestHostDriftCapturedDebian13NativeSpecialRuleArrays(t *testing.T) {
+	captures := []struct {
+		name string
+		ipv4 bool
+		raw  json.RawMessage
+	}{
+		{
+			"ipv4", true, json.RawMessage(`[{"priority":0,"src":"all","table":"local"},{"priority":121,"src":"all","action":"blackhole"},{"priority":122,"src":"all","action":"unreachable"},{"priority":123,"src":"all","action":"prohibit"},{"priority":124,"src":"all","l3mdev":null},{"priority":125,"src":"all","goto":150},{"priority":126,"src":"all","nop":null},{"priority":127,"src":"all","action":"anycast"},{"priority":128,"src":"all","action":"multicast"},{"priority":129,"src":"all","action":"xresolve"},{"priority":130,"src":"all","action":"throw"},{"priority":131,"src":"all","table":"main","masquerade":null},{"priority":150,"src":"all","table":"main"},{"priority":32766,"src":"all","table":"main"},{"priority":32767,"src":"all","table":"default"}]`),
+		},
+		{
+			"ipv6", false, json.RawMessage(`[{"priority":0,"src":"all","table":"local"},{"priority":121,"src":"all","action":"blackhole"},{"priority":122,"src":"all","action":"unreachable"},{"priority":123,"src":"all","action":"prohibit"},{"priority":124,"src":"all","l3mdev":null},{"priority":125,"src":"all","goto":150},{"priority":126,"src":"all","nop":null},{"priority":127,"src":"all","action":"anycast"},{"priority":128,"src":"all","action":"multicast"},{"priority":129,"src":"all","action":"xresolve"},{"priority":130,"src":"all","action":"throw"},{"priority":131,"src":"all","table":"main","masquerade":null},{"priority":150,"src":"all","table":"main"},{"priority":32766,"src":"all","table":"main"}]`),
+		},
+	}
+	for _, tc := range captures {
+		t.Run(tc.name, func(t *testing.T) {
+			if !validHostDriftPolicyRules(tc.raw) {
+				t.Fatal("literal native Debian 13 iproute2 capture rejected")
+			}
+			s := driftFixture()
+			if tc.ipv4 {
+				s.IPv4Rules = tc.raw
+			} else {
+				s.IPv6Rules = tc.raw
+			}
+			path := writeDriftBaseline(t, t.TempDir(), s)
+			if _, err := readHostDriftBaseline(path); err != nil {
+				t.Fatalf("complete host-preflight with real rule inventory rejected: %v", err)
+			}
+		})
+	}
+}
+
+// This test independently exercises the real 6.15 iproute2 JSON writer
+// and our production baseline validator in a short-lived private user+net
+// namespace. No host routing can be edited by the child.
+// GitHub Actions may lack unprivileged namespaces; unit fixtures still run.
+func TestHostDriftNativeSpecialPolicyRuleJSONPrivateNamespace(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("Linux required")
+	}
+	if os.Getenv("SC_DRIFT_PRIVATE_NETNS") == "child" {
+		run := func(args ...string) {
+			t.Helper()
+			output, err := exec.Command(nativeIPPath, args...).CombinedOutput()
+			if err != nil {
+				t.Fatalf("private namespace native rule %v failed: %v %s", args, err, output)
+			}
+		}
+		for _, family := range []string{"-4", "-6"} {
+			for _, rule := range [][]string{
+				{"rule", "add", "pref", "121", "blackhole"},
+				{"rule", "add", "pref", "122", "unreachable"},
+				{"rule", "add", "pref", "123", "prohibit"},
+				{"rule", "add", "pref", "124", "l3mdev"},
+				{"rule", "add", "pref", "125", "goto", "150"},
+				{"rule", "add", "pref", "126", "nop"},
+				{"rule", "add", "pref", "127", "anycast"},
+				{"rule", "add", "pref", "128", "multicast"},
+				{"rule", "add", "pref", "129", "xresolve"},
+				{"rule", "add", "pref", "130", "throw"},
+				{"rule", "add", "pref", "150", "table", "main"},
+			} {
+				run(append([]string{family}, rule...)...)
+			}
+			// route changes are confined to this disposable namespace.
+			output, err := exec.Command(nativeIPPath, "-j", family, "rule", "show").Output()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !validHostDriftPolicyRules(output) {
+				t.Fatalf("iproute2 6.15 native %s special rules rejected: %s", family, output)
+			}
+			var items []map[string]json.RawMessage
+			if err := json.Unmarshal(output, &items); err != nil {
+				t.Fatal(err)
+			}
+			expected := map[string]bool{
+				"action_unreachable": false,
+				"action_blackhole":   false,
+				"action_prohibit":    false,
+				"action_anycast":     false,
+				"action_multicast":   false,
+				"action_xresolve":    false,
+				"action_throw":       false,
+				"l3mdev_null":        false,
+				"nop_null":           false,
+				"goto_numeric":       false,
+			}
+			for _, it := range items {
+				var act string
+				if json.Unmarshal(it["action"], &act) == nil {
+					if _, ok := expected["action_"+act]; ok {
+						expected["action_"+act] = true
+					}
+				}
+				for _, field := range []string{"l3mdev", "nop"} {
+					if raw, ok := it[field]; ok && string(raw) == "null" {
+						expected[field+"_null"] = true
+					}
+				}
+				if raw, ok := it["goto"]; ok {
+					var target uint32
+					if json.Unmarshal(raw, &target) == nil && target == 150 {
+						expected["goto_numeric"] = true
+					}
+				}
+			}
+			for k, v := range expected {
+				if !v {
+					t.Errorf("missing genuine native %s action %s in %s", family, k, output)
+				}
+			}
+			source := driftFixture()
+			if family == "-4" {
+				source.IPv4Rules = output
+			} else {
+				source.IPv6Rules = output
+			}
+			path := writeDriftBaseline(t, t.TempDir(), source)
+			if _, err := readHostDriftBaseline(path); err != nil {
+				t.Fatalf("genuine %s special rule inventory rejected: %v", family, err)
+			}
+		}
+		// iproute2's deprecated NAT rule serializes as
+		// masquerade:null on this Debian 13 kernel even with a supplied
+		// mapping address. The upstream printer can also emit nat_gateway
+		// when the kernel supplies RTA_GATEWAY.
+		for _, family := range []string{"-4", "-6"} {
+			run(family, "rule", "add", "pref", "131", "nat", "192.0.2.1")
+			raw, err := exec.Command(nativeIPPath, "-j", family, "rule", "show").Output()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !validHostDriftPolicyRules(raw) {
+				t.Fatalf("genuine native NAT rejected (%s): %s", family, raw)
+			}
+			var rules []map[string]json.RawMessage
+			if err := json.Unmarshal(raw, &rules); err != nil {
+				t.Fatal(err)
+			}
+			found := false
+			for _, rule := range rules {
+				if marker, ok := rule["masquerade"]; ok && string(marker) == "null" {
+					found = true
+				}
+				if marker, ok := rule["nat_gateway"]; ok && string(marker) != "null" {
+					if addr, err := netip.ParseAddr(hostDriftString(rule, "nat_gateway")); err == nil && addr.Is4() {
+						found = true
+					}
+				}
+			}
+			if !found {
+				t.Fatalf("no native NAT marker found (%s): %s", family, raw)
+			}
+		}
+		return
+	}
+	if _, err := os.Stat(nativeIPPath); err != nil {
+		t.Skip("native iproute2 missing")
+	}
+	if _, err := exec.LookPath("unshare"); err != nil {
+		t.Skip("unshare not available")
+	}
+	probe := exec.Command("unshare", "-Urn", "true")
+	if output, err := probe.CombinedOutput(); err != nil {
+		t.Skipf("private user/network namespace unavailable: %v %s", err, output)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "unshare", "-Urn", os.Args[0],
+		"-test.run=^TestHostDriftNativeSpecialPolicyRuleJSONPrivateNamespace$", "-test.v")
+	cmd.Env = append(os.Environ(), "SC_DRIFT_PRIVATE_NETNS=child")
+	out, err := cmd.CombinedOutput()
+	if err != nil || ctx.Err() != nil {
+		t.Fatalf("native special-policy-rule regression failed: %v context=%v: %s", err, ctx.Err(), out)
+	}
+	t.Logf("private native 6.15 policy evidence verified")
 }
 
 func TestHostDriftActualNativeIPv4IPv6RoutesRemainUnchanged(t *testing.T) {
