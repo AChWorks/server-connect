@@ -1,6 +1,6 @@
 # Architecture and integration boundaries
 
-- **Status:** design contract; no implementation or installed system is claimed.
+- **Status:** authoritative design contract; an initial Proxy Only source candidate is under development. Host-wide guarded routing is not implemented or accepted.
 - **Product requirements:** [PROJECT-SPEC.md](PROJECT-SPEC.md) — canonical.
 
 ## 1. Shape
@@ -16,7 +16,7 @@ Server Connect control plane
    |-- reachability/diagnostics + routing policy planning
    |-- transaction coordinator + owned network resources
    |-- independent Activation Guard and Runtime Health Guard
-   |-- offline installer/updater lifecycle
+   |-- online fetch + offline bundle -> shared installer/updater lifecycle
      |
      +--> sing-box (pinned third-party core)
      |       | Proxy Only (loopback) or guarded TUN
@@ -53,11 +53,20 @@ For routed modes, plan/observe exact Linux route tables, ip rules, marks, IPv4/I
 
 If a needed assumption is unprovable (routing owner, baseline, MTU/IPv6 behavior, firewall coexistence, initial management access), stop with a precise diagnostic rather than apply speculative host-wide changes.
 
+### Future-proof profile and policy seams (deferred; not a new implementation layer)
+
+The MVP state format has one `selected` profile and one `upstream` sing-box tag. These are **internal single-active-outbound implementation details**, not contractual proof that future versions must own exactly one outbound or overwrite all routes when one profile changes. Keep independent stable profile identities separate from ephemeral runtime outbound tags, and use explicit versioned migrations rather than silently reinterpreting stored `desired` state. The canonical desired/observed store may later represent multiple outbound statuses and per-workload bindings while preserving Direct and a reliable last-known-safe baseline.
+
+Future [concurrent profiles](https://github.com/AChWorks/server-connect/issues/7) can preferably share one supported sing-box instance with unique tagged outbounds, selected listeners and policy rules, when verified against the pinned core. Do not assume per-process `HTTP_PROXY` covers raw TCP/UDP apps or a reverse relay, and do not add extra TUN/default-route owners just to enable multiple profiles. Each route decision, loopback listener, DNS/underlay dependency, proof of health, failure response and owned resource must be attributable to its selected path; unrelated active outbounds must not be stopped by one broken path. These are **design constraints only** until Issue #7 is explicitly activated by the Owner.
+
 ## 4. External access is not the outbound VPN
 
 The manager may be used only for outgoing updates and API access; do not require any CDN or external inbound probes. Operators who need foreign users to reach hosted sites can configure an independent already-available CDN/reverse path and optionally force its **outgoing connector** through the selected VPN where it is reachable.
 
 A consumer VLESS profile is not a hosted ingress endpoint; enabling a client tunnel does not create public forwarded ports. Do not add a reverse-proxy server or rewrite customers' web-server configuration merely to claim ingress success.
+
+Likewise, **Marzban panel outbound control traffic** is not the same as **public client ingress** or an **Iran-public-IP-to-foreign-Xray-node relay**. The latter is a separate externally reachable public listener and operator-owned relay/forwarding design (e.g., Backhaul or STL where appropriate), with TCP/UDP/return-path and firewall ownership verified on each side. Server Connect may in the future supply an opt-in outbound path for a compatible connector, but does not implement its ingress, forward its users automatically or guarantee connectivity when no independently usable underlay remains. Preserve existing sockets, listening ports, conntrack replies and service-owned routes across host-network policy changes.
+
 
 ## 5. Modularity without speculative frameworks
 
@@ -67,7 +76,7 @@ Keep implementation concepts separate, not necessarily separate processes:
 - Routing planner/applier: exact resource identities, validate/plan/apply/undo.
 - Guards: activation transaction, runtime proof/failure resolution, and a minimal independent liveness/recovery trigger for **health-guard failure itself**; no unmonitored host-wide interception.
 - Host inspector: Linux/network/systemd/aaPanel coexistence evidence without taking ownership.
-- Offline lifecycle: signed bundle verification, installation, update and owned-state cleanup.
+- Shared lifecycle: optional online acquisition + complete offline bundle both feed identical release verification, install, update and owned-state cleanup.
 - Terminal/CLI: commands, concise operator errors, structured machine results.
 
 Do not introduce public Go libraries, generic plugin registries, distributed orchestration, databases or additional always-on services by default. Keep a simple replaceable boundary around sing-box instead of baking a provider-specific format into every command.
@@ -76,7 +85,7 @@ Do not introduce public Go libraries, generic plugin registries, distributed orc
 
 - Target initially Debian/Ubuntu with systemd and supported Linux TUN/network facilities, **subject to an explicit tested OS/kernel/arch matrix** before any release. No promise of every Debian/Ubuntu or arbitrary Linux version.
 - Integrate native host tools carefully; avoid global NetworkManager, resolv.conf or arbitrary iptables/nftables ownership assumptions.
-- Offline packaging must carry every required runtime artifact for the advertised target; no hidden GitHub/API dependency.
+- Offline packaging must carry every required runtime artifact for the advertised target; no hidden GitHub/API dependency. Online bootstrap may explicitly download and verify prerequisites only on the connected path, before handing identical artifacts to the shared installer.
 - The standalone packaging, validation, and state-recovery requirements are owned by this repository's [offline distribution](OFFLINE-DISTRIBUTION.md), [acceptance](ACCEPTANCE.md), and [safety](SAFETY-RECOVERY.md) contracts. No private framework or governance repository is a runtime or contributor prerequisite.
 - Existing [STL](https://github.com/ach1992/simple-tun-link) is a separate point-to-point Link product; [SSO](https://github.com/ach1992/simple-server-optimizer) is a separate tuning/host utility. Neither owns global server VPN routing or is modified here.
 
