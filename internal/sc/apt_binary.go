@@ -66,6 +66,49 @@ func trustedAPTConfig() (string, error) {
 	return systemAPTConfig, nil
 }
 
+// The HTTPS method on the supported Debian 13 target is a root-owned link
+// to the same pinned native HTTP method. A protected /usr/bin/apt-get is not
+// sufficient when APT could delegate network I/O to a replaced handler.
+// Verify the actual on-disk acquisition handlers and path ancestry before
+// passing any private proxy descriptor to APT.
+func verifyNativeAPTMethods() error {
+	for _, dir := range []string{
+		"/", "/usr", "/usr/lib", "/usr/lib/apt", "/usr/lib/apt/methods",
+	} {
+		info, err := os.Lstat(dir)
+		if err != nil || !info.IsDir() || !aptRootOwnedNonWritable(info) {
+			return Fault("apt_untrusted_executable", "native APT method directory ownership is unsafe")
+		}
+	}
+	for _, method := range []string{"http", "file", "gpgv"} {
+		path := "/usr/lib/apt/methods/" + method
+		info, err := os.Lstat(path)
+		if err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0111 == 0 ||
+			!aptRootOwnedNonWritable(info) {
+			return Fault("apt_untrusted_executable", "native APT acquisition method identity is unsafe")
+		}
+	}
+	https := "/usr/lib/apt/methods/https"
+	info, err := os.Lstat(https)
+	if err != nil || info.Mode()&os.ModeSymlink == 0 || !aptRootOwned(info) {
+		return Fault("apt_untrusted_executable", "native HTTPS acquisition method identity is unsafe")
+	}
+	relative, err := os.Readlink(https)
+	if err != nil || relative != "http" {
+		return Fault("apt_untrusted_executable", "native HTTPS method does not resolve to trusted HTTP method")
+	}
+	return nil
+}
+
+func aptRootOwned(info os.FileInfo) bool {
+	owner, ok := info.Sys().(*syscall.Stat_t)
+	return ok && owner.Uid == 0
+}
+
+func aptRootOwnedNonWritable(info os.FileInfo) bool {
+	return aptRootOwned(info) && info.Mode().Perm()&0022 == 0
+}
+
 func verifyNativeAPTExecutable(installed string) error {
 	// The verifier is deliberately not a general "root-owned path" checker.
 	// A future call site must never approve a different program just because

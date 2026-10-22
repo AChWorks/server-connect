@@ -97,11 +97,22 @@ func TestAptEnvDropsInheritedProxies(t *testing.T) {
 	}
 }
 
+// Baseline for parser-only tests is the observed native Debian 13 APT
+// configuration. Real apt-config evaluation is exercised separately.
+func nativeAptDumpForTest() string {
+	var b strings.Builder
+	b.WriteString("Dir \"/\";\nDir::Usr \"usr\";\n")
+	for key, value := range nativeAPTBinConfig {
+		b.WriteString(key + " \"" + value + "\";\n")
+	}
+	return b.String()
+}
+
 // The generic proxy setting does not take precedence over APT's per-host
 // DIRECT, auto-detection, or binary-specific proxy policy.
 func TestEffectiveAptProxyPolicyRejectsOverrides(t *testing.T) {
 	proxy := "http://sc:syntheticnotreal@127.0.0.1:20807"
-	base := "Acquire::http::Proxy \"" + proxy + "\";\n" +
+	base := nativeAptDumpForTest() + "Acquire::http::Proxy \"" + proxy + "\";\n" +
 		"Acquire::https::Proxy \"" + proxy + "\";\n"
 	for name, extra := range map[string]string{
 		"per-host-direct":   "Acquire::http::Proxy::repository.invalid \"DIRECT\";\n",
@@ -278,5 +289,152 @@ func TestStandaloneUpdateAndOrdinaryPackageOpsRemainSupported(t *testing.T) {
 		if execArgs[len(execArgs)-1] == "--error-on=any" {
 			t.Fatal("standalone update strictness leaked to ordinary operation")
 		}
+	}
+}
+
+// Refuse paths that relocate native APT execution, while retaining the exact
+// source/list/cache controls already used by the genuine-core integration.
+func TestAptExecutionMethodRedirectionCallerPolicy(t *testing.T) {
+	for _, argument := range []string{
+		"Dir::Bin::Methods=/tmp/qa-methods",
+		"Dir::Bin::gzip=/tmp/qa-gzip",
+		"Dir::Bin::dpkg=/tmp/qa-dpkg",
+		"Dir::Bin=/tmp/qa-binaries",
+		"RootDir=/tmp/qa-root",
+		"Dir=/tmp/qa-root",
+		"Dir::Usr=/tmp/qa-usr",
+		"Dir::=/tmp/qa-root",
+		"Dir::Usr::=/tmp/qa-usr",
+		"APT::Compressor::gzip::Binary=/tmp/qa-gzip",
+		"Binary::apt-get::Dir::Bin::Methods=/tmp/qa-methods",
+		"Binary::apt::RootDir=/tmp/qa-root",
+		"Binary::apt::APT::Compressor::gzip::Binary=/tmp/qa-gzip",
+	} {
+		t.Run(strings.SplitN(argument, "=", 2)[0], func(t *testing.T) {
+			for _, args := range [][]string{
+				{"update", "-o", argument},
+				{"-o" + argument, "update"},
+				{"--option=" + argument, "update"},
+			} {
+				_, _, err := validateAptArgs(args)
+				if ErrorCode(err) != "apt_policy_conflict" {
+					t.Fatalf("unsafe APT executable-path override accepted: %v: %v", args, err)
+				}
+				// The public manager entrypoint must stop before loading
+				// product profiles or creating the proxy credential FD.
+				dir := filepath.Join(t.TempDir(), "does-not-exist")
+				code, err := New(dir, "", 0).Apt(append([]string{"apt-get"}, args...))
+				if code == 0 || ErrorCode(err) != "apt_policy_conflict" {
+					t.Fatalf("unsafe method policy reached child: exit=%d err=%v", code, err)
+				}
+				if _, err := os.Stat(dir); !os.IsNotExist(err) {
+					t.Fatal("rejected method override caused unexpected state creation")
+				}
+			}
+		})
+	}
+	accepted := []string{
+		"Dir::Etc::sourcelist=/tmp/qa.list",
+		"Dir::Etc::sourceparts=-",
+		"Dir::State::lists=/tmp/qa-lists",
+		"Dir::Cache::archives=/tmp/qa-cache",
+		"Dir::Cache::pkgcache=/dev/null",
+		"Dir::Cache::srcpkgcache=/dev/null",
+	}
+	args := []string{"update"}
+	for _, setting := range accepted {
+		args = append(args, "-o", setting)
+	}
+	opts, action, err := validateAptArgs(args)
+	if err != nil || action != "update" || len(opts) != 2*len(accepted) {
+		t.Fatalf("legitimate isolated APT fixture options were blocked: %v %q %v", opts, action, err)
+	}
+}
+
+func TestEffectiveAptExecutionMethodsRejectInheritedRedirection(t *testing.T) {
+	proxy := "http://sc:synthetic-never-expose@127.0.0.1:20807"
+	baseline := nativeAptDumpForTest() +
+		"Acquire::http::Proxy \"" + proxy + "\";\n" +
+		"Acquire::https::Proxy \"" + proxy + "\";\n"
+	if err := verifyAptDump(baseline, proxy); err != nil {
+		t.Fatal("supported native Debian baseline failed:", err)
+	}
+	cases := map[string]string{
+		"method-folder":      "Dir::Bin::methods \"/tmp/foreign\";\n",
+		"method-extra":       "Dir::Bin::http \"/tmp/foreign-http\";\n",
+		"compressor":         "Dir::Bin::gzip \"/tmp/custom\";\n",
+		"rootdir":            "RootDir \"/tmp/foreign-root\";\n",
+		"rootdir-empty":      "RootDir \"\";\n",
+		"dir-root":           "Dir \"/tmp/foreign-root\";\n",
+		"dir-usr":            "Dir::Usr \"../../tmp\";\n",
+		"dir-root-extension": "Dir:: \"/tmp/qa-root\";\n",
+		"usr-extension":      "Dir::Usr:: \"/tmp/qa-usr\";\n",
+		"binary-method":      "Binary::apt-get::Dir::Bin::Methods \"/tmp/foreign\";\n",
+		"binary-rootdir":     "Binary::apt::RootDir \"/tmp/foreign\";\n",
+		"binary-dir":         "Binary::apt::Dir \"/tmp/foreign\";\n",
+		"binary-compressor":  "Binary::apt-get::APT::Compressor::gzip::Binary \"/tmp/foreign\";\n",
+		"gzip-binary":        "APT::Compressor::gzip::Binary \"/tmp/foreign\";\n",
+		"unknown-compressor": "APT::Compressor::custom::Binary \"/tmp/foreign\";\n",
+	}
+	for label, extra := range cases {
+		t.Run(label, func(t *testing.T) {
+			err := verifyAptDump(baseline+extra, proxy)
+			if ErrorCode(err) != "apt_policy_conflict" {
+				t.Fatalf("untrusted inherited APT execution policy accepted: %s (%v)", label, err)
+			}
+			if strings.Contains(err.Error(), "synthetic-never-expose") {
+				t.Fatal("proxy credential leaked in APT policy error")
+			}
+		})
+	}
+	// A malicious config may omit, not just replace, an essential method.
+	withoutMethods := strings.Replace(baseline, "dir::bin::methods \"/usr/lib/apt/methods\";\n", "", 1)
+	if err := verifyAptDump(withoutMethods, proxy); ErrorCode(err) != "apt_policy_conflict" {
+		t.Fatal("missing native acquisition methods policy was accepted")
+	}
+}
+
+func TestRealNativeAPTExecutableMethodPolicyPreflight(t *testing.T) {
+	if err := verifyNativeAPTMethods(); err != nil {
+		t.Fatalf("system method handler root ownership not established: %v", err)
+	}
+	proxy, _ := url.Parse("http://sc:synthetic-never-expose@127.0.0.1:20807")
+	fd, err := privateAptConfig(t.TempDir(), proxy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer fd.Close()
+	if err := verifyEffectiveAptProxy(fd, proxy.String(), nil); err != nil {
+		t.Fatalf("native effective APT policy rejected: %v", err)
+	}
+	// These options simulate the *effective inherited policy* as seen by
+	// apt-config. This test does not write the live host's /etc/apt.
+	for _, option := range []string{
+		"Dir::Bin::Methods=/tmp/qa-methods",
+		"Dir::Bin::gzip=/tmp/qa-custom",
+		"Dir=/tmp/qa-root",
+		"Dir::Usr=/tmp/qa-usr",
+		"RootDir=/tmp/qa-root",
+		"Binary::apt-get::Dir::Bin::Methods=/tmp/qa-methods",
+		"Binary::apt::RootDir=/tmp/qa-root",
+		"APT::Compressor::gzip::Binary=/tmp/qa-custom",
+	} {
+		t.Run(strings.SplitN(option, "=", 2)[0], func(t *testing.T) {
+			err := verifyEffectiveAptProxy(fd, proxy.String(), []string{"-o", option})
+			if ErrorCode(err) != "apt_policy_conflict" {
+				t.Fatalf("effective inherited method redirection not rejected: %s %v", option, err)
+			}
+			if strings.Contains(err.Error(), "synthetic-never-expose") {
+				t.Fatal("private proxy credential was printed in diagnostic")
+			}
+		})
+	}
+	// No proxy override/secret is sent to the native APT child for a
+	// misconfigured host, but ordinary isolated source/index settings work.
+	opts := []string{"-o", "Dir::Etc::sourcelist=/tmp/qa.list",
+		"-o", "Dir::Etc::sourceparts=-",
+		"-o", "Dir::State::lists=/tmp/qa-lists"}
+	if err := verifyEffectiveAptProxy(fd, proxy.String(), opts); err != nil {
+		t.Fatalf("safe disposable APT source/list configuration blocked: %v", err)
 	}
 }

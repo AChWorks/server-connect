@@ -59,6 +59,9 @@ func aptThroughSelectedProxy(nativeAPT string, args []string, dir string, proxy 
 	if _, err := trustedAPTConfig(); err != nil {
 		return 1, err
 	}
+	if err := verifyNativeAPTMethods(); err != nil {
+		return 1, err
+	}
 	file, err := privateAptConfig(dir, proxy)
 	if err != nil {
 		return 1, Fault("apt_configuration", "unable to prepare private APT proxy configuration")
@@ -149,6 +152,11 @@ func validateAptArgs(args []string) ([]string, string, error) {
 				strings.HasPrefix(key, "apt::update") ||
 				strings.HasPrefix(key, "apt::get::update") ||
 				strings.HasPrefix(key, "debug::acquire") ||
+				key == "dir" || key == "dir::" ||
+				key == "rootdir" || strings.HasPrefix(key, "rootdir::") ||
+				key == "dir::bin" || strings.HasPrefix(key, "dir::bin::") ||
+				key == "dir::usr" || strings.HasPrefix(key, "dir::usr::") ||
+				strings.HasPrefix(key, "apt::compressor") ||
 				key == "dir::etc" || key == "dir::etc::main" || key == "dir::etc::parts" ||
 				strings.HasPrefix(key, "dir::etc::netrc") {
 				return nil, "", Fault("apt_policy_conflict", "APT proxy, policy or configuration-source overrides are not permitted")
@@ -225,8 +233,42 @@ func (l *limitedAptOutput) Write(p []byte) (int, error) {
 	return l.out.Write(p)
 }
 
+// Native Debian 13's default executable/method resolution policy. An
+// inherited change here can bypass trusted apt/apt-get even when their own
+// binaries were verified. Keep these exact native defaults (no arbitrary
+// machine-wide rewrite); an unusual host APT layout fails closed.
+var nativeAPTBinConfig = map[string]string{
+	"dir::bin":             "",
+	"dir::bin::methods":    "/usr/lib/apt/methods",
+	"dir::bin::solvers":    "",
+	"dir::bin::solvers::":  "/usr/lib/apt/solvers",
+	"dir::bin::planners":   "",
+	"dir::bin::planners::": "/usr/lib/apt/planners",
+	"dir::bin::dpkg":       "/usr/bin/dpkg",
+	"dir::bin::gzip":       "/bin/gzip",
+	"dir::bin::bzip2":      "/bin/bzip2",
+	"dir::bin::xz":         "/usr/bin/xz",
+	"dir::bin::lz4":        "/usr/bin/lz4",
+	"dir::bin::zstd":       "/usr/bin/zstd",
+	"dir::bin::lzma":       "/usr/bin/xz",
+}
+
+// Compressor binary configuration can also introduce external executables,
+// independent of the trusted APT acquisition methods directory.
+var nativeAPTCompressors = map[string]string{
+	"apt::compressor::.::binary":     "",
+	"apt::compressor::zstd::binary":  "zstd",
+	"apt::compressor::lz4::binary":   "false",
+	"apt::compressor::gzip::binary":  "gzip",
+	"apt::compressor::xz::binary":    "xz",
+	"apt::compressor::bzip2::binary": "false",
+	"apt::compressor::lzma::binary":  "xz",
+}
+
 func verifyAptDump(dump, expected string) error {
 	seenHTTP, seenHTTPS := false, false
+	seenDir, seenUsr := false, false
+	seenBins := make(map[string]bool, len(nativeAPTBinConfig))
 	for _, line := range strings.Split(dump, "\n") {
 		fields := strings.Fields(line)
 		if len(fields) == 0 {
@@ -241,12 +283,49 @@ func verifyAptDump(dump, expected string) error {
 		// and dpkg/UI defaults that Debian ships under Binary::apt.
 		binary := strings.HasPrefix(key, "binary::") &&
 			(strings.Contains(key, "::acquire") || strings.Contains(key, "::proxy") ||
-				strings.Contains(key, "::dir::etc") || strings.Contains(key, "::debug::acquire"))
+				strings.Contains(key, "::dir") || strings.Contains(key, "::rootdir") ||
+				strings.Contains(key, "::apt::compressor") ||
+				strings.Contains(key, "::debug::acquire"))
 		// APT's HTTP wire debugging can print Proxy-Authorization (secrets).
 		debug := strings.HasPrefix(key, "debug::acquire") ||
 			strings.HasPrefix(key, "debug::pkgacquire")
 		if binary || auto || debug || (proxyPath && key != "acquire::http::proxy" && key != "acquire::https::proxy") {
 			return Fault("apt_policy_conflict", "APT per-host proxy, auto-detection or binary policy may bypass selected route")
+		}
+		// RootDir prepends even absolute APT paths. A new Dir root or usr
+		// prefix can also change where method executables are resolved.
+		if key == "rootdir" || strings.HasPrefix(key, "rootdir::") {
+			return Fault("apt_policy_conflict", "APT root directory redirection is unsupported in Proxy Only")
+		}
+		if key == "dir::" || strings.HasPrefix(key, "dir::usr::") {
+			return Fault("apt_policy_conflict", "APT root path extension is unsupported")
+		}
+		if key == "dir" || key == "dir::usr" {
+			want := "/"
+			if key == "dir::usr" {
+				want = "usr"
+			}
+			if len(fields) != 2 || fields[1] != "\""+want+"\";" {
+				return Fault("apt_policy_conflict", "APT root directory policy differs from native Debian layout")
+			}
+			if key == "dir" {
+				seenDir = true
+			} else {
+				seenUsr = true
+			}
+		}
+		if key == "dir::bin" || strings.HasPrefix(key, "dir::bin::") {
+			want, ok := nativeAPTBinConfig[key]
+			if !ok || len(fields) != 2 || fields[1] != "\""+want+"\";" {
+				return Fault("apt_policy_conflict", "APT executable or acquisition method path differs from native Debian layout")
+			}
+			seenBins[key] = true
+		}
+		if strings.HasPrefix(key, "apt::compressor::") && strings.HasSuffix(key, "::binary") {
+			want, ok := nativeAPTCompressors[key]
+			if !ok || len(fields) != 2 || fields[1] != "\""+want+"\";" {
+				return Fault("apt_policy_conflict", "APT compressor executable policy differs from native Debian layout")
+			}
 		}
 		if key == "acquire::http::proxy" || key == "acquire::https::proxy" {
 			if len(fields) != 2 || fields[1] != "\""+expected+"\";" {
@@ -261,6 +340,9 @@ func verifyAptDump(dump, expected string) error {
 	}
 	if !seenHTTP || !seenHTTPS {
 		return Fault("apt_policy_conflict", "effective APT HTTP(S) proxy settings not verified")
+	}
+	if !seenDir || !seenUsr || len(seenBins) != len(nativeAPTBinConfig) {
+		return Fault("apt_policy_conflict", "trusted native APT executable path configuration not established")
 	}
 	return nil
 }
