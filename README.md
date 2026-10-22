@@ -37,6 +37,36 @@ The online bootstrap candidate at `scripts/bootstrap-online.sh` requires an expl
 
 On a Linux host with trusted native `/usr/bin/ip`, `server-connect --json host-preflight --endpoint 198.51.100.10 --management-peer 203.0.113.42` records actual IPv4/IPv6 routes, rules, links and kernel route lookups for **literal IPs**. Broadcast, multicast, unspecified, IPv4-mapped IPv6 and link-local addresses without a usable interface scope are rejected before native inspection; private IPv4, IPv6 ULA and loopback literals remain supported. It does not resolve DNS, touch state, enable a tunnel, change kernel networking or prove those peers are reachable. Both peer arguments are optional; supplying them is useful for future underlay and management-path planning. The report deliberately says `activation_ready: false` and `snapshot_atomic: false`: it is **not** an ownership journal, firewall inspection, activation authorization or replacement for the independent guards and SSH/reboot/field acceptance specified in Issue #2. This is a dependent development feature, not a released installation instruction.
 
+### Compare host routes and policy rules against a recorded baseline (Issue #2 development)
+
+Capture a baseline on the host *before* the intended maintenance or experiment;
+keep it private because interface and route information can be sensitive:
+
+```sh
+umask 077
+server-connect --json host-preflight --endpoint 198.51.100.10 --management-peer 203.0.113.42 > ./host-baseline.json
+server-connect --json host-drift --baseline ./host-baseline.json
+```
+
+The comparison repeats native, read-only Linux route/rule/link inspection
+including the **same literal** endpoint and management-peer queries from the
+baseline. It reports per-component SHA-256 fingerprints (never raw baseline
+contents), `changed` flags and a nonzero `host_drift_detected` error when
+an observation differs. Route and link arrays ignore enumeration-order
+differences; policy-rule ordering remains significant. Invalid, oversized,
+symlinked, non-private or incomplete baseline files are rejected **before**
+any kernel inspection; no file paths or file content appear in errors.
+
+**Important:** both snapshots are non-atomic and the saved file is
+operator-provided, not a trusted/cryptographically authenticated kernel
+record. A matching comparison is **not proof** of network resource ownership,
+DNS/bootstrap reachability, safe SSH or HTTP(S) replies, nftables/conntrack,
+independent activation/rollback guards or production readiness. It never
+touches routes, rules, services, DNS or manager state. A changing route report
+is a diagnostic requiring operator investigation, **not an instruction for
+Server Connect to overwrite foreign-owned network configuration**. This
+command is a development diagnostic and is not a routed-mode release.
+
 ### Proxy Only compatibility and application opt-in
 
 - The link importer deliberately supports a **subset** of VLESS TCP/WebSocket and TLS/Reality query fields, rejecting unrecognized or incompatible parameters. **Local TCP VLESS through the pinned sing-box core has live integration evidence; TLS/WebSocket/Reality interoperability with real foreign providers is NOT_RUN.** Import and `validate` establish syntax/core-configuration acceptance, not remote reachability.

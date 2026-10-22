@@ -118,3 +118,149 @@ func TestUnknownCommandNeverEchoesPastedBearerURI(t *testing.T) {
 		}
 	}
 }
+
+func TestHostDriftCLIRejectsBaselineBeforeNetworkWithoutFakeData(t *testing.T) {
+	m := sc.New(filepath.Join(t.TempDir(), "state"), "", 0)
+	secretPath := filepath.Join(t.TempDir(), "secret-private-host-snapshot.json")
+	for _, args := range [][]string{
+		{"host-drift"},
+		{"host-drift", "--baseline", secretPath},
+		{"host-drift", "--baseline", "-", "unexpected"},
+	} {
+		reader, writer, err := os.Pipe()
+		if err != nil {
+			t.Fatal(err)
+		}
+		old := os.Stdout
+		os.Stdout = writer
+		exit := run(true, m, args)
+		_ = writer.Close()
+		os.Stdout = old
+		var response struct {
+			OK    bool            `json:"ok"`
+			Data  json.RawMessage `json:"data"`
+			Error struct {
+				Code    string `json:"code"`
+				Message string `json:"message"`
+			} `json:"error"`
+		}
+		err = json.NewDecoder(reader).Decode(&response)
+		_ = reader.Close()
+		if err != nil || exit == 0 || response.OK || len(response.Data) > 0 ||
+			(response.Error.Code != "invalid_arguments" && response.Error.Code != "invalid_baseline") ||
+			strings.Contains(response.Error.Message, "secret-private-host") {
+			t.Fatalf("invalid baseline output unsafe: args=%q response=%+v err=%v exit=%d", args, response, err, exit)
+		}
+	}
+	if _, err := os.Stat(m.Dir); !os.IsNotExist(err) {
+		t.Fatal("invalid host-drift command touched protected product state")
+	}
+}
+
+func TestHostDriftCLIRoundtripRealHostPreflight(t *testing.T) {
+	if _, err := os.Stat("/usr/bin/ip"); err != nil {
+		t.Skip("native iproute2 is installed in later Debian 13 CI stage")
+	}
+	m := sc.New(filepath.Join(t.TempDir(), "state"), "", 0)
+	capture := func(args ...string) (int, []byte) {
+		t.Helper()
+		reader, writer, err := os.Pipe()
+		if err != nil {
+			t.Fatal(err)
+		}
+		old := os.Stdout
+		os.Stdout = writer
+		code := run(true, m, args)
+		_ = writer.Close()
+		os.Stdout = old
+		data, err := io.ReadAll(reader)
+		_ = reader.Close()
+		if err != nil {
+			t.Fatal(err)
+		}
+		return code, data
+	}
+	code, baseline := capture("host-preflight", "--endpoint", "127.0.0.1", "--management-peer", "127.0.0.2")
+	if code != 0 {
+		t.Fatalf("baseline host preflight unavailable: %s", baseline)
+	}
+	path := filepath.Join(t.TempDir(), "baseline.json")
+	if err := os.WriteFile(path, baseline, 0600); err != nil {
+		t.Fatal(err)
+	}
+	code, out := capture("host-drift", "--baseline", path)
+	var report struct {
+		OK   bool `json:"ok"`
+		Data struct {
+			Mode            string `json:"mode"`
+			ReadOnly        bool   `json:"read_only"`
+			ActivationReady bool   `json:"activation_ready"`
+			SnapshotAtomic  bool   `json:"snapshot_atomic"`
+			CurrentObserved bool   `json:"current_observed"`
+			Changed         bool   `json:"changed"`
+			Outcome         string `json:"outcome"`
+			Components      []struct {
+				Name    string `json:"name"`
+				Changed bool   `json:"changed"`
+			} `json:"components"`
+		} `json:"data"`
+		Error *apiError `json:"error"`
+	}
+	if err := json.Unmarshal(out, &report); err != nil {
+		t.Fatal(err)
+	}
+	if code != 0 || !report.OK || report.Error != nil ||
+		report.Data.Mode != "host_drift_diagnostic" || !report.Data.ReadOnly ||
+		report.Data.ActivationReady || report.Data.SnapshotAtomic ||
+		!report.Data.CurrentObserved || report.Data.Changed || len(report.Data.Components) != 7 {
+		t.Fatalf("actual CLI host drift roundtrip inaccurate: code=%d report=%s", code, out)
+	}
+
+	// Change the saved baseline (not a real route). Detect the precise
+	// component without ever mutating host networking.
+	var fixture struct {
+		OK   bool `json:"ok"`
+		Data struct {
+			IPv4Routes []any `json:"ipv4_routes"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(baseline, &fixture); err != nil {
+		t.Fatal(err)
+	}
+	fixture.Data.IPv4Routes = append(fixture.Data.IPv4Routes,
+		map[string]string{"dst": "198.51.100.0/24", "dev": "synthetic-foreign-change"})
+	newJSON, err := json.Marshal(fixture)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Replace only the snapshot field to retain the other genuine observations.
+	var raw map[string]any
+	if err := json.Unmarshal(baseline, &raw); err != nil {
+		t.Fatal(err)
+	}
+	var changed map[string]any
+	if err := json.Unmarshal(newJSON, &changed); err != nil {
+		t.Fatal(err)
+	}
+	raw["data"].(map[string]any)["ipv4_routes"] = changed["data"].(map[string]any)["ipv4_routes"]
+	payload, err := json.Marshal(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, payload, 0600); err != nil {
+		t.Fatal(err)
+	}
+	code, out = capture("host-drift", "--baseline", path)
+	if err := json.Unmarshal(out, &report); err != nil {
+		t.Fatal(err)
+	}
+	if code == 0 || report.OK || report.Error == nil ||
+		report.Error.Code != "host_drift_detected" ||
+		!report.Data.CurrentObserved || !report.Data.Changed ||
+		!report.Data.ReadOnly || report.Data.ActivationReady || report.Data.SnapshotAtomic {
+		t.Fatalf("synthetic drift did not fail closed: code=%d response=%s", code, out)
+	}
+	if _, err := os.Stat(m.Dir); !os.IsNotExist(err) {
+		t.Fatal("host-drift CLI unexpectedly wrote manager state")
+	}
+}

@@ -200,6 +200,18 @@ func run(j bool, m *sc.Manager, args []string) int {
 		}
 		report, err := sc.InspectHostRoutes(*endpoint, *management)
 		return output(j, report, err)
+	case "host-drift":
+		opts := flag.NewFlagSet(name, flag.ContinueOnError)
+		opts.SetOutput(io.Discard)
+		baseline := opts.String("baseline", "", "private JSON file from --json host-preflight")
+		if e := opts.Parse(args); e != nil || len(opts.Args()) != 0 || *baseline == "" {
+			return output(j, nil, sc.Fault("invalid_arguments", "host-drift requires --baseline FILE"))
+		}
+		report, err := sc.InspectHostDrift(*baseline)
+		if report.Mode == "" {
+			return output(j, nil, err)
+		}
+		return output(j, report, err)
 	case "apt":
 		if j {
 			return output(true, nil, sc.Fault("invalid_arguments", "apt streams child output and does not support JSON mode"))
@@ -255,6 +267,8 @@ Commands:
   apt -- apt-get update        Strict opt-in APT via trusted native binary
   host-preflight [--endpoint IP] [--management-peer IP]
                               Observe kernel routes/rules; no activation
+  host-drift --baseline FILE Compare a prior private preflight JSON with now
+                              Nonzero on drift; never authorizes activation
   version                    Show pinned versions
 
 Import VLESS links from stdin or a mode-0600 file, not shell argv. 'exec'
@@ -264,6 +278,8 @@ an anonymous private APT config to a verified native APT child, with no
 run an explicit strict update first. Neither mode routes unrelated host
 traffic globally. Host preflight is observational: a route lookup does not
 prove connectivity, safety, routing ownership or readiness to activate TUN.
+Host drift compares separate, non-atomic network observations without changing
+the host, and is never an activation guard or a recovery journal.
 `
 
 func menu(m *sc.Manager) int {
