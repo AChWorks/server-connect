@@ -84,13 +84,13 @@ func TestActivationJournalDurablePrepareAndSafeAbandon(t *testing.T) {
 	if _, err := prepareFixtureJournal(fresh); ErrorCode(err) != "activation_journal_conflict" {
 		t.Fatalf("second operation should never replace unfinished record: %v", err)
 	}
-	if err := fresh.abandonPreparedActivationJournal(strings.Repeat("0", 32)); ErrorCode(err) != "activation_journal_conflict" {
+	if err := fresh.abandonPreparedActivationJournal(strings.Repeat("0", 32), 1); ErrorCode(err) != "activation_journal_conflict" {
 		t.Fatalf("wrong operation was permitted to abandon journal: %v", err)
 	}
 	if _, err := os.Stat(path); err != nil {
 		t.Fatalf("incorrect ID damaged journal: %v", err)
 	}
-	if err := fresh.abandonPreparedActivationJournal(prepared.OperationID); err != nil {
+	if err := fresh.abandonPreparedActivationJournal(prepared.OperationID, prepared.Revision); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
@@ -123,7 +123,7 @@ func TestActivationJournalUncertainRetainedAndReplayRefused(t *testing.T) {
 	if _, err := m.markActivationJournalUncertain(prepared.OperationID, 1); ErrorCode(err) != "activation_journal_conflict" {
 		t.Fatalf("stale revision replay accepted: %v", err)
 	}
-	if err := m.abandonPreparedActivationJournal(prepared.OperationID); ErrorCode(err) != "activation_journal_conflict" {
+	if err := m.abandonPreparedActivationJournal(prepared.OperationID, prepared.Revision); ErrorCode(err) != "activation_journal_conflict" {
 		t.Fatalf("unreconciled uncertain journal was erased: %v", err)
 	}
 	if _, err := prepareFixtureJournal(m); ErrorCode(err) != "activation_journal_conflict" {
@@ -317,7 +317,7 @@ func TestActivationJournalSurvivesAbruptProcessExit(t *testing.T) {
 	if err != nil || record.Phase != "prepared" || record.Revision != 1 || len(record.Changes) != 2 {
 		t.Fatalf("abruptly exited process lost prepared write-ahead identity: %+v err=%v", record, err)
 	}
-	if err := New(dir, "", 0).abandonPreparedActivationJournal(record.OperationID); err != nil {
+	if err := New(dir, "", 0).abandonPreparedActivationJournal(record.OperationID, record.Revision); err != nil {
 		t.Fatalf("fresh process cannot safely abandon untouched operation: %v", err)
 	}
 }

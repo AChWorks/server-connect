@@ -7,19 +7,17 @@ import (
 	"errors"
 	"io"
 	"os"
-	"path/filepath"
 	"regexp"
 	"strings"
 	"syscall"
 	"time"
 )
 
-// The route-activation journal is an internal persistence primitive, not an
-// activation mechanism. No caller may equate its presence with an armed guard,
-// a reserved resource, or a safe route. The only implemented states are
-// PREPARED (no host effect) and UNCERTAIN (manual/guard reconciliation needed).
-// PENDING_CONFIRMATION and ACTIVE_VERIFIED remain deliberately unsupported
-// until an independently armed guard and owned-route reconciler exist.
+// The route-activation journal is an INTERNAL persistence primitive, not
+// authorization to activate a network or proof that a guard is armed.
+// Version 1 has exactly two phases: PREPARED@revision=1, meaning no network
+// mutation occurred, and UNCERTAIN@revision=2, which cannot be abandoned by
+// this API. Future PENDING/ACTIVE/rollback transitions are not implemented.
 const (
 	activationJournalFilename = "route-activation-journal.json"
 	activationJournalVersion  = 1
@@ -33,11 +31,9 @@ var (
 	journalKey   = regexp.MustCompile(`^[A-Za-z0-9:._/@=-]{1,192}$`)
 )
 
-// Each change records the *intended* exact delta before any possible future
-// mutation. Before=null encodes prior absence. Intended is an observed
-// comparison target, not proof that the resource has ever been installed.
-// A future reconciler must compare current kernel identity before undoing
-// anything, including objects that look like these proposed identities.
+// Before=null means prior absence. Intended is ONLY the proposed state,
+// not a verified kernel resource. Future reconciliation must re-observe the
+// exact ownership and refuse conflicts before touching any host network.
 type activationJournalChange struct {
 	Kind     string          `json:"kind"`
 	Key      string          `json:"key"`
@@ -69,6 +65,9 @@ func canonicalJournalJSON(raw json.RawMessage) ([]byte, error) {
 }
 
 func canonicalJournalJSONStrict(raw json.RawMessage) ([]byte, error) {
+	if err := rejectAmbiguousJournalJSON(raw); err != nil {
+		return nil, err
+	}
 	decoder := json.NewDecoder(bytes.NewReader(raw))
 	decoder.UseNumber()
 	var value any
@@ -87,16 +86,22 @@ func canonicalJournalJSONStrict(raw json.RawMessage) ([]byte, error) {
 }
 
 func validateActivationJournal(j activationJournal) error {
-	if j.Version != activationJournalVersion || j.Revision == 0 || !journalHex32.MatchString(j.OperationID) ||
-		(j.Phase != "prepared" && j.Phase != "uncertain") || j.CreatedUnix <= 0 ||
-		!journalHex64.MatchString(j.ObservationSHA256) || !journalHex64.MatchString(j.PlanSHA256) ||
+	if j.Version != activationJournalVersion ||
+		!journalHex32.MatchString(j.OperationID) || j.CreatedUnix <= 0 ||
+		!journalHex64.MatchString(j.ObservationSHA256) ||
+		!journalHex64.MatchString(j.PlanSHA256) ||
 		len(j.Changes) == 0 || len(j.Changes) > activationJournalMaxItems {
-		return activationJournalError("unsupported activation journal version, identity, phase or scope")
+		return activationJournalError("unsupported activation journal version, identity or scope")
+	}
+	if (j.Phase != "prepared" || j.Revision != 1) &&
+		(j.Phase != "uncertain" || j.Revision != 2) {
+		return activationJournalError("unsupported activation journal phase/revision combination")
 	}
 	seen := make(map[string]bool, len(j.Changes))
 	for _, change := range j.Changes {
 		if (change.Kind != "route" && change.Kind != "rule" && change.Kind != "interface") ||
-			(!journalKey.MatchString(change.Key) || strings.Contains(change.Key, "..")) || change.Stage != "intent_recorded" {
+			!journalKey.MatchString(change.Key) || strings.Contains(change.Key, "..") ||
+			change.Stage != "intent_recorded" {
 			return activationJournalError("journal resource identity or progress is unsupported")
 		}
 		key := change.Kind + ":" + change.Key
@@ -113,93 +118,67 @@ func validateActivationJournal(j activationJournal) error {
 			return err
 		}
 		if bytes.Equal(before, intended) {
-			return activationJournalError("journal resource change has no distinct prior and intended states")
+			return activationJournalError("journal resource has no distinct prior and intended states")
 		}
 	}
 	return nil
 }
 
-// Only the process owner may supply a private state root or durable journal.
-// In a root-run manager this means root-owned state; do not adopt an
-// operator-created 0700 directory or foreign-owned file for recovery.
-func (m *Manager) verifyActivationJournalStoreLocked() error {
-	info, err := os.Lstat(m.Dir)
+// All read/write/delete operations use one private descriptor-pinned store,
+// held under the existing Manager .lock inode. The journal is never opened,
+// replaced or deleted by a standalone path-based filesystem operation.
+func loadActivationJournalLocked(store *activationJournalDir) (activationJournal, activationJournalFileIdentity, error) {
+	data, identity, err := store.readJournal()
 	if err != nil {
-		return Fault("activation_journal_unavailable", "private activation state directory is unavailable")
+		return activationJournal{}, identity, err
 	}
-	stat, ok := info.Sys().(*syscall.Stat_t)
-	if !ok || !info.IsDir() || info.Mode().Perm() != 0700 ||
-		int(stat.Uid) != os.Geteuid() {
-		return Fault("activation_journal_unavailable", "private activation state directory ownership or permissions are untrusted")
-	}
-	return nil
-}
-
-// loadActivationJournalLocked is called only while holding the shared
-// Manager.withLock lifecycle lock; the lock spans all future routing changes.
-func (m *Manager) loadActivationJournalLocked() (activationJournal, error) {
-	if err := m.verifyActivationJournalStoreLocked(); err != nil {
-		return activationJournal{}, err
-	}
-	path := filepath.Join(m.Dir, activationJournalFilename)
-	info, err := os.Lstat(path)
-	if err != nil {
-		return activationJournal{}, err
-	}
-	stat, ok := info.Sys().(*syscall.Stat_t)
-	if !ok || !info.Mode().IsRegular() || info.Mode().Perm() != 0600 ||
-		int(stat.Uid) != os.Geteuid() || info.Size() <= 0 ||
-		info.Size() > activationJournalMaxBytes {
-		return activationJournal{}, activationJournalError("private activation journal ownership, mode or size is invalid")
-	}
-	data, err := readRegular(path)
-	if err != nil {
-		return activationJournal{}, activationJournalError("activation journal cannot be read safely")
+	if err := strictActivationJournalJSON(data); err != nil {
+		return activationJournal{}, identity, err
 	}
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.DisallowUnknownFields()
 	var record activationJournal
 	if err := decoder.Decode(&record); err != nil {
-		return activationJournal{}, activationJournalError("activation journal is corrupt or unsupported")
+		return activationJournal{}, identity, activationJournalError("activation journal schema is unsupported")
 	}
 	var extra any
 	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
-		return activationJournal{}, activationJournalError("activation journal has trailing content")
+		return activationJournal{}, identity, activationJournalError("activation journal has trailing content")
 	}
 	if err := validateActivationJournal(record); err != nil {
-		return activationJournal{}, err
+		return activationJournal{}, identity, err
 	}
-	return record, nil
+	return record, identity, nil
 }
 
-// observeActivationJournal never claims readiness. It obtains the same lock
-// used for manager lifecycle so a separate recovery process can observe the
-// durable record only at a consistent record boundary.
 func (m *Manager) observeActivationJournal() (activationJournal, error) {
-	var found activationJournal
-	err := m.withLock(func() error {
-		var err error
-		found, err = m.loadActivationJournalLocked()
-		if os.IsNotExist(err) {
+	var observed activationJournal
+	err := m.withActivationJournalLock(syscall.Fsync, func(store *activationJournalDir) error {
+		var readErr error
+		observed, _, readErr = loadActivationJournalLocked(store)
+		if errors.Is(readErr, os.ErrNotExist) {
 			return Fault("activation_journal_missing", "no prepared activation journal exists")
 		}
-		return err
+		return readErr
 	})
-	return found, err
+	return observed, err
 }
 
-// prepareActivationJournal durably records the desired before/after objects
-// (including absence) under the manager lock. It never invokes ip, sing-box,
-// systemd, or any other networking operation. An existing or corrupt journal
-// blocks replacement, preventing loss of unfinished/uncertain recovery state.
+// Only PREPARED intent is written. Parent-directory fsync is required even
+// for the first creation of a custom private state root. This does not prove
+// physical power-loss recovery (SIGKILL and fsync checks are lesser evidence).
 func (m *Manager) prepareActivationJournal(observationSHA, planSHA string, changes []activationJournalChange) (activationJournal, error) {
+	return m.prepareActivationJournalWithParentSync(observationSHA, planSHA, changes, syscall.Fsync)
+}
+
+// Test-only injectable sync distinguishes failure before the acknowledgment
+// from a completed journal write. Production always uses syscall.Fsync.
+func (m *Manager) prepareActivationJournalWithParentSync(observationSHA, planSHA string, changes []activationJournalChange, parentSync func(int) error) (activationJournal, error) {
 	id, err := randomHex(16)
 	if err != nil {
-		return activationJournal{}, Fault("activation_journal_unavailable", "cannot generate operation identity")
+		return activationJournal{}, journalFSUnavailable("cannot generate operation identity")
 	}
-	// Capture input bytes independently. The caller must not be able to
-	// alter a validated intended resource while the durable write waits
-	// for the shared lifecycle lock.
+	// Do not retain caller-owned JSON slices across lock acquisition.
 	copied := make([]activationJournalChange, len(changes))
 	for i, change := range changes {
 		copied[i] = change
@@ -215,21 +194,17 @@ func (m *Manager) prepareActivationJournal(observationSHA, planSHA string, chang
 	if err := validateActivationJournal(record); err != nil {
 		return activationJournal{}, err
 	}
-	err = m.withLock(func() error {
-		if _, err := m.loadActivationJournalLocked(); err == nil {
-			return Fault("activation_journal_conflict", "an activation journal already exists; recovery or safe abandonment is required")
-		} else if !os.IsNotExist(err) {
-			// A corrupt or insecure journal must never be overwritten.
-			return err
+	err = m.withActivationJournalLock(parentSync, func(store *activationJournalDir) error {
+		if _, _, readErr := loadActivationJournalLocked(store); readErr == nil {
+			return Fault("activation_journal_conflict", "an activation journal already exists; recover or abandon safely first")
+		} else if !errors.Is(readErr, os.ErrNotExist) {
+			return readErr // Invalid, corrupt or foreign state blocks replacement.
 		}
 		data, err := json.Marshal(record)
-		if err != nil || len(data) > activationJournalMaxBytes {
-			return activationJournalError("activation journal cannot be serialized within its size bound")
+		if err != nil {
+			return activationJournalError("cannot serialize prepared activation journal")
 		}
-		// Manager.put fsyncs the new private temporary file, atomically
-		// renames it and fsyncs its containing directory. A sync failure
-		// stops the operation; no host/network effect can follow.
-		return put(filepath.Join(m.Dir, activationJournalFilename), append(data, '\n'))
+		return store.writeJournal(append(data, '\n'), nil)
 	})
 	if err != nil {
 		return activationJournal{}, err
@@ -237,12 +212,10 @@ func (m *Manager) prepareActivationJournal(observationSHA, planSHA string, chang
 	return record, nil
 }
 
-// markActivationJournalUncertain preserves an unresolved identity for later
-// manual/independent recovery. It is not a route rollback or an approval.
 func (m *Manager) markActivationJournalUncertain(operationID string, expectedRevision uint64) (activationJournal, error) {
-	var changed activationJournal
-	err := m.withLock(func() error {
-		record, err := m.loadActivationJournalLocked()
+	var result activationJournal
+	err := m.withActivationJournalLock(syscall.Fsync, func(store *activationJournalDir) error {
+		record, identity, err := loadActivationJournalLocked(store)
 		if err != nil {
 			return err
 		}
@@ -251,46 +224,38 @@ func (m *Manager) markActivationJournalUncertain(operationID string, expectedRev
 			record.Revision != expectedRevision || record.Phase != "prepared" {
 			return Fault("activation_journal_conflict", "operation identity, revision or phase no longer matches")
 		}
-		record.Revision++
-		record.Phase = "uncertain"
+		record.Phase, record.Revision = "uncertain", 2
 		if err := validateActivationJournal(record); err != nil {
 			return err
 		}
 		data, err := json.Marshal(record)
-		if err != nil || len(data) > activationJournalMaxBytes {
-			return activationJournalError("activation journal cannot be serialized within its size bound")
+		if err != nil {
+			return activationJournalError("cannot serialize uncertain activation journal")
 		}
-		if err := put(filepath.Join(m.Dir, activationJournalFilename), append(data, '\n')); err != nil {
+		if err := store.writeJournal(append(data, '\n'), &identity); err != nil {
 			return err
 		}
-		changed = record
+		result = record
 		return nil
 	})
-	return changed, err
+	return result, err
 }
 
-// abandonPreparedActivationJournal only removes a never-applied intent.
-// Anything UNCERTAIN or beyond PREPARED requires a separate identity-safe
-// recovery implementation; deleting it here would destroy recovery evidence.
-func (m *Manager) abandonPreparedActivationJournal(operationID string) error {
-	return m.withLock(func() error {
-		record, err := m.loadActivationJournalLocked()
+// Abandonment is only for an untouched PREPARED@rev1 operation. UNCERTAIN
+// survives every attempted cleanup, including matching IDs and stale
+// revisions. No route or policy is removed by this function.
+func (m *Manager) abandonPreparedActivationJournal(operationID string, expectedRevision uint64) error {
+	return m.withActivationJournalLock(syscall.Fsync, func(store *activationJournalDir) error {
+		record, identity, err := loadActivationJournalLocked(store)
 		if err != nil {
 			return err
 		}
 		if !journalHex32.MatchString(operationID) ||
 			subtle.ConstantTimeCompare([]byte(record.OperationID), []byte(operationID)) != 1 ||
-			record.Phase != "prepared" {
-			return Fault("activation_journal_conflict", "only this exact untouched prepared operation may be abandoned")
+			record.Phase != "prepared" || record.Revision != 1 ||
+			expectedRevision != record.Revision {
+			return Fault("activation_journal_conflict", "only the exact untouched prepared revision may be abandoned")
 		}
-		if err := os.Remove(filepath.Join(m.Dir, activationJournalFilename)); err != nil {
-			return err
-		}
-		dir, err := os.Open(m.Dir)
-		if err != nil {
-			return err
-		}
-		defer dir.Close()
-		return dir.Sync()
+		return store.removeJournal(identity)
 	})
 }

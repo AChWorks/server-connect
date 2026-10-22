@@ -66,15 +66,17 @@ jobs:
           go vet ./...
           go test ./... -count=1 -timeout=100s -v
           sh -n bundle/install.sh scripts/package.sh scripts/bootstrap-online.sh
-      - name: Native Debian 13 read-only host preflight
+      - name: Native Debian 13 host preflight and journal race QA
         shell: bash
         run: |
           set -euo pipefail
-          # Keep original tests in the minimal APT layout; install optional
-          # host inspection tools only for their own real-kernel test.
-          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends iproute2
+          # Keep the APT trust-layout tests above in their original minimal
+          # Debian environment. C compiler is installed only after those
+          # checks to run the privileged-journal race regression in exact CI.
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends iproute2 gcc libc6-dev
           test -x /usr/bin/ip
           go test ./internal/sc -run '^TestPreflight' -count=1 -v
+          go test -race ./internal/sc -run '^(TestActivationJournal|TestSharedLifecycleFlock)' -count=1 -timeout=120s -v
           # GitHub's checkout is runner-owned inside this container. Trust
           # only this ephemeral checkout for Go VCS stamping (do not disable it).
           export GIT_CONFIG_COUNT=1
