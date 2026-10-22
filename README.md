@@ -37,6 +37,20 @@ The online bootstrap candidate at `scripts/bootstrap-online.sh` requires an expl
 
 On a Linux host with trusted native `/usr/bin/ip`, `server-connect --json host-preflight --endpoint 198.51.100.10 --management-peer 203.0.113.42` records actual IPv4/IPv6 routes, rules, links and kernel route lookups for **literal IPs**. Broadcast, multicast, unspecified, IPv4-mapped IPv6 and link-local addresses without a usable interface scope are rejected before native inspection; private IPv4, IPv6 ULA and loopback literals remain supported. It does not resolve DNS, touch state, enable a tunnel, change kernel networking or prove those peers are reachable. Both peer arguments are optional; supplying them is useful for future underlay and management-path planning. The report deliberately says `activation_ready: false` and `snapshot_atomic: false`: it is **not** an ownership journal, firewall inspection, activation authorization or replacement for the independent guards and SSH/reboot/field acceptance specified in Issue #2. This is a dependent development feature, not a released installation instruction.
 
+### Advisory selective route planning (Issue #2 development)
+
+The development command below previews **only explicitly selected public CIDR destinations** against the live native Linux route, rule and link inventory. Both endpoint and current management/SSH peer must be literal IPs. The TUN name must be unused; it does not create an interface. For example, using **documentation-only placeholder peers** (replace them before a meaningful operator preview):
+
+~~~sh
+server-connect --json selective-plan --endpoint 198.51.100.10 \
+  --management-peer 203.0.113.42 --tunnel-if scplan0 \
+  --destination 8.8.8.0/24
+~~~
+
+A valid preview returns a deterministic bounded set of **candidate** table/priorities, destination-specific route/rule identities, and fingerprints for that observation and proposed plan. It rejects overlapping destinations, common private/special-purpose ranges, routes overlapping any existing non-default host route, reused interface identity, unsupported rule/table descriptions, and input that would capture the specified VPN endpoint or management peer. It is callable from menu option **11**.
+
+**Safety boundary:** the output always states `read_only: true`, `activation_ready: false`, `snapshot_atomic: false`, `guard_armed: false`, `ownership_verified: false`. No table or priority is actually reserved; nothing is applied or saved. An unchanged preview, hash or apparently unused ID **does not** prove network ownership or safe SSH/HTTP(S) replies, domestic reachability, DNS/bootstrap or a bound VPN path. Do not run the displayed candidate policy manually. Actual owned-route activation, persistent fsync journal, independent 600-second Activation Guard, authenticated new-session confirmation, reboot/timeout rollback and Runtime Health Guard (#3) are separate mandatory implementation and acceptance gates.
+
 ### Proxy Only compatibility and application opt-in
 
 - The link importer deliberately supports a **subset** of VLESS TCP/WebSocket and TLS/Reality query fields, rejecting unrecognized or incompatible parameters. **Local TCP VLESS through the pinned sing-box core has live integration evidence; TLS/WebSocket/Reality interoperability with real foreign providers is NOT_RUN.** Import and `validate` establish syntax/core-configuration acceptance, not remote reachability.

@@ -81,6 +81,25 @@ jobs:
           export GIT_CONFIG_KEY_0=safe.directory
           export GIT_CONFIG_VALUE_0="$GITHUB_WORKSPACE"
           go build -o build/ci/server-connect-cli ./cmd/server-connect
+          # Real native-iproute2 selective preview: proposal only, never apply.
+          build/ci/server-connect-cli --json selective-plan \
+            --endpoint 198.51.100.10 --management-peer 203.0.113.42 \
+            --tunnel-if scpreview0 --destination 8.8.8.0/24 \
+            > build/ci/selective-plan.json
+          python3 - <<'PYPLAN'
+          import json
+          with open('build/ci/selective-plan.json') as f:
+              response=json.load(f)
+          assert response['ok'] is True
+          plan=response['data']
+          assert plan['read_only'] is True
+          for negative in ('activation_ready','snapshot_atomic','guard_armed','ownership_verified'):
+              assert plan[negative] is False
+          assert plan['route_table'] >= 20000
+          assert len(plan['routes']) == len(plan['rules']) == 1
+          assert plan['routes'][0]['destination'] == '8.8.8.0/24'
+          assert len(plan['plan_sha256']) == 64
+          PYPLAN
           build/ci/server-connect-cli --json host-preflight --endpoint 127.0.0.1 \
             --management-peer 127.0.0.2 > build/ci/host-preflight.json
           python3 - <<'PYQA'
