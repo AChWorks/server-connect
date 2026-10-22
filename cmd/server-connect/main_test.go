@@ -154,3 +154,34 @@ func TestUnderlayExplicitEmptyHostnameCannotBypassValidation(t *testing.T) {
 		t.Fatal("invalid hostname unexpectedly modified manager state")
 	}
 }
+
+func TestUnderlayDNSCLIRejectsMissingAndAmbiguousInputs(t *testing.T) {
+	for _, args := range [][]string{
+		{"underlay-dns", "--hostname", "node.example.test", "--endpoint", "198.51.100.17"},
+		{"underlay-dns", "--hostname", "node.example.test", "--endpoint", "198.51.100.17", "--resolver", "dns.example.test"},
+		{"underlay-dns", "--hostname", "node.example.test", "--endpoint", "198.51.100.17", "--resolver", "127.0.0.1", "--resolver-port", "0"},
+		{"underlay-dns", "--hostname", "", "--endpoint", "198.51.100.17", "--resolver", "127.0.0.1"},
+		{"underlay-dns", "--hostname", "node.example.test", "--endpoint", "198.51.100.17", "--resolver", "127.0.0.1", "extra"},
+	} {
+		reader, writer, err := os.Pipe()
+		if err != nil {
+			t.Fatal(err)
+		}
+		old := os.Stdout
+		os.Stdout = writer
+		exit := run(true, sc.New(t.TempDir(), "", 0), args)
+		_ = writer.Close()
+		os.Stdout = old
+		var response struct {
+			OK    bool `json:"ok"`
+			Error struct {
+				Code string `json:"code"`
+			} `json:"error"`
+		}
+		err = json.NewDecoder(reader).Decode(&response)
+		_ = reader.Close()
+		if err != nil || exit == 0 || response.OK || response.Error.Code != "invalid_arguments" {
+			t.Fatalf("invalid explicit resolver input was accepted: %v exit=%d response=%+v err=%v", args, exit, response, err)
+		}
+	}
+}

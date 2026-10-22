@@ -226,6 +226,18 @@ func run(j bool, m *sc.Manager, args []string) int {
 			report, err = sc.InspectUnderlayTCPWithHostname(*endpoint, *hostname, *port)
 		}
 		return output(j, report, err)
+	case "underlay-dns":
+		opts := flag.NewFlagSet(name, flag.ContinueOnError)
+		opts.SetOutput(io.Discard)
+		hostname := opts.String("hostname", "", "absolute DNS-style hostname to verify")
+		endpoint := opts.String("endpoint", "", "literal VPN endpoint IPv4 or IPv6")
+		resolver := opts.String("resolver", "", "literal explicit DNS resolver IPv4 or IPv6")
+		resolverPort := opts.Int("resolver-port", 53, "explicit DNS resolver port")
+		if e := opts.Parse(args); e != nil || len(opts.Args()) != 0 {
+			return output(j, nil, sc.Fault("invalid_arguments", "invalid underlay-dns options"))
+		}
+		report, err := sc.InspectUnderlayDNS(*hostname, *endpoint, *resolver, *resolverPort)
+		return output(j, report, err)
 	case "apt":
 		if j {
 			return output(true, nil, sc.Fault("invalid_arguments", "apt streams child output and does not support JSON mode"))
@@ -283,6 +295,8 @@ Commands:
                               Observe kernel routes/rules; no activation
   underlay-tcp --endpoint IP --port N [--hostname NAME]
                               Optional hostname must resolve to pinned IP before interface-bound TCP probe
+  underlay-dns --hostname NAME --endpoint IP --resolver IP [--resolver-port 53]
+                              Query only the selected interface-bound resolver; never activates routing
   version                    Show pinned versions
 
 Import VLESS links from stdin or a mode-0600 file, not shell argv. 'exec'
@@ -297,12 +311,16 @@ interface and sends no application data. With --hostname, current host name
 resolution must include the explicit pinned --endpoint IP before TCP probing.
 This is not proof that resolver traffic bypassed a VPN or that DNS bootstrap,
 SSH/hosted ingress, VPN protocol, ownership or guards are safe.
+Underlay-dns explicitly queries only a pinned DNS resolver through the
+kernel-selected interface and checks its answers against the pinned endpoint.
+Even matching answers cannot guarantee future DNS/bootstrap behavior after
+routing changes, authenticate DNS, or authorize tunnel activation.
 `
 
 func menu(m *sc.Manager) int {
 	in := bufio.NewReader(os.Stdin)
 	for {
-		fmt.Println("\nServer Connect | 1 Status  2 Profiles  3 Import  4 Select  5 Connect  6 Test  7 Disconnect  8 Remove  9 APT Update  10 Host Preflight  11 Underlay TCP  0 Exit")
+		fmt.Println("\nServer Connect | 1 Status  2 Profiles  3 Import  4 Select  5 Connect  6 Test  7 Disconnect  8 Remove  9 APT Update  10 Host Preflight  11 Underlay TCP  12 Underlay DNS  0 Exit")
 		fmt.Print("Choice: ")
 		raw, e := in.ReadString('\n')
 		if e != nil {
@@ -365,6 +383,15 @@ func menu(m *sc.Manager) int {
 				command = append(command, "--hostname", h)
 			}
 			run(false, m, command)
+		case "12":
+			fmt.Print("Endpoint DNS hostname: ")
+			host, _ := in.ReadString('\n')
+			fmt.Print("Pinned endpoint IP: ")
+			endpoint, _ := in.ReadString('\n')
+			fmt.Print("Explicit resolver IP (DNS queries are sent to this resolver): ")
+			resolver, _ := in.ReadString('\n')
+			run(false, m, []string{"underlay-dns", "--hostname", strings.TrimSpace(host),
+				"--endpoint", strings.TrimSpace(endpoint), "--resolver", strings.TrimSpace(resolver)})
 		case "9":
 			fmt.Print("APT update refreshes system package indexes using the selected proxy. Type UPDATE to confirm: ")
 			confirmation, err := in.ReadString('\n')
