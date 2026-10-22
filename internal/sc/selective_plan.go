@@ -1,6 +1,7 @@
 package sc
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -258,7 +259,127 @@ func selectiveRoutePrefix(dst json.RawMessage, isIPv6 bool) (netip.Prefix, bool,
 	if !p.IsValid() || p.Addr().Is6() != isIPv6 || p.Addr().Is4In6() {
 		return netip.Prefix{}, false, Fault("route_plan_uncertain", "kernel route family is inconsistent")
 	}
+	if p.Bits() == 0 {
+		return netip.Prefix{}, true, nil
+	}
 	return p.Masked(), false, nil
+}
+
+// An existing RPDB rule may terminate lookup before a proposed rule.
+// Since a selective preview has no source, mark or interface constraint,
+// those selectors cannot prove that a foreign rule is disjoint.
+type selectiveObservedRule struct {
+	priority int
+	table    int
+	row      map[string]json.RawMessage
+}
+
+func selectiveEarlierRuleMayPreempt(rule selectiveObservedRule, destination netip.Prefix, defaults map[int]bool) (bool, error) {
+	uncertain := func() (bool, error) {
+		return false, Fault("route_plan_uncertain", "higher-precedence policy rule cannot be proven to fall through for the selected destination")
+	}
+	// The inverse of a disjoint 'to' selector DOES match. Unknown rule
+	// flags and negation cannot be used to prove safe non-interference.
+	if len(rule.row["not"]) != 0 || len(rule.row["invert"]) != 0 || len(rule.row["flags"]) != 0 {
+		return uncertain()
+	}
+	if raw := rule.row["dst"]; len(raw) != 0 {
+		text := selectiveText(raw)
+		if text == "" {
+			return uncertain()
+		}
+		if text != "all" && text != "default" {
+			selected, err := netip.ParsePrefix(text)
+			if err != nil {
+				address, parseErr := netip.ParseAddr(text)
+				if parseErr != nil {
+					return uncertain()
+				}
+				selected = netip.PrefixFrom(address, address.BitLen())
+			}
+			if !selected.IsValid() || selected.Addr().Zone() != "" ||
+				selected.Addr().Is4In6() || selected.Addr().Is6() != destination.Addr().Is6() {
+				return uncertain()
+			}
+			if !selected.Overlaps(destination) {
+				return false, nil
+			}
+		}
+	}
+	// Unsupported actions, dynamic tables, suppressors, and jumps can
+	// terminate routing evaluation without any table route.
+	if rule.table == 0 || len(rule.row["l3mdev"]) != 0 ||
+		len(rule.row["goto"]) != 0 || len(rule.row["suppress_prefixlength"]) != 0 ||
+		len(rule.row["suppress_ifgroup"]) != 0 || len(rule.row["nat"]) != 0 {
+		return uncertain()
+	}
+	if action := selectiveText(rule.row["action"]); len(rule.row["action"]) != 0 &&
+		action != "to_tbl" && action != "lookup" {
+		return uncertain()
+	}
+	if kind := selectiveText(rule.row["type"]); len(rule.row["type"]) != 0 &&
+		kind != "unicast" {
+		return uncertain()
+	}
+	for key := range rule.row {
+		switch key {
+		case "priority", "table", "src", "dst", "fwmark", "fwmask", "iif",
+			"oif", "tos", "uidrange", "ipproto", "sport", "dport", "tun_id",
+			"protocol", "realms", "action", "type":
+		default:
+			return uncertain()
+		}
+	}
+	// All non-default routes are checked globally for overlapping
+	// destinations. A plain lookup with no matching route falls through,
+	// but a table default can shadow the proposed destination-specific
+	// policy even when no non-default route overlaps.
+	return defaults[rule.table], nil
+}
+
+// Fingerprints cover the complete protected-path observation, not merely
+// inventory. Canonical JSON removes object key ordering and whitespace
+// differences while retaining numeric precision through json.Number.
+func selectiveCanonicalArray(raw json.RawMessage, requireEntry bool) (json.RawMessage, error) {
+	rows, err := selectiveRows(raw)
+	if err != nil || (requireEntry && len(rows) == 0) {
+		return nil, Fault("route_plan_uncertain", "kernel observation evidence is absent or unsupported")
+	}
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
+	var data any
+	if err := decoder.Decode(&data); err != nil {
+		return nil, Fault("route_plan_uncertain", "protected route lookup evidence cannot be normalized")
+	}
+	canonical, err := json.Marshal(data)
+	if err != nil {
+		return nil, Fault("route_plan_uncertain", "protected route lookup evidence cannot be fingerprinted")
+	}
+	return canonical, nil
+}
+
+func selectiveCanonicalLookup(lookup *HostRouteLookup, target netip.Addr) (HostRouteLookup, error) {
+	family := "ipv4"
+	if target.Is6() {
+		family = "ipv6"
+	}
+	if lookup == nil || lookup.Target != target.String() || lookup.Family != family {
+		return HostRouteLookup{}, Fault("route_plan_uncertain", "protected route lookup identity does not match the request")
+	}
+	rows, err := selectiveRows(lookup.KernelRoute)
+	if err != nil || len(rows) == 0 {
+		return HostRouteLookup{}, Fault("route_plan_uncertain", "protected route lookup has no kernel evidence")
+	}
+	for _, row := range rows {
+		if selectiveText(row["dst"]) != target.String() {
+			return HostRouteLookup{}, Fault("route_plan_uncertain", "protected route lookup target is missing or inconsistent")
+		}
+	}
+	canonical, err := selectiveCanonicalArray(lookup.KernelRoute, true)
+	if err != nil {
+		return HostRouteLookup{}, err
+	}
+	return HostRouteLookup{Target: target.String(), Family: family, KernelRoute: canonical}, nil
 }
 
 func buildSelectivePlan(intent validatedSelective, host HostPreflight) (SelectiveRoutePlan, error) {
@@ -300,8 +421,18 @@ func buildSelectivePlan(intent validatedSelective, host HostPreflight) (Selectiv
 	if seenLinks[intent.device] {
 		return uncertain("requested tunnel interface is already present and not proven owned")
 	}
+	endpointLookup, err := selectiveCanonicalLookup(host.Endpoint, intent.endpoint)
+	if err != nil {
+		return SelectiveRoutePlan{}, err
+	}
+	managementLookup, err := selectiveCanonicalLookup(host.ManagementPeer, intent.peer)
+	if err != nil {
+		return SelectiveRoutePlan{}, err
+	}
 	usedTables := make(map[int]bool)
 	usedPriorities := make(map[int]bool)
+	defaultTables := map[bool]map[int]bool{false: {}, true: {}}
+	rulesByFamily := map[bool][]selectiveObservedRule{false: {}, true: {}}
 	for _, family := range []struct {
 		raw  json.RawMessage
 		ipv6 bool
@@ -323,6 +454,7 @@ func buildSelectivePlan(intent validatedSelective, host HostPreflight) (Selectiv
 				return SelectiveRoutePlan{}, err
 			}
 			if isDefault {
+				defaultTables[family.ipv6][table] = true
 				continue
 			}
 			for _, dst := range intent.prefixes {
@@ -332,8 +464,13 @@ func buildSelectivePlan(intent validatedSelective, host HostPreflight) (Selectiv
 			}
 		}
 	}
-	for _, raw := range []json.RawMessage{host.IPv4Rules, host.IPv6Rules} {
-		rows, err := selectiveRows(raw)
+	for _, family := range []struct {
+		raw  json.RawMessage
+		ipv6 bool
+	}{
+		{host.IPv4Rules, false}, {host.IPv6Rules, true},
+	} {
+		rows, err := selectiveRows(family.raw)
 		if err != nil {
 			return SelectiveRoutePlan{}, err
 		}
@@ -350,6 +487,9 @@ func buildSelectivePlan(intent validatedSelective, host HostPreflight) (Selectiv
 				return SelectiveRoutePlan{}, err
 			}
 			usedTables[table] = true
+			rulesByFamily[family.ipv6] = append(rulesByFamily[family.ipv6], selectiveObservedRule{
+				priority: priority, table: table, row: rule,
+			})
 		}
 	}
 	table := 0
@@ -383,6 +523,21 @@ func buildSelectivePlan(intent validatedSelective, host HostPreflight) (Selectiv
 		if priority > selectiveLastPriority {
 			return uncertain("no unoccupied preview rule priority in the bounded candidate range")
 		}
+		// Evaluate every proposed priority. A rule between planned priorities
+		// may shadow a later destination even when the first is unaffected.
+		ipv6 := prefix.Addr().Is6()
+		for _, earlier := range rulesByFamily[ipv6] {
+			if earlier.priority >= priority {
+				continue
+			}
+			preempts, err := selectiveEarlierRuleMayPreempt(earlier, prefix, defaultTables[ipv6])
+			if err != nil {
+				return SelectiveRoutePlan{}, err
+			}
+			if preempts {
+				return uncertain("higher-precedence lookup can shadow the selected route through an existing default route")
+			}
+		}
 		family := "ipv4"
 		if prefix.Addr().Is6() {
 			family = "ipv6"
@@ -395,9 +550,24 @@ func buildSelectivePlan(intent validatedSelective, host HostPreflight) (Selectiv
 		})
 		priority++
 	}
+	// Never interpret a preview digest as an activation precondition.
+	observations := [5]json.RawMessage{
+		host.Links, host.IPv4Routes, host.IPv6Routes, host.IPv4Rules, host.IPv6Rules,
+	}
+	for i, raw := range observations {
+		var err error
+		observations[i], err = selectiveCanonicalArray(raw, false)
+		if err != nil {
+			return uncertain("cannot canonicalize kernel observation")
+		}
+	}
 	observed, err := json.Marshal(struct {
 		Links, V4Routes, V6Routes, V4Rules, V6Rules json.RawMessage
-	}{host.Links, host.IPv4Routes, host.IPv6Routes, host.IPv4Rules, host.IPv6Rules})
+		Endpoint, ManagementPeer                    HostRouteLookup
+	}{
+		observations[0], observations[1], observations[2], observations[3], observations[4],
+		endpointLookup, managementLookup,
+	})
 	if err != nil {
 		return uncertain("cannot fingerprint kernel observation")
 	}

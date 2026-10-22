@@ -15,8 +15,8 @@ func fixtureSelectiveHost() HostPreflight {
 		IPv6Routes:     json.RawMessage(`[{"dst":"fe80::/64","dev":"eth0"},{"dst":"default","dev":"eth0"}]`),
 		IPv4Rules:      json.RawMessage(`[{"priority":0,"table":"local"},{"priority":32766,"table":"main"},{"priority":32767,"table":"default"}]`),
 		IPv6Rules:      json.RawMessage(`[{"priority":0,"table":"local"},{"priority":32766,"table":"main"}]`),
-		Endpoint:       &HostRouteLookup{Target: "198.51.100.1", Family: "ipv4"},
-		ManagementPeer: &HostRouteLookup{Target: "198.51.100.2", Family: "ipv4"},
+		Endpoint:       &HostRouteLookup{Target: "198.51.100.1", Family: "ipv4", KernelRoute: json.RawMessage(`[{"dst":"198.51.100.1","gateway":"192.0.2.1","dev":"eth0"}]`)},
+		ManagementPeer: &HostRouteLookup{Target: "198.51.100.2", Family: "ipv4", KernelRoute: json.RawMessage(`[{"dst":"198.51.100.2","gateway":"192.0.2.1","dev":"eth0"}]`)},
 	}
 }
 
@@ -204,5 +204,142 @@ func TestSelectivePlanNeverClaimsProtectionByFieldOmission(t *testing.T) {
 		if !strings.Contains(string(b), field) {
 			t.Fatalf("missing explicit negative assertion %s in %s", field, string(b))
 		}
+	}
+}
+
+func TestSelectivePlanRPDBPrecedence(t *testing.T) {
+	// A rule with a smaller priority number runs first and may terminate
+	// lookup through an existing table default, even without CIDR overlap.
+	tests := []struct {
+		name  string
+		rule  string
+		route string
+		ok    bool
+	}{
+		{"unconditional_table_default", `{"priority":100,"src":"all","table":100}`, `{"dst":"default","table":100,"dev":"eth1"}`, false},
+		{"unconditional_numeric_default", `{"priority":100,"table":100}`, `{"dst":"0.0.0.0/0","table":100,"dev":"eth1"}`, false},
+		{"early_main_default", `{"priority":100,"table":"main"}`, "", false},
+		{"source_specific_default", `{"priority":100,"src":"10.0.0.0/8","table":100}`, `{"dst":"default","table":100,"dev":"eth1"}`, false},
+		{"mark_specific_default", `{"priority":100,"fwmark":"0x1","fwmask":"0xffffffff","table":100}`, `{"dst":"default","table":100,"dev":"eth1"}`, false},
+		{"destination_overlap", `{"priority":100,"dst":"8.8.0.0/16","table":100}`, `{"dst":"default","table":100,"dev":"eth1"}`, false},
+		{"destination_disjoint", `{"priority":100,"dst":"9.9.9.0/24","table":100}`, `{"dst":"default","table":100,"dev":"eth1"}`, true},
+		{"source_rule_no_matching_route", `{"priority":100,"src":"10.0.0.0/8","table":100}`, `{"dst":"9.9.9.0/24","table":100,"dev":"eth1"}`, true},
+		{"mark_rule_no_matching_route", `{"priority":100,"fwmark":"0x1","table":100}`, `{"dst":"9.9.9.0/24","table":100,"dev":"eth1"}`, true},
+		{"inverted_destination_disjoint", `{"priority":100,"not":true,"dst":"9.9.9.0/24","table":100}`, `{"dst":"default","table":100,"dev":"eth1"}`, false},
+		{"unsupported_rule_action", `{"priority":100,"action":"unreachable","table":100}`, "", false},
+		{"unsupported_suppressor", `{"priority":100,"table":100,"suppress_prefixlength":0}`, "", false},
+		{"unsupported_l3mdev", `{"priority":100,"table":100,"l3mdev":true}`, "", false},
+		{"unsupported_unknown_selector", `{"priority":100,"table":100,"opaque_selector":1}`, "", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req, host := fixtureSelectiveRequest(), fixtureSelectiveHost()
+			req.Destinations = []string{"8.8.8.0/24"}
+			host.IPv4Rules = json.RawMessage(`[{"priority":0,"src":"all","table":"local"},` + tt.rule + `,{"priority":32766,"src":"all","table":"main"}]`)
+			if tt.route != "" {
+				host.IPv4Routes = json.RawMessage(`[{"dst":"default","dev":"eth0"},` + tt.route + `]`)
+			}
+			plan, err := planFromFixture(t, req, host)
+			if tt.ok {
+				if err != nil || !plan.ReadOnly || plan.ActivationReady {
+					t.Fatalf("expected safe advisory-only plan: plan=%+v err=%v", plan, err)
+				}
+			} else if ErrorCode(err) != "route_plan_uncertain" || len(plan.Rules) != 0 || plan.PlanSHA256 != "" {
+				t.Fatalf("expected fail-closed uncertain route plan: plan=%+v err=%v", plan, err)
+			}
+		})
+	}
+}
+
+func TestSelectivePlanRejectsInterleavedPolicyAndIPv6Default(t *testing.T) {
+	req, host := fixtureSelectiveRequest(), fixtureSelectiveHost()
+	req.Destinations = []string{"8.8.8.0/24", "9.9.9.0/24"}
+	host.IPv4Rules = json.RawMessage(`[{"priority":0,"table":"local"},{"priority":30001,"table":100},{"priority":32766,"table":"main"}]`)
+	host.IPv4Routes = json.RawMessage(`[{"dst":"default","dev":"eth0"},{"dst":"default","table":100,"dev":"eth1"}]`)
+	plan, err := planFromFixture(t, req, host)
+	if ErrorCode(err) != "route_plan_uncertain" || len(plan.Rules) != 0 {
+		t.Fatalf("policy interleaved between planned priorities was missed: plan=%+v err=%v", plan, err)
+	}
+
+	req, host = fixtureSelectiveRequest(), fixtureSelectiveHost()
+	req.Destinations = []string{"2606:4700:4700::/48"}
+	host.IPv6Rules = json.RawMessage(`[{"priority":0,"table":"local"},{"priority":100,"src":"all","table":100},{"priority":32766,"table":"main"}]`)
+	host.IPv6Routes = json.RawMessage(`[{"dst":"default","table":100,"dev":"eth1"},{"dst":"fe80::/64","dev":"eth0"}]`)
+	plan, err = planFromFixture(t, req, host)
+	if ErrorCode(err) != "route_plan_uncertain" || len(plan.Rules) != 0 {
+		t.Fatalf("IPv6 earlier table default was ignored: plan=%+v err=%v", plan, err)
+	}
+}
+
+func TestSelectivePlanFingerprintProtectsRouteLookups(t *testing.T) {
+	req, host := fixtureSelectiveRequest(), fixtureSelectiveHost()
+	baseline, err := planFromFixture(t, req, host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mutations := []struct {
+		name string
+		edit func(*HostPreflight)
+	}{
+		{"endpoint_route_gateway", func(h *HostPreflight) {
+			h.Endpoint.KernelRoute = json.RawMessage(`[{"dst":"198.51.100.1","gateway":"192.0.2.99","dev":"eth0"}]`)
+		}},
+		{"endpoint_route_device", func(h *HostPreflight) {
+			h.Endpoint.KernelRoute = json.RawMessage(`[{"dst":"198.51.100.1","gateway":"192.0.2.1","dev":"eth2"}]`)
+		}},
+		{"management_route_gateway", func(h *HostPreflight) {
+			h.ManagementPeer.KernelRoute = json.RawMessage(`[{"dst":"198.51.100.2","gateway":"192.0.2.99","dev":"eth0"}]`)
+		}},
+		{"management_route_device", func(h *HostPreflight) {
+			h.ManagementPeer.KernelRoute = json.RawMessage(`[{"dst":"198.51.100.2","gateway":"192.0.2.1","dev":"eth2"}]`)
+		}},
+	}
+	for _, tt := range mutations {
+		t.Run(tt.name, func(t *testing.T) {
+			h := fixtureSelectiveHost()
+			tt.edit(&h)
+			plan, err := planFromFixture(t, req, h)
+			if err != nil || plan.PlanSHA256 == baseline.PlanSHA256 ||
+				plan.ObservationSHA256 == baseline.ObservationSHA256 {
+				t.Fatalf("protected route drift was not fingerprinted: plan=%+v err=%v", plan, err)
+			}
+		})
+	}
+	// Different key order and whitespace are the same observation.
+	host.Endpoint.KernelRoute = json.RawMessage(`[ { "dev":"eth0", "gateway":"192.0.2.1", "dst":"198.51.100.1" } ]`)
+	host.ManagementPeer.KernelRoute = json.RawMessage(`[{"gateway":"192.0.2.1", "dst":"198.51.100.2", "dev":"eth0"}]`)
+	host.IPv4Routes = json.RawMessage(`[{"dev":"eth0","dst":"default"},{"dev":"eth0", "dst":"192.0.2.0/24"}]`)
+	same, err := planFromFixture(t, req, host)
+	if err != nil || same.ObservationSHA256 != baseline.ObservationSHA256 ||
+		same.PlanSHA256 != baseline.PlanSHA256 {
+		t.Fatalf("equivalent observation JSON changed canonical digest: plan=%+v err=%v", same, err)
+	}
+}
+
+func TestSelectivePlanRejectsUnsupportedProtectedLookupEvidence(t *testing.T) {
+	tests := []struct {
+		name string
+		edit func(*HostPreflight)
+	}{
+		{"missing_endpoint_payload", func(h *HostPreflight) { h.Endpoint.KernelRoute = nil }},
+		{"empty_management_payload", func(h *HostPreflight) { h.ManagementPeer.KernelRoute = json.RawMessage(`[]`) }},
+		{"wrong_endpoint_family", func(h *HostPreflight) { h.Endpoint.Family = "ipv6" }},
+		{"wrong_management_destination", func(h *HostPreflight) {
+			h.ManagementPeer.KernelRoute = json.RawMessage(`[{"dst":"8.8.8.8","dev":"eth0"}]`)
+		}},
+		{"missing_endpoint_destination", func(h *HostPreflight) {
+			h.Endpoint.KernelRoute = json.RawMessage(`[{"gateway":"192.0.2.1","dev":"eth0"}]`)
+		}},
+		{"missing_management_reference", func(h *HostPreflight) { h.ManagementPeer = nil }},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req, h := fixtureSelectiveRequest(), fixtureSelectiveHost()
+			tt.edit(&h)
+			p, err := planFromFixture(t, req, h)
+			if ErrorCode(err) != "route_plan_uncertain" || p.PlanSHA256 != "" || len(p.Routes) != 0 {
+				t.Fatalf("invalid protected lookup evidence escaped fail-closed planner: plan=%+v err=%v", p, err)
+			}
+		})
 	}
 }

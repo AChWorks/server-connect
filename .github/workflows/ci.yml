@@ -100,6 +100,27 @@ jobs:
           assert plan['routes'][0]['destination'] == '8.8.8.0/24'
           assert len(plan['plan_sha256']) == 64
           PYPLAN
+          # A second native-iproute2 preview spans both families even on a
+          # host with no IPv6 default route. It must remain advisory only.
+          build/ci/server-connect-cli --json selective-plan \
+            --endpoint 198.51.100.10 --management-peer 203.0.113.42 \
+            --tunnel-if scpreview0 --destination 8.8.8.0/24 \
+            --destination 2606:4700:4700::/48 \
+            > build/ci/selective-plan-mixed.json
+          python3 - <<'PYMIXED'
+          import json
+          with open('build/ci/selective-plan-mixed.json') as f:
+              response=json.load(f)
+          assert response['ok'] is True
+          plan=response['data']
+          assert plan['read_only'] is True
+          for negative in ('activation_ready','snapshot_atomic','guard_armed','ownership_verified'):
+              assert plan[negative] is False
+          assert len(plan['routes']) == len(plan['rules']) == 2
+          assert {r['family'] for r in plan['routes']} == {'ipv4','ipv6'}
+          assert {r['family'] for r in plan['rules']} == {'ipv4','ipv6'}
+          assert len(plan['observation_sha256']) == len(plan['plan_sha256']) == 64
+          PYMIXED
           build/ci/server-connect-cli --json host-preflight --endpoint 127.0.0.1 \
             --management-peer 127.0.0.2 > build/ci/host-preflight.json
           python3 - <<'PYQA'
