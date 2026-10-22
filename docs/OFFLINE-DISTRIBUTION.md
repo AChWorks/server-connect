@@ -63,7 +63,7 @@ A bundle may support additional optional cores **only when tested and intentiona
 - Ordinary uninstall removes owned executable/service/network resources but **preserves operator profile material** by default; destructive purge is separately confirmed.
 - Online and offline package updates converge on the same verified local-bundle path and never silently replaces unrelated applications or network controls. A failed update must leave a usable prior version or explicit recoverable state.
 - Default after first install: **Direct**, no active TUN/host-wide routing takeover.
-- Opt-in `server-connect apt -- apt-get ...` uses an unlinked read-only config descriptor and **never** persists `/etc/apt` proxy settings. APT/download applications are not required to honor generic environment variables; operator-selected applications must have a tested proxy mechanism, and unrelated services must remain unchanged.
+- Opt-in `server-connect apt -- apt-get ...` uses an unlinked private mode-0600 config descriptor and **never** persists `/etc/apt` proxy settings. APT/download applications are not required to honor generic environment variables; operator-selected applications must have a tested proxy mechanism, and unrelated services must remain unchanged.
 
 ## 4. Versioned compatibility and honest support
 

@@ -220,7 +220,7 @@ func run(j bool, m *sc.Manager, args []string) int {
 		fmt.Print(helpText)
 		return 0
 	default:
-		return output(j, nil, fmt.Errorf("unknown command: %s (run help)", name))
+		return output(j, nil, sc.Fault("unknown_command", "unknown command; run help"))
 	}
 }
 

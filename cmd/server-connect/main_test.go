@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -88,5 +89,32 @@ func TestMenuAptUpdateRequiresExplicitConfirmation(t *testing.T) {
 	}
 	if _, err := os.Stat(manager.Dir); !os.IsNotExist(err) {
 		t.Fatal("canceled APT action unexpectedly touched protected product state")
+	}
+}
+
+func TestUnknownCommandNeverEchoesPastedBearerURI(t *testing.T) {
+	secret := "vless://c2902f3a-1c25-41ef-a8dc-760b483aa247@secret.invalid:443?type=tcp"
+	m := sc.New(t.TempDir(), "", 0)
+	for _, jsonMode := range []bool{true, false} {
+		reader, writer, err := os.Pipe()
+		if err != nil {
+			t.Fatal(err)
+		}
+		oldOut, oldErr := os.Stdout, os.Stderr
+		os.Stdout, os.Stderr = writer, writer
+		exit := run(jsonMode, m, []string{secret})
+		writer.Close()
+		os.Stdout, os.Stderr = oldOut, oldErr
+		out, err := io.ReadAll(reader)
+		reader.Close()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if exit == 0 || strings.Contains(string(out), "c2902f3a") || strings.Contains(string(out), "secret.invalid") {
+			t.Fatalf("unknown-command secret exposure or success: code=%d", exit)
+		}
+		if jsonMode && !strings.Contains(string(out), "unknown_command") {
+			t.Fatal("machine-readable error code missing")
+		}
 	}
 }

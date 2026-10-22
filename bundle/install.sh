@@ -48,6 +48,42 @@ verify_payload() {
  core=$($SOURCE_DIR/bin/sing-box version 2>/dev/null | head -n 1) || die 'candidate sing-box not executable'
  [ "$core" = 'sing-box version 1.14.3' ] || die 'unexpected sing-box core version'
 }
+# Inspect the *effective* systemd identity before ANY stop/disable/enable or
+# replacement. No local unit path does not mean there is no vendor/transient
+# unit of the same name in another directory.
+check_service_owner() {
+ props=$(systemctl show server-connect.service    --property=LoadState --property=FragmentPath    --property=DropInPaths --property=Transient --property=UnitFileState) ||
+     die 'cannot inspect systemd service provenance'
+ load=$(printf '%s\n' "$props" | sed -n 's/^LoadState=//p')
+ fragment=$(printf '%s\n' "$props" | sed -n 's/^FragmentPath=//p')
+ dropins=$(printf '%s\n' "$props" | sed -n 's/^DropInPaths=//p')
+ transient=$(printf '%s\n' "$props" | sed -n 's/^Transient=//p')
+ enabled=$(printf '%s\n' "$props" | sed -n 's/^UnitFileState=//p')
+ case "$load" in
+ not-found)
+  [ -z "$fragment" ] && [ -z "$dropins" ] && [ "$transient" = no ] &&
+   [ -z "$enabled" ] || die 'conflicting or stale same-name systemd unit; refusing mutation'
+  [ ! -e "$UNIT" ] && [ ! -L "$UNIT" ] ||
+   die 'systemd does not recognize existing local unit; repair via console'
+  [ ! -e "$PREFIX" ] && [ ! -L "$PREFIX" ] ||
+   die 'partial product installation lacks a verified loaded unit; repair via console'
+  unit_identity=absent
+  ;;
+ loaded)
+  [ "$fragment" = "$UNIT" ] && [ -z "$dropins" ] && [ "$transient" = no ] ||
+   die 'foreign same-name systemd unit or drop-in; refusing mutation'
+  check_root_file "$PREFIX/.owner"
+  [ "$(cat "$PREFIX/.owner")" = 'AChWorks/server-connect' ] ||
+   die 'product install marker conflict; refusing service mutation'
+  check_root_file "$UNIT"
+  check_root_file "$PREFIX/unit.sha256"
+  printf '%s  %s\n' "$(cat "$PREFIX/unit.sha256")" "$UNIT" |
+   sha256sum --quiet --check - || die 'systemd unit ownership digest conflict'
+  unit_identity=owned
+  ;;
+ *) die 'systemd service provenance not safely absent or owned'
+ esac
+}
 check_owned() {
  if [ -e "$PREFIX" ] || [ -L "$PREFIX" ]; then
   check_root_dir "$PREFIX"
@@ -83,6 +119,7 @@ require_root
 check_platform
 verify_payload
 check_owned
+check_service_owner
 
 if [ "$ACTION" = --verify-only ]; then say 'local bundle and owned-resource preflight PASS; publisher signature must be independently verified'; exit 0;fi
 
@@ -98,7 +135,8 @@ exec 9>"$STATE/.lock"
 chmod 0600 "$STATE/.lock"
 flock -w 30 -x 9 || die 'another Server Connect operation holds the lifecycle lock'
 check_owned
-if [ -f "$UNIT" ]; then
+check_service_owner
+if [ "$unit_identity" = owned ]; then
  "$SOURCE_DIR/bin/server-connect" installer-check-service >/dev/null ||
   die 'effective installed systemd unit provenance conflict'
 fi
@@ -151,7 +189,11 @@ release="$PREFIX/releases/$release_name"
 previous=''
 if [ -L "$PREFIX/current" ]; then previous=$(readlink "$PREFIX/current");fi
 was_active=no
-if systemctl is-active --quiet server-connect.service; then was_active=yes;fi
+was_enabled=no
+if [ "$unit_identity" = owned ];then
+ if systemctl is-active --quiet server-connect.service;then was_active=yes;fi
+ if systemctl is-enabled --quiet server-connect.service;then was_enabled=yes;fi
+fi
 [ -z "$previous" ] || [ -f "$UNIT" ] || die 'previous owned release has no systemd unit; repair via console before update'
 
 prefix_created=no
@@ -193,6 +235,15 @@ rollback_candidate() {
     rm -f -- "$COMMAND" || { say 'RECOVERY_REQUIRED: new command link removal failed';failed=yes; }
   fi
   systemctl daemon-reload || { say 'RECOVERY_REQUIRED: systemd reload failed';failed=yes; }
+  if [ "$unit_identity" = owned ];then
+   if [ "$was_enabled" = yes ];then
+    systemctl enable server-connect.service ||
+     { say 'RECOVERY_REQUIRED: previous enabled state restoration failed';failed=yes; }
+   else
+    systemctl disable server-connect.service ||
+     { say 'RECOVERY_REQUIRED: previous disabled state restoration failed';failed=yes; }
+   fi
+  fi
   if [ "$was_active" = yes ];then
    systemctl start server-connect.service ||
     { say 'RECOVERY_REQUIRED: previous service restart failed';failed=yes; }
@@ -317,9 +368,16 @@ if [ "$was_active" = yes ];then
  "$PREFIX/current/bin/server-connect" ready --json >/dev/null ||
   die 'updated service listener readiness failed'
 else
- # Never silently reactivate a proxy retained from an old uninstall.
+ # An owned crashed/inactive service may remain enabled; committed Direct
+ # must be *both* inactive and disabled before discarding runtime credentials.
+ systemctl disable server-connect.service ||
+  die 'cannot disable owned inactive service before Direct reconciliation'
  "$PREFIX/current/bin/server-connect" installer-reconcile-direct >/dev/null ||
   die 'Direct state reconciliation failed after installation'
+ if systemctl is-failed --quiet server-connect.service;then
+  systemctl reset-failed server-connect.service ||
+   die 'cannot reconcile historical owned service failure state'
+ fi
 fi
 operation_done=yes
 rollback_needed=no

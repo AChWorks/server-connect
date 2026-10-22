@@ -541,7 +541,37 @@ func (m *Manager) Ready() error {
 // ReconcileDirectUnderInstaller runs only from a root-owned installer while
 // its shared .lock is held and after systemd has confirmed service shutdown.
 // This resets active intent but preserves stored profiles for later opt-in.
+// verifyInheritedInstallerLock validates FD 9 inherited from the actual
+// installer flock. Re-acquiring LOCK_EX on the same open file description
+// succeeds; a different command cannot mutate while another holder owns it.
+// An outside invocation lacking this protected descriptor is rejected.
+func (m *Manager) verifyInheritedInstallerLock() error {
+	if os.Geteuid() != 0 || m.Dir != DefaultDir {
+		return Fault("lifecycle_conflict", "installed root-owned lifecycle lock required")
+	}
+	lockPath := filepath.Join(m.Dir, ".lock")
+	fileInfo, err := os.Lstat(lockPath)
+	if err != nil || !fileInfo.Mode().IsRegular() || fileInfo.Mode().Perm() != 0600 || !ownedByRoot(fileInfo) {
+		return Fault("lifecycle_conflict", "trusted lifecycle lock unavailable")
+	}
+	procInfo, err := os.Stat("/proc/self/fd/9")
+	if err != nil || !os.SameFile(fileInfo, procInfo) {
+		return Fault("lifecycle_conflict", "inherited installer lock descriptor missing")
+	}
+	if err = syscall.Flock(9, syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		return Fault("lifecycle_conflict", "lifecycle lock held by another operation")
+	}
+	return nil
+}
+
 func (m *Manager) ReconcileDirectUnderInstaller() error {
+	if err := m.verifyInheritedInstallerLock(); err != nil {
+		return err
+	}
+	// A valid lifecycle lock alone cannot adopt a foreign or missing service.
+	if err := m.verifyUnitOwnership(); err != nil {
+		return err
+	}
 	if os.Geteuid() != 0 || m.Dir != DefaultDir || m.Core != DefaultCore {
 		return Fault("lifecycle_conflict", "only the installed root-owned lifecycle can reconcile Direct")
 	}

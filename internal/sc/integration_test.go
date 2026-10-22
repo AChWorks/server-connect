@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -209,7 +210,7 @@ func testAPTThroughCore(t *testing.T, proxyURL *url.URL) {
 	digest := sha256.Sum256(zippedIndex)
 	plainDigest := sha256.Sum256(packageIndex)
 	release := fmt.Sprintf("Origin: Server Connect CI\nLabel: SC disposable test\nSuite: qa\nCodename: qa\nArchitectures: amd64\nComponents: main\nDate: %s\nSHA256:\n %x %d main/binary-amd64/Packages\n %x %d main/binary-amd64/Packages.gz\n", time.Now().UTC().Format(time.RFC1123Z), plainDigest, len(packageIndex), digest, len(zippedIndex))
-	aptOrigin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	originHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/dists/qa/Release":
 			w.Write([]byte(release))
@@ -220,8 +221,11 @@ func testAPTThroughCore(t *testing.T, proxyURL *url.URL) {
 		default:
 			http.NotFound(w, r)
 		}
-	}))
+	})
+	aptOrigin := httptest.NewServer(originHandler)
 	defer aptOrigin.Close()
+	secondary := httptest.NewServer(originHandler)
+	defer secondary.Close()
 	dir := t.TempDir()
 	for _, name := range []string{"lists", "lists/partial", "archives"} {
 		if err := os.MkdirAll(filepath.Join(dir, name), 0755); err != nil {
@@ -229,7 +233,9 @@ func testAPTThroughCore(t *testing.T, proxyURL *url.URL) {
 		}
 	}
 	source := filepath.Join(dir, "sources.list")
-	if err := os.WriteFile(source, []byte("deb [trusted=yes] "+aptOrigin.URL+" qa main\n"), 0644); err != nil {
+	if err := os.WriteFile(source, []byte(
+		"deb [trusted=yes] "+aptOrigin.URL+" qa main\n"+
+			"deb [trusted=yes] "+secondary.URL+" qa main\n"), 0644); err != nil {
 		t.Fatal(err)
 	}
 	state := t.TempDir()
@@ -272,13 +278,13 @@ func testAPTThroughCore(t *testing.T, proxyURL *url.URL) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	found := false
+	found := 0
 	for _, entry := range listEntries {
 		if strings.Contains(entry.Name(), "_Packages") {
-			found = true
+			found++
 		}
 	}
-	if !found {
+	if found < 2 {
 		names := make([]string, 0, len(listEntries))
 		for _, entry := range listEntries {
 			names = append(names, entry.Name())
@@ -292,6 +298,41 @@ func testAPTThroughCore(t *testing.T, proxyURL *url.URL) {
 				}
 			}
 		}
-		t.Fatalf("APT package index missing: file_names=%v safe_progress=%v", names, safeProgress)
+		t.Fatalf("APT package indexes missing: file_names=%v safe_progress=%v", names, safeProgress)
+	}
+	// Close one repository AFTER indexing it. An ordinary apt-get update can
+	// return success while retaining stale indexes, so require strict mode.
+	// This synthetic server is entirely local; never log its auth debug trace.
+	secondary.Close()
+	if _, err = fd.Seek(0, 0); err != nil {
+		t.Fatal(err)
+	}
+	strictArgs := append(append([]string{}, args...), "--error-on=any")
+	strict := exec.Command("apt-get", strictArgs...)
+	strict.Env = safeAptEnv()
+	strict.ExtraFiles = []*os.File{fd}
+	failedOutput, runErr := strict.CombinedOutput()
+	if runErr == nil {
+		t.Fatal("partial APT failure incorrectly reported success with cached indexes")
+	}
+	var exit *exec.ExitError
+	if !errors.As(runErr, &exit) || exit.ExitCode() != 100 {
+		t.Fatal("strict APT update did not fail with expected acquisition error")
+	}
+	if !bytes.Contains(failedOutput, []byte("Failed to fetch")) {
+		t.Fatal("APT failure lacked a useful acquisition diagnostic")
+	}
+	after, err := os.ReadDir(filepath.Join(dir, "lists"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cached := 0
+	for _, entry := range after {
+		if strings.Contains(entry.Name(), "_Packages") {
+			cached++
+		}
+	}
+	if cached < 2 {
+		t.Fatal("partial failure test did not retain original cached repository indexes")
 	}
 }
