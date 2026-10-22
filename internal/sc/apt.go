@@ -318,8 +318,15 @@ func verifyAptDump(dump, expected string) error {
 			}
 		}
 		if key == "dir::bin" || strings.HasPrefix(key, "dir::bin::") {
-			want, ok := nativeAPTBinConfig[key]
-			if !ok || len(fields) != 2 || fields[1] != "\""+want+"\";" {
+			want, known := nativeAPTBinConfig[key]
+			approved := known && len(fields) == 2 && fields[1] == "\""+want+"\";"
+			// Debian 13's minimal image selects the native lzma program
+			// while a full installation may use xz for the same compressor.
+			// Neither spelling permits a caller-controlled method path.
+			if key == "dir::bin::lzma" && len(fields) == 2 && fields[1] == "\"/usr/bin/lzma\";" {
+				approved = true
+			}
+			if !approved {
 				return Fault("apt_policy_conflict", "APT executable or acquisition method path differs from native Debian layout")
 			}
 			seenBins[key] = true

@@ -442,6 +442,28 @@ func TestRealNativeAPTExecutableMethodPolicyPreflight(t *testing.T) {
 // Minimal and full Debian 13 images need not install the same optional
 // compressors. "false" is the native disabled form, not a custom executable
 // path or general-purpose policy exemption.
+func TestNativeAPTMinimalAndFullLZMAPathCompatibility(t *testing.T) {
+	proxy := "http://sc:never-expose@127.0.0.1:20807"
+	base := nativeAptDumpForTest() +
+		"Acquire::http::Proxy \"" + proxy + "\";\n" +
+		"Acquire::https::Proxy \"" + proxy + "\";\n"
+	if err := verifyAptDump(base, proxy); err != nil {
+		t.Fatal("full Debian 13 lzma via xz unexpectedly rejected:", err)
+	}
+	minimal := strings.Replace(base,
+		"dir::bin::lzma \"/usr/bin/xz\";\n",
+		"dir::bin::lzma \"/usr/bin/lzma\";\n", 1)
+	if err := verifyAptDump(minimal, proxy); err != nil {
+		t.Fatal("minimal Debian 13 native lzma unexpectedly rejected:", err)
+	}
+	unsafe := strings.Replace(base,
+		"dir::bin::lzma \"/usr/bin/xz\";\n",
+		"dir::bin::lzma \"/tmp/foreign-lzma\";\n", 1)
+	if err := verifyAptDump(unsafe, proxy); ErrorCode(err) != "apt_policy_conflict" {
+		t.Fatalf("untrusted lzma executable override accepted: %v", err)
+	}
+}
+
 func TestNativeAPTOptionalCompressorCompatibility(t *testing.T) {
 	proxy := "http://sc:never-expose@127.0.0.1:20807"
 	base := nativeAptDumpForTest() +
