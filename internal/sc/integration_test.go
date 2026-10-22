@@ -143,6 +143,9 @@ func TestRealPinnedCoreProxyOnly(t *testing.T) {
 		t.Run("RealAPTBoundToPinnedVLESS", func(t *testing.T) {
 			testAPTThroughCore(t, proxyURL)
 		})
+		t.Run("NativeMirrorAndPDiffBoundToPinnedVLESS", func(t *testing.T) {
+			testAPTNativeMirrorAndPDiff(t, proxyURL)
+		})
 	} else {
 		t.Log("NOT_RUN: apt-get is not installed; only live VLESS HTTP acceptance ran")
 	}

@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 )
 
@@ -120,5 +121,145 @@ func TestAPTCredentialExecutionEnvDoesNotInheritLoaderOrPath(t *testing.T) {
 	}
 	if !haveSafePath {
 		t.Fatal("native APT child PATH is missing")
+	}
+}
+
+func createNativeAPTMethodFixture(t *testing.T, full bool) (string, uint32) {
+	t.Helper()
+	dir := t.TempDir()
+	names := append([]string{}, requiredAPTMethods...)
+	if full {
+		names = append(names, "rred", "mirror", "copy", "cdrom", "store", "sqv",
+			"mirror+http", "mirror+https", "mirror+file", "mirror+copy")
+	}
+	for _, name := range names {
+		path := filepath.Join(dir, name)
+		if target, ok := nativeAPTMethodAliases[name]; ok {
+			if err := os.Symlink(target, path); err != nil {
+				t.Fatal(err)
+			}
+		} else if err := os.WriteFile(path, []byte("fixture - not executed"), 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	info, err := os.Lstat(filepath.Join(dir, "http"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		t.Fatal("native ownership metadata unavailable")
+	}
+	return dir, stat.Uid
+}
+
+func TestNativeAPTMethodInventorySupportsFullAndMinimalDebian13(t *testing.T) {
+	for _, full := range []bool{false, true} {
+		dir, uid := createNativeAPTMethodFixture(t, full)
+		if err := verifyNativeAPTMethodInventory(dir, uid); err != nil {
+			t.Fatalf("full=%t native optional inventory rejected: %v", full, err)
+		}
+	}
+	// Root ownership and modes of every present helper are checked on the
+	// actual supported host, not only on test-created files.
+	if err := verifyNativeAPTMethods(); err != nil {
+		t.Fatalf("present native Debian 13 acquisition helpers not verified: %v", err)
+	}
+}
+
+func TestNativeAPTMethodInventoryFailsClosedOnUntrustedHelpers(t *testing.T) {
+	cases := []struct {
+		name   string
+		mutate func(t *testing.T, dir string)
+	}{
+		{"missing required method", func(t *testing.T, dir string) {
+			if err := os.Remove(filepath.Join(dir, "http")); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"optional non executable rred", func(t *testing.T, dir string) {
+			if err := os.Chmod(filepath.Join(dir, "rred"), 0644); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"writable mirror", func(t *testing.T, dir string) {
+			if err := os.Chmod(filepath.Join(dir, "mirror"), 0775); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"writable rred", func(t *testing.T, dir string) {
+			if err := os.Chmod(filepath.Join(dir, "rred"), 0757); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"untrusted alias traversal", func(t *testing.T, dir string) {
+			p := filepath.Join(dir, "mirror+https")
+			if err := os.Remove(p); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink("../outside", p); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"untrusted absolute alias", func(t *testing.T, dir string) {
+			p := filepath.Join(dir, "https")
+			if err := os.Remove(p); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink("/usr/bin/sh", p); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"alias to wrong local executable", func(t *testing.T, dir string) {
+			p := filepath.Join(dir, "mirror+http")
+			if err := os.Remove(p); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink("http", p); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"alias target missing", func(t *testing.T, dir string) {
+			if err := os.Remove(filepath.Join(dir, "mirror")); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"symlink replaces regular rred", func(t *testing.T, dir string) {
+			p := filepath.Join(dir, "rred")
+			if err := os.Remove(p); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink("http", p); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"unknown executable", func(t *testing.T, dir string) {
+			if err := os.WriteFile(filepath.Join(dir, "custom-transport"), []byte("fixture - not executed"), 0755); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"unknown nonexecutable", func(t *testing.T, dir string) {
+			if err := os.WriteFile(filepath.Join(dir, "foreign-readme"), []byte("fixture - not executed"), 0644); err != nil {
+				t.Fatal(err)
+			}
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir, uid := createNativeAPTMethodFixture(t, true)
+			tc.mutate(t, dir)
+			if err := verifyNativeAPTMethodInventory(dir, uid); ErrorCode(err) != "apt_untrusted_executable" {
+				t.Fatalf("untrusted APT method inventory accepted: %v", err)
+			}
+		})
+	}
+}
+
+func TestNativeAPTMethodInventoryRejectsNonTrustedOwnership(t *testing.T) {
+	dir, uid := createNativeAPTMethodFixture(t, true)
+	// The same real UID check used with expectedUID=0 in production must
+	// reject a regular native helper that belongs to another principal.
+	if err := verifyNativeAPTMethodInventory(dir, uid+1); ErrorCode(err) != "apt_untrusted_executable" {
+		t.Fatalf("different-owner native method incorrectly accepted: %v", err)
 	}
 }
