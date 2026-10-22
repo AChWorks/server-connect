@@ -66,6 +66,30 @@ jobs:
           go vet ./...
           go test ./... -count=1 -timeout=100s -v
           sh -n bundle/install.sh scripts/package.sh scripts/bootstrap-online.sh
+      - name: Native Debian 13 read-only host preflight
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Keep original tests in the minimal APT layout; install optional
+          # host inspection tools only for their own real-kernel test.
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends iproute2
+          test -x /usr/bin/ip
+          go test ./internal/sc -run '^TestPreflight' -count=1 -v
+          go build -o build/ci/server-connect-cli ./cmd/server-connect
+          build/ci/server-connect-cli --json host-preflight --endpoint 127.0.0.1 \
+            --management-peer 127.0.0.2 > build/ci/host-preflight.json
+          python3 - <<'PYQA'
+          import json
+          with open('build/ci/host-preflight.json') as source:
+              response = json.load(source)
+          report = response['data']
+          assert response['ok'] is True
+          assert report['read_only'] is True
+          assert report['activation_ready'] is False
+          assert report['snapshot_atomic'] is False
+          assert report['endpoint']['target'] == '127.0.0.1'
+          assert report['management_peer']['target'] == '127.0.0.2'
+          PYQA
       - name: Local QA artifact and digest-verified online acquisition smoke
         shell: bash
         run: |
