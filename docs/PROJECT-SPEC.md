@@ -42,6 +42,13 @@ Policies apply to **outbound connectivity**. Incoming public traffic from abroad
 
 The tool must let users keep the website/SSH ingress goal out of scope, test it optionally, or make it an explicit acceptance gate for a hosting-oriented activation. Paid-gateway/IP-allowlisted APIs, SMTP and other applications may need independent route and fail-closed policy.
 
+### Deferred expansion boundaries (not MVP or first-release acceptance)
+
+- **Stored profiles are not active paths.** The initial Proxy Only workflow may select exactly one active outbound, but this is an MVP limitation, **not** a permanent product invariant. Preserve stable private profile identities and versioned migratable state so an operator can later activate two or more independently testable, differently configured outbounds, selecting each explicitly per supported application, local listener, or destination policy. No multi-profile runtime, per-app router or speculative provider framework is required now; the Owner-deferred [Issue #7](https://github.com/AChWorks/server-connect/issues/7) owns future implementation and acceptance.
+- **Traffic policy and core runtime remain distinct.** Future outbound selection and path health must be attributable to the exact selected profile, not a single global default or a successful Direct check. Future per-flow fail-closed choices must not redirect operator-marked VPN-required traffic to Direct. Existing single-profile state may evolve through an explicit backward-safe migration; do not treat its current JSON shape or sing-box tag as a permanent public API.
+- **Ingress and server-to-server relay are separate integrations.** Hosting a Marzban control panel, offering Xray/Marzban Node services, or forwarding public client connections through an operator-owned Backhaul-like relay is not implied by making outbound downloads/APIs work. The client-to-Iran public IP/port path, relay underlay, foreign node, return traffic and applicable TCP/UDP semantics must each be independently reachable and verified. Do not seize relay ports, inbound connections, established reply paths or third-party tunnel state. Future optional egress assistance for an operator-owned connector may be considered only with a supported transport and dedicated guarded route policy; no inbound relay or VPN-selling panel is part of this product's MVP.
+
+
 **Proxy Only** must also be safe when the VPN core stops: prefer opt-in per-command/application proxy settings. If Server Connect itself creates persistent application-level proxy settings, it must remove or restore exactly those owned changes on disconnect, failure and uninstall; never overwrite operator-managed settings or leave clients unintentionally pointing at a dead local proxy.
 
 ## 4. Safety invariants

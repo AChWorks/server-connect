@@ -20,34 +20,60 @@ case "$digest" in *[!0123456789abcdefABCDEF]*) echo 'Invalid digest syntax' >&2;
 command -v curl >/dev/null 2>&1 || { echo 'A supported downloader (curl) is required for the online bootstrap' >&2;exit 1; }
 command -v sha256sum >/dev/null 2>&1 || { echo 'sha256sum is required' >&2;exit 1; }
 command -v tar >/dev/null 2>&1 || { echo 'tar is required' >&2;exit 1; }
+# Privileged installation requires root-owned staging from the first download.
+# Root authority is acquired before network acquisition, never after a user
+# controls a temporary archive/extraction directory.
+if [ "$verify_only" != yes ] && [ "$(id -u)" -ne 0 ];then
+ echo 'Run the online installation command as root; non-root --verify-only is supported.' >&2
+ exit 1
+fi
 work=$(mktemp -d) || exit 1
 trap 'rm -rf -- "$work"' EXIT HUP INT TERM
 # Download a complete offline artifact: no secondary/floating prerequisites.
-if ! curl --fail --location --silent --show-error --connect-timeout 15 --max-time 180 --retry 2 --output "$work/bundle.tar.gz" "$url";then
+case "$url" in
+ https://*) allowed_proto='=https';;
+ *) allowed_proto='=http,https';;
+esac
+if ! curl --fail --location --proto "$allowed_proto" --proto-redir "$allowed_proto" --silent --show-error --connect-timeout 15 --max-time 180 --retry 2 --output "$work/bundle.tar.gz" "$url";then
  echo 'Online acquisition failed without installation changes. Use the complete offline bundle instead.' >&2
  exit 1
 fi
 printf '%s  %s\n' "$digest" "$work/bundle.tar.gz" | sha256sum --quiet --check - || { echo 'Publisher-supplied independent digest mismatch' >&2;exit 1; }
-# Do not let an archive member escape the private extraction directory.
-# An accepted top-level prefix alone does not reject server-connect/../../etc.
-if ! tar -tzf "$work/bundle.tar.gz" | LC_ALL=C awk '
-  BEGIN {seen=0; invalid=0}
-  {
-    seen++
-    if ($0 !~ /^server-connect\// || $0 ~ /(^|\/)\.\.(\/|$)/ || $0 ~ /(^|\/)\.(\/|$)/ || $0 ~ /\/\// || $0 ~ /\\/ || $0 ~ /[[:cntrl:]]/) invalid=1
-  }
-  END {if (seen==0 || invalid) exit 1}
-';then echo 'Unsafe archive entry; refusing extraction' >&2;exit 1;fi
-if tar -tvzf "$work/bundle.tar.gz" | LC_ALL=C grep -E '^[lh]' >/dev/null;then echo 'Archive contains link entries; refusing extraction' >&2; exit 1;fi
+# Metadata must be fully readable before extraction. Reject dangerous member
+# types, repetitions, traversal, control chars and unbounded expansion.
+archive_bytes=$(wc -c < "$work/bundle.tar.gz")
+[ "$archive_bytes" -le 1073741824 ] || { echo 'Archive exceeds supported 1 GiB compressed size' >&2;exit 1; }
+tar -tzf "$work/bundle.tar.gz" > "$work/names.txt" ||
+ { echo 'Malformed archive entry listing' >&2;exit 1; }
+tar -tvzf "$work/bundle.tar.gz" > "$work/members.txt" ||
+ { echo 'Malformed archive metadata' >&2;exit 1; }
+LC_ALL=C awk '
+ BEGIN {seen=0; bad=0}
+ {
+  seen++
+  if ($0 !~ /^server-connect\// || $0 ~ /(^|\/)\.\.(\/|$)/ || $0 ~ /(^|\/)\.(\/|$)/ ||
+   $0 ~ /\/\// || $0 ~ /\\/ || $0 ~ /[[:cntrl:]]/) bad=1
+ }
+ END {if (bad || seen==0 || seen>10000) exit 1}
+' "$work/names.txt" || { echo 'Unsafe archive name or excessive entries' >&2;exit 1; }
+if LC_ALL=C sort "$work/names.txt" | uniq -d | grep -q .;then
+ echo 'Duplicate archive member path; refusing extraction' >&2;exit 1
+fi
+LC_ALL=C awk '
+ BEGIN {count=0; total=0;bad=0}
+ {
+  count++
+  type=substr($1,1,1)
+  if ((type!="-" && type!="d") || $3 !~ /^[0-9]+$/) bad=1
+  total+=$3
+  if ($3>4294967296 || total>8589934592) bad=1
+ }
+ END {if (bad || count==0 || count>10000) exit 1}
+' "$work/members.txt" || { echo 'Unsupported archive member type or expanded size' >&2;exit 1; }
 tar -xzf "$work/bundle.tar.gz" -C "$work" --no-same-owner --no-same-permissions
 [ -f "$work/server-connect/install.sh" ] && [ ! -L "$work/server-connect/install.sh" ] || { echo 'Missing local installer' >&2;exit 1; }
 if [ "$verify_only" = yes ];then
  echo 'Online fetch, trusted digest and archive layout: verified. Installation was not attempted.'
  exit 0
 fi
-if [ "$(id -u)" -eq 0 ];then
- sh "$work/server-connect/install.sh" --offline
-else
- command -v sudo >/dev/null 2>&1 || { echo 'sudo required for privileged installation' >&2;exit 1; }
- sudo sh "$work/server-connect/install.sh" --offline
-fi
+sh "$work/server-connect/install.sh" --offline

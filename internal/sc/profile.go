@@ -7,7 +7,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"net"
 	"net/url"
 	"os"
@@ -129,19 +128,38 @@ func parseVLESS(raw string) (json.RawMessage, string, error) {
 		return nil, "", errors.New("endpoint hostname too long")
 	}
 	q := u.Query()
+	allowed := map[string]bool{
+		"type": true, "security": true, "encryption": true, "flow": true,
+		"sni": true, "fp": true, "alpn": true, "pbk": true, "sid": true,
+		"path": true, "host": true,
+	}
+	for name, values := range q {
+		if !allowed[name] || len(values) != 1 {
+			return nil, "", Fault("unsupported_profile", "unknown, repeated or unsupported VLESS query option")
+		}
+	}
 	typ := q.Get("type")
 	if typ == "" {
 		typ = "tcp"
 	}
 	if typ != "tcp" && typ != "ws" {
-		return nil, "", fmt.Errorf("unsupported VLESS transport: %s", typ)
+		return nil, "", Fault("unsupported_profile", "unsupported VLESS transport")
 	}
 	security := q.Get("security")
 	if security == "" {
 		security = "none"
 	}
 	if security != "none" && security != "tls" && security != "reality" {
-		return nil, "", fmt.Errorf("unsupported VLESS security: %s", security)
+		return nil, "", Fault("unsupported_profile", "unsupported VLESS security")
+	}
+	if typ != "ws" && (q.Has("path") || q.Has("host")) {
+		return nil, "", Fault("unsupported_profile", "WebSocket-specific options require WebSocket transport")
+	}
+	if security == "none" && (q.Has("sni") || q.Has("fp") || q.Has("alpn") || q.Has("pbk") || q.Has("sid")) {
+		return nil, "", Fault("unsupported_profile", "TLS-specific options require TLS or Reality")
+	}
+	if security != "reality" && (q.Has("pbk") || q.Has("sid")) {
+		return nil, "", Fault("unsupported_profile", "Reality-specific options require Reality")
 	}
 	if q.Get("encryption") != "" && q.Get("encryption") != "none" {
 		return nil, "", errors.New("unsupported VLESS encryption")
@@ -182,6 +200,9 @@ func parseVLESS(raw string) (json.RawMessage, string, error) {
 			tls["alpn"] = strings.Split(a, ",")
 		}
 		if security == "reality" {
+			if q.Get("fp") == "" {
+				return nil, "", Fault("unsupported_profile", "Reality clients require a supported uTLS fingerprint (fp)")
+			}
 			if q.Get("pbk") == "" || q.Get("sni") == "" {
 				return nil, "", errors.New("Reality requires pbk and sni")
 			}
@@ -243,9 +264,9 @@ func CheckConfig(core, base string, config []byte) error {
 	cmd := exec.CommandContext(ctx, core, "check", "-c", path)
 	if e := cmd.Run(); e != nil {
 		if ctx.Err() != nil {
-			return errors.New("sing-box core validation timed out")
+			return Fault("core_timeout", "sing-box core validation timed out")
 		}
-		return errors.New("sing-box rejected the profile; check supported fields and transport")
+		return Fault("core_config_rejected", "sing-box rejected the profile; check supported fields and transport")
 	}
 	return nil
 }
@@ -255,10 +276,10 @@ func EnsureCore(core string) error {
 	defer cancel()
 	b, e := exec.CommandContext(ctx, core, "version").Output()
 	if e != nil {
-		return fmt.Errorf("pinned sing-box core unavailable: %w", e)
+		return Fault("core_unavailable", "pinned sing-box core unavailable or not executable")
 	}
 	if !strings.HasPrefix(string(b), "sing-box version "+CoreVersion+"\n") {
-		return fmt.Errorf("core version mismatch (requires %s)", CoreVersion)
+		return Fault("core_version_mismatch", "pinned sing-box core version mismatch")
 	}
 	return nil
 }

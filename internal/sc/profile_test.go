@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 const testUUID = "c2902f3a-1c25-41ef-a8dc-760b483aa247"
@@ -19,7 +20,7 @@ func TestVLESSParsingAndLocalProxyAuth(t *testing.T) {
 	}{
 		{"tcp", "vless://" + testUUID + "@127.0.0.1:30303?security=none&type=tcp#Test%20connection", true},
 		{"tls", "vless://" + testUUID + "@edge.example.org:443?type=ws&security=tls&sni=edge.example.org&path=%2Fws&host=edge.example.org", true},
-		{"reality", "vless://" + testUUID + "@edge.example.org:443?type=tcp&security=reality&sni=example.org&pbk=AbCdEf1234&sid=1234", true},
+		{"reality", "vless://" + testUUID + "@edge.example.org:443?type=tcp&security=reality&sni=example.org&pbk=AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA&sid=1234&fp=chrome", true},
 		{"bad port", "vless://" + testUUID + "@example.org:99999?security=none", false},
 		{"bad secret", "vless://abc@example.org:443?type=tcp", false},
 		{"unknown transport", "vless://" + testUUID + "@example.org:443?type=grpc", false},
@@ -82,7 +83,7 @@ func TestNativeConfigExtraction(t *testing.T) {
 }
 func TestPrivateStateAndNoProfileSecretsInListing(t *testing.T) {
 	dir := t.TempDir()
-	m := New(filepath.Join(dir, "state"), "/does/not/exist", DefaultUnit, DefaultPort)
+	m := New(filepath.Join(dir, "state"), "/does/not/exist", DefaultPort)
 	if e := m.withLock(func() error { return m.save(State{Version: 1, Desired: "direct", Port: DefaultPort}) }); e != nil {
 		t.Fatal(e)
 	}
@@ -124,7 +125,7 @@ func TestRejectSymlinkedPrivateState(t *testing.T) {
 	if e := os.Symlink(secret, filepath.Join(dir, "state")); e != nil {
 		t.Fatal(e)
 	}
-	m := New(filepath.Join(dir, "state"), "", "", 0)
+	m := New(filepath.Join(dir, "state"), "", 0)
 	if _, e := m.List(); e == nil {
 		t.Fatal("symlinked state accepted")
 	}
@@ -135,7 +136,7 @@ func TestRejectSymlinkedPrivateState(t *testing.T) {
 func TestDirectProbeHTTPFailureIsFailure(t *testing.T) {
 	failed := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusBadGateway) }))
 	defer failed.Close()
-	m := New(t.TempDir(), "", "", 0)
+	m := New(t.TempDir(), "", 0)
 	result, e := m.Probe("direct", failed.URL)
 	if e == nil || result.Code != 502 || result.Result != "http_error" {
 		t.Fatalf("HTTP 502 must be reported as failure: result=%+v err=%v", result, e)
@@ -145,5 +146,69 @@ func TestDirectProbeHTTPFailureIsFailure(t *testing.T) {
 	success, e := m.Probe("direct", passed.URL)
 	if e != nil || success.Code != 200 || success.Result != "reachable" {
 		t.Fatalf("unexpected healthy path result=%+v err=%v", success, e)
+	}
+}
+
+func TestUnsupportedVLESSQueryCannotBeSilentlyIgnored(t *testing.T) {
+	base := "vless://" + testUUID + "@example.org:443?type=tcp&security=none"
+	invalid := []string{
+		base + "&headerType=http",
+		base + "&serviceName=grpc",
+		base + "&type=ws",
+		base + "&path=%2Fws",
+		base + "&fp=chrome",
+		base + "&sni=secret.example",
+		base + "&flow=xtls-rprx-vision",
+		base + "&unsupported_token=never-log-this",
+	}
+	for _, src := range invalid {
+		_, err := ValidateSource([]byte(src), "")
+		if err == nil {
+			t.Fatalf("unsupported VLESS query was silently accepted")
+		}
+		if strings.Contains(err.Error(), "never-log-this") {
+			t.Fatalf("secret value leaked: %v", err)
+		}
+	}
+}
+
+func TestLifecycleRefusesUnmanagedTestState(t *testing.T) {
+	manager := New(t.TempDir(), DefaultCore, DefaultPort)
+	if err := manager.verifyUnitOwnership(); err == nil {
+		t.Fatal("arbitrary/test state cannot authorize installed systemd service mutations")
+	}
+}
+
+func TestSharedLifecycleFlockSerializesIndependentOperations(t *testing.T) {
+	m := New(filepath.Join(t.TempDir(), "state"), DefaultCore, DefaultPort)
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	done := make(chan error, 1)
+	go func() {
+		done <- m.withLock(func() error {
+			close(entered)
+			<-release
+			return nil
+		})
+	}()
+	<-entered
+	second := make(chan error, 1)
+	go func() { second <- m.withLock(func() error { return nil }) }()
+	select {
+	case err := <-second:
+		t.Fatalf("second state operation escaped the shared lifecycle lock: %v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-second:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("lock not released to waiting operation")
 	}
 }

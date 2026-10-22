@@ -145,3 +145,36 @@ func TestRealPinnedCoreProxyOnly(t *testing.T) {
 		t.Fatalf("direct access changed after upstream died: status=%d err=%v", status, e)
 	}
 }
+
+// Syntax acceptance is not reachability. Verify every advertised VLESS link
+// shape against the actual pinned upstream core, then separately test TCP live.
+func TestPinnedCoreAcceptsSupportedVLESSConfigShapes(t *testing.T) {
+	core := os.Getenv("SC_TEST_SINGBOX")
+	if core == "" {
+		t.Skip("NOT_RUN: pinned sing-box executable unavailable")
+	}
+	if err := EnsureCore(core); err != nil {
+		t.Fatal(err)
+	}
+	cases := map[string]string{
+		"vless-tcp":     "vless://" + testUUID + "@127.0.0.1:443?type=tcp&security=none",
+		"vless-tls":     "vless://" + testUUID + "@example.org:443?type=tcp&security=tls&sni=example.org",
+		"vless-ws-tls":  "vless://" + testUUID + "@example.org:443?type=ws&security=tls&sni=example.org&path=%2Fws&host=example.org",
+		"vless-reality": "vless://" + testUUID + "@example.org:443?type=tcp&security=reality&sni=example.org&pbk=AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA&sid=1234&fp=chrome",
+	}
+	for name, source := range cases {
+		t.Run(name, func(t *testing.T) {
+			p, e := ValidateSource([]byte(source), "")
+			if e != nil {
+				t.Fatal(e)
+			}
+			cfg, e := CoreConfig(p, 20807, "test-password")
+			if e != nil {
+				t.Fatal(e)
+			}
+			if e = CheckConfig(core, t.TempDir(), cfg); e != nil {
+				t.Fatal(e)
+			}
+		})
+	}
+}

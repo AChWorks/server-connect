@@ -1,7 +1,11 @@
 package sc
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
+	"crypto/x509"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -23,13 +27,15 @@ import (
 const DefaultDir = "/var/lib/server-connect"
 const DefaultCore = "/opt/server-connect/current/bin/sing-box"
 const DefaultUnit = "server-connect.service"
+const managedUnitPath = "/etc/systemd/system/server-connect.service"
+const managedPrefix = "/opt/server-connect"
 const DefaultPort = 20807
 
 var idPattern = regexp.MustCompile(`^[0-9a-f]{16}$`)
 
 type Manager struct {
-	Dir, Core, Unit string
-	Port            int
+	Dir, Core string
+	Port      int
 }
 type State struct {
 	Version  int    `json:"version"`
@@ -58,20 +64,17 @@ type ProbeResult struct {
 	Result     string `json:"result"`
 }
 
-func New(dir, core, unit string, port int) *Manager {
+func New(dir, core string, port int) *Manager {
 	if dir == "" {
 		dir = DefaultDir
 	}
 	if core == "" {
 		core = DefaultCore
 	}
-	if unit == "" {
-		unit = DefaultUnit
-	}
 	if port == 0 {
 		port = DefaultPort
 	}
-	return &Manager{Dir: dir, Core: core, Unit: unit, Port: port}
+	return &Manager{Dir: dir, Core: core, Port: port}
 }
 
 func ensureDir(path string) error {
@@ -309,7 +312,7 @@ func (m *Manager) Remove(id string) error {
 func (m *Manager) unitActive() (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 	defer cancel()
-	b, e := exec.CommandContext(ctx, "systemctl", "is-active", m.Unit).CombinedOutput()
+	b, e := exec.CommandContext(ctx, "systemctl", "is-active", DefaultUnit).CombinedOutput()
 	state := strings.TrimSpace(string(b))
 	if e != nil && state != "inactive" && state != "failed" && state != "unknown" {
 		return "unknown", errors.New("systemd service state unavailable")
@@ -321,11 +324,92 @@ func (m *Manager) unitActive() (string, error) {
 		return "unknown", errors.New("systemd returned unknown service state")
 	}
 }
+
+// verifyUnitOwnership executes before any lifecycle mutation. Merely choosing
+// an arbitrary --unit/name must never turn unrelated host services into ours.
+func (m *Manager) verifyUnitOwnership() error {
+	if m.Dir != DefaultDir || m.Core != DefaultCore {
+		return errors.New("service lifecycle requires installed Server Connect paths")
+	}
+	marker := filepath.Join(managedPrefix, ".owner")
+	markerData, err := readTrustedRootFile(marker)
+	if err != nil || strings.TrimSpace(string(markerData)) != "AChWorks/server-connect" {
+		return errors.New("Server Connect installation ownership is not verified")
+	}
+	unitData, err := readTrustedRootFile(managedUnitPath)
+	if err != nil {
+		return errors.New("owned systemd unit is missing or unsafe")
+	}
+	expected, err := readTrustedRootFile(filepath.Join(managedPrefix, "unit.sha256"))
+	if err != nil {
+		return errors.New("owned systemd unit manifest is missing or unsafe")
+	}
+	digest, err := hex.DecodeString(strings.TrimSpace(string(expected)))
+	if err != nil || len(digest) != sha256.Size {
+		return errors.New("invalid systemd unit ownership digest")
+	}
+	actual := sha256.Sum256(unitData)
+	if !bytes.Equal(digest, actual[:]) {
+		return Fault("service_conflict", "systemd unit differs from owned manifest")
+	}
+	dir, err := os.Lstat(managedPrefix)
+	if err != nil || !dir.IsDir() || dir.Mode().Perm()&0022 != 0 || !ownedByRoot(dir) {
+		return errors.New("unsafe systemd installation ownership directory")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	output, err := exec.CommandContext(ctx, "systemctl", "show", DefaultUnit,
+		"--property=LoadState", "--property=FragmentPath", "--property=DropInPaths", "--property=Transient").Output()
+	if err != nil {
+		return errors.New("systemd ownership could not be inspected")
+	}
+	fields := map[string]string{}
+	for _, line := range strings.Split(string(output), "\n") {
+		pair := strings.SplitN(line, "=", 2)
+		if len(pair) == 2 {
+			fields[pair[0]] = pair[1]
+		}
+	}
+	if fields["LoadState"] != "loaded" || fields["FragmentPath"] != managedUnitPath ||
+		fields["DropInPaths"] != "" || fields["Transient"] != "no" {
+		return Fault("service_conflict", "systemd unit provenance conflict; refusing service mutation")
+	}
+	return nil
+}
+
+func readTrustedRootFile(path string) ([]byte, error) {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return nil, err
+	}
+	if !info.Mode().IsRegular() || info.Mode().Perm()&0022 != 0 || !ownedByRoot(info) {
+		return nil, errors.New("resource is not a root-owned regular non-writable file")
+	}
+	return os.ReadFile(path)
+}
+
+func ownedByRoot(info os.FileInfo) bool {
+	st, ok := info.Sys().(*syscall.Stat_t)
+	return ok && st.Uid == 0
+}
+
+// VerifyUnitForInstaller must be callable before starting/stopping the
+// installed service. It performs no mutation or profile-store write.
+func (m *Manager) VerifyUnitForInstaller() error {
+	if os.Geteuid() != 0 {
+		return Fault("ownership_required", "root required for installed unit verification")
+	}
+	return m.verifyUnitOwnership()
+}
+
 func (m *Manager) systemctl(args ...string) error {
+	if err := m.verifyUnitOwnership(); err != nil {
+		return err
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
 	defer cancel()
 	base := append([]string{}, args...)
-	base = append(base, m.Unit)
+	base = append(base, DefaultUnit)
 	if e := exec.CommandContext(ctx, "systemctl", base...).Run(); e != nil {
 		if ctx.Err() != nil {
 			return errors.New("systemctl operation timed out")
@@ -351,6 +435,9 @@ func (m *Manager) Status() (Status, error) {
 		}
 		if s.Desired == "direct" && observed == "failed" {
 			status.Health = "historical_proxy_failure_direct_unaffected"
+		}
+		if observed == "active" && m.verifyUnitOwnership() != nil {
+			status.Health = "service_ownership_conflict"
 		}
 		return nil
 	})
@@ -431,25 +518,66 @@ func (m *Manager) waitReady(port int, password string) error {
 	return errors.New("sing-box authenticated loopback listener readiness timeout")
 }
 
-// Ready is a local-only readiness check; it does not claim upstream health.
+// Ready is read-only: state is written atomically and installer updates hold
+// the lifecycle lock while checking readiness. Avoid re-locking that FD here.
 func (m *Manager) Ready() error {
-	return m.withLock(func() error {
-		s, e := m.load()
-		if e != nil {
-			return e
+	if err := m.verifyUnitOwnership(); err != nil {
+		return err
+	}
+	s, e := m.load()
+	if e != nil {
+		return e
+	}
+	if s.Desired != "proxy" {
+		return Fault("proxy_unavailable", "proxy mode is not desired")
+	}
+	b, e := readRegular(filepath.Join(m.Dir, "proxy-auth"))
+	if e != nil {
+		return Fault("proxy_unavailable", "proxy authentication state unavailable")
+	}
+	return m.waitReady(s.Port, string(b))
+}
+
+// ReconcileDirectUnderInstaller runs only from a root-owned installer while
+// its shared .lock is held and after systemd has confirmed service shutdown.
+// This resets active intent but preserves stored profiles for later opt-in.
+func (m *Manager) ReconcileDirectUnderInstaller() error {
+	if os.Geteuid() != 0 || m.Dir != DefaultDir || m.Core != DefaultCore {
+		return Fault("lifecycle_conflict", "only the installed root-owned lifecycle can reconcile Direct")
+	}
+	state, err := m.unitActive()
+	if err != nil {
+		return err
+	}
+	if state == "active" {
+		return Fault("lifecycle_conflict", "cannot reconcile Direct with active proxy service")
+	}
+	if err = m.prepare(); err != nil {
+		return err
+	}
+	desired, err := m.load()
+	if err != nil {
+		return err
+	}
+	desired.Desired = "direct"
+	if err = m.save(desired); err != nil {
+		return err
+	}
+	target := filepath.Join(m.Dir, "runtime.json")
+	if _, err = readRegular(target); err == nil {
+		if err = os.Remove(target); err != nil {
+			return err
 		}
-		if s.Desired != "proxy" {
-			return errors.New("proxy mode is not desired")
-		}
-		b, e := readRegular(filepath.Join(m.Dir, "proxy-auth"))
-		if e != nil {
-			return e
-		}
-		return m.waitReady(s.Port, string(b))
-	})
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+	return nil
 }
 
 func (m *Manager) Connect() error {
+	if err := m.verifyUnitOwnership(); err != nil {
+		return err
+	}
 	if e := EnsureCore(m.Core); e != nil {
 		return e
 	}
@@ -557,7 +685,10 @@ func (m *Manager) proxyURL() (*url.URL, error) {
 		}
 		active, _ := m.unitActive()
 		if s.Desired != "proxy" || active != "active" {
-			return errors.New("local proxy is not active")
+			return Fault("proxy_unavailable", "local proxy is not active")
+		}
+		if err := m.verifyUnitOwnership(); err != nil {
+			return err
 		}
 		b, e := readRegular(filepath.Join(m.Dir, "proxy-auth"))
 		if e != nil {
@@ -601,7 +732,23 @@ func (m *Manager) Probe(via, destination string) (ProbeResult, error) {
 	resp, e := cli.Do(req)
 	result := ProbeResult{Path: via, DurationMs: time.Since(start).Milliseconds(), Result: "failed"}
 	if e != nil {
-		return result, fmt.Errorf("%s probe failed (DNS, connect, TLS, upstream or proxy path); host routing unchanged", via)
+		var dnsErr *net.DNSError
+		var certErr x509.UnknownAuthorityError
+		var invalidCert x509.CertificateInvalidError
+		switch {
+		case errors.As(e, &dnsErr):
+			return result, Fault("probe_dns", "path DNS resolution failed")
+		case errors.As(e, &certErr) || errors.As(e, &invalidCert):
+			return result, Fault("probe_tls", "path TLS certificate validation failed")
+		case errors.Is(e, context.DeadlineExceeded) || errors.Is(e, os.ErrDeadlineExceeded):
+			return result, Fault("probe_timeout", "path probe timed out")
+		default:
+			var opErr *net.OpError
+			if errors.As(e, &opErr) {
+				return result, Fault("probe_connect", "path TCP or proxy connection failed")
+			}
+			return result, Fault("probe_transport", "path request failed; root cause unverified")
+		}
 	}
 	defer resp.Body.Close()
 	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 2048))
@@ -610,7 +757,7 @@ func (m *Manager) Probe(via, destination string) (ProbeResult, error) {
 		result.Result = "reachable"
 	} else {
 		result.Result = "http_error"
-		return result, fmt.Errorf("%s path returned HTTP %d; request is not healthy", via, resp.StatusCode)
+		return result, Fault("probe_http", "selected path returned unhealthy HTTP response")
 	}
 	return result, nil
 }

@@ -33,6 +33,10 @@ printf '{"schema":1,"manager":"0.1.0-dev","core":"sing-box 1.14.3","core_archive
  ./bin/sing-box version | head -n 1
 )
 artifact="$ROOT/dist/server-connect-0.1.0-dev-debian13-amd64-local-qa.tar.gz"
-tar -czf "$artifact" -C "$work" server-connect
+# Normalize archive order, ownership and timestamps. A QA reviewer can
+# independently rebuild the same byte-identical artifact from pinned inputs.
+source_date_epoch=$(git show -s --format=%ct HEAD)
+LC_ALL=C TZ=UTC tar --format=gnu --sort=name --mtime="@$source_date_epoch" --owner=0 --group=0 --numeric-owner -cf - -C "$work" server-connect | gzip -n > "$artifact"
+tar -tzf "$artifact" >/dev/null || { echo 'Generated QA archive is malformed' >&2;exit 1; }
 sha256sum "$artifact"
 echo 'LOCAL QA ONLY: no publisher signature, no product license, no public binary release authorization.'

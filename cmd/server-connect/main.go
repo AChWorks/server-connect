@@ -33,7 +33,7 @@ func output(j bool, value any, err error) int {
 		if err != nil {
 			// Preserve safe partial diagnostic data (HTTP status/path/timing),
 			// while the failure remains explicit in ok=false and exit code.
-			out.Error = &apiError{Code: "operation_failed", Message: err.Error()}
+			out.Error = &apiError{Code: sc.ErrorCode(err), Message: err.Error()}
 		}
 		if e := json.NewEncoder(os.Stdout).Encode(out); e != nil {
 			return 1
@@ -60,26 +60,35 @@ func parseOpts(args []string) (bool, *sc.Manager, []string, error) {
 	jsonOut := opts.Bool("json", false, "JSON output")
 	stateDir := opts.String("state-dir", sc.DefaultDir, "private state folder")
 	core := opts.String("core", sc.DefaultCore, "pinned sing-box executable")
-	unit := opts.String("unit", sc.DefaultUnit, "owned systemd unit")
 	port := opts.Int("port", sc.DefaultPort, "loopback proxy port")
 	if e := opts.Parse(args); e != nil {
-		return false, nil, nil, e
+		return *jsonOut, nil, nil, sc.Fault("invalid_arguments", "invalid or unsupported command options")
 	}
 	if *port < 1024 || *port > 65535 {
-		return false, nil, nil, errors.New("invalid local proxy port")
+		return *jsonOut, nil, nil, sc.Fault("invalid_arguments", "invalid local proxy port")
 	}
-	return *jsonOut, sc.New(*stateDir, *core, *unit, *port), opts.Args(), nil
+	return *jsonOut, sc.New(*stateDir, *core, *port), opts.Args(), nil
 }
 func readInput(path string) ([]byte, error) {
 	if path == "-" {
 		return io.ReadAll(io.LimitReader(os.Stdin, sc.MaxProfileBytes+1))
 	}
+	if strings.Contains(path, "://") {
+		return nil, sc.Fault("invalid_input", "--file expects a local path or '-', not a URI; provide the secret on stdin")
+	}
 	f, e := os.Open(path)
 	if e != nil {
-		return nil, e
+		if errors.Is(e, os.ErrNotExist) {
+			return nil, sc.Fault("file_not_found", "profile file not found; check the private local path")
+		}
+		return nil, sc.Fault("file_unreadable", "profile file could not be opened (path withheld)")
 	}
 	defer f.Close()
-	return io.ReadAll(io.LimitReader(f, sc.MaxProfileBytes+1))
+	b, e := io.ReadAll(io.LimitReader(f, sc.MaxProfileBytes+1))
+	if e != nil {
+		return nil, sc.Fault("file_unreadable", "profile file could not be read")
+	}
+	return b, nil
 }
 func run(j bool, m *sc.Manager, args []string) int {
 	if len(args) == 0 {
@@ -100,6 +109,18 @@ func run(j bool, m *sc.Manager, args []string) int {
 		args = rest
 	}
 	switch name {
+	case "installer-check-service":
+		if len(args) != 0 || os.Geteuid() != 0 {
+			return output(j, nil, sc.Fault("invalid_arguments", "installer-only command"))
+		}
+		err := m.VerifyUnitForInstaller()
+		return output(j, map[string]bool{"verified": err == nil}, err)
+	case "installer-reconcile-direct":
+		if len(args) != 0 {
+			return output(j, nil, sc.Fault("invalid_arguments", "installer-only command"))
+		}
+		err := m.ReconcileDirectUnderInstaller()
+		return output(j, map[string]bool{"direct_reconciled": err == nil}, err)
 	case "version":
 		return output(j, map[string]string{"manager": managerVersion, "sing_box": sc.CoreVersion}, nil)
 	case "status":
@@ -114,7 +135,7 @@ func run(j bool, m *sc.Manager, args []string) int {
 		f := opts.String("file", "-", "config file, VLESS link file, or - for stdin")
 		tag := opts.String("tag", "", "sing-box outbound tag")
 		if e := opts.Parse(args); e != nil {
-			return output(j, nil, e)
+			return output(j, nil, sc.Fault("invalid_arguments", "invalid command options"))
 		}
 		b, e := readInput(*f)
 		if e != nil {
@@ -132,7 +153,7 @@ func run(j bool, m *sc.Manager, args []string) int {
 			if e == nil {
 				e = sc.CheckConfig(m.Core, os.TempDir(), cfg)
 			}
-			return output(j, map[string]any{"valid": e == nil, "kind": p.Kind}, e)
+			return output(j, map[string]any{"valid": e == nil, "kind": p.Kind, "validation_level": "pinned_core_config", "network_verified": false}, e)
 		}
 		p, e := m.Import(b, *tag)
 		return output(j, p, e)
@@ -162,10 +183,10 @@ func run(j bool, m *sc.Manager, args []string) int {
 		via := opts.String("via", "proxy", "direct or proxy (no fallback)")
 		target := opts.String("url", "", "HTTP(S) target")
 		if e := opts.Parse(args); e != nil {
-			return output(j, nil, e)
+			return output(j, nil, sc.Fault("invalid_arguments", "invalid command options"))
 		}
 		if *target == "" {
-			return output(j, nil, errors.New("--url is required"))
+			return output(j, nil, sc.Fault("invalid_arguments", "--url is required"))
 		}
 		res, e := m.Probe(*via, *target)
 		return output(j, res, e)
@@ -273,9 +294,20 @@ func menu(m *sc.Manager) int {
 }
 
 func main() {
+	// Determine JSON preference before parsing so invalid flags stay machine-readable.
+	wantsJSON := false
+	for _, arg := range os.Args[1:] {
+		if arg == "--json" {
+			wantsJSON = true
+			break
+		}
+		if arg == "exec" {
+			break
+		}
+	}
 	jsonOut, m, args, e := parseOpts(os.Args[1:])
 	if e != nil {
-		fmt.Fprintln(os.Stderr, "Error:", e)
+		output(wantsJSON || jsonOut, nil, e)
 		os.Exit(2)
 	}
 	os.Exit(run(jsonOut, m, args))

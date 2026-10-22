@@ -12,6 +12,11 @@ The bootstrap and release artifact must be authenticated against an independent 
 
 **Both paths:** the online bootstrap is only an acquisition/verification frontend. One shared installer handles version checks, preflight, staging, owned resources, state preservation, rollback, offline/online update and uninstall. No extra persistent fetch daemon, second installation state machine or feature difference is permitted.
 
+On a connected Linux host, privileged installation must create **root-owned private download/extraction staging before fetching or unpacking anything**; escalating a user-owned mutable archive directory after verification is not sufficient. Non-root dry-run archive `--verify-only` remains acceptable when no privileged installation follows. Reject unsupported archive member types, duplicate paths and traversal before extraction. A matching user-supplied checksum only verifies the bytes against that value and does not resolve the separate publisher authenticity/release-authorization gate.
+
+The first implementation's installer and CLI share an exclusive product lifecycle lock for operations that change service/profile state. Uninstall preserves stored profiles but explicitly clears active proxy intent and owned runtime configuration; reinstall starts Direct unless an explicitly separately approved restore policy exists. A failed staging or update transaction must not leave an unowned service, a dangling command link or unverified previous active state; print recovery-required evidence when restoration cannot be proved.
+
+
 Current local QA candidate layout (future signed release may add authentication metadata):
 
 ~~~text

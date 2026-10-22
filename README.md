@@ -17,7 +17,9 @@ The initial connectivity engine is **sing-box**. Rather than reinventing VPN pro
 
 A tunnel-affecting change must pass a guarded activation and an operator confirmation window before it is committed. If an active profile stops working, independent health/recovery mechanisms must restore the selected safe network policy. **Checking whether websites are reachable from abroad is optional**, depending on the operator's goal; a client VPN alone does not grant public inbound connectivity.
 
-These are **accepted design requirements, not implemented or tested capabilities**. A profile that works in Windows v2rayN/Karing may not be reachable from a particular Linux datacenter. No VPN protocol can restore international connectivity when the underlying network has no usable path.
+Direct and single-active-profile Proxy Only are implemented as **development candidates** and tested with a local genuine sing-box VLESS TCP relay; guarded host-wide routing and automatic recovery are **not implemented or accepted**. A profile that works in Windows v2rayN/Karing may not be reachable from a particular Linux datacenter. No VPN protocol can restore international connectivity when the underlying network has no usable path.
+
+Future multi-active profiles and per-workload outbound selection are [parked in Issue #7](https://github.com/AChWorks/server-connect/issues/7), not required for the first release. Profile identity, traffic policy and the data-plane runtime are distinct future migration boundaries; the MVP's single active selection and internal sing-box tag are not permanent API promises. Public ingress, Marzban/Xray node forwarding and Backhaul-like relays are separate operator-owned deployments, not an effect of activating an outbound VPN.
 
 ## Planned installation experience
 
@@ -29,7 +31,16 @@ A development-only `install.sh`, Go CLI, pinned-core packaging script and online
 
 The current initial Linux target is **Debian 13 / amd64**. The manager is implemented in Go using only the standard library. Run `go test ./...` for source tests. Optional genuine local VLESS core tests require `SC_TEST_SINGBOX=/absolute/path/to/the/pinned/sing-box` and `go test ./...`. To create a **local QA-only** bundle from the separately fetched and digest-verified official upstream archive, run `scripts/package.sh /path/to/sing-box-1.14.3-linux-amd64.tar.gz`. The resulting artifact is not a public release; its local checksum alone is not a publisher signature.
 
-The online bootstrap candidate at `scripts/bootstrap-online.sh` requires an explicit HTTPS archive URL and independently obtained SHA-256 digest; it downloads the **complete** offline bundle and invokes the **same** local installer. A short public one-line release command must wait for the Owner-approved release endpoint, publisher authentication and license decision. Never use a made-up download URL or execute unverified release code as root.
+The online bootstrap candidate at `scripts/bootstrap-online.sh` requires an explicit HTTPS archive URL and independently obtained SHA-256 digest; it downloads the **complete** offline bundle and invokes the **same** local installer. Actual online installation requires root-owned staging from the beginning; non-root `--verify-only` remains possible. A short public one-line release command must wait for the Owner-approved release endpoint, publisher authentication and license decision. Never use a made-up download URL or execute unverified release code as root.
+
+### Proxy Only compatibility and application opt-in
+
+- The link importer deliberately supports a **subset** of VLESS TCP/WebSocket and TLS/Reality query fields, rejecting unrecognized or incompatible parameters. **Local TCP VLESS through the pinned sing-box core has live integration evidence; TLS/WebSocket/Reality interoperability with real foreign providers is NOT_RUN.** Import and `validate` establish syntax/core-configuration acceptance, not remote reachability.
+- A selected application may opt in explicitly with `server-connect exec -- curl ...`, or with its own authenticated HTTP/SOCKS proxy settings. `server-connect probe --via proxy --url https://...` tests the selected path; `--via direct` independently tests host Direct connectivity. These commands require an already installed, selected and running development candidate.
+- **APT is not guaranteed to honor generic `HTTP_PROXY`.** Its `Acquire::http::Proxy` / `Acquire::https::Proxy` settings need separate operator-controlled testing and safe credential delivery. WordPress/PHP-FPM/plugins may likewise use different HTTP clients or ignore shell environment variables. Do not globally rewrite APT, PHP-FPM, aaPanel or customer proxy configuration, or claim their acceptance before representative host-specific tests.
+- A user-facing inbound VPN/relay service (for example Marzban Node or Backhaul) does not automatically opt into `HTTP_PROXY`. Raw TCP/UDP forwarding and established inbound reply paths require their own explicitly verified routing/relay architecture.
+
+The current Go JSON/CLI and offline installer are **not production-supported interfaces** until review findings and exact-artifact acceptance are resolved.
 
 ## Documentation and project status
 
