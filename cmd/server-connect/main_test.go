@@ -118,3 +118,39 @@ func TestUnknownCommandNeverEchoesPastedBearerURI(t *testing.T) {
 		}
 	}
 }
+
+func TestUnderlayExplicitEmptyHostnameCannotBypassValidation(t *testing.T) {
+	manager := sc.New(filepath.Join(t.TempDir(), "state"), "", 0)
+	pipeRead, pipeWrite, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pipeRead.Close()
+	oldOut := os.Stdout
+	os.Stdout = pipeWrite
+	exit := run(true, manager, []string{"underlay-tcp", "--endpoint", "127.0.0.1", "--port", "443", "--hostname="})
+	_ = pipeWrite.Close()
+	os.Stdout = oldOut
+	out, err := io.ReadAll(pipeRead)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if exit == 0 {
+		t.Fatal("explicit empty hostname bypassed required DNS validation")
+	}
+	var response struct {
+		OK    bool `json:"ok"`
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(out, &response); err != nil {
+		t.Fatalf("malformed JSON: %s (%v)", out, err)
+	}
+	if response.OK || response.Error.Code != "invalid_arguments" {
+		t.Fatalf("empty hostname did not fail safely: %s", out)
+	}
+	if _, err := os.Stat(manager.Dir); !os.IsNotExist(err) {
+		t.Fatal("invalid hostname unexpectedly modified manager state")
+	}
+}

@@ -18,22 +18,28 @@ import (
 // the interface currently selected by the kernel for a literal endpoint.
 // It cannot attest VPN protocol/TLS, DNS, management replies or future routing.
 type UnderlayTCPReport struct {
-	Mode               string   `json:"mode"`
-	ReadOnly           bool     `json:"read_only"`
-	ActivationReady    bool     `json:"activation_ready"`
-	Endpoint           string   `json:"endpoint"`
-	Port               int      `json:"port"`
-	Protocol           string   `json:"protocol"`
-	RouteDevice        string   `json:"route_device,omitempty"`
-	RouteGateway       string   `json:"route_gateway,omitempty"`
-	RouteSource        string   `json:"route_source,omitempty"`
-	InterfaceBound     bool     `json:"interface_bound"`
-	RouteStable        bool     `json:"route_stable"`
-	SocketConnected    bool     `json:"socket_connected"`
-	SocketLocalAddress string   `json:"socket_local_address,omitempty"`
-	Outcome            string   `json:"outcome"`
-	DurationMs         int64    `json:"duration_ms"`
-	Limitations        []string `json:"limitations"`
+	Mode                 string   `json:"mode"`
+	ReadOnly             bool     `json:"read_only"`
+	ActivationReady      bool     `json:"activation_ready"`
+	Endpoint             string   `json:"endpoint"`
+	Hostname             string   `json:"hostname,omitempty"`
+	NameResolved         bool     `json:"name_resolved"`
+	NameMatched          bool     `json:"name_matched"`
+	ResolvedAddresses    []string `json:"resolved_addresses,omitempty"`
+	ResolutionMs         int64    `json:"resolution_ms,omitempty"`
+	DNSBootstrapVerified bool     `json:"dns_bootstrap_verified"`
+	Port                 int      `json:"port"`
+	Protocol             string   `json:"protocol"`
+	RouteDevice          string   `json:"route_device,omitempty"`
+	RouteGateway         string   `json:"route_gateway,omitempty"`
+	RouteSource          string   `json:"route_source,omitempty"`
+	InterfaceBound       bool     `json:"interface_bound"`
+	RouteStable          bool     `json:"route_stable"`
+	SocketConnected      bool     `json:"socket_connected"`
+	SocketLocalAddress   string   `json:"socket_local_address,omitempty"`
+	Outcome              string   `json:"outcome"`
+	DurationMs           int64    `json:"duration_ms"`
+	Limitations          []string `json:"limitations"`
 }
 
 type underlayRoute struct {
@@ -88,28 +94,43 @@ func sameUnderlayRoute(a, b underlayRoute) bool {
 		a.Source == b.Source && a.Kind == b.Kind && bytes.Equal(a.Table, b.Table)
 }
 
+// validateUnderlayTCPArgs runs before any native tool, hostname resolution or
+// socket attempt. The optional DNS consistency mode shares this boundary.
+func validateUnderlayTCPArgs(endpointIP string, port int) (netip.Addr, error) {
+	ip, err := parsePreflightAddress(endpointIP, "endpoint")
+	if err != nil || !ip.IsValid() {
+		return netip.Addr{}, Fault("invalid_arguments", "underlay TCP endpoint must be a literal unicast IPv4/IPv6 address")
+	}
+	if port < 1 || port > 65535 {
+		return netip.Addr{}, Fault("invalid_arguments", "underlay TCP port must be between 1 and 65535")
+	}
+	return ip, nil
+}
+
+func newUnderlayTCPReport(ip netip.Addr, port int) UnderlayTCPReport {
+	return UnderlayTCPReport{
+		Mode: "underlay_tcp_diagnostic", ReadOnly: true, ActivationReady: false,
+		Endpoint: ip.String(), Port: port, Protocol: "tcp", Outcome: "not_tested",
+		DNSBootstrapVerified: false,
+		Limitations: []string{
+			"Successful TCP connection does not prove VPN handshake, TLS identity, authenticated proxy operation or UDP transport.",
+			"Interface binding does not establish an unmodified underlay, ingress/SSH reply safety or network/firewall ownership.",
+			"Kernel route observations are non-atomic; hostname resolution does not prove DNS underlay, management safety, activation or rollback guards.",
+		},
+	}
+}
+
 // InspectUnderlayTCP makes an explicit, bounded TCP connection attempt; it
 // sends no application data, uses no DNS or proxy environment variables, and
 // does not change host route tables, firewall, profile state or systemd units.
 // SO_BINDTODEVICE fails closed if the current route interface cannot be bound.
 // Even successful TCP evidence MUST NOT authorize tunnel activation.
 func InspectUnderlayTCP(endpointIP string, port int) (UnderlayTCPReport, error) {
-	ip, err := parsePreflightAddress(endpointIP, "endpoint")
-	if err != nil || !ip.IsValid() || (!ip.IsGlobalUnicast() && !ip.IsLoopback()) {
-		return UnderlayTCPReport{}, Fault("invalid_arguments", "underlay TCP endpoint must be a literal unicast IPv4/IPv6 address")
+	ip, err := validateUnderlayTCPArgs(endpointIP, port)
+	if err != nil {
+		return UnderlayTCPReport{}, err
 	}
-	if port < 1 || port > 65535 {
-		return UnderlayTCPReport{}, Fault("invalid_arguments", "underlay TCP port must be between 1 and 65535")
-	}
-	report := UnderlayTCPReport{
-		Mode: "underlay_tcp_diagnostic", ReadOnly: true, ActivationReady: false,
-		Endpoint: ip.String(), Port: port, Protocol: "tcp", Outcome: "not_tested",
-		Limitations: []string{
-			"Successful TCP connection does not prove VPN handshake, TLS identity, authenticated proxy operation or UDP transport.",
-			"Interface binding does not establish an unmodified underlay, ingress/SSH reply safety or network/firewall ownership.",
-			"Kernel route observations are non-atomic; DNS, management safety, activation and runtime rollback guards remain unverified.",
-		},
-	}
+	report := newUnderlayTCPReport(ip, port)
 	if err = trustedHostIPExecutable(); err != nil {
 		report.Outcome = "unavailable"
 		return report, err

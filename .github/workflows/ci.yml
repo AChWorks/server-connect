@@ -100,9 +100,17 @@ jobs:
             echo 'Non-literal underlay endpoint unexpectedly accepted' >&2
             exit 1
           fi
+          if build/ci/server-connect-cli --json underlay-tcp --endpoint 127.0.0.1 --hostname 'invalid@@host' --port 443 > build/ci/invalid-underlay-hostname.json; then
+            echo 'Invalid underlay hostname unexpectedly accepted' >&2
+            exit 1
+          fi
           python3 - <<'PYQA'
           import json
           with open('build/ci/invalid-underlay.json') as source:
+              response=json.load(source)
+          assert response['ok'] is False
+          assert response['error']['code'] == 'invalid_arguments'
+          with open('build/ci/invalid-underlay-hostname.json') as source:
               response=json.load(source)
           assert response['ok'] is False
           assert response['error']['code'] == 'invalid_arguments'

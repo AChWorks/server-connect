@@ -203,12 +203,28 @@ func run(j bool, m *sc.Manager, args []string) int {
 	case "underlay-tcp":
 		opts := flag.NewFlagSet(name, flag.ContinueOnError)
 		opts.SetOutput(io.Discard)
-		endpoint := opts.String("endpoint", "", "literal TCP endpoint IPv4 or IPv6 (no DNS)")
+		endpoint := opts.String("endpoint", "", "pinned literal TCP endpoint IPv4 or IPv6")
+		hostname := opts.String("hostname", "", "optional hostname to resolve and verify matches the pinned endpoint IP")
 		port := opts.Int("port", 0, "explicit TCP destination port")
 		if e := opts.Parse(args); e != nil || len(opts.Args()) != 0 {
 			return output(j, nil, sc.Fault("invalid_arguments", "invalid underlay-tcp options"))
 		}
-		report, err := sc.InspectUnderlayTCP(*endpoint, *port)
+		hostnameProvided := false
+		opts.Visit(func(f *flag.Flag) {
+			if f.Name == "hostname" {
+				hostnameProvided = true
+			}
+		})
+		if hostnameProvided && *hostname == "" {
+			return output(j, nil, sc.Fault("invalid_arguments", "explicit --hostname must not be empty"))
+		}
+		var report sc.UnderlayTCPReport
+		var err error
+		if !hostnameProvided {
+			report, err = sc.InspectUnderlayTCP(*endpoint, *port)
+		} else {
+			report, err = sc.InspectUnderlayTCPWithHostname(*endpoint, *hostname, *port)
+		}
 		return output(j, report, err)
 	case "apt":
 		if j {
@@ -265,8 +281,8 @@ Commands:
   apt -- apt-get update        Strict opt-in APT via trusted native binary
   host-preflight [--endpoint IP] [--management-peer IP]
                               Observe kernel routes/rules; no activation
-  underlay-tcp --endpoint IP --port N
-                              Probe literal TCP endpoint bound to current kernel route interface
+  underlay-tcp --endpoint IP --port N [--hostname NAME]
+                              Optional hostname must resolve to pinned IP before interface-bound TCP probe
   version                    Show pinned versions
 
 Import VLESS links from stdin or a mode-0600 file, not shell argv. 'exec'
@@ -277,8 +293,10 @@ run an explicit strict update first. Neither mode routes unrelated host
 traffic globally. Host preflight is observational: a route lookup does not
 prove connectivity, safety, routing ownership or readiness to activate TUN.
 An explicit underlay-tcp probe binds a TCP socket to the kernel-selected
-interface and sends no application data. It does not prove actual VPN protocol,
-DNS bootstrap, SSH/hosted ingress safety, ownership or guard readiness.
+interface and sends no application data. With --hostname, current host name
+resolution must include the explicit pinned --endpoint IP before TCP probing.
+This is not proof that resolver traffic bypassed a VPN or that DNS bootstrap,
+SSH/hosted ingress, VPN protocol, ownership or guards are safe.
 `
 
 func menu(m *sc.Manager) int {
@@ -337,7 +355,16 @@ func menu(m *sc.Manager) int {
 			if err != nil {
 				return 0
 			}
-			run(false, m, []string{"underlay-tcp", "--endpoint", strings.TrimSpace(address), "--port", strings.TrimSpace(rawPort)})
+			fmt.Print("Optional DNS hostname to verify against pinned IP (blank to skip): ")
+			hostname, err := in.ReadString('\n')
+			if err != nil {
+				return 0
+			}
+			command := []string{"underlay-tcp", "--endpoint", strings.TrimSpace(address), "--port", strings.TrimSpace(rawPort)}
+			if h := strings.TrimSpace(hostname); h != "" {
+				command = append(command, "--hostname", h)
+			}
+			run(false, m, command)
 		case "9":
 			fmt.Print("APT update refreshes system package indexes using the selected proxy. Type UPDATE to confirm: ")
 			confirmation, err := in.ReadString('\n')

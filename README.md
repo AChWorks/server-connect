@@ -41,23 +41,41 @@ On a Linux host with trusted native `/usr/bin/ip`, `server-connect --json host-p
 
 For a *known* literal TCP endpoint and port, run
 `server-connect --json underlay-tcp --endpoint 198.51.100.10 --port 443`.
-This makes one bounded TCP connection attempt **with no application bytes**,
+If the configured VPN endpoint also uses a DNS name, explicitly verify that
+the **current host resolver** includes the intended pinned IP *before* the
+TCP attempt:
+`server-connect --json underlay-tcp --endpoint 198.51.100.10 --hostname vpn.example.net --port 443`.
+The hostname check rejects malformed/ambiguous names, resolves an absolute
+DNS-style name (never silently adding a local search suffix), caps resolution
+to three seconds, checks A/AAAA records against the pinned literal, refuses
+oversized or unsuitable resolver results, and **does not connect** if that
+literal is absent. It never silently substitutes another resolved address.
+The IP-only command remains a literal-only test and does not invoke DNS.
+
+Either form makes one bounded TCP connection attempt **with no application bytes**,
 using the current kernel route lookup and `SO_BINDTODEVICE` for that
 specific interface, and performs a second route lookup afterward. It rejects
 ambiguous/missing/down interfaces and **never falls back to an unbound socket**
 when interface binding fails. Unreachable/refused/timeouts produce a nonzero
 exit code and a machine-readable partial report (`ok: false`). The
-command does not depend on proxy environment variables, saved profiles,
-systemd services or name resolution, and must be explicitly invoked by the
-operator rather than automatically testing an arbitrary endpoint.
+command does not depend on proxy environment variables, saved profiles or
+systemd services. The optional --hostname mode **does** use the current host
+name resolver and requires a DNS-style ASCII hostname with at least two labels;
+IP-only mode never invokes name resolution. Both must be explicitly invoked by
+the operator rather than automatically testing an arbitrary endpoint.
 
 **Scope limitation:** TCP reachability on the selected current interface
 is not proof of a safe unmodified pre-VPN underlay, VPN/TLS authentication,
 UDP/QUIC transport, endpoint DNS bootstrap, existing/new SSH reply paths,
-aaPanel ingress or any Activation/Runtime Guard. It never mutates routes,
-firewall, DNS or host state; `activation_ready` remains **false**
-even on a successful connection. The host may already have third-party
-routing; the route observations are non-atomic.
+aaPanel ingress or any Activation/Runtime Guard. The hostname match uses
+the **host-configured resolver** (which may use local hosts records/caches
+or an already-tunneled DNS path). It cannot prove a DNS query succeeded
+over an independent Direct underlay. Pinning an IP does not guarantee the
+VPN client will use that address later; activation planning must independently
+protect actual resolver, endpoint and management paths. This diagnostic never
+mutates routes, firewall, resolver files or host state; `activation_ready`
+and `dns_bootstrap_verified` both remain **false**, even on success.
+Existing third-party routing is possible; observations are non-atomic.
 
 ### Proxy Only compatibility and application opt-in
 
