@@ -200,6 +200,16 @@ func run(j bool, m *sc.Manager, args []string) int {
 		}
 		report, err := sc.InspectHostRoutes(*endpoint, *management)
 		return output(j, report, err)
+	case "underlay-tcp":
+		opts := flag.NewFlagSet(name, flag.ContinueOnError)
+		opts.SetOutput(io.Discard)
+		endpoint := opts.String("endpoint", "", "literal TCP endpoint IPv4 or IPv6 (no DNS)")
+		port := opts.Int("port", 0, "explicit TCP destination port")
+		if e := opts.Parse(args); e != nil || len(opts.Args()) != 0 {
+			return output(j, nil, sc.Fault("invalid_arguments", "invalid underlay-tcp options"))
+		}
+		report, err := sc.InspectUnderlayTCP(*endpoint, *port)
+		return output(j, report, err)
 	case "apt":
 		if j {
 			return output(true, nil, sc.Fault("invalid_arguments", "apt streams child output and does not support JSON mode"))
@@ -255,6 +265,8 @@ Commands:
   apt -- apt-get update        Strict opt-in APT via trusted native binary
   host-preflight [--endpoint IP] [--management-peer IP]
                               Observe kernel routes/rules; no activation
+  underlay-tcp --endpoint IP --port N
+                              Probe literal TCP endpoint bound to current kernel route interface
   version                    Show pinned versions
 
 Import VLESS links from stdin or a mode-0600 file, not shell argv. 'exec'
@@ -264,12 +276,15 @@ an anonymous private APT config to a verified native APT child, with no
 run an explicit strict update first. Neither mode routes unrelated host
 traffic globally. Host preflight is observational: a route lookup does not
 prove connectivity, safety, routing ownership or readiness to activate TUN.
+An explicit underlay-tcp probe binds a TCP socket to the kernel-selected
+interface and sends no application data. It does not prove actual VPN protocol,
+DNS bootstrap, SSH/hosted ingress safety, ownership or guard readiness.
 `
 
 func menu(m *sc.Manager) int {
 	in := bufio.NewReader(os.Stdin)
 	for {
-		fmt.Println("\nServer Connect | 1 Status  2 Profiles  3 Import  4 Select  5 Connect  6 Test  7 Disconnect  8 Remove  9 APT Update  10 Host Preflight  0 Exit")
+		fmt.Println("\nServer Connect | 1 Status  2 Profiles  3 Import  4 Select  5 Connect  6 Test  7 Disconnect  8 Remove  9 APT Update  10 Host Preflight  11 Underlay TCP  0 Exit")
 		fmt.Print("Choice: ")
 		raw, e := in.ReadString('\n')
 		if e != nil {
@@ -311,6 +326,18 @@ func menu(m *sc.Manager) int {
 			run(false, m, []string{"disconnect"})
 		case "10":
 			run(false, m, []string{"host-preflight"})
+		case "11":
+			fmt.Print("Literal TCP endpoint IP (no DNS): ")
+			address, err := in.ReadString('\n')
+			if err != nil {
+				return 0
+			}
+			fmt.Print("Endpoint TCP port: ")
+			rawPort, err := in.ReadString('\n')
+			if err != nil {
+				return 0
+			}
+			run(false, m, []string{"underlay-tcp", "--endpoint", strings.TrimSpace(address), "--port", strings.TrimSpace(rawPort)})
 		case "9":
 			fmt.Print("APT update refreshes system package indexes using the selected proxy. Type UPDATE to confirm: ")
 			confirmation, err := in.ReadString('\n')

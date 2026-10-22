@@ -37,6 +37,28 @@ The online bootstrap candidate at `scripts/bootstrap-online.sh` requires an expl
 
 On a Linux host with trusted native `/usr/bin/ip`, `server-connect --json host-preflight --endpoint 198.51.100.10 --management-peer 203.0.113.42` records actual IPv4/IPv6 routes, rules, links and kernel route lookups for **literal IPs**. It does not resolve DNS, touch state, enable a tunnel, change kernel networking or prove those peers are reachable. Both peer arguments are optional; supplying them is useful for future underlay and management-path planning. The report deliberately says `activation_ready: false` and `snapshot_atomic: false`: it is **not** an ownership journal, firewall inspection, activation authorization or replacement for the independent guards and SSH/reboot/field acceptance specified in Issue #2. This is a dependent development feature, not a released installation instruction.
 
+### Explicit underlay TCP diagnostic (Issue #2 dependent development)
+
+For a *known* literal TCP endpoint and port, run
+`server-connect --json underlay-tcp --endpoint 198.51.100.10 --port 443`.
+This makes one bounded TCP connection attempt **with no application bytes**,
+using the current kernel route lookup and `SO_BINDTODEVICE` for that
+specific interface, and performs a second route lookup afterward. It rejects
+ambiguous/missing/down interfaces and **never falls back to an unbound socket**
+when interface binding fails. Unreachable/refused/timeouts produce a nonzero
+exit code and a machine-readable partial report (`ok: false`). The
+command does not depend on proxy environment variables, saved profiles,
+systemd services or name resolution, and must be explicitly invoked by the
+operator rather than automatically testing an arbitrary endpoint.
+
+**Scope limitation:** TCP reachability on the selected current interface
+is not proof of a safe unmodified pre-VPN underlay, VPN/TLS authentication,
+UDP/QUIC transport, endpoint DNS bootstrap, existing/new SSH reply paths,
+aaPanel ingress or any Activation/Runtime Guard. It never mutates routes,
+firewall, DNS or host state; `activation_ready` remains **false**
+even on a successful connection. The host may already have third-party
+routing; the route observations are non-atomic.
+
 ### Proxy Only compatibility and application opt-in
 
 - The link importer deliberately supports a **subset** of VLESS TCP/WebSocket and TLS/Reality query fields, rejecting unrecognized or incompatible parameters. **Local TCP VLESS through the pinned sing-box core has live integration evidence; TLS/WebSocket/Reality interoperability with real foreign providers is NOT_RUN.** Import and `validate` establish syntax/core-configuration acceptance, not remote reachability.

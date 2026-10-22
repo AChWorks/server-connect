@@ -74,7 +74,7 @@ jobs:
           # host inspection tools only for their own real-kernel test.
           DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends iproute2
           test -x /usr/bin/ip
-          go test ./internal/sc -run '^TestPreflight' -count=1 -v
+          go test ./internal/sc -run '^(TestPreflight|TestUnderlay)' -count=1 -v
           # GitHub's checkout is runner-owned inside this container. Trust
           # only this ephemeral checkout for Go VCS stamping (do not disable it).
           export GIT_CONFIG_COUNT=1
@@ -94,6 +94,18 @@ jobs:
           assert report['snapshot_atomic'] is False
           assert report['endpoint']['target'] == '127.0.0.1'
           assert report['management_peer']['target'] == '127.0.0.2'
+          PYQA
+          # Invalid destinations must fail before any network activity.
+          if build/ci/server-connect-cli --json underlay-tcp --endpoint example.org --port 443 > build/ci/invalid-underlay.json; then
+            echo 'Non-literal underlay endpoint unexpectedly accepted' >&2
+            exit 1
+          fi
+          python3 - <<'PYQA'
+          import json
+          with open('build/ci/invalid-underlay.json') as source:
+              response=json.load(source)
+          assert response['ok'] is False
+          assert response['error']['code'] == 'invalid_arguments'
           PYQA
       - name: Local QA artifact and digest-verified online acquisition smoke
         shell: bash
