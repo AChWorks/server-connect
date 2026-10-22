@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net/netip"
 	"os"
 	"sort"
 	"strings"
@@ -110,10 +111,15 @@ func validateHostDriftSnapshot(snapshot HostPreflight) error {
 		snapshot.SnapshotAtomic || snapshot.ActivationReady {
 		return bad()
 	}
-	for _, component := range []json.RawMessage{
-		snapshot.Links, snapshot.IPv4Routes, snapshot.IPv6Routes,
-		snapshot.IPv4Rules, snapshot.IPv6Rules,
-	} {
+	// A successful Linux link inventory cannot be empty: even a private
+	// namespace has loopback. Interface indexes and names identify links
+	// without assuming any specific type or host naming convention.
+	if !validHostDriftLinks(snapshot.Links) ||
+		!validHostDriftRoutes(snapshot.IPv4Routes, false) ||
+		!validHostDriftRoutes(snapshot.IPv6Routes, true) {
+		return bad()
+	}
+	for _, component := range []json.RawMessage{snapshot.IPv4Rules, snapshot.IPv6Rules} {
 		if _, err := decodeRouteArray(component); err != nil {
 			return bad()
 		}
@@ -138,11 +144,136 @@ func validateHostDriftSnapshot(snapshot HostPreflight) error {
 			return bad()
 		}
 		var items []json.RawMessage
-		if json.Unmarshal(arr, &items) != nil || len(items) != 1 {
+		if json.Unmarshal(arr, &items) != nil || len(items) != 1 ||
+			!validHostDriftLookupRoute(items[0], ip) {
 			return bad()
 		}
 	}
 	return nil
+}
+
+// These checks establish minimal usable *shape* for a successful iproute2
+// snapshot, not trust in an operator-supplied baseline. We must not require
+// any IPv4/IPv6 routes or a normal device on blackhole/local routes.
+func hostDriftObjects(raw json.RawMessage) ([]map[string]json.RawMessage, bool) {
+	canonical, err := decodeRouteArray(raw)
+	if err != nil {
+		return nil, false
+	}
+	var entries []json.RawMessage
+	if json.Unmarshal(canonical, &entries) != nil {
+		return nil, false
+	}
+	rows := make([]map[string]json.RawMessage, 0, len(entries))
+	for _, entry := range entries {
+		var obj map[string]json.RawMessage
+		if json.Unmarshal(entry, &obj) != nil || len(obj) == 0 {
+			return nil, false
+		}
+		rows = append(rows, obj)
+	}
+	return rows, true
+}
+
+func hostDriftString(obj map[string]json.RawMessage, key string) string {
+	var value string
+	if json.Unmarshal(obj[key], &value) != nil || value == "" || strings.TrimSpace(value) != value {
+		return ""
+	}
+	return value
+}
+
+func validHostDriftLinks(raw json.RawMessage) bool {
+	rows, ok := hostDriftObjects(raw)
+	if !ok || len(rows) == 0 {
+		return false
+	}
+	byIndex := make(map[int]bool, len(rows))
+	byName := make(map[string]bool, len(rows))
+	for _, link := range rows {
+		name := hostDriftString(link, "ifname")
+		var index int
+		if name == "" || json.Unmarshal(link["ifindex"], &index) != nil || index <= 0 ||
+			byIndex[index] || byName[name] {
+			return false
+		}
+		byIndex[index], byName[name] = true, true
+	}
+	return true
+}
+
+func hostDriftRouteDestination(obj map[string]json.RawMessage, ipv6 bool) bool {
+	dst := hostDriftString(obj, "dst")
+	if dst == "default" {
+		return true
+	}
+	if dst == "" {
+		return false
+	}
+	if prefix, err := netip.ParsePrefix(dst); err == nil {
+		return prefix.Addr().Is6() == ipv6 && !prefix.Addr().Is4In6()
+	}
+	addr, err := netip.ParseAddr(dst)
+	return err == nil && addr.Is6() == ipv6 && !addr.Is4In6()
+}
+
+func hostDriftRouteHasIdentity(obj map[string]json.RawMessage) bool {
+	if hostDriftString(obj, "dev") != "" {
+		return true
+	}
+	if gateway := hostDriftString(obj, "gateway"); gateway != "" {
+		if ip, err := netip.ParseAddr(gateway); err == nil && ip.IsValid() {
+			return true
+		}
+	}
+	// iproute2 can return a valid terminal action with no output device.
+	switch hostDriftString(obj, "type") {
+	case "local", "broadcast", "anycast", "multicast", "blackhole", "unreachable", "prohibit", "throw", "nat":
+		return true
+	}
+	var nhid int
+	if json.Unmarshal(obj["nhid"], &nhid) == nil && nhid > 0 {
+		return true
+	}
+	var nexthops []json.RawMessage
+	if json.Unmarshal(obj["nexthops"], &nexthops) == nil && len(nexthops) > 0 {
+		for _, raw := range nexthops {
+			var hop map[string]json.RawMessage
+			if json.Unmarshal(raw, &hop) != nil || len(hop) == 0 ||
+				(hostDriftString(hop, "dev") == "" && hostDriftString(hop, "gateway") == "") {
+				return false
+			}
+		}
+		return true
+	}
+	return false
+}
+
+func validHostDriftRoutes(raw json.RawMessage, ipv6 bool) bool {
+	// Empty route families are unusual but possible in isolated hosts.
+	rows, ok := hostDriftObjects(raw)
+	if !ok {
+		return false
+	}
+	for _, route := range rows {
+		if !hostDriftRouteDestination(route, ipv6) ||
+			!hostDriftRouteHasIdentity(route) {
+			return false
+		}
+	}
+	return true
+}
+
+func validHostDriftLookupRoute(raw json.RawMessage, target netip.Addr) bool {
+	var route map[string]json.RawMessage
+	if json.Unmarshal(raw, &route) != nil || len(route) == 0 ||
+		!hostDriftRouteHasIdentity(route) {
+		return false
+	}
+	// 'ip -j route get <literal>' returns the queried destination in dst,
+	// even when it was selected through a default route.
+	dst, err := netip.ParseAddr(hostDriftString(route, "dst"))
+	return err == nil && dst == target
 }
 
 // Semantic fingerprints normalize object key order and whitespace. For links

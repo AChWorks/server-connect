@@ -132,10 +132,15 @@ The comparison repeats native, read-only Linux route/rule/link inspection
 including the **same literal** endpoint and management-peer queries from the
 baseline. It reports per-component SHA-256 fingerprints (never raw baseline
 contents), `changed` flags and a nonzero `host_drift_detected` error when
-an observation differs. Route and link arrays ignore enumeration-order
-differences; policy-rule ordering remains significant. Invalid, oversized,
-symlinked, non-private or incomplete baseline files are rejected **before**
-any kernel inspection; no file paths or file content appear in errors.
+an observation differs. The **non-JSON CLI and interactive menu option 13**
+also display the safe per-component report on detected drift, together with
+an explicit classified failure; they never silently print only a generic
+error. Route and link arrays ignore enumeration-order differences;
+policy-rule ordering remains significant. Invalid, oversized,
+symlinked, non-private or structurally incomplete baseline files are
+rejected **before** any kernel inspection (including empty link inventories
+or identity-free kernel route lookups); no baseline file paths or raw
+file content appear in errors or diagnostic output.
 
 **Important:** both snapshots are non-atomic and the saved file is
 operator-provided, not a trusted/cryptographically authenticated kernel

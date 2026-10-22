@@ -54,6 +54,23 @@ func output(j bool, value any, err error) int {
 	}
 	return 0
 }
+
+// Host drift is an explicit operator diagnostic: on an observed failure,
+// retain component-level evidence in the interactive and text CLI, without
+// changing the shared error semantics of unrelated commands.
+func outputHostDrift(j bool, report sc.HostDriftReport, err error) int {
+	if report.Mode == "" {
+		return output(j, nil, err)
+	}
+	if !j && err != nil {
+		if output(false, report, nil) != 0 {
+			return 1
+		}
+		fmt.Fprintf(os.Stderr, "Error [%s]: %v\n", sc.ErrorCode(err), err)
+		return 1
+	}
+	return output(j, report, err)
+}
 func parseOpts(args []string) (bool, *sc.Manager, []string, error) {
 	opts := flag.NewFlagSet("server-connect", flag.ContinueOnError)
 	opts.SetOutput(io.Discard)
@@ -208,10 +225,7 @@ func run(j bool, m *sc.Manager, args []string) int {
 			return output(j, nil, sc.Fault("invalid_arguments", "host-drift requires --baseline FILE"))
 		}
 		report, err := sc.InspectHostDrift(*baseline)
-		if report.Mode == "" {
-			return output(j, nil, err)
-		}
-		return output(j, report, err)
+		return outputHostDrift(j, report, err)
 	case "underlay-tcp":
 		opts := flag.NewFlagSet(name, flag.ContinueOnError)
 		opts.SetOutput(io.Discard)

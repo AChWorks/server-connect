@@ -75,7 +75,7 @@ jobs:
           DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends iproute2
           test -x /usr/bin/ip
           go test ./internal/sc -run '^(TestPreflight|TestUnderlay|TestHostDrift)' -count=1 -v
-          go test ./cmd/server-connect -run '^TestHostDriftCLI' -count=1 -v
+          go test ./cmd/server-connect -run '^(TestHostDriftCLI|TestHostDriftMenu)' -count=1 -v
           # GitHub's checkout is runner-owned inside this container. Trust
           # only this ephemeral checkout for Go VCS stamping (do not disable it).
           export GIT_CONFIG_COUNT=1

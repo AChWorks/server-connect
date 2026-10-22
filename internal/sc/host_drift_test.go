@@ -191,6 +191,83 @@ func TestHostDriftBaselineRejectsIncompleteAndUntrustedFiles(t *testing.T) {
 	}
 }
 
+// Incomplete-but-well-formed success envelopes must fail before any
+// invocation of trusted native iproute2. This checks the reader directly,
+// as well as the public observation path.
+func TestHostDriftRejectsStructurallyIncompleteBaselines(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*HostPreflight)
+	}{
+		{"empty_links", func(p *HostPreflight) { p.Links = json.RawMessage(`[]`) }},
+		{"empty_link_object", func(p *HostPreflight) { p.Links = json.RawMessage(`[{}]`) }},
+		{"missing_link_index", func(p *HostPreflight) { p.Links = json.RawMessage(`[{"ifname":"eth0"}]`) }},
+		{"zero_link_index", func(p *HostPreflight) { p.Links = json.RawMessage(`[{"ifname":"eth0","ifindex":0}]`) }},
+		{"string_link_index", func(p *HostPreflight) { p.Links = json.RawMessage(`[{"ifname":"eth0","ifindex":"2"}]`) }},
+		{"missing_link_name", func(p *HostPreflight) { p.Links = json.RawMessage(`[{"ifindex":2}]`) }},
+		{"duplicate_link_index", func(p *HostPreflight) {
+			p.Links = json.RawMessage(`[{"ifname":"eth0","ifindex":2},{"ifname":"eth1","ifindex":2}]`)
+		}},
+		{"endpoint_empty_route_object", func(p *HostPreflight) { p.Endpoint.KernelRoute = json.RawMessage(`[{}]`) }},
+		{"management_empty_route_object", func(p *HostPreflight) { p.ManagementPeer.KernelRoute = json.RawMessage(`[{}]`) }},
+		{"endpoint_destination_only", func(p *HostPreflight) { p.Endpoint.KernelRoute = json.RawMessage(`[{"dst":"198.51.100.9"}]`) }},
+		{"management_destination_only", func(p *HostPreflight) { p.ManagementPeer.KernelRoute = json.RawMessage(`[{"dst":"2001:db8::9"}]`) }},
+		{"endpoint_route_missing_destination", func(p *HostPreflight) { p.Endpoint.KernelRoute = json.RawMessage(`[{"dev":"eth0"}]`) }},
+		{"endpoint_route_wrong_destination", func(p *HostPreflight) {
+			p.Endpoint.KernelRoute = json.RawMessage(`[{"dst":"198.51.100.8","dev":"eth0"}]`)
+		}},
+		{"management_route_wrong_family", func(p *HostPreflight) {
+			p.ManagementPeer.KernelRoute = json.RawMessage(`[{"dst":"198.51.100.9","dev":"eth0"}]`)
+		}},
+		{"empty_ipv4_route_object", func(p *HostPreflight) { p.IPv4Routes = json.RawMessage(`[{}]`) }},
+		{"ipv4_route_without_destination", func(p *HostPreflight) { p.IPv4Routes = json.RawMessage(`[{"dev":"eth0"}]`) }},
+		{"ipv4_destination_only", func(p *HostPreflight) { p.IPv4Routes = json.RawMessage(`[{"dst":"default"}]`) }},
+		{"wrong_family_ipv6_route", func(p *HostPreflight) { p.IPv6Routes = json.RawMessage(`[{"dst":"198.51.100.0/24","dev":"eth0"}]`) }},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			base := driftFixture()
+			tc.mutate(&base)
+			path := writeDriftBaseline(t, t.TempDir(), base)
+			if _, err := readHostDriftBaseline(path); ErrorCode(err) != "invalid_baseline" {
+				t.Fatalf("incomplete evidence passed pre-native reader: %v", err)
+			}
+			report, err := InspectHostDrift(path)
+			if ErrorCode(err) != "invalid_baseline" || report.Mode != "" || strings.Contains(err.Error(), path) {
+				t.Fatalf("invalid input reached observation or leaked path: %+v, %v", report, err)
+			}
+		})
+	}
+}
+
+func TestHostDriftSpecialRoutesAndEmptyFamiliesRemainSupported(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		change func(*HostPreflight)
+	}{
+		{"empty_route_families", func(p *HostPreflight) { p.IPv4Routes = json.RawMessage(`[]`); p.IPv6Routes = json.RawMessage(`[]`) }},
+		{"local_route_without_device", func(p *HostPreflight) {
+			p.IPv4Routes = json.RawMessage(`[{"type":"local","dst":"127.0.0.1","table":"local"}]`)
+		}},
+		{"blackhole_route_without_device", func(p *HostPreflight) {
+			p.IPv6Routes = json.RawMessage(`[{"type":"blackhole","dst":"2001:db8::/48","table":"main"}]`)
+		}},
+		{"blackhole_lookup_without_device", func(p *HostPreflight) {
+			p.Endpoint.KernelRoute = json.RawMessage(`[{"type":"blackhole","dst":"198.51.100.9"}]`)
+		}},
+		{"gateway_only_route", func(p *HostPreflight) { p.IPv4Routes = json.RawMessage(`[{"dst":"default","gateway":"192.0.2.1"}]`) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := driftFixture()
+			tc.change(&p)
+			path := writeDriftBaseline(t, t.TempDir(), p)
+			if _, err := readHostDriftBaseline(path); err != nil {
+				t.Fatalf("valid special Linux representation rejected: %v", err)
+			}
+		})
+	}
+}
+
 func TestHostDriftActualNativeIPv4IPv6RoutesRemainUnchanged(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("Linux required")
