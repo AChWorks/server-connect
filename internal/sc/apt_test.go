@@ -35,10 +35,11 @@ func TestAnonymousAPTConfigAndLocalOnly(t *testing.T) {
 	if _, err := fd.Seek(0, 0); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := exec.LookPath("apt-config"); err != nil {
-		t.Skip("APT binary not available")
+	nativeConfig, err := trustedAPTConfig()
+	if err != nil {
+		t.Skip("trusted native APT configuration tool unavailable")
 	}
-	cmd := exec.Command("apt-config", "-c", "/proc/self/fd/3", "dump")
+	cmd := exec.Command(nativeConfig, "-c", "/proc/self/fd/3", "dump")
 	cmd.ExtraFiles = []*os.File{fd}
 	cmd.Env = safeAptEnv()
 	output, err := cmd.Output()
@@ -153,8 +154,8 @@ func TestAptRejectsCallerProxyAndConfigOverrides(t *testing.T) {
 }
 
 func TestRealAptConfigPreflightWithAnonymousFD(t *testing.T) {
-	if _, err := exec.LookPath("apt-config"); err != nil {
-		t.Skip("APT unavailable")
+	if _, err := trustedAPTConfig(); err != nil {
+		t.Skip("trusted native APT configuration tool unavailable")
 	}
 	proxy, _ := url.Parse("http://sc:syntheticnotreal@127.0.0.1:20807")
 	file, err := privateAptConfig(t.TempDir(), proxy)
@@ -201,6 +202,81 @@ func TestStrictAPTUpdateModesAndOptionOrdering(t *testing.T) {
 	for _, a := range aptExecArgs([]string{"install", "example"}, action) {
 		if a == "--error-on=any" {
 			t.Fatal("strict update flag on unrelated command")
+		}
+	}
+}
+
+func TestCombinedAPTUpdateNeverForwardsToPackageOperation(t *testing.T) {
+	requireNativeAPT(t)
+	for _, args := range [][]string{
+		{"-U", "install", "safe-test-package"},
+		{"--update", "install", "safe-test-package"},
+		{"--update=true", "install", "safe-test-package"},
+		{"install", "--update", "safe-test-package"},
+		{"install", "-U", "safe-test-package"},
+		{"-qqU", "install", "safe-test-package"},
+		{"-Uq", "install", "safe-test-package"},
+		{"-yU", "install", "safe-test-package"},
+		{"--option=APT::Get::Update=true", "install", "safe-test-package"},
+		{"-o", "APT::Update::Error-Mode=persistent", "install", "safe-test-package"},
+		{"--error-on=none", "update"},
+		{"--error-on", "none", "update"},
+		{"-eany", "update"},
+		{"-e", "none", "update"},
+	} {
+		_, _, err := validateAptArgs(args)
+		if err == nil {
+			t.Fatalf("combined-update/strict-policy bypass accepted: %v", args)
+		}
+		switch ErrorCode(err) {
+		case "apt_combined_update_unsupported", "apt_policy_conflict":
+		default:
+			t.Fatalf("unexpected rejection category: %v (%v)", args, err)
+		}
+		// Exercise the PUBLIC manager entrypoint, with no installed product.
+		// The arguments MUST be rejected without even loading private state
+		// or attempting to run apt-get.
+		for _, apt := range []string{"apt", "apt-get"} {
+			m := New(filepath.Join(t.TempDir(), "nonexistent-state"), "", 0)
+			combined := append([]string{apt}, args...)
+			code, runErr := m.Apt(combined)
+			if code == 0 || (ErrorCode(runErr) != "apt_combined_update_unsupported" &&
+				ErrorCode(runErr) != "apt_policy_conflict") {
+				t.Fatalf("combined-update operation crossed credential boundary: %v (%v)", combined, runErr)
+			}
+			if _, e := os.Stat(m.Dir); !os.IsNotExist(e) {
+				t.Fatal("rejected combined update unexpectedly created product state")
+			}
+		}
+	}
+}
+
+func TestStandaloneUpdateAndOrdinaryPackageOpsRemainSupported(t *testing.T) {
+	for _, args := range [][]string{
+		{"update"},
+		{"-q", "update"},
+		{"-o", "Dir::Etc::sourcelist=/tmp/test-repo", "update"},
+	} {
+		_, action, err := validateAptArgs(args)
+		if err != nil || action != "update" {
+			t.Fatalf("standalone update rejected: %v (%v)", args, err)
+		}
+		execArgs := aptExecArgs(args, action)
+		if execArgs[len(execArgs)-1] != "--error-on=any" {
+			t.Fatalf("standalone update not strict: %v", execArgs)
+		}
+	}
+	for _, args := range [][]string{
+		{"install", "safe-test-package"}, {"download", "safe-test-package"},
+		{"--assume-yes", "install", "safe-test-package"},
+	} {
+		_, action, err := validateAptArgs(args)
+		if err != nil {
+			t.Fatalf("ordinary non-update APT operation rejected: %v", err)
+		}
+		execArgs := aptExecArgs(args, action)
+		if execArgs[len(execArgs)-1] == "--error-on=any" {
+			t.Fatal("standalone update strictness leaked to ordinary operation")
 		}
 	}
 }

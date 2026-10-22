@@ -139,7 +139,7 @@ func TestRealPinnedCoreProxyOnly(t *testing.T) {
 	if status, e := get(viaDirect); e != nil || status != 200 {
 		t.Fatalf("direct path failed: status=%d err=%v", status, e)
 	}
-	if _, e := exec.LookPath("apt-get"); e == nil {
+	if _, e := trustedAPTCommand("apt-get"); e == nil {
 		t.Run("RealAPTBoundToPinnedVLESS", func(t *testing.T) {
 			testAPTThroughCore(t, proxyURL)
 		})
@@ -256,7 +256,11 @@ func testAPTThroughCore(t *testing.T, proxyURL *url.URL) {
 		"-o", "Debug::NoLocking=1",
 		"-o", "Debug::Acquire::http=1",
 	}
-	cmd := exec.Command("apt-get", args...)
+	rawNative, err := trustedAPTCommand("apt-get")
+	if err != nil {
+		t.Fatal("genuine native APT binary unavailable")
+	}
+	cmd := exec.Command(rawNative, args...)
 	cmd.Env = safeAptEnv()
 	cmd.ExtraFiles = []*os.File{fd}
 	// Debug::Acquire may print Proxy-Authorization: never reveal raw output.
@@ -300,6 +304,41 @@ func testAPTThroughCore(t *testing.T, proxyURL *url.URL) {
 		}
 		t.Fatalf("APT package indexes missing: file_names=%v safe_progress=%v", names, safeProgress)
 	}
+	// Exercise the SAME credential-bearing path as the public APT wrapper.
+	// Both actual Debian-family clients must use trusted native paths, verify
+	// effective proxy policy, and reach the fixture through pinned VLESS.
+	wrappedArgs := []string{
+		"update",
+		"-o", "Dir::Etc::sourcelist=" + source,
+		"-o", "Dir::Etc::sourceparts=-",
+		"-o", "Dir::State::lists=" + filepath.Join(dir, "lists"),
+		"-o", "Dir::Cache::archives=" + filepath.Join(dir, "archives"),
+		"-o", "Dir::Cache::pkgcache=/dev/null",
+		"-o", "Dir::Cache::srcpkgcache=/dev/null",
+		"-o", "APT::Get::List-Cleanup=0",
+		"-o", "Debug::NoLocking=1",
+	}
+	_, action, err := validateAptArgs(wrappedArgs)
+	if err != nil || action != "update" {
+		t.Fatalf("wrapped update not accepted: %v", err)
+	}
+	for _, token := range []string{"apt-get", "apt"} {
+		native, e := trustedAPTCommand(token)
+		if e != nil {
+			t.Fatalf("native %s path untrusted: %v", token, e)
+		}
+		code, e := aptThroughSelectedProxy(native, wrappedArgs, t.TempDir(), proxyURL)
+		if e != nil || code != 0 {
+			t.Fatalf("actual native %s via VLESS failed: exit=%d err=%v", token, code, e)
+		}
+	}
+	// Combined update is explicitly unsupported: it cannot cause a hidden
+	// non-strict index refresh before install, even on the VLESS path.
+	for _, flag := range []string{"-U", "--update", "-qU"} {
+		if _, _, e := validateAptArgs([]string{flag, "install", "qa-only"}); e == nil {
+			t.Fatal("unsupported combined APT update accepted on genuine core integration")
+		}
+	}
 	// Close one repository AFTER indexing it. An ordinary apt-get update can
 	// return success while retaining stale indexes, so require strict mode.
 	// This synthetic server is entirely local; never log its auth debug trace.
@@ -308,7 +347,7 @@ func testAPTThroughCore(t *testing.T, proxyURL *url.URL) {
 		t.Fatal(err)
 	}
 	strictArgs := append(append([]string{}, args...), "--error-on=any")
-	strict := exec.Command("apt-get", strictArgs...)
+	strict := exec.Command(rawNative, strictArgs...)
 	strict.Env = safeAptEnv()
 	strict.ExtraFiles = []*os.File{fd}
 	failedOutput, runErr := strict.CombinedOutput()
@@ -321,6 +360,14 @@ func testAPTThroughCore(t *testing.T, proxyURL *url.URL) {
 	}
 	if !bytes.Contains(failedOutput, []byte("Failed to fetch")) {
 		t.Fatal("APT failure lacked a useful acquisition diagnostic")
+	}
+	native, e := trustedAPTCommand("apt-get")
+	if e != nil {
+		t.Fatal(e)
+	}
+	wrappedCode, wrappedErr := aptThroughSelectedProxy(native, wrappedArgs, t.TempDir(), proxyURL)
+	if wrappedErr != nil || wrappedCode != 100 {
+		t.Fatalf("CLI shared execution did not fail strict cached-index update: exit=%d err=%v", wrappedCode, wrappedErr)
 	}
 	after, err := os.ReadDir(filepath.Join(dir, "lists"))
 	if err != nil {

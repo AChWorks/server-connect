@@ -7,7 +7,6 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 )
 
@@ -17,18 +16,50 @@ func (m *Manager) Apt(args []string) (int, error) {
 	if len(args) > 0 && args[0] == "--" {
 		args = args[1:]
 	}
-	if len(args) == 0 || (filepath.Base(args[0]) != "apt-get" && filepath.Base(args[0]) != "apt") {
+	if len(args) == 0 {
 		return 1, Fault("invalid_arguments", "apt requires an explicit apt-get or apt command")
 	}
-	opts, action, err := validateAptArgs(args[1:])
+	// Validate executable identity and flags BEFORE reading the private proxy
+	// secret or creating any credential-bearing descriptor.
+	nativeAPT, err := trustedAPTCommand(args[0])
 	if err != nil {
+		return 1, err
+	}
+	if _, _, err := validateAptArgs(args[1:]); err != nil {
+		return 1, err
+	}
+	// Identity of BOTH children must be established before reading secrets.
+	if _, err = trustedAPTConfig(); err != nil {
 		return 1, err
 	}
 	proxy, err := m.proxyURL()
 	if err != nil {
 		return 1, err
 	}
-	file, err := privateAptConfig(m.Dir, proxy)
+	return aptThroughSelectedProxy(nativeAPT, args[1:], m.Dir, proxy)
+}
+
+// aptThroughSelectedProxy owns the *entire* credential-bearing subprocess
+// operation. This is also used by genuine-core isolated integration tests;
+// no test-only implementation of the APT transport is required.
+func aptThroughSelectedProxy(nativeAPT string, args []string, dir string, proxy *url.URL) (int, error) {
+	if nativeAPT != systemAPT && nativeAPT != systemAPTGet {
+		return 1, Fault("apt_untrusted_executable", "APT command is not a trusted native executable")
+	}
+	// The credential-bearing operation MUST derive the action and effective
+	// overrides from the SAME forwarded arguments. Never trust a separate
+	// caller-supplied "action" that could skip strict partial-update handling.
+	opts, action, err := validateAptArgs(args)
+	if err != nil {
+		return 1, err
+	}
+	if err := verifyNativeAPTExecutable(nativeAPT); err != nil {
+		return 1, err
+	}
+	if _, err := trustedAPTConfig(); err != nil {
+		return 1, err
+	}
+	file, err := privateAptConfig(dir, proxy)
 	if err != nil {
 		return 1, Fault("apt_configuration", "unable to prepare private APT proxy configuration")
 	}
@@ -38,8 +69,8 @@ func (m *Manager) Apt(args []string) (int, error) {
 	if err = verifyEffectiveAptProxy(file, proxy.String(), opts); err != nil {
 		return 1, err
 	}
-	argv := aptExecArgs(args[1:], action)
-	cmd := exec.Command(args[0], argv...)
+	argv := aptExecArgs(args, action)
+	cmd := exec.Command(nativeAPT, argv...)
 	cmd.ExtraFiles = []*os.File{file}
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
 	cmd.Env = safeAptEnv()
@@ -72,6 +103,18 @@ func validateAptArgs(args []string) ([]string, string, error) {
 	for i := 0; i < len(args); i++ {
 		a := args[i]
 		lower := strings.ToLower(a)
+		if a == "--update" || strings.HasPrefix(a, "--update=") ||
+			isCombinedAPTUpdateShortFlag(a) {
+			return nil, "", Fault("apt_combined_update_unsupported",
+				"APT -U/--update is unsupported in Proxy Only; run a separate strict apt-get update before the package command")
+		}
+		// The wrapper, not caller input, owns the update error policy.
+		// Accepting -e/--error-on risks ambiguous APT precedence.
+		if a == "-e" || strings.HasPrefix(a, "-e") ||
+			a == "--error-on" || strings.HasPrefix(a, "--error-on=") {
+			return nil, "", Fault("apt_policy_conflict",
+				"APT update error policy is managed by Server Connect")
+		}
 		if a == "--" {
 			return nil, "", Fault("invalid_arguments", "APT argument separator not supported")
 		}
@@ -103,7 +146,9 @@ func validateAptArgs(args []string) ([]string, string, error) {
 				return nil, "", Fault("invalid_arguments", "malformed APT configuration option")
 			}
 			if strings.HasPrefix(key, "acquire::") || strings.HasPrefix(key, "binary::") ||
-				key == "apt::update::error-mode" || strings.HasPrefix(key, "debug::acquire") ||
+				strings.HasPrefix(key, "apt::update") ||
+				strings.HasPrefix(key, "apt::get::update") ||
+				strings.HasPrefix(key, "debug::acquire") ||
 				key == "dir::etc" || key == "dir::etc::main" || key == "dir::etc::parts" ||
 				strings.HasPrefix(key, "dir::etc::netrc") {
 				return nil, "", Fault("apt_policy_conflict", "APT proxy, policy or configuration-source overrides are not permitted")
@@ -129,6 +174,21 @@ func validateAptArgs(args []string) ([]string, string, error) {
 	return opts, action, nil
 }
 
+// APT permits short flag groups (e.g. -qU); never allow a combined update
+// phase to escape the strict standalone-update contract. Other options
+// taking attached values (-o, -t, -a, -e) are not groups.
+func isCombinedAPTUpdateShortFlag(a string) bool {
+	if len(a) < 2 || !strings.HasPrefix(a, "-") || strings.HasPrefix(a, "--") {
+		return false
+	}
+	for _, prefix := range []string{"-o", "-t", "-a", "-e", "-c"} {
+		if strings.HasPrefix(a, prefix) {
+			return false
+		}
+	}
+	return strings.Contains(a[1:], "U")
+}
+
 // Inspect APT host policy and caller-supplied supported options with the
 // same anonymous config FD/environment. apt-config's stdout is a secret.
 func verifyEffectiveAptProxy(file *os.File, expected string, opts []string) error {
@@ -137,7 +197,11 @@ func verifyEffectiveAptProxy(file *os.File, expected string, opts []string) erro
 	}
 	argv := append([]string{"-c", "/proc/self/fd/3"}, opts...)
 	argv = append(argv, "dump")
-	cmd := exec.Command("apt-config", argv...)
+	nativeConfig, err := trustedAPTConfig()
+	if err != nil {
+		return err
+	}
+	cmd := exec.Command(nativeConfig, argv...)
 	cmd.ExtraFiles = []*os.File{file}
 	cmd.Env = safeAptEnv()
 	var out bytes.Buffer
@@ -242,11 +306,18 @@ func safeAptEnv() []string {
 	env := make([]string, 0, len(os.Environ()))
 	for _, val := range os.Environ() {
 		key, _, _ := strings.Cut(val, "=")
-		switch strings.ToLower(key) {
-		case "apt_config", "http_proxy", "https_proxy", "all_proxy", "no_proxy", "ftp_proxy":
+		lowerKey := strings.ToLower(key)
+		switch lowerKey {
+		case "apt_config", "http_proxy", "https_proxy", "all_proxy", "no_proxy", "ftp_proxy",
+			"path", "gconv_path":
+			continue
+		}
+		if strings.HasPrefix(lowerKey, "ld_") {
 			continue
 		}
 		env = append(env, val)
 	}
-	return env
+	// Do not allow inherited PATH or dynamic linker settings to shadow APT's
+	// child utilities/methods, or preflight itself.
+	return append(env, "PATH=/usr/sbin:/usr/bin:/sbin:/bin")
 }

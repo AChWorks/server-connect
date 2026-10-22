@@ -242,13 +242,15 @@ Commands:
   status [--json]            Desired/observed service state, not fake VPN health
   probe --via proxy|direct --url https://example.org
   exec -- curl -I https://example.org
-  apt -- apt-get update        One-command APT opt-in; no global apt changes
+  apt -- apt-get update        Strict opt-in APT via trusted native binary
   version                    Show pinned versions
 
 Import VLESS links from stdin or a mode-0600 file, not shell argv. 'exec'
 sets proxy variables for only the selected child process. 'apt' passes
-an anonymous private APT config to its chosen child, with no /etc/apt edits.
-Neither mode routes unrelated host traffic globally.
+an anonymous private APT config to a verified native APT child, with no
+/etc/apt edits. Combined -U/--update package operations are unsupported;
+run an explicit strict update first. Neither mode routes unrelated host
+traffic globally.
 `
 
 func menu(m *sc.Manager) int {
