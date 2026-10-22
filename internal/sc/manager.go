@@ -83,7 +83,10 @@ func ensureDir(path string) error {
 	}
 	s, e := os.Lstat(path)
 	if os.IsNotExist(e) {
-		if e = os.Mkdir(path, 0700); e != nil {
+		// Another local operation may create the private directory at
+		// the same instant. Reinspect its type and permissions below;
+		// never assume that EEXIST implies a trusted directory.
+		if e = os.Mkdir(path, 0700); e != nil && !os.IsExist(e) {
 			return e
 		}
 		s, e = os.Lstat(path)
