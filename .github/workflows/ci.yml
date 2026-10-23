@@ -84,7 +84,9 @@ jobs:
           # C compiler required by the journal race detector.
           DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends iproute2 gcc libc6-dev
           test -x /usr/bin/ip
-          go test ./internal/sc -run '^(TestPreflight|TestUnderlay|TestHostDrift)' -count=1 -v
+          # Run selected-kernel RPDB acceptance AFTER native iproute2 is installed.
+          # Restricted runners may SKIP unshare; missing iproute2 is not acceptable here.
+          go test ./internal/sc -run '^(TestPreflight|TestUnderlay|TestHostDrift|TestSelectivePolicyKernelRoutingInPrivateNamespace)' -count=1 -v
           go test ./cmd/server-connect -run '^(TestHostDriftCLI|TestHostDriftMenu)' -count=1 -v
           # Journal checks are non-networking: exercise descriptor identity,
           # strict JSON, crash/restart semantics and nonblocking FIFO rejection.
