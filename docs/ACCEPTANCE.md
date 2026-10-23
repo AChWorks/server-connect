@@ -12,6 +12,12 @@
 
 Record exact commit SHA, artifact digest, sing-box version, OS/kernel/arch, baseline host network, probe destination class (without secrets), test duration, pass/fail/NOT_RUN and rollback evidence. Do not convert a simulated restricted connection into proof of connectivity during a real war/outage.
 
+## Disposable Debian 13 installed-host QA harness
+
+The path-scoped GitHub Actions workflow `.github/workflows/installed-host-qa.yml` builds a **QA-only** bundle from the independently SHA-256-verified pinned official core, then starts a disposable Debian 13 Docker container with real `systemd` PID 1, no external Docker networking and no prior product installation. The test script `scripts/qa/test-installed-host.sh` is restricted to ephemeral GitHub Actions runners. It exercises the root-owned shared offline installer in `--verify-only`, install, reinstall and uninstall modes. Syscall tracing rejects DNS/HTTP/network attempts and external fetch tools during each **offline** operation. It checks that the installed service remains Direct/inactive, product-owned resources disappear on uninstall, private test profile bytes survive, and container routes/rules/links match the initial snapshot.
+
+A second **isolated-loopback-only** acquisition validates the development online bootstrap handoff to the same installer and subsequent uninstall. Image preparation and genuine upstream core download happen on the connected disposable GitHub runner **before** the disconnected installer test. This does **not** prove an authenticated public one-line channel, physical disconnected server, upgrade to a different release, SSH/aaPanel coexistence, foreign VPN reachability, reboot/power-loss recovery or safe host routing. Root-capable Docker is confined to a disposable no-secret hosted CI runner; it is not a supported server-install mechanism. Base any PASS claim on the exact completed CI run and job logs, not the existence of this test. Field-host acceptance and publisher/licensing decisions remain independent gates.
+
 ## Required matrix
 
 | Scenario | What must be demonstrated | Minimum evidence |

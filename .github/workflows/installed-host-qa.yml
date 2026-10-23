@@ -1,0 +1,66 @@
+name: Installed-host QA (isolated)
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/installed-host-qa.yml'
+      - 'bundle/install.sh'
+      - 'scripts/bootstrap-online.sh'
+      - 'scripts/package.sh'
+      - 'scripts/qa/**'
+      - 'cmd/server-connect/**'
+      - 'internal/sc/**'
+      - 'go.mod'
+      - 'go.sum'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sc-installed-host-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  debian13-systemd-lifecycle:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      GOPROXY: 'off'
+      GOTOOLCHAIN: 'local'
+    steps:
+      - name: Checkout exact candidate without retained credentials
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Pinned Go compiler
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.27.1'
+          cache: false
+
+      - name: Acquire and verify genuine pinned upstream core for QA
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p build/installed-qa
+          curl -q --fail --location --proto '=https' --proto-redir '=https' \
+            --max-filesize 100663296 --connect-timeout 15 --max-time 150 \
+            --retry 2 --silent --show-error \
+            --output build/installed-qa/sing-box.tar.gz \
+            https://github.com/SagerNet/sing-box/releases/download/v1.14.3/sing-box-1.14.3-linux-amd64.tar.gz
+          printf '%s\n' 'e2bdf179c15a3652955dc44867e33ca0965c9c9b91b34267dcc5a5d639a5feee  build/installed-qa/sing-box.tar.gz' | sha256sum --check
+          scripts/package.sh "$PWD/build/installed-qa/sing-box.tar.gz"
+          test -f dist/server-connect-0.1.0-dev-debian13-amd64-local-qa.tar.gz
+          sha256sum dist/server-connect-0.1.0-dev-debian13-amd64-local-qa.tar.gz
+
+      - name: Exercise private Debian 13 systemd installation with no external network
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker info --format 'Docker engine ready: {{.ServerVersion}}'
+          sh -n scripts/qa/test-installed-host.sh
+          bash scripts/qa/test-installed-host.sh \
+            dist/server-connect-0.1.0-dev-debian13-amd64-local-qa.tar.gz \
+            scripts/bootstrap-online.sh

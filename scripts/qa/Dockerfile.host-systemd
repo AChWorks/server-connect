@@ -1,0 +1,11 @@
+# Ephemeral GitHub-hosted QA only. Not a production container or supported install target.
+FROM debian:trixie-slim
+ENV DEBIAN_FRONTEND=noninteractive
+ENV container=docker
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+      ca-certificates curl gzip iproute2 procps python3 strace systemd systemd-sysv \
+      tar util-linux \
+ && rm -rf /var/lib/apt/lists/*
+STOPSIGNAL SIGRTMIN+3
+CMD ["/sbin/init"]
