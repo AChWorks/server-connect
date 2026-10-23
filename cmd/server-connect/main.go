@@ -190,6 +190,20 @@ func run(j bool, m *sc.Manager, args []string) int {
 		}
 		res, e := m.Probe(*via, *target)
 		return output(j, res, e)
+	case "diagnose-path":
+		opts := flag.NewFlagSet(name, flag.ContinueOnError)
+		opts.SetOutput(io.Discard)
+		via := opts.String("via", "proxy", "direct or proxy; never falls back")
+		var urls []string
+		opts.Func("url", "HTTP(S) target; specify two to four distinct hosts", func(value string) error {
+			urls = append(urls, value)
+			return nil
+		})
+		if e := opts.Parse(args); e != nil || len(opts.Args()) != 0 {
+			return output(j, nil, sc.Fault("invalid_arguments", "invalid diagnose-path options"))
+		}
+		result, err := m.DiagnosePath(*via, urls)
+		return output(j, result, err)
 	case "host-preflight":
 		opts := flag.NewFlagSet(name, flag.ContinueOnError)
 		opts.SetOutput(io.Discard)
@@ -251,6 +265,8 @@ Commands:
   disconnect                 Stop and disable product-owned local proxy service
   status [--json]            Desired/observed service state, not fake VPN health
   probe --via proxy|direct --url https://example.org
+  diagnose-path --via proxy|direct --url https://one.example --url https://two.example
+                              Two to four distinct hosts; diagnostic only
   exec -- curl -I https://example.org
   apt -- apt-get update        Strict opt-in APT via trusted native binary
   host-preflight [--endpoint IP] [--management-peer IP]
@@ -262,14 +278,16 @@ sets proxy variables for only the selected child process. 'apt' passes
 an anonymous private APT config to a verified native APT child, with no
 /etc/apt edits. Combined -U/--update package operations are unsupported;
 run an explicit strict update first. Neither mode routes unrelated host
-traffic globally. Host preflight is observational: a route lookup does not
+traffic globally. Path diagnostics never fall back to Direct, do not echo
+targets in results, and do not establish tunnel health or start recovery.
+Host preflight is observational: a route lookup does not
 prove connectivity, safety, routing ownership or readiness to activate TUN.
 `
 
 func menu(m *sc.Manager) int {
 	in := bufio.NewReader(os.Stdin)
 	for {
-		fmt.Println("\nServer Connect | 1 Status  2 Profiles  3 Import  4 Select  5 Connect  6 Test  7 Disconnect  8 Remove  9 APT Update  10 Host Preflight  0 Exit")
+		fmt.Println("\nServer Connect | 1 Status  2 Profiles  3 Import  4 Select  5 Connect  6 Test  7 Disconnect  8 Remove  9 APT Update  10 Host Preflight  11 Path Diagnostics  0 Exit")
 		fmt.Print("Choice: ")
 		raw, e := in.ReadString('\n')
 		if e != nil {
@@ -311,6 +329,18 @@ func menu(m *sc.Manager) int {
 			run(false, m, []string{"disconnect"})
 		case "10":
 			run(false, m, []string{"host-preflight"})
+		case "11":
+			fmt.Print("First independent HTTP(S) target: ")
+			first, _ := in.ReadString('\n')
+			fmt.Print("Second independent HTTP(S) target: ")
+			second, _ := in.ReadString('\n')
+			fmt.Print("Path 1=proxy, 2=direct: ")
+			selection, _ := in.ReadString('\n')
+			via := "proxy"
+			if strings.TrimSpace(selection) == "2" {
+				via = "direct"
+			}
+			run(false, m, []string{"diagnose-path", "--via", via, "--url", strings.TrimSpace(first), "--url", strings.TrimSpace(second)})
 		case "9":
 			fmt.Print("APT update refreshes system package indexes using the selected proxy. Type UPDATE to confirm: ")
 			confirmation, err := in.ReadString('\n')
