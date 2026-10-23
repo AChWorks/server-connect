@@ -38,10 +38,15 @@ case "$1" in
     # strace -ff writes one PHASE.PID file per traced process.
     set -- "$trace_dir"/"$phase".*
     [ -f "$1" ] || fail "no process traces for phase $phase"
+    nonempty_seen=no
     for trace_file do
       [ -f "$trace_file" ] && [ ! -L "$trace_file" ] &&
-        [ -r "$trace_file" ] && [ -s "$trace_file" ] ||
-        fail "missing, empty, unreadable or non-regular trace: $trace_file"
+        [ -r "$trace_file" ] ||
+        fail "missing, unreadable or non-regular trace: $trace_file"
+      # -ff may create an empty trace for a child that exits without any
+      # selected syscalls. A single empty child is valid, but the full
+      # invocation must contain at least one actual trace record.
+      [ ! -s "$trace_file" ] || nonempty_seen=yes
 
       # A trace containing raw binary/control bytes cannot be treated as
       # complete textual syscall evidence (strace normally escapes them).
@@ -64,6 +69,8 @@ case "$1" in
       reject_pattern 'unverifiable fd-only execution' \
         'execveat\(.*AT_EMPTY_PATH' "$trace_file"
     done
+    [ "$nonempty_seen" = yes ] ||
+      fail "all process traces were empty for phase $phase"
     ;;
   network)
     [ "$#" -eq 1 ] || fail 'network usage: network'

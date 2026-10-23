@@ -147,8 +147,9 @@ run_offline() {
 }
 assert_no_offline_fetch() {
   label=$1
-  # Missing/empty/unreadable child traces, scanner errors and forbidden
-  # execve/execveat or IPv4/IPv6 network attempts MUST all fail acceptance.
+  # Missing/unreadable traces, an entirely empty trace set, scanner
+  # errors and forbidden execve/execveat or IPv4/IPv6 network attempts
+  # MUST all fail acceptance (individual empty child traces are valid).
   docker exec "$container" /bin/sh /root/qa-host-assertions.sh \
     trace /root/qa-strace "$label"
   echo "OFFLINE_FETCH_ATTEMPTS($label)=ZERO"

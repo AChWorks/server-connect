@@ -49,8 +49,11 @@ expect_trace_rejected 'binary or corrupted trace'
 rm "$trace_file"
 expect_trace_rejected 'missing process trace'
 : >"$trace_file"
-expect_trace_rejected 'empty process trace'
+expect_trace_rejected 'all process traces empty'
 printf '%s\n' "$safe_trace" >"$trace_file"
+: >"$scratch/traces/check.102"
+expect_trace_ok 'valid empty child trace alongside nonempty parent'
+rm "$scratch/traces/check.102"
 mkdir "$scratch/traces/check.102"
 expect_trace_rejected 'non-regular child trace'
 rmdir "$scratch/traces/check.102"
