@@ -206,6 +206,11 @@ func selectiveText(raw json.RawMessage) string {
 }
 
 func selectiveInt(raw json.RawMessage) (int, bool) {
+	// encoding/json silently leaves non-pointer integers at zero for null.
+	// A missing kernel numeric selector must never become a trusted zero.
+	if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		return 0, false
+	}
 	var value int
 	if json.Unmarshal(raw, &value) == nil {
 		return value, value >= 0
