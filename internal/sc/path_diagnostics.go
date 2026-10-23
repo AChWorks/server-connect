@@ -68,10 +68,17 @@ func validatePathDiagnosticTargets(path string, targets []string) error {
 	return nil
 }
 
-// runPathDiagnostics is dependency-injected solely to make aggregate decision
-// policy testable without installed systemd or outbound network access.
-// Production always binds each probe to Manager.Probe (no fallback).
+// runPathDiagnostics isolates aggregation policy from the installed service.
+// Production Direct uses Manager.Probe; Proxy uses a pinned selected transport
+// and a short-lived identity check around every request (never a long lock).
 func runPathDiagnostics(path string, targets []string, probe func(string) (ProbeResult, error)) (PathDiagnostics, error) {
+	return runPathDiagnosticsChecked(path, targets, probe, nil)
+}
+
+// identityUnchanged verifies that all responses still belong to one selected
+// outbound. Failure invalidates the WHOLE set, including prior successful
+// samples. Never hold the Manager lifecycle lock while probe is executing.
+func runPathDiagnosticsChecked(path string, targets []string, probe func(string) (ProbeResult, error), identityUnchanged func() bool) (PathDiagnostics, error) {
 	report := PathDiagnostics{
 		Path: path, Assessment: "not_tested",
 		HostNetworkReadOnly: true, FallbackAttempted: false,
@@ -85,32 +92,72 @@ func runPathDiagnostics(path string, targets []string, probe func(string) (Probe
 	}
 	report.TargetCount = len(targets)
 	report.Samples = make([]PathDiagnosticTarget, 0, len(targets))
+	pathChanged := false
 	for i, destination := range targets {
+		if identityUnchanged != nil && !identityUnchanged() {
+			pathChanged = true
+			break
+		}
 		result, err := probe(destination)
+		if identityUnchanged != nil && !identityUnchanged() {
+			// Do not report even this target as successful: it may have
+			// completed on a different service or profile generation.
+			pathChanged = true
+			break
+		}
 		entry := PathDiagnosticTarget{
-			Index: i, Status: result.Result, HTTPStatus: result.Code,
+			Index: i, Status: "failed", HTTPStatus: result.Code,
 			DurationMs: result.DurationMs,
 		}
 		if err == nil && result.Path == path &&
 			result.Result == "reachable" && result.Code >= 200 && result.Code < 300 {
+			entry.Status = "reachable"
 			report.ReachableCount++
 		} else {
 			report.FailedCount++
-			if err != nil {
+			switch {
+			case result.Path != path:
+				// A successful Direct response never proves selected Proxy.
+				entry.Status = "unverified"
+				entry.ErrorCode = "diagnostic_inconsistent"
+			case err != nil:
+				// A conflicting raw 'reachable' result is never trusted.
+				// Retain only known non-success result categories and a
+				// safe classified error (not its underlying raw message).
+				if result.Result == "unavailable" || result.Result == "http_error" {
+					entry.Status = result.Result
+				}
 				entry.ErrorCode = ErrorCode(err)
-			} else if result.Code >= 300 && result.Code < 400 && result.Path == path {
-				// Redirects/captive portals do not establish that the
-				// selected destination returned its expected HTTP content.
+			case result.Code >= 300 && result.Code < 400:
+				// A redirect does not prove destination content.
 				entry.Status = "redirect_unverified"
 				entry.ErrorCode = "probe_redirect_unverified"
-			} else {
+			default:
+				entry.Status = "unverified"
 				entry.ErrorCode = "diagnostic_inconsistent"
-			}
-			if entry.Status == "" {
-				entry.Status = "failed"
 			}
 		}
 		report.Samples = append(report.Samples, entry)
+	}
+	if pathChanged {
+		// A successful sample taken before drift is no longer evidence
+		// about one stable profile. Fill untouched targets without probing
+		// a newly selected outbound or exposing sensitive path details.
+		for i := range report.Samples {
+			if report.Samples[i].Status == "reachable" {
+				report.Samples[i].Status = "unverified"
+				report.Samples[i].ErrorCode = "diagnostic_path_changed"
+			}
+		}
+		for len(report.Samples) < report.TargetCount {
+			report.Samples = append(report.Samples, PathDiagnosticTarget{
+				Index: len(report.Samples), Status: "unverified", ErrorCode: "diagnostic_path_changed",
+			})
+		}
+		report.ReachableCount = 0
+		report.FailedCount = report.TargetCount
+		report.Assessment = "path_changed_unverified"
+		return report, Fault("diagnostic_path_changed", "selected proxy identity changed; aggregate path evidence is unverified")
 	}
 	switch {
 	case report.ReachableCount == report.TargetCount:
@@ -129,7 +176,34 @@ func runPathDiagnostics(path string, targets []string, probe func(string) (Probe
 // callers can request a separate Direct report for comparison. No timer,
 // route modification, daemon, automatic fallback or state transition exists.
 func (m *Manager) DiagnosePath(path string, targets []string) (PathDiagnostics, error) {
-	return runPathDiagnostics(path, targets, func(target string) (ProbeResult, error) {
-		return m.Probe(path, target)
+	if path != "proxy" {
+		return runPathDiagnostics(path, targets, func(target string) (ProbeResult, error) {
+			return m.Probe(path, target)
+		})
+	}
+	// Validate all destinations before inspecting local profile/service state.
+	if err := validatePathDiagnosticTargets(path, targets); err != nil {
+		return runPathDiagnostics(path, targets, nil)
+	}
+	return runSelectedProxyPathDiagnostics(targets, m.captureDiagnosticProxy)
+}
+
+// A capturing function is injected only so installed-state/transport behavior
+// can be tested against disposable local fixtures, not a real systemd unit.
+func runSelectedProxyPathDiagnostics(targets []string, capture func() (diagnosticProxySnapshot, error)) (PathDiagnostics, error) {
+	initial, err := capture()
+	if err != nil {
+		// An unavailable selected Proxy must never silently fall back to
+		// Direct; preserve per-target unavailable results and CLI errors.
+		return runPathDiagnostics("proxy", targets, func(string) (ProbeResult, error) {
+			return ProbeResult{Path: "proxy", Result: "unavailable"},
+				Fault("proxy_unavailable", "selected proxy path cannot be verified")
+		})
+	}
+	return runPathDiagnosticsChecked("proxy", targets, func(target string) (ProbeResult, error) {
+		return probeHTTPPath("proxy", target, initial.proxy)
+	}, func() bool {
+		current, err := capture()
+		return err == nil && current.identity == initial.identity
 	})
 }

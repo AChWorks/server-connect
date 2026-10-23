@@ -211,3 +211,49 @@ func TestDiagnosePathCLIHonorsErrorsAndRedactsTargets(t *testing.T) {
 		t.Fatalf("unsafe URI accepted or reflected: code=%d", code)
 	}
 }
+
+func TestDiagnosticPathDriftJSONExitAndSanitization(t *testing.T) {
+	report := sc.PathDiagnostics{
+		Path: "proxy", Assessment: "path_changed_unverified",
+		TargetCount: 2, ReachableCount: 0, FailedCount: 2,
+		Samples: []sc.PathDiagnosticTarget{
+			{Index: 0, Status: "unverified", ErrorCode: "diagnostic_path_changed"},
+			{Index: 1, Status: "unverified", ErrorCode: "diagnostic_path_changed"},
+		},
+		HostNetworkReadOnly: true,
+	}
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := os.Stdout
+	os.Stdout = writer
+	exit := output(true, report, sc.Fault("diagnostic_path_changed", "selected proxy identity changed; aggregate path evidence is unverified"))
+	writer.Close()
+	os.Stdout = old
+	raw, err := io.ReadAll(reader)
+	reader.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var result struct {
+		OK    bool               `json:"ok"`
+		Data  sc.PathDiagnostics `json:"data"`
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(raw, &result); err != nil {
+		t.Fatal(err)
+	}
+	if exit != 1 || result.OK || result.Error.Code != "diagnostic_path_changed" ||
+		result.Data.Assessment != "path_changed_unverified" || result.Data.ReachableCount != 0 ||
+		len(result.Data.Samples) != 2 || result.Data.Samples[0].Status != "unverified" {
+		t.Fatalf("path drift must be a machine failure with safe samples: %+v", result)
+	}
+	for _, forbidden := range []string{"password", "https://", "private-token"} {
+		if strings.Contains(string(raw), forbidden) {
+			t.Fatalf("unexpected private path information in JSON")
+		}
+	}
+}

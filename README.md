@@ -47,8 +47,13 @@ On a Linux host with trusted native `/usr/bin/ip`, `server-connect --json host-p
   Run an independent `--via direct` invocation for the Direct baseline; Direct successes never count as Proxy
   results. Responses contain only target indexes, bounded HTTP codes/error classifications, counts, and
   `all_targets_reachable`, `mixed_results`, or `no_targets_reachable`; no URL, query or credentials are returned.
+  Proxy diagnostics pin one selected profile/runtime and service invocation across the target set, checking
+  identity before and after each request without holding the lifecycle lock during network I/O. If that
+  identity changes or becomes unverifiable, the whole set returns `path_changed_unverified` /
+  `diagnostic_path_changed`, with no sample marked reachable; prior successful samples are invalidated.
   A single failed target returns `probe_set_partial`, **not** proof of a dead VPN. Redirects are never followed;
-  HTTP 3xx is `probe_redirect_unverified`, not verified destination content. At most four 12-second target
+  HTTP 3xx is `probe_redirect_unverified`, not verified destination content. Contradictory path/result
+  combinations never expose a success status; TLS hostname mismatches report `probe_tls`. At most four 12-second target
   requests are made, without modifying host routes or firewall. Results explicitly mark
   `tunnel_health_verified: false` and `activation_ready: false`. The existing selected-proxy lookup may
   initialize private application state. These checks **do not attest foreign egress identity, independently

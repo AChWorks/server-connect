@@ -2,6 +2,7 @@ package sc
 
 import (
 	"context"
+	"crypto/tls"
 	"crypto/x509"
 	"errors"
 	"io"
@@ -53,23 +54,7 @@ func probeHTTPPath(via, destination string, selectedProxy *url.URL) (ProbeResult
 	response, err := client.Do(request)
 	result := ProbeResult{Path: via, DurationMs: time.Since(start).Milliseconds(), Result: "failed"}
 	if err != nil {
-		var dnsErr *net.DNSError
-		var authorityErr x509.UnknownAuthorityError
-		var certErr x509.CertificateInvalidError
-		switch {
-		case errors.As(err, &dnsErr):
-			return result, Fault("probe_dns", "path DNS resolution failed")
-		case errors.As(err, &authorityErr) || errors.As(err, &certErr):
-			return result, Fault("probe_tls", "path TLS certificate validation failed")
-		case errors.Is(err, context.DeadlineExceeded) || errors.Is(err, os.ErrDeadlineExceeded):
-			return result, Fault("probe_timeout", "path probe timed out")
-		default:
-			var connectErr *net.OpError
-			if errors.As(err, &connectErr) {
-				return result, Fault("probe_connect", "path TCP or proxy connection failed")
-			}
-			return result, Fault("probe_transport", "path request failed; root cause unverified")
-		}
+		return result, classifyHTTPProbeError(err)
 	}
 	defer response.Body.Close()
 	_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 2048))
@@ -80,4 +65,31 @@ func probeHTTPPath(via, destination string, selectedProxy *url.URL) (ProbeResult
 	}
 	result.Result = "http_error"
 	return result, Fault("probe_http", "selected path returned unhealthy HTTP response")
+}
+
+// Only emit stable diagnostic categories, never the underlying error text:
+// net/url errors may contain target URLs, proxy credentials or certificate
+// subjects. Classify wrapped TLS failures before generic net.OpError.
+func classifyHTTPProbeError(err error) error {
+	var certificateErr *tls.CertificateVerificationError
+	var authorityErr x509.UnknownAuthorityError
+	var invalidErr x509.CertificateInvalidError
+	var hostnameErr x509.HostnameError
+	var rootsErr x509.SystemRootsError
+	var dnsErr *net.DNSError
+	var connectErr *net.OpError
+	switch {
+	case errors.As(err, &certificateErr), errors.As(err, &authorityErr),
+		errors.As(err, &invalidErr), errors.As(err, &hostnameErr),
+		errors.As(err, &rootsErr):
+		return Fault("probe_tls", "path TLS certificate validation failed")
+	case errors.As(err, &dnsErr):
+		return Fault("probe_dns", "path DNS resolution failed")
+	case errors.Is(err, context.DeadlineExceeded) || errors.Is(err, os.ErrDeadlineExceeded):
+		return Fault("probe_timeout", "path probe timed out")
+	case errors.As(err, &connectErr):
+		return Fault("probe_connect", "path TCP or proxy connection failed")
+	default:
+		return Fault("probe_transport", "path request failed; root cause unverified")
+	}
 }
