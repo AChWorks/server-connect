@@ -4,14 +4,12 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
-	"crypto/x509"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net"
-	"net/http"
 	"net/url"
 	"os"
 	"os/exec"
@@ -83,7 +81,10 @@ func ensureDir(path string) error {
 	}
 	s, e := os.Lstat(path)
 	if os.IsNotExist(e) {
-		if e = os.Mkdir(path, 0700); e != nil {
+		// Another local operation may create the private directory at
+		// the same instant. Reinspect its type and permissions below;
+		// never assume that EEXIST implies a trusted directory.
+		if e = os.Mkdir(path, 0700); e != nil && !os.IsExist(e) {
 			return e
 		}
 		s, e = os.Lstat(path)
@@ -743,53 +744,16 @@ func (m *Manager) Probe(via, destination string) (ProbeResult, error) {
 	if e != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
 		return ProbeResult{}, errors.New("probe URL must be http(s)")
 	}
-	t := &http.Transport{Proxy: nil, DialContext: (&net.Dialer{Timeout: 6 * time.Second}).DialContext, TLSHandshakeTimeout: 7 * time.Second, DisableKeepAlives: true}
+	var proxy *url.URL
 	if via == "proxy" {
-		px, e := m.proxyURL()
+		proxy, e = m.proxyURL()
 		if e != nil {
 			return ProbeResult{Path: via, Result: "unavailable"}, e
 		}
-		t.Proxy = http.ProxyURL(px)
 	}
-	defer t.CloseIdleConnections()
-	cli := &http.Client{Transport: t, Timeout: 12 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
-	start := time.Now()
-	req, e := http.NewRequest(http.MethodGet, destination, nil)
-	if e != nil {
-		return ProbeResult{}, errors.New("invalid probe request")
-	}
-	req.Header.Set("Cache-Control", "no-cache")
-	resp, e := cli.Do(req)
-	result := ProbeResult{Path: via, DurationMs: time.Since(start).Milliseconds(), Result: "failed"}
-	if e != nil {
-		var dnsErr *net.DNSError
-		var certErr x509.UnknownAuthorityError
-		var invalidCert x509.CertificateInvalidError
-		switch {
-		case errors.As(e, &dnsErr):
-			return result, Fault("probe_dns", "path DNS resolution failed")
-		case errors.As(e, &certErr) || errors.As(e, &invalidCert):
-			return result, Fault("probe_tls", "path TLS certificate validation failed")
-		case errors.Is(e, context.DeadlineExceeded) || errors.Is(e, os.ErrDeadlineExceeded):
-			return result, Fault("probe_timeout", "path probe timed out")
-		default:
-			var opErr *net.OpError
-			if errors.As(e, &opErr) {
-				return result, Fault("probe_connect", "path TCP or proxy connection failed")
-			}
-			return result, Fault("probe_transport", "path request failed; root cause unverified")
-		}
-	}
-	defer resp.Body.Close()
-	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 2048))
-	result.Code = resp.StatusCode
-	if resp.StatusCode >= 200 && resp.StatusCode < 400 {
-		result.Result = "reachable"
-	} else {
-		result.Result = "http_error"
-		return result, Fault("probe_http", "selected path returned unhealthy HTTP response")
-	}
-	return result, nil
+	// Never substitute Direct for a requested Proxy, including if the
+	// selected service stops before the actual HTTP request.
+	return probeHTTPPath(via, destination, proxy)
 }
 func (m *Manager) Exec(command []string) (int, error) {
 	if len(command) == 0 {
