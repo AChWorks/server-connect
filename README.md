@@ -49,7 +49,54 @@ server-connect --json selective-plan --endpoint 198.51.100.10 \
 
 A valid preview returns a deterministic bounded set of **candidate** table/priorities, destination-specific route/rule identities, and fingerprints for that observation and proposed plan. It rejects overlapping destinations, common private/special-purpose ranges, routes overlapping any existing non-default host route, reused interface identity, unsupported rule/table descriptions, and input that would capture the specified VPN endpoint or management peer. The planner also checks whether **earlier policy rules** could intercept selected traffic via a matching default route in another table (including source-, destination-, or mark-specific rules); unknown rule actions or unprovable precedence fail closed with `route_plan_uncertain` instead of silently overwriting third-party policy. Observation and plan fingerprints cover canonicalized route/rule/link inventories **plus the native route-get results for both protected endpoint and management peer**; missing or inconsistent protected lookup evidence is rejected. It is callable from menu option **12**; option **11** remains the previously merged read-only Path Diagnostics.
 
-**Safety boundary:** the output always states `read_only: true`, `activation_ready: false`, `snapshot_atomic: false`, `guard_armed: false`, `ownership_verified: false`. No table or priority is actually reserved; nothing is applied or saved. An unchanged preview, hash or apparently unused ID **does not** prove network ownership or safe SSH/HTTP(S) replies, domestic reachability, DNS/bootstrap or a bound VPN path. Do not run the displayed candidate policy manually. Actual owned-route activation, persistent fsync journal, independent 600-second Activation Guard, authenticated new-session confirmation, reboot/timeout rollback and Runtime Health Guard (#3) are separate mandatory implementation and acceptance gates.
+**Safety boundary:** the output always states `read_only: true`, `activation_ready: false`, `snapshot_atomic: false`, `guard_armed: false`, `ownership_verified: false`. No table or priority is actually reserved; nothing is applied or saved. An unchanged preview, hash or apparently unused ID **does not** prove network ownership or safe SSH/HTTP(S) replies, domestic reachability, DNS/bootstrap or a bound VPN path. Do not run the displayed candidate policy manually. The internal fsync-backed PREPARED/UNCERTAIN intent journal does not attest route ownership or apply network changes. Guarded owned-route activation and rollback, an independent 600-second Activation Guard, authenticated new-session confirmation, reboot/timeout recovery and Runtime Health Guard (#3) remain separate mandatory implementation and acceptance gates.
+
+### Explicit underlay TCP diagnostic (Issue #2 dependent development)
+
+For a *known* literal TCP endpoint and port, run
+`server-connect --json underlay-tcp --endpoint 198.51.100.10 --port 443`.
+If the configured VPN endpoint also uses a DNS name, explicitly verify that
+the **current host resolver** includes the intended pinned IP *before* the
+TCP attempt:
+`server-connect --json underlay-tcp --endpoint 198.51.100.10 --hostname vpn.example.net --port 443`.
+The hostname check rejects malformed/ambiguous names, resolves an absolute
+DNS-style name (never silently adding a local search suffix), caps resolution
+to three seconds, checks A/AAAA records against the pinned literal, refuses
+oversized or unsuitable resolver results, and **does not connect** if that
+literal is absent. It never silently substitutes another resolved address.
+The IP-only command remains a literal-only test and does not invoke DNS.
+
+Either form makes one bounded TCP connection attempt **with no application bytes**,
+using a Linux kernel route lookup qualified by **TCP protocol, the exact
+destination port and the CLI process UID**, followed by `SO_BINDTODEVICE` on
+that selected interface. The **same flow-qualified route and the relevant
+policy rules** are checked again afterward. Source-dependent, source-port,
+mark, VRF, output-interface or unrecognized rule selectors are classified as
+`underlay_policy_unsupported` instead of guessing the socket's effective
+route. It rejects ambiguous/missing/down interfaces and **never falls back
+to an unbound socket** when binding fails. Unreachable/refused/timeouts
+produce a nonzero exit code and a machine-readable partial report
+(`ok: false`). Invalid endpoint/port/hostname arguments return an error
+**without a fabricated `data` report**; failures after the diagnostic starts
+retain `read_only: true` and bounded partial observations. The
+command does not depend on proxy environment variables, saved profiles or
+systemd services. The optional --hostname mode **does** use the current host
+name resolver and requires a DNS-style ASCII hostname with at least two labels;
+IP-only mode never invokes name resolution. Both must be explicitly invoked by
+the operator rather than automatically testing an arbitrary endpoint.
+
+**Scope limitation:** TCP reachability on the selected current interface
+is not proof of a safe unmodified pre-VPN underlay, VPN/TLS authentication,
+UDP/QUIC transport, endpoint DNS bootstrap, existing/new SSH reply paths,
+aaPanel ingress or any Activation/Runtime Guard. The hostname match uses
+the **host-configured resolver** (which may use local hosts records/caches
+or an already-tunneled DNS path). It cannot prove a DNS query succeeded
+over an independent Direct underlay. Pinning an IP does not guarantee the
+VPN client will use that address later; activation planning must independently
+protect actual resolver, endpoint and management paths. This diagnostic never
+mutates routes, firewall, resolver files or host state; `activation_ready`
+and `dns_bootstrap_verified` both remain **false**, even on success.
+Existing third-party routing is possible; observations are non-atomic. The interactive diagnostic is menu option **13**; existing Path Diagnostics and Selective Plan retain options **11** and **12**.
 
 ### Proxy Only compatibility and application opt-in
 

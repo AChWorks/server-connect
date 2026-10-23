@@ -357,3 +357,161 @@ func TestDistinctMenuOptionsAfterPathDiagnosticIntegration(t *testing.T) {
 		t.Fatal("invalid interactive diagnostics/planner unexpectedly created product state")
 	}
 }
+
+func TestUnderlayExplicitEmptyHostnameCannotBypassValidation(t *testing.T) {
+	manager := sc.New(filepath.Join(t.TempDir(), "state"), "", 0)
+	pipeRead, pipeWrite, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pipeRead.Close()
+	oldOut := os.Stdout
+	os.Stdout = pipeWrite
+	exit := run(true, manager, []string{"underlay-tcp", "--endpoint", "127.0.0.1", "--port", "443", "--hostname="})
+	_ = pipeWrite.Close()
+	os.Stdout = oldOut
+	out, err := io.ReadAll(pipeRead)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if exit == 0 {
+		t.Fatal("explicit empty hostname bypassed required DNS validation")
+	}
+	var response struct {
+		OK    bool `json:"ok"`
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(out, &response); err != nil {
+		t.Fatalf("malformed JSON: %s (%v)", out, err)
+	}
+	if response.OK || response.Error.Code != "invalid_arguments" {
+		t.Fatalf("empty hostname did not fail safely: %s", out)
+	}
+	if _, err := os.Stat(manager.Dir); !os.IsNotExist(err) {
+		t.Fatal("invalid hostname unexpectedly modified manager state")
+	}
+}
+
+// PRE-validation failures have no structured route observations: omit data
+// instead of serializing a zero-value report with read_only:false.
+func TestUnderlayTCPInvalidArgumentsOmitDiagnosticData(t *testing.T) {
+	m := sc.New(filepath.Join(t.TempDir(), "state"), "", 0)
+	for _, tc := range []struct {
+		name string
+		args []string
+	}{
+		{"missing_endpoint", []string{"underlay-tcp", "--port", "443"}},
+		{"malformed_endpoint", []string{"underlay-tcp", "--endpoint", "fake.remote.invalid", "--port", "443"}},
+		{"zero_port", []string{"underlay-tcp", "--endpoint", "127.0.0.1", "--port", "0"}},
+		{"oversized_port", []string{"underlay-tcp", "--endpoint", "127.0.0.1", "--port", "65536"}},
+		{"hostname_syntax", []string{"underlay-tcp", "--endpoint", "127.0.0.1", "--port", "443", "--hostname", "invalid@@name"}},
+		{"empty_hostname", []string{"underlay-tcp", "--endpoint", "127.0.0.1", "--port", "443", "--hostname="}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			old := os.Stdout
+			reader, writer, err := os.Pipe()
+			if err != nil {
+				t.Fatal(err)
+			}
+			os.Stdout = writer
+			exit := run(true, m, tc.args)
+			_ = writer.Close()
+			os.Stdout = old
+			defer reader.Close()
+			var got struct {
+				OK    bool            `json:"ok"`
+				Data  json.RawMessage `json:"data"`
+				Error struct {
+					Code    string `json:"code"`
+					Message string `json:"message"`
+				} `json:"error"`
+			}
+			if err := json.NewDecoder(reader).Decode(&got); err != nil {
+				t.Fatal(err)
+			}
+			if exit == 0 || got.OK || got.Error.Code != "invalid_arguments" || len(got.Data) != 0 {
+				t.Fatalf("invalid input emitted fake route evidence: %+v exit=%d", got, exit)
+			}
+			if strings.Contains(got.Error.Message, "fake.remote.invalid") || strings.Contains(got.Error.Message, "invalid@@name") {
+				t.Fatal("input echoed into a machine-visible failure")
+			}
+		})
+	}
+	if _, err := os.Stat(m.Dir); !os.IsNotExist(err) {
+		t.Fatal("invalid underlay arguments touched protected state")
+	}
+}
+
+func TestUnderlayTCPValidArgumentsRetainSafePartialFailureReport(t *testing.T) {
+	m := sc.New(filepath.Join(t.TempDir(), "state"), "", 0)
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := os.Stdout
+	os.Stdout = writer
+	// This is a syntactically valid request, even on hosts without iproute2.
+	exit := run(true, m, []string{"underlay-tcp", "--endpoint", "127.0.0.1", "--port", "1"})
+	_ = writer.Close()
+	os.Stdout = old
+	defer reader.Close()
+	var got struct {
+		OK   bool `json:"ok"`
+		Data struct {
+			Mode                 string `json:"mode"`
+			ReadOnly             bool   `json:"read_only"`
+			ActivationReady      bool   `json:"activation_ready"`
+			DNSBootstrapVerified bool   `json:"dns_bootstrap_verified"`
+			Outcome              string `json:"outcome"`
+		} `json:"data"`
+		Error *apiError `json:"error"`
+	}
+	if err := json.NewDecoder(reader).Decode(&got); err != nil {
+		t.Fatal(err)
+	}
+	if exit == 0 || got.OK || got.Data.Mode != "underlay_tcp_diagnostic" ||
+		!got.Data.ReadOnly || got.Data.ActivationReady || got.Data.DNSBootstrapVerified ||
+		got.Data.Outcome == "" || got.Error == nil {
+		t.Fatalf("runtime failure lost required truthful safety evidence: %+v exit=%d", got, exit)
+	}
+}
+
+func TestUnderlayTCPMenu13PreservesExistingOptions(t *testing.T) {
+	manager := sc.New(filepath.Join(t.TempDir(), "missing-product-state"), "", 0)
+	in, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 13: literal IP, invalid port and omitted hostname; no TCP socket
+	// is opened and no manager state is created. Keep 11/12 intact.
+	if _, err := writer.Write([]byte("13\n127.0.0.1\n0\n\n0\n")); err != nil {
+		t.Fatal(err)
+	}
+	writer.Close()
+	out, capture, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldIn, oldOut := os.Stdin, os.Stdout
+	os.Stdin, os.Stdout = in, capture
+	code := menu(manager)
+	capture.Close()
+	os.Stdin, os.Stdout = oldIn, oldOut
+	defer in.Close()
+	raw, err := io.ReadAll(out)
+	out.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code != 0 ||
+		!strings.Contains(string(raw), "11 Path Diagnostics  12 Selective Plan  13 Underlay TCP") ||
+		!strings.Contains(string(raw), "Literal TCP endpoint IP (no DNS):") ||
+		!strings.Contains(string(raw), "Endpoint TCP port:") {
+		t.Fatalf("distinct option 13 not wired: code=%d output=%s", code, raw)
+	}
+	if _, err := os.Stat(manager.Dir); !os.IsNotExist(err) {
+		t.Fatal("invalid underlay menu unexpectedly created product state")
+	}
+}

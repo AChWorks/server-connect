@@ -243,6 +243,37 @@ func run(j bool, m *sc.Manager, args []string) int {
 		}
 		report, err := sc.InspectHostRoutes(*endpoint, *management)
 		return output(j, report, err)
+	case "underlay-tcp":
+		opts := flag.NewFlagSet(name, flag.ContinueOnError)
+		opts.SetOutput(io.Discard)
+		endpoint := opts.String("endpoint", "", "pinned literal TCP endpoint IPv4 or IPv6")
+		hostname := opts.String("hostname", "", "optional hostname to resolve and verify matches the pinned endpoint IP")
+		port := opts.Int("port", 0, "explicit TCP destination port")
+		if e := opts.Parse(args); e != nil || len(opts.Args()) != 0 {
+			return output(j, nil, sc.Fault("invalid_arguments", "invalid underlay-tcp options"))
+		}
+		hostnameProvided := false
+		opts.Visit(func(f *flag.Flag) {
+			if f.Name == "hostname" {
+				hostnameProvided = true
+			}
+		})
+		if hostnameProvided && *hostname == "" {
+			return output(j, nil, sc.Fault("invalid_arguments", "explicit --hostname must not be empty"))
+		}
+		var report sc.UnderlayTCPReport
+		var err error
+		if !hostnameProvided {
+			report, err = sc.InspectUnderlayTCP(*endpoint, *port)
+		} else {
+			report, err = sc.InspectUnderlayTCPWithHostname(*endpoint, *hostname, *port)
+		}
+		// No report exists when argument validation fails. Do not encode a
+		// zero-value struct with misleading read_only=false safety fields.
+		if report.Mode == "" {
+			return output(j, nil, err)
+		}
+		return output(j, report, err)
 	case "apt":
 		if j {
 			return output(true, nil, sc.Fault("invalid_arguments", "apt streams child output and does not support JSON mode"))
@@ -303,6 +334,8 @@ Commands:
   selective-plan --endpoint IP --management-peer IP --tunnel-if NAME
                  --destination CIDR [--destination CIDR...]
                               Advisory selective routing preview; never applies
+  underlay-tcp --endpoint IP --port N [--hostname NAME]
+                              Optional hostname must resolve to pinned IP before interface-bound TCP probe
   version                    Show pinned versions
 
 Import VLESS links from stdin or a mode-0600 file, not shell argv. 'exec'
@@ -314,12 +347,17 @@ traffic globally. Path diagnostics never fall back to Direct, do not echo
 targets in results, and do not establish tunnel health or start recovery.
 Host preflight is observational: a route lookup does not
 prove connectivity, safety, routing ownership or readiness to activate TUN.
+An explicit underlay-tcp probe binds a TCP socket to the kernel-selected
+interface and sends no application data. With --hostname, current host name
+resolution must include the explicit pinned --endpoint IP before TCP probing.
+This is not proof that resolver traffic bypassed a VPN or that DNS bootstrap,
+SSH/hosted ingress, VPN protocol, ownership or guards are safe.
 `
 
 func menu(m *sc.Manager) int {
 	in := bufio.NewReader(os.Stdin)
 	for {
-		fmt.Println("\nServer Connect | 1 Status  2 Profiles  3 Import  4 Select  5 Connect  6 Test  7 Disconnect  8 Remove  9 APT Update  10 Host Preflight  11 Path Diagnostics  12 Selective Plan  0 Exit")
+		fmt.Println("\nServer Connect | 1 Status  2 Profiles  3 Import  4 Select  5 Connect  6 Test  7 Disconnect  8 Remove  9 APT Update  10 Host Preflight  11 Path Diagnostics  12 Selective Plan  13 Underlay TCP  0 Exit")
 		fmt.Print("Choice: ")
 		raw, e := in.ReadString('\n')
 		if e != nil {
@@ -388,6 +426,27 @@ func menu(m *sc.Manager) int {
 				args = append(args, "--destination", strings.TrimSpace(cidr))
 			}
 			run(false, m, args)
+		case "13":
+			fmt.Print("Literal TCP endpoint IP (no DNS): ")
+			address, err := in.ReadString('\n')
+			if err != nil {
+				return 0
+			}
+			fmt.Print("Endpoint TCP port: ")
+			rawPort, err := in.ReadString('\n')
+			if err != nil {
+				return 0
+			}
+			fmt.Print("Optional DNS hostname to verify against pinned IP (blank to skip): ")
+			hostname, err := in.ReadString('\n')
+			if err != nil {
+				return 0
+			}
+			command := []string{"underlay-tcp", "--endpoint", strings.TrimSpace(address), "--port", strings.TrimSpace(rawPort)}
+			if h := strings.TrimSpace(hostname); h != "" {
+				command = append(command, "--hostname", h)
+			}
+			run(false, m, command)
 		case "9":
 			fmt.Print("APT update refreshes system package indexes using the selected proxy. Type UPDATE to confirm: ")
 			confirmation, err := in.ReadString('\n')

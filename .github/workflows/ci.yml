@@ -84,7 +84,7 @@ jobs:
           # C compiler required by the journal race detector.
           DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends iproute2 gcc libc6-dev
           test -x /usr/bin/ip
-          go test ./internal/sc -run '^TestPreflight' -count=1 -v
+          go test ./internal/sc -run '^(TestPreflight|TestUnderlay)' -count=1 -v
           # Journal checks are non-networking: exercise descriptor identity,
           # strict JSON, crash/restart semantics and nonblocking FIFO rejection.
           go test -race ./internal/sc -run '^(TestActivationJournal|TestSharedLifecycleFlock)' -count=1 -timeout=120s -v
@@ -147,6 +147,28 @@ jobs:
           assert report['snapshot_atomic'] is False
           assert report['endpoint']['target'] == '127.0.0.1'
           assert report['management_peer']['target'] == '127.0.0.2'
+          PYQA
+          # Invalid destinations must fail before any network activity.
+          if build/ci/server-connect-cli --json underlay-tcp --endpoint example.org --port 443 > build/ci/invalid-underlay.json; then
+            echo 'Non-literal underlay endpoint unexpectedly accepted' >&2
+            exit 1
+          fi
+          if build/ci/server-connect-cli --json underlay-tcp --endpoint 127.0.0.1 --hostname 'invalid@@host' --port 443 > build/ci/invalid-underlay-hostname.json; then
+            echo 'Invalid underlay hostname unexpectedly accepted' >&2
+            exit 1
+          fi
+          python3 - <<'PYQA'
+          import json
+          with open('build/ci/invalid-underlay.json') as source:
+              response=json.load(source)
+          assert response['ok'] is False
+          assert response['error']['code'] == 'invalid_arguments'
+          assert 'data' not in response
+          with open('build/ci/invalid-underlay-hostname.json') as source:
+              response=json.load(source)
+          assert response['ok'] is False
+          assert response['error']['code'] == 'invalid_arguments'
+          assert 'data' not in response
           PYQA
       - name: Local QA artifact and digest-verified online acquisition smoke
         shell: bash
