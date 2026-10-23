@@ -197,7 +197,7 @@ func (store *activationJournalDir) lockSharedManager() error {
 		return err
 	}
 	fd, err := syscall.Openat(int(store.dir.Fd()), ".lock",
-		syscall.O_RDWR|syscall.O_CREAT|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0600)
+		syscall.O_RDWR|syscall.O_CREAT|syscall.O_NONBLOCK|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0600)
 	if err != nil {
 		return journalFSUnavailable("cannot open trusted shared manager lock")
 	}
@@ -217,7 +217,7 @@ func (store *activationJournalDir) ensureLockIdentity() error {
 		return err
 	}
 	fd, err := syscall.Openat(int(store.dir.Fd()), ".lock",
-		syscall.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0)
+		syscall.O_RDONLY|syscall.O_NONBLOCK|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0)
 	if err != nil {
 		return journalFSUnavailable("shared manager lock path was replaced")
 	}
@@ -233,6 +233,12 @@ func (store *activationJournalDir) ensureLockIdentity() error {
 	return nil
 }
 
+// Existing on-disk entries are untrusted even when their mode looks private:
+// O_NOFOLLOW alone does not reject FIFOs and blocking devices. Every
+// descriptor opened on a preexisting journal or .lock entry uses O_NONBLOCK,
+// and Fstat verifies the regular-file type before reading or taking flock.
+// Creating a new temporary file with O_EXCL is separate and safe.
+//
 // This uses the exact existing .lock inode, rather than a separate journal
 // lock. All journal filesystem operations happen while it is held.
 func (m *Manager) withActivationJournalLock(parentSync func(int) error, fn func(*activationJournalDir) error) error {
@@ -252,7 +258,7 @@ func (store *activationJournalDir) openJournal() (_ *os.File, identity activatio
 		return nil, identity, err
 	}
 	fd, err := syscall.Openat(int(store.dir.Fd()), activationJournalFilename,
-		syscall.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0)
+		syscall.O_RDONLY|syscall.O_NONBLOCK|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0)
 	if errors.Is(err, syscall.ENOENT) {
 		return nil, identity, os.ErrNotExist
 	}
