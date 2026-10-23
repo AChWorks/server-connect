@@ -75,15 +75,19 @@ jobs:
           SC_QA_SUDO_ENTRY=1 python3 scripts/test_bootstrap_online.py
           rm -f /etc/sudoers.d/server-connect-qa
           trap - EXIT
-      - name: Native Debian 13 read-only host preflight
+      - name: Native Debian 13 host preflight and prepared-journal race QA
         shell: bash
         run: |
           set -euo pipefail
-          # Keep original tests in the minimal APT layout; install optional
-          # host inspection tools only for their own real-kernel test.
-          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends iproute2
+          # Keep the earlier native APT/online-bootstrap tests in the
+          # minimal Debian environment. Only this later step installs the
+          # C compiler required by the journal race detector.
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends iproute2 gcc libc6-dev
           test -x /usr/bin/ip
           go test ./internal/sc -run '^TestPreflight' -count=1 -v
+          # Journal checks are non-networking: exercise descriptor identity,
+          # strict JSON, crash/restart semantics and nonblocking FIFO rejection.
+          go test -race ./internal/sc -run '^(TestActivationJournal|TestSharedLifecycleFlock)' -count=1 -timeout=120s -v
           # GitHub's checkout is runner-owned inside this container. Trust
           # only this ephemeral checkout for Go VCS stamping (do not disable it).
           export GIT_CONFIG_COUNT=1
