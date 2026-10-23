@@ -257,3 +257,103 @@ func TestDiagnosticPathDriftJSONExitAndSanitization(t *testing.T) {
 		}
 	}
 }
+
+func TestSelectivePlanRejectsUnsafeCLIWithoutProductState(t *testing.T) {
+	tests := [][]string{
+		{"selective-plan"},
+		{"selective-plan", "--endpoint", "example.org", "--management-peer", "9.9.9.9",
+			"--tunnel-if", "scdemo0", "--destination", "8.8.8.0/24"},
+		{"selective-plan", "--endpoint", "1.1.1.1", "--management-peer", "9.9.9.9",
+			"--tunnel-if", "lo", "--destination", "0.0.0.0/0"},
+		{"selective-plan", "--endpoint", "1.1.1.1", "--management-peer", "9.9.9.9",
+			"--tunnel-if", "scdemo0", "--destination", "8.8.8.0/24", "--surprise"},
+	}
+	for _, args := range tests {
+		m := sc.New(filepath.Join(t.TempDir(), "missing-product-state"), "", 0)
+		reader, writer, err := os.Pipe()
+		if err != nil {
+			t.Fatal(err)
+		}
+		old := os.Stdout
+		os.Stdout = writer
+		exit := run(true, m, args)
+		writer.Close()
+		os.Stdout = old
+		body, err := io.ReadAll(reader)
+		reader.Close()
+		if err != nil || exit != 1 {
+			t.Fatalf("unexpected exit/error for %v: exit=%d err=%v", args, exit, err)
+		}
+		var out struct {
+			OK    bool            `json:"ok"`
+			Data  json.RawMessage `json:"data"`
+			Error struct {
+				Code string `json:"code"`
+			} `json:"error"`
+		}
+		if err := json.Unmarshal(body, &out); err != nil ||
+			out.OK || len(out.Data) != 0 || out.Error.Code != "invalid_arguments" {
+			t.Fatalf("invalid plan escaped validation: %s err=%v", body, err)
+		}
+		if _, err := os.Stat(m.Dir); !os.IsNotExist(err) {
+			t.Fatal("invalid preview unexpectedly created product state")
+		}
+	}
+}
+
+func TestSelectivePlanMenuRejectsEmptyInputWithoutTouchingHost(t *testing.T) {
+	manager := sc.New(filepath.Join(t.TempDir(), "missing-product-state"), "", 0)
+	input, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writer.Write([]byte(strings.Join([]string{"12", "", "", "", "", "0", ""}, string(rune(10))))); err != nil {
+		t.Fatal(err)
+	}
+	writer.Close()
+	old := os.Stdin
+	os.Stdin = input
+	defer func() { os.Stdin = old; input.Close() }()
+	if code := menu(manager); code != 0 {
+		t.Fatalf("menu exit=%d", code)
+	}
+	if _, err := os.Stat(manager.Dir); !os.IsNotExist(err) {
+		t.Fatal("preview menu unexpectedly wrote product state")
+	}
+}
+
+func TestDistinctMenuOptionsAfterPathDiagnosticIntegration(t *testing.T) {
+	manager := sc.New(filepath.Join(t.TempDir(), "missing-product-state"), "", 0)
+	input, inputWriter, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Option 11 remains the previously merged diagnostic, while option 12
+	// is the new read-only selective planner. Neither accepts empty inputs.
+	lines := []string{"11", "", "", "2", "12", "", "", "", "", "0", ""}
+	if _, err := inputWriter.Write([]byte(strings.Join(lines, "\n"))); err != nil {
+		t.Fatal(err)
+	}
+	inputWriter.Close()
+	reader, outputWriter, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldIn, oldOut := os.Stdin, os.Stdout
+	os.Stdin, os.Stdout = input, outputWriter
+	defer func() { os.Stdin, os.Stdout = oldIn, oldOut; input.Close(); reader.Close() }()
+	code := menu(manager)
+	outputWriter.Close()
+	raw, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code != 0 || !strings.Contains(string(raw), "First independent HTTP(S) target:") ||
+		!strings.Contains(string(raw), "Pinned VPN endpoint literal IP:") ||
+		!strings.Contains(string(raw), "11 Path Diagnostics  12 Selective Plan") {
+		t.Fatalf("interactive option 11/12 reconciliation failed: exit=%d", code)
+	}
+	if _, err := os.Stat(manager.Dir); !os.IsNotExist(err) {
+		t.Fatal("invalid interactive diagnostics/planner unexpectedly created product state")
+	}
+}

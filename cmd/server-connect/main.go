@@ -22,6 +22,16 @@ type envelope struct {
 	Data  any       `json:"data,omitempty"`
 	Error *apiError `json:"error,omitempty"`
 }
+
+// destinationFlags supports repeated explicit --destination CIDR arguments.
+type destinationFlags []string
+
+func (d *destinationFlags) String() string { return strings.Join(*d, ",") }
+func (d *destinationFlags) Set(value string) error {
+	*d = append(*d, value)
+	return nil
+}
+
 type apiError struct {
 	Code    string `json:"code"`
 	Message string `json:"message"`
@@ -190,6 +200,25 @@ func run(j bool, m *sc.Manager, args []string) int {
 		}
 		res, e := m.Probe(*via, *target)
 		return output(j, res, e)
+	case "selective-plan":
+		opts := flag.NewFlagSet(name, flag.ContinueOnError)
+		opts.SetOutput(io.Discard)
+		endpoint := opts.String("endpoint", "", "literal existing VPN endpoint IP")
+		management := opts.String("management-peer", "", "literal current SSH/admin peer IP")
+		tunnel := opts.String("tunnel-if", "", "proposed unused TUN interface name")
+		var destinations destinationFlags
+		opts.Var(&destinations, "destination", "explicit public CIDR; repeat per destination")
+		if e := opts.Parse(args); e != nil || len(opts.Args()) != 0 {
+			return output(j, nil, sc.Fault("invalid_arguments", "invalid selective-plan options"))
+		}
+		plan, err := sc.PreviewSelectiveRoutes(sc.SelectivePlanRequest{
+			EndpointIP: *endpoint, ManagementPeerIP: *management,
+			TunnelInterface: *tunnel, Destinations: destinations,
+		})
+		if err != nil {
+			return output(j, nil, err)
+		}
+		return output(j, plan, nil)
 	case "diagnose-path":
 		opts := flag.NewFlagSet(name, flag.ContinueOnError)
 		opts.SetOutput(io.Discard)
@@ -271,6 +300,9 @@ Commands:
   apt -- apt-get update        Strict opt-in APT via trusted native binary
   host-preflight [--endpoint IP] [--management-peer IP]
                               Observe kernel routes/rules; no activation
+  selective-plan --endpoint IP --management-peer IP --tunnel-if NAME
+                 --destination CIDR [--destination CIDR...]
+                              Advisory selective routing preview; never applies
   version                    Show pinned versions
 
 Import VLESS links from stdin or a mode-0600 file, not shell argv. 'exec'
@@ -287,7 +319,7 @@ prove connectivity, safety, routing ownership or readiness to activate TUN.
 func menu(m *sc.Manager) int {
 	in := bufio.NewReader(os.Stdin)
 	for {
-		fmt.Println("\nServer Connect | 1 Status  2 Profiles  3 Import  4 Select  5 Connect  6 Test  7 Disconnect  8 Remove  9 APT Update  10 Host Preflight  11 Path Diagnostics  0 Exit")
+		fmt.Println("\nServer Connect | 1 Status  2 Profiles  3 Import  4 Select  5 Connect  6 Test  7 Disconnect  8 Remove  9 APT Update  10 Host Preflight  11 Path Diagnostics  12 Selective Plan  0 Exit")
 		fmt.Print("Choice: ")
 		raw, e := in.ReadString('\n')
 		if e != nil {
@@ -341,6 +373,21 @@ func menu(m *sc.Manager) int {
 				via = "direct"
 			}
 			run(false, m, []string{"diagnose-path", "--via", via, "--url", strings.TrimSpace(first), "--url", strings.TrimSpace(second)})
+		case "12":
+			fmt.Print("Pinned VPN endpoint literal IP: ")
+			endpoint, _ := in.ReadString('\n')
+			fmt.Print("Current admin/SSH peer literal IP: ")
+			management, _ := in.ReadString('\n')
+			fmt.Print("Proposed unused TUN interface name: ")
+			tunnel, _ := in.ReadString('\n')
+			fmt.Print("Public destination CIDRs (comma-separated): ")
+			raw, _ := in.ReadString('\n')
+			args := []string{"selective-plan", "--endpoint", strings.TrimSpace(endpoint),
+				"--management-peer", strings.TrimSpace(management), "--tunnel-if", strings.TrimSpace(tunnel)}
+			for _, cidr := range strings.Split(strings.TrimSpace(raw), ",") {
+				args = append(args, "--destination", strings.TrimSpace(cidr))
+			}
+			run(false, m, args)
 		case "9":
 			fmt.Print("APT update refreshes system package indexes using the selected proxy. Type UPDATE to confirm: ")
 			confirmation, err := in.ReadString('\n')
