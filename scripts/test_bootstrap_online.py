@@ -36,7 +36,26 @@ FILE_NAMES = [
 ]
 
 
+class ZeroSource:
+    """Stream compressible bytes without allocating a large buffer."""
+    def __init__(self, total: int):
+        self.remaining = total
+
+    def read(self, n=-1) -> bytes:
+        count = min(self.remaining, 65536 if n < 0 else n)
+        self.remaining -= count
+        return b"\x00" * count
+
+
 def archive(path: Path, *, abnormal: str | None = None) -> str:
+    if abnormal == "compressed_oversized":
+        # Actual ~192 MiB expansion, tiny gzip. Budget gate must reject the
+        # member before creating any extracted data on the host filesystem.
+        with tarfile.open(path, "w:gz", format=tarfile.GNU_FORMAT) as output:
+            member = tarfile.TarInfo("server-connect/bin/sing-box")
+            member.size = 201326593
+            output.addfile(member, ZeroSource(member.size))
+        return hashlib.sha256(path.read_bytes()).hexdigest()
     if abnormal == "expanded":
         info = tarfile.TarInfo("server-connect/bin/sing-box")
         info.mode = 0o755
@@ -98,6 +117,22 @@ class LocalHTTPHandler(SimpleHTTPRequestHandler):
         pass
 
     def do_GET(self):
+        if self.path in ("/redirect-external-http", "/redirect-external-https", "/redirect-loopback"):
+            self.send_response(302)
+            target = {
+                "/redirect-external-http": "http://outside.invalid/should-not-fetch?token=PRIVATE_QA",
+                "/redirect-external-https": "https://outside.invalid/should-not-fetch?token=PRIVATE_QA",
+                "/redirect-loopback": f"http://127.0.0.1:{self.server.server_port}/redirect-sentinel",
+            }[self.path]
+            self.send_header("Location", target)
+            self.end_headers()
+            return
+        if self.path == "/redirect-sentinel":
+            self.server.redirect_followed = True
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"invalid")
+            return
         if self.path == "/declared-too-large":
             self.send_response(200)
             self.send_header("Content-Length", "4096")
@@ -142,10 +177,12 @@ class BootstrapSecurityTest(unittest.TestCase):
             ("expanded.tar.gz", "expanded"),
             ("members.tar.gz", "members"),
             ("pax_metadata.tar.gz", "pax_metadata"),
+            ("compressed_oversized.tar.gz", "compressed_oversized"),
         ]:
             cls.digests[name] = archive(cls.directory / name, abnormal=abnormal)
         handler = partial(LocalHTTPHandler, directory=str(cls.directory))
         cls.server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+        cls.server.redirect_followed = False
         cls.thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
         cls.thread.start()
 
@@ -156,13 +193,13 @@ class BootstrapSecurityTest(unittest.TestCase):
         cls.thread.join(timeout=5)
         cls.temporary.cleanup()
 
-    def bootstrap(self, filename="valid.tar.gz", *, changes=None, digest=None, extra=(), interpreter="/bin/sh", clean_entry=False):
+    def bootstrap(self, filename="valid.tar.gz", *, changes=None, digest=None, extra=(), interpreter="/bin/sh", clean_entry=False, url=None):
         environment = os.environ.copy()
         if changes:
             environment.update(changes)
         argv = [
             interpreter, str(BOOTSTRAP), "--archive-url",
-            f"http://127.0.0.1:{self.server.server_port}/{filename}",
+            url or f"http://127.0.0.1:{self.server.server_port}/{filename}",
             "--sha256", digest or self.digests.get(filename, "0" * 64),
             "--verify-only", *extra,
         ]
@@ -256,11 +293,111 @@ class BootstrapSecurityTest(unittest.TestCase):
         for filename in (
             "duplicate.tar.gz", "traversal.tar.gz", "symlink.tar.gz",
             "hardlink.tar.gz", "expanded.tar.gz", "members.tar.gz",
-            "pax_metadata.tar.gz",
+            "pax_metadata.tar.gz", "compressed_oversized.tar.gz",
         ):
             with self.subTest(filename=filename):
                 result = self.bootstrap(filename)
                 self.assertNotEqual(result.returncode, 0, "Unsafe archive was accepted")
+
+    def test_real_compressed_bomb_rejected_without_extracting(self):
+        sample = self.directory / "compressed_oversized.tar.gz"
+        self.assertLess(sample.stat().st_size, 1_500_000)
+        result = self.bootstrap("compressed_oversized.tar.gz")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Online archive rejected", result.stderr)
+
+    def test_url_authority_parser_has_strict_https_and_loopback_modes(self):
+        # Execute the exact embedded URL validator without network requests.
+        body = BOOTSTRAP.read_text()
+        code = body.split("<<'PYURL'\n", 1)[1].split("\nPYURL", 1)[0]
+        cases = (
+            ("https://trusted.example/release?token=QA_PRIVATE", True, "https"),
+            ("https://trusted.example:443/release", True, "https"),
+            ("http://127.0.0.1:8080/a", True, "http_loopback"),
+            ("http://localhost:8080/a", True, "http_localhost:8080"),
+            ("http://localhost:8080@external.invalid/a", False, ""),
+            ("http://127.0.0.1:8080@external.invalid/a", False, ""),
+            ("http://localhost:99999/a", False, ""),
+            ("http://localhost:bad/a", False, ""),
+            ("http://127.0.0.2:8080/a", False, ""),
+            ("http://127.1:8080/a", False, ""),
+            ("http://external.invalid:8080/a", False, ""),
+            ("http://localhost:8080@localhost:8181/a", False, ""),
+            ("http://localhost:8080/a#fragment", False, ""),
+            ("https://user:secret@trusted.example/a", False, ""),
+            ("https://trusted.example/a#fragment", False, ""),
+            ("https://trusted.example/unsafe\r\nHost: outside.invalid", False, ""),
+            ("https://trusted.example\\@outside.invalid/a", False, ""),
+            ("ftp://trusted.example/release", False, ""),
+        )
+        for address, allowed, mode in cases:
+            with self.subTest(url=address.split("?")[0]):
+                result = subprocess.run(
+                    ["/usr/bin/python3", "-I", "-S", "-", address],
+                    input=code, capture_output=True, text=True, timeout=5,
+                )
+                self.assertEqual(result.returncode == 0, allowed, result.stderr)
+                if allowed:
+                    self.assertEqual(result.stdout.strip(), mode)
+                else:
+                    self.assertEqual(result.stdout, "")
+                self.assertNotIn("QA_PRIVATE", result.stdout + result.stderr)
+
+    def test_http_loopback_redirects_do_not_escape(self):
+        self.server.redirect_followed = False
+        for endpoint in ("redirect-external-http", "redirect-external-https", "redirect-loopback"):
+            with self.subTest(redirect=endpoint):
+                result = self.bootstrap(endpoint)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("Online acquisition failed", result.stderr)
+                self.assertNotIn("PRIVATE_QA", result.stderr)
+                self.assertFalse(self.server.redirect_followed, "redirect was followed")
+        result = self.bootstrap(url=f"http://localhost:{self.server.server_port}/valid.tar.gz")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(self.server.redirect_followed)
+
+    def test_http_loopback_userinfo_does_not_trigger_request(self):
+        for authority in (
+            f"localhost:{self.server.server_port}@external.invalid",
+            f"127.0.0.1:{self.server.server_port}@external.invalid",
+        ):
+            result = self.bootstrap(url=f"http://{authority}/archive?token=PRIVATE_QA")
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("Unsupported URL", result.stderr)
+            self.assertNotIn("PRIVATE_QA", result.stdout + result.stderr)
+
+    def test_capacity_limited_private_tmpfs_fails_before_download(self):
+        # A dedicated tiny tmpfs has genuine kernel-enforced FS capacity;
+        # no mock statvfs or large disk write is involved.
+        scratch = Path("/dev/shm")
+        if not scratch.is_dir() or not os.access(scratch, os.W_OK):
+            self.skipTest("no writable tmpfs available")
+        stat = os.statvfs(scratch)
+        if stat.f_blocks * stat.f_frsize > 268435456:
+            self.skipTest("available tmpfs is not capacity limited")
+        with tempfile.TemporaryDirectory(prefix="sc-capacity-qa-", dir=scratch) as directory:
+            Path(directory).chmod(0o777 if os.geteuid() == 0 else 0o700)
+            environment = os.environ.copy()
+            environment["TMPDIR"] = directory
+            argv = [
+                "/bin/sh", str(BOOTSTRAP), "--archive-url",
+                f"http://127.0.0.1:{self.server.server_port}/valid.tar.gz",
+                "--sha256", self.digests["valid.tar.gz"], "--verify-only",
+            ]
+
+            def demote():
+                os.setgroups([])
+                os.setgid(65534)
+                os.setuid(65534)
+
+            result = subprocess.run(
+                argv, env=environment,
+                preexec_fn=demote if os.geteuid() == 0 else None,
+                capture_output=True, text=True, timeout=20,
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("Insufficient reserved staging capacity", result.stderr)
+            self.assertEqual(list(Path(directory).iterdir()), [], "staging was not cleaned")
 
     def test_independent_digest_required(self):
         result = self.bootstrap(digest="0" * 64)
@@ -281,7 +418,7 @@ class BootstrapSecurityTest(unittest.TestCase):
         self.assertIn("Online acquisition failed", result.stderr)
 
     def test_cannot_raise_global_transfer_ceiling(self):
-        for size in ("0", "1073741825", "-1", "not-a-number", "9999999999999999999999"):
+        for size in ("0", "100663297", "1073741825", "-1", "not-a-number", "9999999999999999999999"):
             result = self.bootstrap(extra=("--max-download-bytes", size))
             self.assertNotEqual(result.returncode, 0)
 

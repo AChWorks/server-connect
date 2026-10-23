@@ -14,19 +14,22 @@ unset PYTHONPATH PYTHONHOME PYTHONSTARTUP
 url=''
 digest=''
 verify_only=no
-# This ceiling is enforced by curl WHILE receiving bytes, including when
-# the peer streams with no Content-Length. Operators may only lower it.
-max_download_bytes=1073741824
+# Official pinned core 1.14.3 is 31,678,266 compressed / 93,255,156
+# expanded bytes. These conservative QA bundle caps allow manager/metadata
+# headroom without permitting multi-GiB disk consumption on hosting servers.
+# The curl ceiling applies while receiving bytes; operators may only lower it.
+max_download_bytes=100663296
+max_expanded_bytes=201326592
+max_file_bytes=134217728
 while [ "$#" -gt 0 ]; do
  case "$1" in
   --archive-url) [ "$#" -ge 2 ] || exit 2; url=$2;shift 2;;
   --sha256) [ "$#" -ge 2 ] || exit 2; digest=$2;shift 2;;
   --verify-only)verify_only=yes;shift;;
   --max-download-bytes) [ "$#" -ge 2 ] || exit 2; max_download_bytes=$2;shift 2;;
-  *) echo 'Usage: bootstrap-online.sh --archive-url HTTPS_URL --sha256 TRUSTED_DIGEST [--verify-only] [--max-download-bytes 1..1073741824]' >&2;exit 2;;
+  *) echo 'Usage: bootstrap-online.sh --archive-url HTTPS_URL --sha256 TRUSTED_DIGEST [--verify-only] [--max-download-bytes 1..100663296]' >&2;exit 2;;
  esac
 done
-case "$url" in https://*|http://127.0.0.1:*|http://localhost:*) ;; *) echo 'Only HTTPS release endpoints (or isolated local test hosts) are supported' >&2; exit 2;; esac
 [ "${#digest}" -eq 64 ] || { echo 'A trusted 64-character SHA-256 digest is required' >&2;exit 2; }
 case "$digest" in *[!0123456789abcdefABCDEF]*) echo 'Invalid digest syntax' >&2;exit 2;; esac
 case "$max_download_bytes" in ''|*[!0123456789]*) echo 'Invalid download ceiling' >&2;exit 2;; esac
@@ -34,12 +37,42 @@ case "$max_download_bytes" in ''|*[!0123456789]*) echo 'Invalid download ceiling
 max_download_bytes=$(printf '%s' "$max_download_bytes" | sed 's/^0*//')
 [ -n "$max_download_bytes" ] || max_download_bytes=0
 [ "${#max_download_bytes}" -le 10 ] && [ "$max_download_bytes" -ge 1 ] &&
- [ "$max_download_bytes" -le 1073741824 ] || { echo 'Download ceiling outside supported range' >&2;exit 2; }
+ [ "$max_download_bytes" -le 100663296 ] || { echo 'Download ceiling outside supported range' >&2;exit 2; }
 command -v curl >/dev/null 2>&1 || { echo 'A supported downloader (curl) is required for the online bootstrap' >&2;exit 1; }
 command -v sha256sum >/dev/null 2>&1 || { echo 'sha256sum is required' >&2;exit 1; }
 command -v stat >/dev/null 2>&1 || { echo 'stat is required for trusted staging' >&2;exit 1; }
 command -v python3 >/dev/null 2>&1 || { echo 'Python 3 is required for bounded ONLINE archive processing (not needed offline)' >&2;exit 1; }
 command -v timeout >/dev/null 2>&1 || { echo 'timeout is required for bounded ONLINE archive processing' >&2;exit 1; }
+# Parse the effective authority, never textual localhost prefixes. Test-only
+# HTTP permits only explicit IPv4 loopback / localhost with a numeric port.
+# URL credentials, encoded authority, fragments and unsafe bytes are refused.
+acquisition_mode=$(python3 -I -S - "$url" <<'PYURL'
+import sys
+from urllib.parse import urlsplit
+
+url = sys.argv[1]
+try:
+    if len(url) > 4096 or any(ord(c) < 33 or ord(c) > 126 or c == "\\" for c in url):
+        raise ValueError("unsafe URL")
+    parsed = urlsplit(url)
+    if (parsed.scheme not in ("https", "http") or not parsed.netloc
+            or parsed.username is not None or parsed.password is not None
+            or "@" in parsed.netloc or "%" in parsed.netloc or parsed.fragment):
+        raise ValueError("unsupported URL authority")
+    host = parsed.hostname
+    port = parsed.port
+    if not host or len(host) > 253 or port == 0:
+        raise ValueError("invalid host/port")
+    if parsed.scheme == "http":
+        if host not in ("127.0.0.1", "localhost") or port is None:
+            raise ValueError("HTTP must use actual loopback")
+        print("http_localhost:" + str(port) if host == "localhost" else "http_loopback")
+    else:
+        print("https")
+except ValueError:
+    sys.exit(1)
+PYURL
+) || { echo 'Unsupported URL: HTTPS required except for strict loopback HTTP test host' >&2;exit 2; }
 # Privileged installation requires root-owned staging from the first download.
 # Root authority is acquired before network acquisition, never after a user
 # controls a temporary archive/extraction directory.
@@ -61,17 +94,48 @@ else
  work=$(mktemp -d) || exit 1
 fi
 trap 'rm -rf -- "$work"' EXIT HUP INT TERM
-# Download a complete offline artifact: no secondary/floating prerequisites.
-case "$url" in
- https://*) allowed_proto='=https';;
- *) allowed_proto='=http,https';;
+# Before download, require enough available staging capacity for the maximum
+# permitted compressed and expanded artifacts PLUS a reserve for other services.
+# This is a conservative gate, not a filesystem quota; the bounded extractor
+# also enforces its own byte budget and checks reserve at every write.
+if ! python3 -I -S - "$work" "$max_download_bytes" "$max_expanded_bytes" <<'PYSPACE'
+import os
+import sys
+
+root, compressed, expanded = sys.argv[1:]
+fs = os.statvfs(root)
+available = fs.f_bavail * fs.f_frsize
+capacity = fs.f_blocks * fs.f_frsize
+reserve = max(1073741824, capacity // 10)
+needed = reserve + int(compressed) + int(expanded) + 16777216
+sys.exit(0 if available >= needed else 1)
+PYSPACE
+then
+ echo 'Insufficient reserved staging capacity; no download or installation attempted' >&2
+ exit 1
+fi
+
+# Production HTTPS redirects are bounded and HTTPS-only. Test HTTP has ZERO
+# redirects; no proxy and no external resolution are allowed. Pin localhost
+# to IPv4 loopback, rather than trusting mutable resolver configuration.
+case "$acquisition_mode" in
+ https)
+  allowed_proto='=https'; max_redirs=5; set --;;
+ http_loopback)
+  allowed_proto='=http'; max_redirs=0; set --;;
+ http_localhost:*)
+  allowed_proto='=http'; max_redirs=0
+  loopback_port=$(printf '%s' "$acquisition_mode" | cut -d: -f2)
+  set -- --resolve "localhost:$loopback_port:127.0.0.1";;
+ *) echo 'Unsupported download mode' >&2; exit 2;;
 esac
-# curl's byte ceiling applies before accepting response bodies, including
-# chunked/unknown-length responses. Its time limits remain independent.
-if ! curl -q --fail --location --proto "$allowed_proto" --proto-redir "$allowed_proto" \
+# curl's byte ceiling is active DURING the receive, even for chunked bodies.
+# stderr is private and never reflects an input URL/token in CLI output.
+if ! curl -q --fail --location --max-redirs "$max_redirs" \
+ --proto "$allowed_proto" --proto-redir "$allowed_proto" --noproxy '*' "$@" \
  --silent --show-error --connect-timeout 15 --max-time 180 --retry 2 \
  --max-filesize "$max_download_bytes" \
- --output "$work/bundle.tar.gz" "$url"; then
+ --output "$work/bundle.tar.gz" "$url" 2>"$work/download.err"; then
  echo 'Online acquisition failed or exceeded the transfer ceiling; no installation changes.' >&2
  exit 1
 fi
@@ -89,21 +153,36 @@ printf '%s  %s\n' "$digest" "$work/bundle.tar.gz" |
 (
  ulimit -v 262144 || exit 1
  timeout -s TERM -k 3s 150s python3 -I -S - \
-  "$work/bundle.tar.gz" "$work" <<'PYARCHIVE'
+  "$work/bundle.tar.gz" "$work" "$max_expanded_bytes" "$max_file_bytes" <<'PYARCHIVE'
 import gzip
 import os
 from pathlib import Path
+import resource
 import sys
 import tarfile
 
-archive_path, root_path = sys.argv[1:]
+archive_path, root_path, expanded_arg, file_arg = sys.argv[1:]
 root = Path(root_path)
-MAX_MEMBERS = 10000
-MAX_FILE = 4294967296
-MAX_EXPANDED = 8589934592
+MAX_MEMBERS = 64
+MAX_FILE = int(file_arg)
+MAX_EXPANDED = int(expanded_arg)
+# Kernel-enforced per-file ceiling complements the application's strict
+# aggregate write budget; neither relies solely on a stale free-space check.
+resource.setrlimit(resource.RLIMIT_FSIZE, (MAX_FILE, MAX_FILE))
 MAX_METADATA = 1048576
 MAX_RAW = MAX_EXPANDED + MAX_METADATA
 MAX_READ = 2097152
+SAFETY_MARGIN = 16777216
+
+def check_staging_capacity(next_write):
+    fs = os.statvfs(root)
+    free = fs.f_bavail * fs.f_frsize
+    capacity = fs.f_blocks * fs.f_frsize
+    reserved = max(1073741824, capacity // 10) + SAFETY_MARGIN
+    if free < reserved + next_write:
+        raise ValueError("insufficient reserved staging capacity")
+
+
 REQUIRED_FILES = {
     "server-connect/install.sh",
     "server-connect/server-connect.service",
@@ -148,6 +227,7 @@ def archive_pass(extract):
     seen_files = set()
     total_files = 0
     padded_file_bytes = 0
+    written_bytes = 0
     with open(archive_path, "rb") as source, gzip.GzipFile(fileobj=source) as gzip_stream:
         bounded = Budget(gzip_stream)
         with tarfile.open(fileobj=bounded, mode="r|") as stream:
@@ -190,8 +270,9 @@ def archive_pass(extract):
                         destination.mkdir(parents=True, exist_ok=True, mode=0o700)
                     else:
                         destination.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+                        check_staging_capacity(member.size)
                         fd = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
-                        with os.fdopen(fd, "wb") as output:
+                        try:
                             data = stream.extractfile(member)
                             if data is None:
                                 raise ValueError("missing archive payload")
@@ -200,19 +281,33 @@ def archive_pass(extract):
                                 piece = data.read(min(65536, remaining))
                                 if not piece:
                                     raise ValueError("truncated archive file")
-                                output.write(piece)
+                                check_staging_capacity(len(piece))
+                                if written_bytes + len(piece) > MAX_EXPANDED:
+                                    raise ValueError("aggregate extraction byte budget")
+                                view = memoryview(piece)
+                                while view:
+                                    count = os.write(fd, view)
+                                    if count <= 0:
+                                        raise OSError("short extraction write")
+                                    view = view[count:]
+                                written_bytes += len(piece)
                                 remaining -= len(piece)
+                        finally:
+                            os.close(fd)
                         os.chmod(destination, 0o700 if canonical in EXECUTABLES else 0o600)
         if seen_files != REQUIRED_FILES:
             raise ValueError("missing or unexpected release payload")
-    return
+    return total_files
 
 
 try:
-    archive_pass(False)
+    # Verify full member layout before writing a single extracted file.
+    declared = archive_pass(False)
+    check_staging_capacity(declared)
     # Reparse with the identical library and perform bounded private staging.
     # --verify-only retains this extraction check, but never invokes install.sh.
-    archive_pass(True)
+    if archive_pass(True) != declared:
+        raise ValueError("inconsistent archive extraction")
 except (OSError, EOFError, ValueError, tarfile.TarError, OverflowError, MemoryError):
     print("Archive preflight failed (layout, decompression or resource ceiling); no installation attempted", file=sys.stderr)
     sys.exit(1)
