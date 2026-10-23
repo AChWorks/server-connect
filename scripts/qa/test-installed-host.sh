@@ -46,7 +46,9 @@ trap 'exit 143' TERM
 
 echo '=== Disposable Debian 13 preparation (network permitted BEFORE isolation) ==='
 docker build --pull -f scripts/qa/Dockerfile.host-systemd -t "$image" scripts/qa
-docker run -d --rm --name "$container" --hostname sc-qa \
+# Keep a failed container inspectable until the exit trap, rather than
+# discarding the only genuine systemd boot error with Docker --rm.
+docker run -d --name "$container" --hostname sc-qa \
   --network none --privileged --cgroupns=private \
   --tmpfs /run:rw,nosuid,nodev,mode=755 \
   --tmpfs /run/lock:rw,nosuid,nodev,mode=755 \
@@ -54,7 +56,12 @@ docker run -d --rm --name "$container" --hostname sc-qa \
 started=yes
 [[ $(docker inspect --format '{{.HostConfig.NetworkMode}}' "$container") == none ]]
 ready=no
-for attempt in $(seq 1 40); do
+for attempt in $(seq 1 30); do
+  if [[ $(docker inspect --format '{{.State.Running}}' "$container") != true ]]; then
+    echo 'Disposable systemd container exited during boot; inspect Docker logs' >&2
+    docker logs "$container" >&2 || true
+    exit 1
+  fi
   if docker exec "$container" /bin/sh -c \
     'test -d /run/systemd/system && systemctl show server-connect.service -p LoadState --value >/dev/null'; then
     ready=yes
