@@ -2,15 +2,19 @@
 # Server Connect local installer: no curl, wget, APT or host route modification.
 set -eu
 umask 077
-# Privileged lifecycle commands must never resolve tools from a caller PATH.
+# A trusted sudo + env -i launcher must clear startup/loader variables
+# BEFORE the shell starts. This reset is defense in depth for descendants;
+# it cannot repair an already compromised privilege-entry interpreter.
 PATH=/usr/sbin:/usr/bin:/sbin:/bin
 export PATH
+unset ENV BASH_ENV LD_PRELOAD LD_LIBRARY_PATH LD_AUDIT LD_DEBUG LD_ORIGIN_PATH
+unset PYTHONPATH PYTHONHOME CDPATH
 
 PREFIX=/opt/server-connect
 STATE=/var/lib/server-connect
 UNIT=/etc/systemd/system/server-connect.service
 COMMAND=/usr/local/bin/server-connect
-SOURCE_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
+SOURCE_DIR=$(dirname -- "$0")
 ACTION=${1:---offline}
 
 say() { printf 'Server Connect: %s\n' "$*"; }
@@ -29,6 +33,26 @@ check_root_dir() {
  [ "$((0$mode & 022))" -eq 0 ] || die "unsafe writable directory: $1"
 }
 require_root() { [ "$(id -u)" -eq 0 ] || die 'run as root with sudo'; }
+# Never canonicalize away a symlinked or replaceable source ancestor.
+# Every component is inspected from / outward, before referencing any
+# payload binary or modifying installed services. A trusted, root-owned,
+# non-group/other-writable chain cannot be renamed by unprivileged users.
+check_source_ancestry() {
+ case "$0" in /*) ;; *) die 'invoke the staged installer by its absolute trusted path' ;; esac
+ case "$0" in *'//'*|*'/./'*|*'/../'*|*'/.'|*'/..') die 'non-canonical installer source path' ;; esac
+ check_root_dir /
+ rest=${SOURCE_DIR#/}
+ current=''
+ while [ -n "$rest" ]; do
+  part=${rest%%/*}
+  [ -n "$part" ] && [ "$part" != . ] && [ "$part" != .. ] ||
+   die 'untrusted installer source path component'
+  current=$current/$part
+  check_root_dir "$current"
+  case "$rest" in */*) rest=${rest#*/} ;; *) rest='' ;; esac
+ done
+ [ "$(readlink -f -- "$0")" = "$0" ] || die 'installer path contains a symlink or alias'
+}
 check_platform() {
  [ "$(uname -m)" = x86_64 ] || die 'unsupported CPU; this candidate supports only x86_64'
  [ -r /etc/os-release ] || die 'missing /etc/os-release'
@@ -119,6 +143,7 @@ if [ "$ACTION" = --help ]; then
 fi
 case "$ACTION" in --offline|--verify-only|--uninstall) ;; *) die 'only --offline, --verify-only, --uninstall supported; online bootstrap fetches a verified bundle first' ;; esac
 require_root
+check_source_ancestry
 check_platform
 verify_payload
 check_owned

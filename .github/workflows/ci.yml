@@ -34,7 +34,7 @@ jobs:
           test "$ID" = debian
           test "$VERSION_ID" = 13
           apt-get update
-          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ca-certificates curl git python3 tar gzip
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ca-certificates curl git python3 tar gzip sudo
           apt-config --version
           git --version
       - name: Checkout source without write credentials
@@ -66,7 +66,15 @@ jobs:
           go vet ./...
           go test ./... -count=1 -timeout=100s -v
           sh -n bundle/install.sh scripts/package.sh scripts/bootstrap-online.sh
-          python3 scripts/test_bootstrap_online.py
+          # Disposable Debian container ONLY: exercise real unprivileged ->
+          # sudo env_reset -> clean /usr/bin/env -i -> root shell boundary.
+          # The temporary sudoers entry is removed even on test failure.
+          printf 'nobody ALL=(root) NOPASSWD: /usr/bin/env\n' > /etc/sudoers.d/server-connect-qa
+          chmod 0440 /etc/sudoers.d/server-connect-qa
+          trap 'rm -f /etc/sudoers.d/server-connect-qa' EXIT
+          SC_QA_SUDO_ENTRY=1 python3 scripts/test_bootstrap_online.py
+          rm -f /etc/sudoers.d/server-connect-qa
+          trap - EXIT
       - name: Native Debian 13 read-only host preflight
         shell: bash
         run: |
