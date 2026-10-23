@@ -153,6 +153,15 @@ func run(j bool, m *sc.Manager, args []string) int {
 	case "status":
 		s, e := m.Status()
 		return output(j, s, e)
+	case "activation-journal-status":
+		if len(args) != 0 {
+			return output(j, nil, sc.Fault("invalid_arguments", "activation-journal-status accepts no command options"))
+		}
+		report, err := m.InspectActivationJournal()
+		if err != nil {
+			return output(j, nil, err) // never serialize untrusted/private journal evidence
+		}
+		return output(j, report, nil)
 	case "list", "profiles":
 		s, e := m.List()
 		return output(j, s, e)
@@ -365,6 +374,7 @@ Commands:
   ready                      Verify owned authenticated listener (not upstream)
   disconnect                 Stop and disable product-owned local proxy service
   status [--json]            Desired/observed service state, not fake VPN health
+  activation-journal-status  Private intent state/operation ID only; no host mutation
   probe --via proxy|direct --url https://example.org
   diagnose-path --via proxy|direct --url https://one.example --url https://two.example
                               Two to four distinct hosts; diagnostic only
@@ -394,6 +404,10 @@ Host preflight is observational: a route lookup does not
 prove connectivity, safety, routing ownership or readiness to activate TUN.
 Host drift compares separate, non-atomic network observations without changing
 the host, and is never an activation guard or a recovery journal.
+Activation-journal-status shows only safe metadata for the internal v1
+PREPARED/UNCERTAIN journal, never private resource before/intended snapshots.
+Even an absent journal cannot prove safe networking, guard arming or recovery.
+It may initialize a private state directory/lock but never changes host routes.
 An explicit underlay-tcp probe binds a TCP socket to the kernel-selected
 interface and sends no application data. With --hostname, current host name
 resolution must include the explicit pinned --endpoint IP before TCP probing.
@@ -408,7 +422,7 @@ routing changes, authenticate DNS, or authorize tunnel activation.
 func menu(m *sc.Manager) int {
 	in := bufio.NewReader(os.Stdin)
 	for {
-		fmt.Println("\nServer Connect | 1 Status  2 Profiles  3 Import  4 Select  5 Connect  6 Test  7 Disconnect  8 Remove  9 APT Update  10 Host Preflight  11 Path Diagnostics  12 Selective Plan  13 Underlay TCP  14 Underlay DNS  15 Host Drift  0 Exit")
+		fmt.Println("\nServer Connect | 1 Status  2 Profiles  3 Import  4 Select  5 Connect  6 Test  7 Disconnect  8 Remove  9 APT Update  10 Host Preflight  11 Path Diagnostics  12 Selective Plan  13 Underlay TCP  14 Underlay DNS  15 Host Drift  16 Activation Journal  0 Exit")
 		fmt.Print("Choice: ")
 		raw, e := in.ReadString('\n')
 		if e != nil {
@@ -507,6 +521,8 @@ func menu(m *sc.Manager) int {
 			resolver, _ := in.ReadString('\n')
 			run(false, m, []string{"underlay-dns", "--hostname", strings.TrimSpace(host),
 				"--endpoint", strings.TrimSpace(endpoint), "--resolver", strings.TrimSpace(resolver)})
+		case "16":
+			run(false, m, []string{"activation-journal-status"})
 		case "15":
 			fmt.Print("Private host-preflight JSON baseline path: ")
 			path, err := in.ReadString('\n')
