@@ -80,6 +80,10 @@ func TestRealPinnedCoreProxyOnly(t *testing.T) {
 	proxyPort := freePort(t)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-SC-Test", "local-origin")
+		if r.URL.Path == "/unhealthy" {
+			w.WriteHeader(http.StatusBadGateway)
+			return
+		}
 		w.WriteHeader(200)
 		w.Write([]byte("ok"))
 	}))
@@ -133,6 +137,24 @@ func TestRealPinnedCoreProxyOnly(t *testing.T) {
 		}
 		return resp.StatusCode, nil
 	}
+	// The exact same HTTP transport as the operator-facing probe is used
+	// against a live pinned VLESS relay. It must not borrow a Direct result.
+	secondURL := strings.Replace(server.URL, "127.0.0.1", "localhost", 1)
+	selectedTargets := []string{server.URL, secondURL}
+	throughSelectedProxy := func(target string) (ProbeResult, error) {
+		return probeHTTPPath("proxy", target, proxyURL)
+	}
+	all, e := runPathDiagnostics("proxy", selectedTargets, throughSelectedProxy)
+	if e != nil || all.Assessment != "all_targets_reachable" || all.ReachableCount != 2 ||
+		all.FallbackAttempted || all.TunnelHealthVerified {
+		t.Fatalf("real selected VLESS path did not serve both HTTP targets: %+v err=%v", all, e)
+	}
+	mixedTargets := []string{server.URL, secondURL + "/unhealthy"}
+	mixed, e := runPathDiagnostics("proxy", mixedTargets, throughSelectedProxy)
+	if ErrorCode(e) != "probe_set_partial" || mixed.Assessment != "mixed_results" ||
+		mixed.ReachableCount != 1 || mixed.Samples[1].ErrorCode != "probe_http" {
+		t.Fatalf("one bad HTTP target was mistaken for total path failure: %+v err=%v", mixed, e)
+	}
 	if status, e := get(viaProxy); e != nil || status != 200 {
 		t.Fatalf("real VLESS proxy failed: status=%d err=%v", status, e)
 	}
@@ -156,6 +178,17 @@ func TestRealPinnedCoreProxyOnly(t *testing.T) {
 	// A broken upstream cannot silently masquerade as a working selected proxy.
 	if status, e := get(viaProxy); e == nil && status >= 200 && status < 400 {
 		t.Fatal("proxy unexpectedly succeeded without VLESS upstream")
+	}
+	dead, err := runPathDiagnostics("proxy", selectedTargets, throughSelectedProxy)
+	if ErrorCode(err) != "probe_set_unreachable" || dead.ReachableCount != 0 ||
+		dead.Assessment != "no_targets_reachable" || dead.FallbackAttempted {
+		t.Fatalf("dead pinned VLESS upstream falsely passed selected proxy diagnostic: %+v err=%v", dead, err)
+	}
+	workingDirect, err := runPathDiagnostics("direct", selectedTargets, func(target string) (ProbeResult, error) {
+		return probeHTTPPath("direct", target, nil)
+	})
+	if err != nil || workingDirect.ReachableCount != 2 || workingDirect.Assessment != "all_targets_reachable" {
+		t.Fatalf("Direct baseline was lost or confused with selected proxy: %+v err=%v", workingDirect, err)
 	}
 	if status, e := get(viaDirect); e != nil || status != 200 {
 		t.Fatalf("direct access changed after upstream died: status=%d err=%v", status, e)
