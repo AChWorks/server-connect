@@ -66,6 +66,7 @@ jobs:
           go vet ./...
           go test ./... -count=1 -timeout=100s -v
           sh -n bundle/install.sh scripts/package.sh scripts/bootstrap-online.sh
+          python3 scripts/test_bootstrap_online.py
       - name: Native Debian 13 read-only host preflight
         shell: bash
         run: |

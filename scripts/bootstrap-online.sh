@@ -3,6 +3,11 @@
 # Supply an independently trusted 64-character SHA-256 digest.
 set -eu
 umask 077
+# This script may run as root. Never resolve tools from a caller-controlled PATH,
+# load curlrc options, or let GNU tar/gzip environment variables change parsing.
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+unset TAR_OPTIONS GZIP GZIP_OPT
 url=''
 digest=''
 verify_only=no
@@ -20,21 +25,34 @@ case "$digest" in *[!0123456789abcdefABCDEF]*) echo 'Invalid digest syntax' >&2;
 command -v curl >/dev/null 2>&1 || { echo 'A supported downloader (curl) is required for the online bootstrap' >&2;exit 1; }
 command -v sha256sum >/dev/null 2>&1 || { echo 'sha256sum is required' >&2;exit 1; }
 command -v tar >/dev/null 2>&1 || { echo 'tar is required' >&2;exit 1; }
+command -v stat >/dev/null 2>&1 || { echo 'stat is required for trusted staging' >&2;exit 1; }
 # Privileged installation requires root-owned staging from the first download.
 # Root authority is acquired before network acquisition, never after a user
 # controls a temporary archive/extraction directory.
-if [ "$verify_only" != yes ] && [ "$(id -u)" -ne 0 ];then
+user_id=$(id -u)
+if [ "$verify_only" != yes ] && [ "$user_id" -ne 0 ];then
  echo 'Run the online installation command as root; non-root --verify-only is supported.' >&2
  exit 1
 fi
-work=$(mktemp -d) || exit 1
+if [ "$user_id" -eq 0 ];then
+ # Ignore TMPDIR even for --verify-only as root. An attacker-owned parent can
+ # rename a temporary tree between verification and privileged installation.
+ [ -d /root ] && [ ! -L /root ] && [ "$(stat -c '%u' /root)" = 0 ] ||
+  { echo 'No trusted root-owned staging parent at /root' >&2;exit 1; }
+ root_mode=$(stat -c '%a' /root) || exit 1
+ [ "$((0$root_mode & 022))" -eq 0 ] ||
+  { echo 'Root staging parent is group/other writable' >&2;exit 1; }
+ work=$(mktemp -d /root/.server-connect-bootstrap.XXXXXXXX) || exit 1
+else
+ work=$(mktemp -d) || exit 1
+fi
 trap 'rm -rf -- "$work"' EXIT HUP INT TERM
 # Download a complete offline artifact: no secondary/floating prerequisites.
 case "$url" in
  https://*) allowed_proto='=https';;
  *) allowed_proto='=http,https';;
 esac
-if ! curl --fail --location --proto "$allowed_proto" --proto-redir "$allowed_proto" --silent --show-error --connect-timeout 15 --max-time 180 --retry 2 --output "$work/bundle.tar.gz" "$url";then
+if ! curl -q --fail --location --proto "$allowed_proto" --proto-redir "$allowed_proto" --silent --show-error --connect-timeout 15 --max-time 180 --retry 2 --output "$work/bundle.tar.gz" "$url";then
  echo 'Online acquisition failed without installation changes. Use the complete offline bundle instead.' >&2
  exit 1
 fi

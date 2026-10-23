@@ -2,6 +2,9 @@
 # Server Connect local installer: no curl, wget, APT or host route modification.
 set -eu
 umask 077
+# Privileged lifecycle commands must never resolve tools from a caller PATH.
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
 
 PREFIX=/opt/server-connect
 STATE=/var/lib/server-connect
