@@ -185,6 +185,29 @@ is a diagnostic requiring operator investigation, **not an instruction for
 Server Connect to overwrite foreign-owned network configuration**. This
 command is a development diagnostic and is not a routed-mode release.
 
+### Inspect the internal activation intent journal (Issue #2 development)
+
+`server-connect --json activation-journal-status` (interactive menu **16**)
+reports only the phase (`absent`, `prepared` or `uncertain`),
+operation identity, revision, creation timestamp and resource **count**
+from the existing strictly validated private version-1 intent journal.
+Private route/rule/interface `before` and `intended` records, observed
+destinations, and plan fingerprints are **not returned**. A corrupt, unsafe
+or untrusted record fails closed with a nonzero classified error and **no**
+fabricated safe-absent data; the record is retained for investigation.
+`prepared` and `uncertain` both explicitly require operator review.
+An `absent` record is *not* a verified safe network baseline.
+
+This command does not inspect or change host networking, authorize a route
+apply, arm a guard, commit a profile or perform rollback. The current journal
+still supports **only** `prepared` and `uncertain` phases. Pending
+confirmation, independent timers, fresh SSH authorization, actual owned
+resource reconciliation and reboot recovery remain **unimplemented**.
+Like existing Manager state operations, first inspection may create a private
+state directory and lifecycle `.lock` file; it does not create an intent
+journal or affect routes, firewall, DNS or service configuration. This
+development diagnostic is not an activation/release capability.
+
 ### Proxy Only compatibility and application opt-in
 
 - The link importer deliberately supports a **subset** of VLESS TCP/WebSocket and TLS/Reality query fields, rejecting unrecognized or incompatible parameters. **Local TCP VLESS through the pinned sing-box core has live integration evidence; TLS/WebSocket/Reality interoperability with real foreign providers is NOT_RUN.** Import and `validate` establish syntax/core-configuration acceptance, not remote reachability.
