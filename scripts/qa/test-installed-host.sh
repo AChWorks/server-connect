@@ -46,19 +46,24 @@ trap 'exit 143' TERM
 
 echo '=== Disposable Debian 13 preparation (network permitted BEFORE isolation) ==='
 docker build --pull -f scripts/qa/Dockerfile.host-systemd -t "$image" scripts/qa
-# Keep a failed container inspectable until the exit trap, rather than
-# discarding the only genuine systemd boot error with Docker --rm.
+# Delegate the container's PRIVATE cgroup v2 filesystem through Docker.
+# NEVER bind-mount the host cgroup root into a private cgroup namespace:
+# it creates inconsistent ownership and can stop systemd before boot.
+# The privileged container exists only on an ephemeral, credential-free
+# GitHub runner; --network none remains enforced throughout its lifetime.
 docker run -d --name "$container" --hostname sc-qa \
   --network none --privileged --cgroupns=private \
   --tmpfs /run:rw,nosuid,nodev,mode=755 \
   --tmpfs /run/lock:rw,nosuid,nodev,mode=755 \
-  --volume /sys/fs/cgroup:/sys/fs/cgroup:rw "$image" >/dev/null
+  "$image" >/dev/null
 started=yes
 [[ $(docker inspect --format '{{.HostConfig.NetworkMode}}' "$container") == none ]]
 ready=no
 for attempt in $(seq 1 30); do
   if [[ $(docker inspect --format '{{.State.Running}}' "$container") != true ]]; then
-    echo 'Disposable systemd container exited during boot; inspect Docker logs' >&2
+    echo 'Disposable systemd container exited before service readiness' >&2
+    docker inspect "$container" \
+      --format 'State: exit={{.State.ExitCode}}, error={{.State.Error}}, OOM={{.State.OOMKilled}}, PID={{.State.Pid}}; cgroupns={{.HostConfig.CgroupnsMode}}; network={{.HostConfig.NetworkMode}}' >&2 || true
     docker logs "$container" >&2 || true
     exit 1
   fi

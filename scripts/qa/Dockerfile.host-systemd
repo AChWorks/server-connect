@@ -8,4 +8,5 @@ RUN apt-get update \
       tar util-linux \
  && rm -rf /var/lib/apt/lists/*
 STOPSIGNAL SIGRTMIN+3
-CMD ["/sbin/init"]
+# Emit startup evidence to Docker logs even if the init scope fails early.
+CMD ["/sbin/init", "--log-target=console", "--log-level=info"]

@@ -23,6 +23,9 @@ concurrency:
 
 jobs:
   debian13-systemd-lifecycle:
+    # Privileged disposable systemd testing must never execute fork PR content.
+    # The checkout is still token-read-only and must not receive secrets.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-24.04
     timeout-minutes: 25
     env:
