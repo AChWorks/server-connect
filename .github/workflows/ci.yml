@@ -34,7 +34,7 @@ jobs:
           test "$ID" = debian
           test "$VERSION_ID" = 13
           apt-get update
-          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ca-certificates curl git python3 tar gzip
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ca-certificates curl git python3 tar gzip sudo
           apt-config --version
           git --version
       - name: Checkout source without write credentials
@@ -66,22 +66,75 @@ jobs:
           go vet ./...
           go test ./... -count=1 -timeout=100s -v
           sh -n bundle/install.sh scripts/package.sh scripts/bootstrap-online.sh
-      - name: Native Debian 13 read-only host preflight
+          # Disposable Debian container ONLY: exercise real unprivileged ->
+          # sudo env_reset -> clean /usr/bin/env -i -> root shell boundary.
+          # The temporary sudoers entry is removed even on test failure.
+          printf 'nobody ALL=(root) NOPASSWD: /usr/bin/env\n' > /etc/sudoers.d/server-connect-qa
+          chmod 0440 /etc/sudoers.d/server-connect-qa
+          trap 'rm -f /etc/sudoers.d/server-connect-qa' EXIT
+          SC_QA_SUDO_ENTRY=1 python3 scripts/test_bootstrap_online.py
+          rm -f /etc/sudoers.d/server-connect-qa
+          trap - EXIT
+      - name: Native Debian 13 host preflight and prepared-journal race QA
         shell: bash
         run: |
           set -euo pipefail
-          # Keep original tests in the minimal APT layout; install optional
-          # host inspection tools only for their own real-kernel test.
-          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends iproute2
+          # Keep the earlier native APT/online-bootstrap tests in the
+          # minimal Debian environment. Only this later step installs the
+          # C compiler required by the journal race detector.
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends iproute2 gcc libc6-dev
           test -x /usr/bin/ip
           go test ./internal/sc -run '^(TestPreflight|TestUnderlay|TestHostDrift)' -count=1 -v
           go test ./cmd/server-connect -run '^(TestHostDriftCLI|TestHostDriftMenu)' -count=1 -v
+          # Journal checks are non-networking: exercise descriptor identity,
+          # strict JSON, crash/restart semantics and nonblocking FIFO rejection.
+          go test -race ./internal/sc -run '^(TestActivationJournal|TestSharedLifecycleFlock)' -count=1 -timeout=120s -v
           # GitHub's checkout is runner-owned inside this container. Trust
           # only this ephemeral checkout for Go VCS stamping (do not disable it).
           export GIT_CONFIG_COUNT=1
           export GIT_CONFIG_KEY_0=safe.directory
           export GIT_CONFIG_VALUE_0="$GITHUB_WORKSPACE"
           go build -o build/ci/server-connect-cli ./cmd/server-connect
+          # Real native-iproute2 selective preview: proposal only, never apply.
+          build/ci/server-connect-cli --json selective-plan \
+            --endpoint 198.51.100.10 --management-peer 203.0.113.42 \
+            --tunnel-if scpreview0 --destination 8.8.8.0/24 \
+            > build/ci/selective-plan.json
+          python3 - <<'PYPLAN'
+          import json
+          with open('build/ci/selective-plan.json') as f:
+              response=json.load(f)
+          assert response['ok'] is True
+          plan=response['data']
+          assert plan['read_only'] is True
+          for negative in ('activation_ready','snapshot_atomic','guard_armed','ownership_verified'):
+              assert plan[negative] is False
+          assert plan['route_table'] >= 20000
+          assert len(plan['routes']) == len(plan['rules']) == 1
+          assert plan['routes'][0]['destination'] == '8.8.8.0/24'
+          assert len(plan['plan_sha256']) == 64
+          PYPLAN
+          # A second native-iproute2 preview spans both families even on a
+          # host with no IPv6 default route. It must remain advisory only.
+          build/ci/server-connect-cli --json selective-plan \
+            --endpoint 198.51.100.10 --management-peer 203.0.113.42 \
+            --tunnel-if scpreview0 --destination 8.8.8.0/24 \
+            --destination 2606:4700:4700::/48 \
+            > build/ci/selective-plan-mixed.json
+          python3 - <<'PYMIXED'
+          import json
+          with open('build/ci/selective-plan-mixed.json') as f:
+              response=json.load(f)
+          assert response['ok'] is True
+          plan=response['data']
+          assert plan['read_only'] is True
+          for negative in ('activation_ready','snapshot_atomic','guard_armed','ownership_verified'):
+              assert plan[negative] is False
+          assert len(plan['routes']) == len(plan['rules']) == 2
+          assert {r['family'] for r in plan['routes']} == {'ipv4','ipv6'}
+          assert {r['family'] for r in plan['rules']} == {'ipv4','ipv6'}
+          assert len(plan['observation_sha256']) == len(plan['plan_sha256']) == 64
+          PYMIXED
           umask 077
           build/ci/server-connect-cli --json host-preflight --endpoint 127.0.0.1 \
             --management-peer 127.0.0.2 > build/ci/host-preflight.json
@@ -143,10 +196,12 @@ jobs:
               response=json.load(source)
           assert response['ok'] is False
           assert response['error']['code'] == 'invalid_arguments'
+          assert 'data' not in response
           with open('build/ci/invalid-underlay-hostname.json') as source:
               response=json.load(source)
           assert response['ok'] is False
           assert response['error']['code'] == 'invalid_arguments'
+          assert 'data' not in response
           PYQA
       - name: Local QA artifact and digest-verified online acquisition smoke
         shell: bash
