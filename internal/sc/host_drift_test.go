@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"fmt"
 	"net/netip"
 	"os"
 	"os/exec"
@@ -505,284 +504,119 @@ func TestHostDriftCapturedDebian13NativeSpecialRuleArrays(t *testing.T) {
 	}
 }
 
-// Kernel namespace descriptors, not environment variables, establish the
-// safety boundary for tests that add policy rules. The parent supplies its
-// real net/user namespace FDs via ExtraFiles before launching unshare -Urn.
-// The child must be in fresh namespaces, and its net namespace must be
-// owned by its new user namespace (Linux nsfs NS_GET_USERNS).
-func verifyHostDriftPrivateNamespace(parentNetFD, parentUserFD uintptr) error {
-	const (
-		nsGetUserNS = 0xb701 // _IO(NSIO, 0x1), linux/nsfs.h
-		nsGetType   = 0xb703 // _IO(NSIO, 0x3), linux/nsfs.h
-	)
-	checkType := func(fd uintptr, want uintptr) error {
-		kind, _, errno := syscall.Syscall(syscall.SYS_IOCTL, fd, nsGetType, 0)
-		if errno != 0 || kind != want {
-			return fmt.Errorf("missing or incorrect kernel namespace descriptor: %v", errno)
-		}
-		return nil
-	}
-	sameNS := func(a, b uintptr) (bool, error) {
-		var sa, sb syscall.Stat_t
-		if err := syscall.Fstat(int(a), &sa); err != nil {
-			return false, err
-		}
-		if err := syscall.Fstat(int(b), &sb); err != nil {
-			return false, err
-		}
-		return sa.Dev == sb.Dev && sa.Ino == sb.Ino, nil
-	}
-	net, err := os.Open("/proc/self/ns/net")
-	if err != nil {
-		return err
-	}
-	defer net.Close()
-	user, err := os.Open("/proc/self/ns/user")
-	if err != nil {
-		return err
-	}
-	defer user.Close()
-	for _, pair := range []struct{ fd, kind uintptr }{
-		{parentNetFD, syscall.CLONE_NEWNET},
-		{parentUserFD, syscall.CLONE_NEWUSER},
-		{net.Fd(), syscall.CLONE_NEWNET},
-		{user.Fd(), syscall.CLONE_NEWUSER},
-	} {
-		if err := checkType(pair.fd, pair.kind); err != nil {
-			return err
-		}
-	}
-	for _, pair := range [][2]uintptr{{parentNetFD, net.Fd()}, {parentUserFD, user.Fd()}} {
-		equal, err := sameNS(pair[0], pair[1])
-		if err != nil {
-			return err
-		}
-		if equal {
-			return fmt.Errorf("policy-rule test must use fresh private network and user namespaces")
-		}
-	}
-	ownerFD, _, errno := syscall.Syscall(syscall.SYS_IOCTL, net.Fd(), nsGetUserNS, 0)
-	if errno != 0 {
-		return fmt.Errorf("cannot verify network namespace owner: %v", errno)
-	}
-	defer syscall.Close(int(ownerFD))
-	if err := checkType(ownerFD, syscall.CLONE_NEWUSER); err != nil {
-		return err
-	}
-	owned, err := sameNS(ownerFD, user.Fd())
-	if err != nil {
-		return err
-	}
-	if !owned {
-		return fmt.Errorf("network namespace is not owned by the new private user namespace")
-	}
-	return nil
-}
-
-// Mutations are inaccessible until a kernel-backed isolation check succeeds.
-// Regression tests substitute an inert callback, never an actual ip rule add.
-func withVerifiedHostDriftNamespace(parentNetFD, parentUserFD uintptr, mutate func() ([]byte, error)) ([]byte, error) {
-	if err := verifyHostDriftPrivateNamespace(parentNetFD, parentUserFD); err != nil {
-		return nil, err
-	}
-	return mutate()
-}
-
-func TestHostDriftForgedChildMarkerCannotRunPolicyMutations(t *testing.T) {
-	if runtime.GOOS != "linux" {
-		t.Skip("Linux required")
-	}
-	t.Setenv("SC_DRIFT_PRIVATE_NETNS", "child")
-	net, err := os.Open("/proc/self/ns/net")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer net.Close()
-	user, err := os.Open("/proc/self/ns/user")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer user.Close()
-	for _, tc := range []struct {
-		name                  string
-		parentNet, parentUser uintptr
-	}{
-		{"forged_child_same_namespaces", net.Fd(), user.Fd()},
-		{"forged_child_invalid_descriptors", 0, 1},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			called := false
-			_, err := withVerifiedHostDriftNamespace(tc.parentNet, tc.parentUser, func() ([]byte, error) {
-				called = true
-				return nil, nil
-			})
-			if err == nil || called {
-				t.Fatal("forged child-mode marker bypassed isolation before rule mutation")
-			}
-		})
-	}
-}
-
-// This test independently exercises the real 6.15 iproute2 JSON writer
-// and our production baseline validator in a short-lived private user+net
-// namespace. No host routing can be edited by the child.
-// GitHub Actions may lack unprivileged namespaces; unit fixtures still run.
+// Native special-policy serialization is captured in a short-lived disposable
+// user+network namespace. The only "ip rule add" commands are shell arguments
+// to /usr/bin/unshare -Urn; Go has no marker-controlled mutating child branch.
+// Thus even a forged environment variable cannot run those commands on the host.
+// The fixed Debian 13 captures above remain the CI fallback when unshare is
+// forbidden by the runner.
 func TestHostDriftNativeSpecialPolicyRuleJSONPrivateNamespace(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("Linux required")
-	}
-	if os.Getenv("SC_DRIFT_PRIVATE_NETNS") == "child" {
-		// ExtraFiles 3/4 identify parent namespaces; the marker is not
-		// proof. Each policy-rule mutation separately verifies isolation.
-		run := func(args ...string) {
-			t.Helper()
-			output, err := withVerifiedHostDriftNamespace(3, 4, func() ([]byte, error) {
-				return exec.Command(nativeIPPath, args...).CombinedOutput()
-			})
-			if err != nil {
-				t.Fatalf("private namespace native rule %v refused/failed: %v %s", args, err, output)
-			}
-		}
-		for _, family := range []string{"-4", "-6"} {
-			for _, rule := range [][]string{
-				{"rule", "add", "pref", "121", "blackhole"},
-				{"rule", "add", "pref", "122", "unreachable"},
-				{"rule", "add", "pref", "123", "prohibit"},
-				{"rule", "add", "pref", "124", "l3mdev"},
-				{"rule", "add", "pref", "125", "goto", "150"},
-				{"rule", "add", "pref", "126", "nop"},
-				{"rule", "add", "pref", "127", "anycast"},
-				{"rule", "add", "pref", "128", "multicast"},
-				{"rule", "add", "pref", "129", "xresolve"},
-				{"rule", "add", "pref", "130", "throw"},
-				{"rule", "add", "pref", "150", "table", "main"},
-			} {
-				run(append([]string{family}, rule...)...)
-			}
-			// route changes are confined to this disposable namespace.
-			output, err := exec.Command(nativeIPPath, "-j", family, "rule", "show").Output()
-			if err != nil {
-				t.Fatal(err)
-			}
-			if !validHostDriftPolicyRules(output) {
-				t.Fatalf("iproute2 6.15 native %s special rules rejected: %s", family, output)
-			}
-			var items []map[string]json.RawMessage
-			if err := json.Unmarshal(output, &items); err != nil {
-				t.Fatal(err)
-			}
-			expected := map[string]bool{
-				"action_unreachable": false,
-				"action_blackhole":   false,
-				"action_prohibit":    false,
-				"action_anycast":     false,
-				"action_multicast":   false,
-				"action_xresolve":    false,
-				"action_throw":       false,
-				"l3mdev_null":        false,
-				"nop_null":           false,
-				"goto_numeric":       false,
-			}
-			for _, it := range items {
-				var act string
-				if json.Unmarshal(it["action"], &act) == nil {
-					if _, ok := expected["action_"+act]; ok {
-						expected["action_"+act] = true
-					}
-				}
-				for _, field := range []string{"l3mdev", "nop"} {
-					if raw, ok := it[field]; ok && string(raw) == "null" {
-						expected[field+"_null"] = true
-					}
-				}
-				if raw, ok := it["goto"]; ok {
-					var target uint32
-					if json.Unmarshal(raw, &target) == nil && target == 150 {
-						expected["goto_numeric"] = true
-					}
-				}
-			}
-			for k, v := range expected {
-				if !v {
-					t.Errorf("missing genuine native %s action %s in %s", family, k, output)
-				}
-			}
-			source := driftFixture()
-			if family == "-4" {
-				source.IPv4Rules = output
-			} else {
-				source.IPv6Rules = output
-			}
-			path := writeDriftBaseline(t, t.TempDir(), source)
-			if _, err := readHostDriftBaseline(path); err != nil {
-				t.Fatalf("genuine %s special rule inventory rejected: %v", family, err)
-			}
-		}
-		// iproute2's deprecated NAT rule serializes as
-		// masquerade:null on this Debian 13 kernel even with a supplied
-		// mapping address. The upstream printer can also emit nat_gateway
-		// when the kernel supplies RTA_GATEWAY.
-		for _, family := range []string{"-4", "-6"} {
-			run(family, "rule", "add", "pref", "131", "nat", "192.0.2.1")
-			raw, err := exec.Command(nativeIPPath, "-j", family, "rule", "show").Output()
-			if err != nil {
-				t.Fatal(err)
-			}
-			if !validHostDriftPolicyRules(raw) {
-				t.Fatalf("genuine native NAT rejected (%s): %s", family, raw)
-			}
-			var rules []map[string]json.RawMessage
-			if err := json.Unmarshal(raw, &rules); err != nil {
-				t.Fatal(err)
-			}
-			found := false
-			for _, rule := range rules {
-				if marker, ok := rule["masquerade"]; ok && string(marker) == "null" {
-					found = true
-				}
-				if marker, ok := rule["nat_gateway"]; ok && string(marker) != "null" {
-					if addr, err := netip.ParseAddr(hostDriftString(rule, "nat_gateway")); err == nil && addr.Is4() {
-						found = true
-					}
-				}
-			}
-			if !found {
-				t.Fatalf("no native NAT marker found (%s): %s", family, raw)
-			}
-		}
-		return
 	}
 	if _, err := os.Stat(nativeIPPath); err != nil {
 		t.Skip("native iproute2 missing")
 	}
 	if _, err := os.Stat("/usr/bin/unshare"); err != nil {
-		t.Skip("trusted unshare not available")
+		t.Skip("unshare unavailable")
 	}
-	probe := exec.Command("/usr/bin/unshare", "-Urn", "/usr/bin/true")
-	if output, err := probe.CombinedOutput(); err != nil {
+	if output, err := exec.Command("/usr/bin/unshare", "-Urn", "/usr/bin/true").CombinedOutput(); err != nil {
 		t.Skipf("private user/network namespace unavailable: %v %s", err, output)
 	}
+	// Unshare must succeed before /usr/bin/sh can execute a single policy
+	// mutation. This script is never invoked directly or selected by an env
+	// marker; it lives only in the argv of the trusted unshare executable.
+	const capture = `set -eu
+for family in -4 -6; do
+	/usr/bin/ip "$family" rule add pref 121 blackhole
+	/usr/bin/ip "$family" rule add pref 122 unreachable
+	/usr/bin/ip "$family" rule add pref 123 prohibit
+	/usr/bin/ip "$family" rule add pref 124 l3mdev
+	/usr/bin/ip "$family" rule add pref 125 goto 150
+	/usr/bin/ip "$family" rule add pref 126 nop
+	/usr/bin/ip "$family" rule add pref 127 anycast
+	/usr/bin/ip "$family" rule add pref 128 multicast
+	/usr/bin/ip "$family" rule add pref 129 xresolve
+	/usr/bin/ip "$family" rule add pref 130 throw
+	/usr/bin/ip "$family" rule add pref 150 table main
+	/usr/bin/ip "$family" rule add pref 131 nat 192.0.2.1
+done
+/usr/bin/ip -j -4 rule show
+/usr/bin/ip -j -6 rule show`
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	parentNet, err := os.Open("/proc/self/ns/net")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer parentNet.Close()
-	parentUser, err := os.Open("/proc/self/ns/user")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer parentUser.Close()
-	cmd := exec.CommandContext(ctx, "/usr/bin/unshare", "-Urn", os.Args[0],
-		"-test.run=^TestHostDriftNativeSpecialPolicyRuleJSONPrivateNamespace$", "-test.v")
-	cmd.Env = append(os.Environ(), "SC_DRIFT_PRIVATE_NETNS=child")
-	cmd.ExtraFiles = []*os.File{parentNet, parentUser}
-	out, err := cmd.CombinedOutput()
+	cmd := exec.CommandContext(ctx, "/usr/bin/unshare", "-Urn", "/usr/bin/sh", "-c", capture)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
 	if err != nil || ctx.Err() != nil {
-		t.Fatalf("native special-policy-rule regression failed: %v context=%v: %s", err, ctx.Err(), out)
+		t.Fatalf("isolated native policy serialization failed: %v timeout=%v stderr=%s", err, ctx.Err(), stderr.String())
 	}
-	t.Logf("private native 6.15 policy evidence verified")
+	// Only the two native JSON arrays cross back to the parent. All parsing,
+	// baseline writing and assertions happen outside the disposable namespace.
+	arrays := bytes.Split(bytes.TrimSpace(out), []byte("\n"))
+	if len(arrays) != 2 {
+		t.Fatalf("expected exactly IPv4 and IPv6 native JSON arrays, got %d", len(arrays))
+	}
+	for idx, family := range []string{"ipv4", "ipv6"} {
+		t.Run(family, func(t *testing.T) {
+			raw := json.RawMessage(arrays[idx])
+			if !validHostDriftPolicyRules(raw) {
+				t.Fatalf("native special policy rules rejected: %s", raw)
+			}
+			var items []map[string]json.RawMessage
+			if err := json.Unmarshal(raw, &items); err != nil {
+				t.Fatal(err)
+			}
+			expected := map[string]bool{
+				"action_unreachable": false, "action_blackhole": false,
+				"action_prohibit": false, "action_anycast": false,
+				"action_multicast": false, "action_xresolve": false,
+				"action_throw": false, "l3mdev_null": false,
+				"nop_null": false, "goto_numeric": false, "nat": false,
+			}
+			for _, item := range items {
+				var action string
+				if json.Unmarshal(item["action"], &action) == nil {
+					if _, ok := expected["action_"+action]; ok {
+						expected["action_"+action] = true
+					}
+				}
+				for _, marker := range []string{"l3mdev", "nop"} {
+					if bytes.Equal(item[marker], []byte("null")) {
+						expected[marker+"_null"] = true
+					}
+				}
+				var gotoPriority uint32
+				if json.Unmarshal(item["goto"], &gotoPriority) == nil && gotoPriority == 150 {
+					expected["goto_numeric"] = true
+				}
+				if bytes.Equal(item["masquerade"], []byte("null")) {
+					expected["nat"] = true
+				}
+				if ip := hostDriftString(item, "nat_gateway"); ip != "" {
+					if addr, err := netip.ParseAddr(ip); err == nil && addr.Is4() {
+						expected["nat"] = true
+					}
+				}
+			}
+			for key, present := range expected {
+				if !present {
+					t.Errorf("missing native %s policy action %s", family, key)
+				}
+			}
+			snapshot := driftFixture()
+			if family == "ipv4" {
+				snapshot.IPv4Rules = raw
+			} else {
+				snapshot.IPv6Rules = raw
+			}
+			path := writeDriftBaseline(t, t.TempDir(), snapshot)
+			if _, err := readHostDriftBaseline(path); err != nil {
+				t.Fatalf("genuine native policy inventory rejected: %v", err)
+			}
+		})
+	}
 }
 
 func TestHostDriftActualNativeIPv4IPv6RoutesRemainUnchanged(t *testing.T) {
