@@ -98,6 +98,42 @@ mutates routes, firewall, resolver files or host state; `activation_ready`
 and `dns_bootstrap_verified` both remain **false**, even on success.
 Existing third-party routing is possible; observations are non-atomic. The interactive diagnostic is menu option **13**; existing Path Diagnostics and Selective Plan retain options **11** and **12**.
 
+### Explicit resolver-bound DNS diagnostic (Issue #2, dependent development)
+
+The operator may separately check an **explicit DNS resolver path** rather than
+silently trusting the host's current resolver or cached hostname data:
+
+`server-connect --json underlay-dns --hostname vpn.example.net --endpoint 198.51.100.10 --resolver 1.1.1.1`
+
+Optionally set `--resolver-port 53` to target an explicitly selected nonstandard
+DNS service. This command validates the literal resolver and pinned endpoint,
+uses trusted native `/usr/bin/ip` to observe UDP and TCP resolver routes
+for the **exact DNS port and process UID**, and sends bounded standard DNS
+A/AAAA queries **only to that literal server**, with `SO_BINDTODEVICE` on
+the selected interface. Differing UDP/TCP paths, unknown routing selectors,
+source/mark/VRF/source-port-sensitive policies, and post-query route changes
+fail closed. There is no unbound or host-resolver fallback. Invalid input
+omits `data` rather than reporting fictitious safety flags. It refuses
+hosts-file-only answers, malformed inputs,
+a missing/unreachable resolver, unsupported address results, route drift,
+and any response lacking the operator-pinned endpoint IP. Each failure has
+structured `ok: false` evidence without connecting to the VPN endpoint or
+changing host DNS, system networking, profiles or services. Queries may reveal
+the supplied hostname to that resolver; invoke only with an operator-approved
+resolver.
+
+**Not an activation gate:** the resolver's response is not DNSSEC/TLS
+authenticated; an existing tunnel could still carry the interface-bound
+resolver traffic, and an eventual routing change could interrupt the route.
+Even a match leaves `read_only: true`, `dns_bootstrap_verified: false` and
+`activation_ready: false`. Independent route ownership, an owned-network transaction journal,
+activation/recovery guards, management proofs and physical post-change
+tests are still mandatory; the existing PREPARED/UNCERTAIN intent journal
+is not an applied route transaction. The exact CLI/API remains a development
+candidate, not a published stable release.
+
+The explicit resolver diagnostic is menu option **14**; existing Path Diagnostics **11**, Selective Plan **12**, and Underlay TCP **13** are retained.
+
 ### Proxy Only compatibility and application opt-in
 
 - The link importer deliberately supports a **subset** of VLESS TCP/WebSocket and TLS/Reality query fields, rejecting unrecognized or incompatible parameters. **Local TCP VLESS through the pinned sing-box core has live integration evidence; TLS/WebSocket/Reality interoperability with real foreign providers is NOT_RUN.** Import and `validate` establish syntax/core-configuration acceptance, not remote reachability.

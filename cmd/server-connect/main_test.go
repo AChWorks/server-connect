@@ -515,3 +515,109 @@ func TestUnderlayTCPMenu13PreservesExistingOptions(t *testing.T) {
 		t.Fatal("invalid underlay menu unexpectedly created product state")
 	}
 }
+
+func TestUnderlayDNSCLIRejectsMissingAndAmbiguousInputs(t *testing.T) {
+	for _, args := range [][]string{
+		{"underlay-dns", "--hostname", "node.example.test", "--endpoint", "198.51.100.17"},
+		{"underlay-dns", "--hostname", "node.example.test", "--endpoint", "198.51.100.17", "--resolver", "dns.example.test"},
+		{"underlay-dns", "--hostname", "node.example.test", "--endpoint", "198.51.100.17", "--resolver", "127.0.0.1", "--resolver-port", "0"},
+		{"underlay-dns", "--hostname", "", "--endpoint", "198.51.100.17", "--resolver", "127.0.0.1"},
+		{"underlay-dns", "--hostname", "node.example.test", "--endpoint", "198.51.100.17", "--resolver", "127.0.0.1", "extra"},
+	} {
+		reader, writer, err := os.Pipe()
+		if err != nil {
+			t.Fatal(err)
+		}
+		old := os.Stdout
+		os.Stdout = writer
+		exit := run(true, sc.New(t.TempDir(), "", 0), args)
+		_ = writer.Close()
+		os.Stdout = old
+		var response struct {
+			OK    bool            `json:"ok"`
+			Data  json.RawMessage `json:"data"`
+			Error struct {
+				Code string `json:"code"`
+			} `json:"error"`
+		}
+		err = json.NewDecoder(reader).Decode(&response)
+		_ = reader.Close()
+		if err != nil || exit == 0 || response.OK || response.Error.Code != "invalid_arguments" || len(response.Data) != 0 {
+			t.Fatalf("invalid explicit resolver input emitted fake report: %v exit=%d response=%+v err=%v", args, exit, response, err)
+		}
+	}
+}
+
+// After valid underlay-dns arguments, even a refused DNS resolver retains
+// truthful partial safety evidence and a nonzero exit / structured error.
+func TestUnderlayDNSValidArgumentsRetainPartialFailure(t *testing.T) {
+	m := sc.New(filepath.Join(t.TempDir(), "state"), "", 0)
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := os.Stdout
+	os.Stdout = writer
+	exit := run(true, m, []string{"underlay-dns", "--hostname", "node.example.test",
+		"--endpoint", "198.51.100.9", "--resolver", "127.0.0.1", "--resolver-port", "1"})
+	_ = writer.Close()
+	os.Stdout = old
+	defer reader.Close()
+	var result struct {
+		OK   bool `json:"ok"`
+		Data struct {
+			Mode                 string `json:"mode"`
+			ReadOnly             bool   `json:"read_only"`
+			ActivationReady      bool   `json:"activation_ready"`
+			DNSBootstrapVerified bool   `json:"dns_bootstrap_verified"`
+			Outcome              string `json:"outcome"`
+		} `json:"data"`
+		Error *apiError `json:"error"`
+	}
+	if err := json.NewDecoder(reader).Decode(&result); err != nil {
+		t.Fatal(err)
+	}
+	if exit == 0 || result.OK || result.Error == nil ||
+		result.Data.Mode != "explicit_resolver_diagnostic" || !result.Data.ReadOnly ||
+		result.Data.ActivationReady || result.Data.DNSBootstrapVerified || result.Data.Outcome == "" {
+		t.Fatalf("DNS runtime error lost partial safety report: %+v exit=%d", result, exit)
+	}
+}
+
+func TestUnderlayDNSMenu14RetainsOtherDiagnostics(t *testing.T) {
+	manager := sc.New(filepath.Join(t.TempDir(), "missing-product-state"), "", 0)
+	in, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Option 14 is invalid and does not dial or create persistent state.
+	if _, err := writer.Write([]byte("14\n\n\n\n0\n")); err != nil {
+		t.Fatal(err)
+	}
+	writer.Close()
+	out, capture, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldIn, oldOut := os.Stdin, os.Stdout
+	os.Stdin, os.Stdout = in, capture
+	exit := menu(manager)
+	capture.Close()
+	os.Stdin, os.Stdout = oldIn, oldOut
+	defer in.Close()
+	content, err := io.ReadAll(out)
+	out.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if exit != 0 ||
+		!strings.Contains(string(content), "11 Path Diagnostics  12 Selective Plan  13 Underlay TCP  14 Underlay DNS") ||
+		!strings.Contains(string(content), "Endpoint DNS hostname:") ||
+		!strings.Contains(string(content), "Pinned endpoint IP:") ||
+		!strings.Contains(string(content), "Explicit resolver IP") {
+		t.Fatalf("DNS option 14 collides or is missing: exit=%d", exit)
+	}
+	if _, err := os.Stat(manager.Dir); !os.IsNotExist(err) {
+		t.Fatal("invalid underlay DNS menu created product state")
+	}
+}
