@@ -26,26 +26,44 @@ suffix=$(basename "$scratch" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9')
 container="sc-hostqa-$suffix"
 image="sc-hostqa:$suffix"
 started=no
+image_built=no
 cleanup() {
-  rc=$?
+  original_rc=$?
   trap - EXIT
+  cleanup_failed=no
   if [[ $started == yes ]]; then
-    if (( rc != 0 )); then
+    if (( original_rc != 0 )); then
       echo 'Disposable systemd diagnostics (failure only):' >&2
-      docker logs --tail 100 "$container" >&2 || true
+      docker logs --tail 100 "$container" >&2 ||
+        echo 'Warning: could not collect container logs' >&2
     fi
-    docker rm -f "$container" >/dev/null 2>&1 || true
+    if ! docker rm -f "$container" >/dev/null; then
+      echo "QA cleanup failed: docker container $container" >&2
+      cleanup_failed=yes
+    fi
   fi
-  docker image rm "$image" >/dev/null 2>&1 || true
-  rm -rf -- "$scratch"
-  exit "$rc"
+  if [[ $image_built == yes ]]; then
+    if ! docker image rm "$image" >/dev/null; then
+      echo "QA cleanup failed: docker image $image" >&2
+      cleanup_failed=yes
+    fi
+  fi
+  if ! rm -rf -- "$scratch"; then
+    echo 'QA cleanup failed: disposable scratch directory' >&2
+    cleanup_failed=yes
+  fi
+  # Preserve the original test failure; never silently pass failed cleanup.
+  if [[ $original_rc -eq 0 && $cleanup_failed == yes ]]; then original_rc=1; fi
+  exit "$original_rc"
 }
+
 trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
 echo '=== Disposable Debian 13 preparation (network permitted BEFORE isolation) ==='
 docker build --pull -f scripts/qa/Dockerfile.host-systemd -t "$image" scripts/qa
+image_built=yes
 # Delegate the container's PRIVATE cgroup v2 filesystem through Docker.
 # NEVER bind-mount the host cgroup root into a private cgroup namespace:
 # it creates inconsistent ownership and can stop systemd before boot.
@@ -88,9 +106,22 @@ docker exec "$container" /bin/sh -c '
   test -z "$(ip -4 route show default)" && test -z "$(ip -6 route show default)"
 '
 network_digest() {
-  docker exec "$container" /bin/sh -c \
-   '{ ip -j -4 route show table all; ip -j -6 route show table all; ip -j -4 rule show; ip -j -6 rule show; ip -j link show; } | sha256sum | cut -d" " -f1'
+  docker exec "$container" /bin/sh /root/qa-host-assertions.sh network
 }
+assert_network_unchanged() {
+  local phase=$1 baseline=$2 current
+  if ! current=$(network_digest); then
+    echo "NETWORK_PRESERVATION($phase)=FAIL (snapshot query)" >&2
+    exit 1
+  fi
+  if [[ $current != "$baseline" ]]; then
+    echo "NETWORK_PRESERVATION($phase)=FAIL (route/rule/link drift)" >&2
+    exit 1
+  fi
+  echo "NETWORK_PRESERVATION($phase)=PASS"
+}
+docker cp "$root/scripts/qa/host-qa-assertions.sh" "$container:/root/qa-host-assertions.sh"
+
 docker cp "$bundle" "$container:/root/sc-qa-bundle.tar.gz"
 docker cp "$bootstrap" "$container:/root/sc-qa-bootstrap.sh"
 docker exec "$container" /bin/sh -c '
@@ -107,8 +138,8 @@ run_offline() {
   label=$1
   action=$2
   echo "=== Disconnected offline $label ==="
-  docker exec "$container" /usr/bin/strace -ff -qq -s 128 \
-    -e trace=execve,connect,sendto,sendmsg,sendmmsg \
+  docker exec "$container" /usr/bin/strace -ff -qq -yy -s 128 \
+    -e trace=%network,%process \
     -o "/root/qa-strace/$label" /usr/bin/env -i \
     HOME=/root PATH=/usr/sbin:/usr/bin:/sbin:/bin LC_ALL=C \
     /bin/sh /root/server-connect/install.sh "$action"
@@ -116,22 +147,13 @@ run_offline() {
 }
 assert_no_offline_fetch() {
   label=$1
-  # Assert ACTUAL syscalls/exec, not merely an unreachable external network.
-  docker exec "$container" /bin/sh -c '
-    label=$1
-    set -- /root/qa-strace/"$label".*
-    test -f "$1" || exit 1
-    if grep -Eh "(connect|sendto|sendmsg|sendmmsg)\(.*AF_INET(6)?" "$@"; then
-      echo "Unexpected DNS/HTTP network syscall in offline installer" >&2
-      exit 1
-    fi
-    if grep -Eh "execve\(.*\/(curl|wget|apt|apt-get|git)\"" "$@"; then
-      echo "Unexpected fetch or package command in offline installer" >&2
-      exit 1
-    fi
-  ' qa-trace "$label"
+  # Missing/empty/unreadable child traces, scanner errors and forbidden
+  # execve/execveat or IPv4/IPv6 network attempts MUST all fail acceptance.
+  docker exec "$container" /bin/sh /root/qa-host-assertions.sh \
+    trace /root/qa-strace "$label"
   echo "OFFLINE_FETCH_ATTEMPTS($label)=ZERO"
 }
+
 verify_direct_install() {
   docker exec "$container" /bin/sh -c '
     set -eu
@@ -158,6 +180,7 @@ verify_clean_uninstall() {
 }
 
 run_offline verify-only --verify-only
+assert_network_unchanged verify-only "$offline_before"
 docker exec "$container" /bin/sh -c 'test ! -e /opt/server-connect && test ! -e /var/lib/server-connect'
 
 echo '=== Negative offline acceptance: missing pinned core must reject BEFORE mutation ==='
@@ -168,8 +191,8 @@ docker exec "$container" /bin/sh -c '
   test -f /root/server-connect/bin/sing-box
   mv /root/server-connect/bin/sing-box /root/server-connect/bin/sing-box.qa-hidden
 '
-if docker exec "$container" /usr/bin/strace -ff -qq -s 128 \
-  -e trace=execve,connect,sendto,sendmsg,sendmmsg \
+if docker exec "$container" /usr/bin/strace -ff -qq -yy -s 128 \
+  -e trace=%network,%process \
   -o /root/qa-strace/missing-core /usr/bin/env -i \
   HOME=/root PATH=/usr/sbin:/usr/bin:/sbin:/bin LC_ALL=C \
   /bin/sh /root/server-connect/install.sh --offline \
@@ -191,25 +214,24 @@ docker exec "$container" /bin/sh -c '
   mv /root/server-connect/bin/sing-box.qa-hidden /root/server-connect/bin/sing-box
   (cd /root/server-connect && sha256sum --quiet --check checksums.sha256)
 '
-[[ $(network_digest) == "$offline_before" ]] || {
-  echo 'Missing-core preflight unexpectedly modified host network' >&2
-  exit 1
-}
+assert_network_unchanged missing-core "$offline_before"
+
 assert_no_offline_fetch missing-core
 echo 'OFFLINE_MISSING_CORE_FAIL_CLOSED=PASS (installer NOT applied)'
 run_offline first-install --offline
 verify_direct_install
+assert_network_unchanged first-install "$offline_before"
 docker exec "$container" /bin/sh -c '
   printf "SC_QA_RETAIN_PROFILE_BYTES\n" > /var/lib/server-connect/profiles/qa-retained
   chmod 0600 /var/lib/server-connect/profiles/qa-retained
 '
 run_offline reinstall --offline
 verify_direct_install
+assert_network_unchanged reinstall "$offline_before"
 run_offline uninstall --uninstall
 verify_clean_uninstall
-[[ $(network_digest) == "$offline_before" ]] || {
-  echo 'Disconnected installer unexpectedly changed kernel routes/rules/links' >&2; exit 1;
-}
+assert_network_unchanged uninstall "$offline_before"
+
 echo 'DISCONNECTED_OFFLINE_CYCLE=PASS'
 
 echo '=== Isolated LOOPBACK acquisition followed by the SAME real installer ==='
@@ -235,11 +257,11 @@ docker exec "$container" /usr/bin/env -i \
   /bin/sh /root/sc-qa-bootstrap.sh \
   --archive-url http://localhost:19179/bundle.tar.gz --sha256 "$digest"
 verify_direct_install
+assert_network_unchanged loopback-online-install "$online_before"
 run_offline online-then-uninstall --uninstall
 verify_clean_uninstall
-[[ $(network_digest) == "$online_before" ]] || {
-  echo 'Online installer unexpectedly changed kernel routes/rules/links' >&2; exit 1;
-}
+assert_network_unchanged loopback-online-uninstall "$online_before"
+
 docker exec "$container" /bin/sh -c \
   'test -z "$(find /root -maxdepth 1 -name ".server-connect-bootstrap.*" -print)"'
 echo 'LOCAL_LOOPBACK_ONLINE_INSTALL=PASS'
