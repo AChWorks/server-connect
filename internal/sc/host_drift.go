@@ -32,8 +32,6 @@ type HostDriftReport struct {
 	ReadOnly        bool                 `json:"read_only"`
 	ActivationReady bool                 `json:"activation_ready"`
 	SnapshotAtomic  bool                 `json:"snapshot_atomic"`
-	Endpoint        string               `json:"endpoint,omitempty"`
-	ManagementPeer  string               `json:"management_peer,omitempty"`
 	CurrentObserved bool                 `json:"current_observed"`
 	Changed         bool                 `json:"changed"`
 	Components      []HostDriftComponent `json:"components,omitempty"`
@@ -41,8 +39,8 @@ type HostDriftReport struct {
 	Limitations     []string             `json:"limitations"`
 }
 
-func newHostDriftReport(baseline HostPreflight) HostDriftReport {
-	report := HostDriftReport{
+func newHostDriftReport() HostDriftReport {
+	return HostDriftReport{
 		Mode: "host_drift_diagnostic", ReadOnly: true,
 		ActivationReady: false, SnapshotAtomic: false,
 		Outcome: "not_observed",
@@ -53,13 +51,6 @@ func newHostDriftReport(baseline HostPreflight) HostDriftReport {
 			"Semantic JSON comparison does not attest host state between observations or preserve a recoverable network journal.",
 		},
 	}
-	if baseline.Endpoint != nil {
-		report.Endpoint = baseline.Endpoint.Target
-	}
-	if baseline.ManagementPeer != nil {
-		report.ManagementPeer = baseline.ManagementPeer.Target
-	}
-	return report
 }
 
 // readHostDriftBaseline accepts only a complete successful --json host-preflight
@@ -417,7 +408,7 @@ func hostDriftFingerprint(raw json.RawMessage, unordered bool) (string, error) {
 // fixtures without mutating host tables. A mismatch is a warning, not a
 // decision to restore, rewrite or take ownership of anything.
 func compareHostDriftSnapshots(baseline, observed HostPreflight) (HostDriftReport, error) {
-	report := newHostDriftReport(baseline)
+	report := newHostDriftReport()
 	if validateHostDriftSnapshot(baseline) != nil || validateHostDriftSnapshot(observed) != nil {
 		return report, Fault("host_drift_unavailable", "cannot compare incomplete host route observations")
 	}
@@ -483,8 +474,16 @@ func InspectHostDrift(baselineFile string) (HostDriftReport, error) {
 	if err != nil {
 		return HostDriftReport{}, err
 	}
-	report := newHostDriftReport(baseline)
-	observed, err := InspectHostRoutes(report.Endpoint, report.ManagementPeer)
+	report := newHostDriftReport()
+	// The baseline targets are needed for read-only lookups, not for output.
+	endpoint, managementPeer := "", ""
+	if baseline.Endpoint != nil {
+		endpoint = baseline.Endpoint.Target
+	}
+	if baseline.ManagementPeer != nil {
+		managementPeer = baseline.ManagementPeer.Target
+	}
+	observed, err := InspectHostRoutes(endpoint, managementPeer)
 	if err != nil {
 		report.Outcome = "observation_failed"
 		return report, err

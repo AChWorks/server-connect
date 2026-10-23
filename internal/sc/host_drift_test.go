@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/netip"
 	"os"
 	"os/exec"
@@ -37,9 +38,15 @@ func TestHostDriftSemanticCompareAndSafetyInvariants(t *testing.T) {
 	report, err := compareHostDriftSnapshots(base, other)
 	if err != nil || report.Changed || !report.CurrentObserved || report.Outcome != "matching_observations" ||
 		!report.ReadOnly || report.SnapshotAtomic || report.ActivationReady || len(report.Components) != 7 ||
-		report.Endpoint != base.Endpoint.Target || report.ManagementPeer != base.ManagementPeer.Target ||
 		len(report.Limitations) < 3 {
 		t.Fatalf("false drift/readiness or missing comparison evidence: %+v error=%v", report, err)
+	}
+	serialized, err := json.Marshal(report)
+	if err != nil || bytes.Contains(serialized, []byte(base.Endpoint.Target)) ||
+		bytes.Contains(serialized, []byte(base.ManagementPeer.Target)) ||
+		bytes.Contains(serialized, []byte(`"management_peer"`)) ||
+		bytes.Contains(serialized, []byte(`"endpoint"`)) {
+		t.Fatalf("private baseline target leaked through report: %s err=%v", serialized, err)
 	}
 	for _, c := range report.Components {
 		if c.Changed || len(c.BaselineSHA256) != 64 || c.BaselineSHA256 != c.ObservedSHA256 {
@@ -498,6 +505,124 @@ func TestHostDriftCapturedDebian13NativeSpecialRuleArrays(t *testing.T) {
 	}
 }
 
+// Kernel namespace descriptors, not environment variables, establish the
+// safety boundary for tests that add policy rules. The parent supplies its
+// real net/user namespace FDs via ExtraFiles before launching unshare -Urn.
+// The child must be in fresh namespaces, and its net namespace must be
+// owned by its new user namespace (Linux nsfs NS_GET_USERNS).
+func verifyHostDriftPrivateNamespace(parentNetFD, parentUserFD uintptr) error {
+	const (
+		nsGetUserNS = 0xb701 // _IO(NSIO, 0x1), linux/nsfs.h
+		nsGetType   = 0xb703 // _IO(NSIO, 0x3), linux/nsfs.h
+	)
+	checkType := func(fd uintptr, want uintptr) error {
+		kind, _, errno := syscall.Syscall(syscall.SYS_IOCTL, fd, nsGetType, 0)
+		if errno != 0 || kind != want {
+			return fmt.Errorf("missing or incorrect kernel namespace descriptor: %v", errno)
+		}
+		return nil
+	}
+	sameNS := func(a, b uintptr) (bool, error) {
+		var sa, sb syscall.Stat_t
+		if err := syscall.Fstat(int(a), &sa); err != nil {
+			return false, err
+		}
+		if err := syscall.Fstat(int(b), &sb); err != nil {
+			return false, err
+		}
+		return sa.Dev == sb.Dev && sa.Ino == sb.Ino, nil
+	}
+	net, err := os.Open("/proc/self/ns/net")
+	if err != nil {
+		return err
+	}
+	defer net.Close()
+	user, err := os.Open("/proc/self/ns/user")
+	if err != nil {
+		return err
+	}
+	defer user.Close()
+	for _, pair := range []struct{ fd, kind uintptr }{
+		{parentNetFD, syscall.CLONE_NEWNET},
+		{parentUserFD, syscall.CLONE_NEWUSER},
+		{net.Fd(), syscall.CLONE_NEWNET},
+		{user.Fd(), syscall.CLONE_NEWUSER},
+	} {
+		if err := checkType(pair.fd, pair.kind); err != nil {
+			return err
+		}
+	}
+	for _, pair := range [][2]uintptr{{parentNetFD, net.Fd()}, {parentUserFD, user.Fd()}} {
+		equal, err := sameNS(pair[0], pair[1])
+		if err != nil {
+			return err
+		}
+		if equal {
+			return fmt.Errorf("policy-rule test must use fresh private network and user namespaces")
+		}
+	}
+	ownerFD, _, errno := syscall.Syscall(syscall.SYS_IOCTL, net.Fd(), nsGetUserNS, 0)
+	if errno != 0 {
+		return fmt.Errorf("cannot verify network namespace owner: %v", errno)
+	}
+	defer syscall.Close(int(ownerFD))
+	if err := checkType(ownerFD, syscall.CLONE_NEWUSER); err != nil {
+		return err
+	}
+	owned, err := sameNS(ownerFD, user.Fd())
+	if err != nil {
+		return err
+	}
+	if !owned {
+		return fmt.Errorf("network namespace is not owned by the new private user namespace")
+	}
+	return nil
+}
+
+// Mutations are inaccessible until a kernel-backed isolation check succeeds.
+// Regression tests substitute an inert callback, never an actual ip rule add.
+func withVerifiedHostDriftNamespace(parentNetFD, parentUserFD uintptr, mutate func() ([]byte, error)) ([]byte, error) {
+	if err := verifyHostDriftPrivateNamespace(parentNetFD, parentUserFD); err != nil {
+		return nil, err
+	}
+	return mutate()
+}
+
+func TestHostDriftForgedChildMarkerCannotRunPolicyMutations(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("Linux required")
+	}
+	t.Setenv("SC_DRIFT_PRIVATE_NETNS", "child")
+	net, err := os.Open("/proc/self/ns/net")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer net.Close()
+	user, err := os.Open("/proc/self/ns/user")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer user.Close()
+	for _, tc := range []struct {
+		name                  string
+		parentNet, parentUser uintptr
+	}{
+		{"forged_child_same_namespaces", net.Fd(), user.Fd()},
+		{"forged_child_invalid_descriptors", 0, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			called := false
+			_, err := withVerifiedHostDriftNamespace(tc.parentNet, tc.parentUser, func() ([]byte, error) {
+				called = true
+				return nil, nil
+			})
+			if err == nil || called {
+				t.Fatal("forged child-mode marker bypassed isolation before rule mutation")
+			}
+		})
+	}
+}
+
 // This test independently exercises the real 6.15 iproute2 JSON writer
 // and our production baseline validator in a short-lived private user+net
 // namespace. No host routing can be edited by the child.
@@ -507,11 +632,15 @@ func TestHostDriftNativeSpecialPolicyRuleJSONPrivateNamespace(t *testing.T) {
 		t.Skip("Linux required")
 	}
 	if os.Getenv("SC_DRIFT_PRIVATE_NETNS") == "child" {
+		// ExtraFiles 3/4 identify parent namespaces; the marker is not
+		// proof. Each policy-rule mutation separately verifies isolation.
 		run := func(args ...string) {
 			t.Helper()
-			output, err := exec.Command(nativeIPPath, args...).CombinedOutput()
+			output, err := withVerifiedHostDriftNamespace(3, 4, func() ([]byte, error) {
+				return exec.Command(nativeIPPath, args...).CombinedOutput()
+			})
 			if err != nil {
-				t.Fatalf("private namespace native rule %v failed: %v %s", args, err, output)
+				t.Fatalf("private namespace native rule %v refused/failed: %v %s", args, err, output)
 			}
 		}
 		for _, family := range []string{"-4", "-6"} {
@@ -626,18 +755,29 @@ func TestHostDriftNativeSpecialPolicyRuleJSONPrivateNamespace(t *testing.T) {
 	if _, err := os.Stat(nativeIPPath); err != nil {
 		t.Skip("native iproute2 missing")
 	}
-	if _, err := exec.LookPath("unshare"); err != nil {
-		t.Skip("unshare not available")
+	if _, err := os.Stat("/usr/bin/unshare"); err != nil {
+		t.Skip("trusted unshare not available")
 	}
-	probe := exec.Command("unshare", "-Urn", "true")
+	probe := exec.Command("/usr/bin/unshare", "-Urn", "/usr/bin/true")
 	if output, err := probe.CombinedOutput(); err != nil {
 		t.Skipf("private user/network namespace unavailable: %v %s", err, output)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "unshare", "-Urn", os.Args[0],
+	parentNet, err := os.Open("/proc/self/ns/net")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer parentNet.Close()
+	parentUser, err := os.Open("/proc/self/ns/user")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer parentUser.Close()
+	cmd := exec.CommandContext(ctx, "/usr/bin/unshare", "-Urn", os.Args[0],
 		"-test.run=^TestHostDriftNativeSpecialPolicyRuleJSONPrivateNamespace$", "-test.v")
 	cmd.Env = append(os.Environ(), "SC_DRIFT_PRIVATE_NETNS=child")
+	cmd.ExtraFiles = []*os.File{parentNet, parentUser}
 	out, err := cmd.CombinedOutput()
 	if err != nil || ctx.Err() != nil {
 		t.Fatalf("native special-policy-rule regression failed: %v context=%v: %s", err, ctx.Err(), out)

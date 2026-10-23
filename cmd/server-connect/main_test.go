@@ -714,6 +714,10 @@ func TestHostDriftCLIRoundtripRealHostPreflight(t *testing.T) {
 	if err := json.Unmarshal(out, &report); err != nil {
 		t.Fatal(err)
 	}
+	if bytes.Contains(out, []byte("127.0.0.1")) || bytes.Contains(out, []byte("127.0.0.2")) ||
+		bytes.Contains(out, []byte(`"endpoint"`)) || bytes.Contains(out, []byte(`"management_peer"`)) {
+		t.Fatalf("private baseline targets leaked in matching JSON report: %s", out)
+	}
 	if code != 0 || !report.OK || report.Error != nil ||
 		report.Data.Mode != "host_drift_diagnostic" || !report.Data.ReadOnly ||
 		report.Data.ActivationReady || report.Data.SnapshotAtomic ||
@@ -758,6 +762,9 @@ func TestHostDriftCLIRoundtripRealHostPreflight(t *testing.T) {
 	code, out = capture("host-drift", "--baseline", path)
 	if err := json.Unmarshal(out, &report); err != nil {
 		t.Fatal(err)
+	}
+	if bytes.Contains(out, []byte("127.0.0.1")) || bytes.Contains(out, []byte("127.0.0.2")) {
+		t.Fatalf("private baseline targets leaked in drift JSON report: %s", out)
 	}
 	if code == 0 || report.OK || report.Error == nil ||
 		report.Error.Code != "host_drift_detected" ||
@@ -889,7 +896,10 @@ func assertHostDriftEvidenceVisible(t *testing.T, stdout, stderr, path string) {
 	if !strings.Contains(stderr, "host_drift_detected") {
 		t.Errorf("non-JSON operator output lacks error class: %s", stderr)
 	}
-	if strings.Contains(stdout, path) || strings.Contains(stderr, path) || strings.Contains(stdout, "synthetic-baseline-only") {
+	if strings.Contains(stdout, path) || strings.Contains(stderr, path) ||
+		strings.Contains(stdout, "127.0.0.1") || strings.Contains(stdout, "127.0.0.2") ||
+		strings.Contains(stderr, "127.0.0.1") || strings.Contains(stderr, "127.0.0.2") ||
+		strings.Contains(stdout, "synthetic-baseline-only") {
 		t.Fatal("private baseline filename/content leaked to operator output")
 	}
 }

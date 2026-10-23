@@ -147,7 +147,10 @@ server-connect --json host-drift --baseline ./host-baseline.json
 
 The comparison repeats native, read-only Linux route/rule/link inspection
 including the **same literal** endpoint and management-peer queries from the
-baseline. It reports per-component SHA-256 fingerprints (never raw baseline
+baseline, but retains their addresses only as private lookup inputs. The Host
+Drift report does **not** print those baseline target addresses in JSON, text
+or menu output; component names indicate whether each optional lookup was
+compared. It reports per-component SHA-256 fingerprints (never raw baseline
 contents), `changed` flags and a nonzero `host_drift_detected` error when
 an observation differs. The **non-JSON CLI and interactive menu option 15**
 also display the safe per-component report on detected drift, together with
