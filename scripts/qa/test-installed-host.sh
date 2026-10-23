@@ -112,6 +112,10 @@ run_offline() {
     -o "/root/qa-strace/$label" /usr/bin/env -i \
     HOME=/root PATH=/usr/sbin:/usr/bin:/sbin:/bin LC_ALL=C \
     /bin/sh /root/server-connect/install.sh "$action"
+  assert_no_offline_fetch "$label"
+}
+assert_no_offline_fetch() {
+  label=$1
   # Assert ACTUAL syscalls/exec, not merely an unreachable external network.
   docker exec "$container" /bin/sh -c '
     label=$1
@@ -155,6 +159,44 @@ verify_clean_uninstall() {
 
 run_offline verify-only --verify-only
 docker exec "$container" /bin/sh -c 'test ! -e /opt/server-connect && test ! -e /var/lib/server-connect'
+
+echo '=== Negative offline acceptance: missing pinned core must reject BEFORE mutation ==='
+# This test mutates ONLY the private disposable source bundle, restores the
+# original verified bytes before the next test, and never touches another host.
+docker exec "$container" /bin/sh -c '
+  set -eu
+  test -f /root/server-connect/bin/sing-box
+  mv /root/server-connect/bin/sing-box /root/server-connect/bin/sing-box.qa-hidden
+'
+if docker exec "$container" /usr/bin/strace -ff -qq -s 128 \
+  -e trace=execve,connect,sendto,sendmsg,sendmmsg \
+  -o /root/qa-strace/missing-core /usr/bin/env -i \
+  HOME=/root PATH=/usr/sbin:/usr/bin:/sbin:/bin LC_ALL=C \
+  /bin/sh /root/server-connect/install.sh --offline \
+  2>"$scratch/missing-core.stderr"; then
+  echo 'Missing pinned sing-box unexpectedly installed' >&2
+  exit 1
+fi
+grep -F 'missing or non-root-owned regular file' "$scratch/missing-core.stderr" >/dev/null || {
+  echo 'Missing-core rejection was not the verified early payload failure' >&2
+  cat "$scratch/missing-core.stderr" >&2
+  exit 1
+}
+docker exec "$container" /bin/sh -c '
+  set -eu
+  test "$(systemctl show server-connect.service -p LoadState --value)" = not-found
+  test ! -e /opt/server-connect
+  test ! -e /var/lib/server-connect
+  test ! -e /usr/local/bin/server-connect
+  mv /root/server-connect/bin/sing-box.qa-hidden /root/server-connect/bin/sing-box
+  (cd /root/server-connect && sha256sum --quiet --check checksums.sha256)
+'
+[[ $(network_digest) == "$offline_before" ]] || {
+  echo 'Missing-core preflight unexpectedly modified host network' >&2
+  exit 1
+}
+assert_no_offline_fetch missing-core
+echo 'OFFLINE_MISSING_CORE_FAIL_CLOSED=PASS (installer NOT applied)'
 run_offline first-install --offline
 verify_direct_install
 docker exec "$container" /bin/sh -c '
