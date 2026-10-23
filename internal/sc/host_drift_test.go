@@ -517,12 +517,7 @@ func TestHostDriftNativeSpecialPolicyRuleJSONPrivateNamespace(t *testing.T) {
 	if _, err := os.Stat(nativeIPPath); err != nil {
 		t.Skip("native iproute2 missing")
 	}
-	if _, err := os.Stat("/usr/bin/unshare"); err != nil {
-		t.Skip("unshare unavailable")
-	}
-	if output, err := exec.Command("/usr/bin/unshare", "-Urn", "/usr/bin/true").CombinedOutput(); err != nil {
-		t.Skipf("private user/network namespace unavailable: %v %s", err, output)
-	}
+	requireDisposableUserNetNamespace(t)
 	// Unshare must succeed before /usr/bin/sh can execute a single policy
 	// mutation. This script is never invoked directly or selected by an env
 	// marker; it lives only in the argv of the trusted unshare executable.
@@ -545,12 +540,9 @@ done
 /usr/bin/ip -j -6 rule show`
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "/usr/bin/unshare", "-Urn", "/usr/bin/sh", "-c", capture)
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-	out, err := cmd.Output()
+	out, stderr, err := runBoundedTestProcess(ctx, "/usr/bin/unshare", "-Urn", "/usr/bin/sh", "-c", capture)
 	if err != nil || ctx.Err() != nil {
-		t.Fatalf("isolated native policy serialization failed: %v timeout=%v stderr=%s", err, ctx.Err(), stderr.String())
+		t.Fatalf("isolated native policy serialization failed: %v timeout=%v stderr=%s", err, ctx.Err(), stderr)
 	}
 	// Only the two native JSON arrays cross back to the parent. All parsing,
 	// baseline writing and assertions happen outside the disposable namespace.

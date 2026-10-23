@@ -6,7 +6,6 @@ import (
 	"net"
 	"net/netip"
 	"os"
-	"os/exec"
 	"runtime"
 	"strings"
 	"sync/atomic"
@@ -207,12 +206,7 @@ func TestUnderlayDNSFlowPolicyInPrivateNamespace(t *testing.T) {
 	if _, err := os.Stat(nativeIPPath); err != nil {
 		t.Skip("native iproute2 missing")
 	}
-	if _, err := os.Stat("/usr/bin/unshare"); err != nil {
-		t.Skip("unshare unavailable")
-	}
-	if err := exec.Command("/usr/bin/unshare", "-Urn", "/usr/bin/true").Run(); err != nil {
-		t.Skipf("unprivileged disposable namespace unavailable: %v", err)
-	}
+	requireDisposableUserNetNamespace(t)
 	const script = `set -eu
 ip=/usr/bin/ip
 "$ip" link set lo up
@@ -223,15 +217,14 @@ ip=/usr/bin/ip
 "$ip" -4 route add 198.51.100.0/24 dev scdns0 table 100
 "$ip" -4 rule add pref 100 ipproto udp dport 5353 table 100
 "$ip" -4 rule add pref 101 ipproto tcp dport 5353 table 100
-SC_TEST_DNS_NETNS=child SC_TEST_DNS_PHASE=matching "$1" -test.run=^TestUnderlayDNSFlowPolicyInPrivateNamespace$ -test.v
+SC_TEST_DNS_NETNS=child SC_TEST_DNS_PHASE=matching "$1" -test.run=^TestUnderlayDNSFlowPolicyInPrivateNamespace$ -test.timeout=4s -test.v
 "$ip" -4 rule del pref 101
-SC_TEST_DNS_NETNS=child SC_TEST_DNS_PHASE=diverged "$1" -test.run=^TestUnderlayDNSFlowPolicyInPrivateNamespace$ -test.v`
+SC_TEST_DNS_NETNS=child SC_TEST_DNS_PHASE=diverged "$1" -test.run=^TestUnderlayDNSFlowPolicyInPrivateNamespace$ -test.timeout=4s -test.v`
 	ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "/usr/bin/unshare", "-Urn", "/usr/bin/sh", "-c", script, "dns-isolated", os.Args[0])
-	out, err := cmd.CombinedOutput()
+	out, stderr, err := runBoundedTestProcess(ctx, "/usr/bin/unshare", "-Urn", "/usr/bin/sh", "-c", script, "dns-isolated", os.Args[0])
 	if err != nil || ctx.Err() != nil {
-		t.Fatalf("DNS route policy in private namespace failed: %v context=%v output=%s", err, ctx.Err(), out)
+		t.Fatalf("DNS route policy in private namespace failed: %v context=%v stdout=%s stderr=%s", err, ctx.Err(), out, stderr)
 	}
 	t.Logf("private namespace UDP/TCP policy succeeded: %s", out)
 }

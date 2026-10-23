@@ -81,12 +81,7 @@ func TestUnderlayTCPFlowPolicyInPrivateNamespace(t *testing.T) {
 	if _, err := os.Stat(nativeIPPath); err != nil {
 		t.Skip("native iproute2 unavailable")
 	}
-	if _, err := os.Stat("/usr/bin/unshare"); err != nil {
-		t.Skip("unshare unavailable")
-	}
-	if err := exec.Command("/usr/bin/unshare", "-Urn", "/usr/bin/true").Run(); err != nil {
-		t.Skipf("unprivileged disposable network namespace unavailable: %v", err)
-	}
+	requireDisposableUserNetNamespace(t)
 	const script = `set -eu
 ip=/usr/bin/ip
 "$ip" link set lo up
@@ -100,24 +95,23 @@ ip=/usr/bin/ip
 "$ip" -4 route add 198.51.100.0/24 dev scveth1 table 101
 "$ip" -4 rule add pref 100 ipproto tcp dport 443 table 100
 "$ip" -4 rule add pref 101 uidrange 0-0 ipproto tcp dport 8443 table 101
-SC_TEST_UNDERLAY_NETNS=child SC_TEST_UNDERLAY_CASE=base "$1" -test.run=^TestUnderlayTCPFlowPolicyInPrivateNamespace$ -test.v
+SC_TEST_UNDERLAY_NETNS=child SC_TEST_UNDERLAY_CASE=base "$1" -test.run=^TestUnderlayTCPFlowPolicyInPrivateNamespace$ -test.timeout=4s -test.v
 "$ip" -4 rule add pref 90 from 10.77.0.0/24 table 101
-SC_TEST_UNDERLAY_NETNS=child SC_TEST_UNDERLAY_CASE=source "$1" -test.run=^TestUnderlayTCPFlowPolicyInPrivateNamespace$ -test.v
+SC_TEST_UNDERLAY_NETNS=child SC_TEST_UNDERLAY_CASE=source "$1" -test.run=^TestUnderlayTCPFlowPolicyInPrivateNamespace$ -test.timeout=4s -test.v
 "$ip" -4 rule del pref 90
 "$ip" -4 rule add pref 90 fwmark 0x1/0xff table 101
-SC_TEST_UNDERLAY_NETNS=child SC_TEST_UNDERLAY_CASE=mark "$1" -test.run=^TestUnderlayTCPFlowPolicyInPrivateNamespace$ -test.v
+SC_TEST_UNDERLAY_NETNS=child SC_TEST_UNDERLAY_CASE=mark "$1" -test.run=^TestUnderlayTCPFlowPolicyInPrivateNamespace$ -test.timeout=4s -test.v
 "$ip" -4 rule del pref 90
 "$ip" -4 rule add pref 90 ipproto tcp sport 1000-4000 table 101
-SC_TEST_UNDERLAY_NETNS=child SC_TEST_UNDERLAY_CASE=source_port "$1" -test.run=^TestUnderlayTCPFlowPolicyInPrivateNamespace$ -test.v
+SC_TEST_UNDERLAY_NETNS=child SC_TEST_UNDERLAY_CASE=source_port "$1" -test.run=^TestUnderlayTCPFlowPolicyInPrivateNamespace$ -test.timeout=4s -test.v
 "$ip" -4 rule del pref 90
 "$ip" -4 rule add pref 90 oif scveth0 table 101
-SC_TEST_UNDERLAY_NETNS=child SC_TEST_UNDERLAY_CASE=output_interface "$1" -test.run=^TestUnderlayTCPFlowPolicyInPrivateNamespace$ -test.v`
+SC_TEST_UNDERLAY_NETNS=child SC_TEST_UNDERLAY_CASE=output_interface "$1" -test.run=^TestUnderlayTCPFlowPolicyInPrivateNamespace$ -test.timeout=4s -test.v`
 	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "/usr/bin/unshare", "-Urn", "/usr/bin/sh", "-c", script, "underlay-isolated", os.Args[0])
-	out, err := cmd.CombinedOutput()
+	out, stderr, err := runBoundedTestProcess(ctx, "/usr/bin/unshare", "-Urn", "/usr/bin/sh", "-c", script, "underlay-isolated", os.Args[0])
 	if err != nil || ctx.Err() != nil {
-		t.Fatalf("isolated policy test failed: %v context=%v output=%s", err, ctx.Err(), out)
+		t.Fatalf("isolated policy test failed: %v context=%v stdout=%s stderr=%s", err, ctx.Err(), out, stderr)
 	}
 	t.Logf("isolated policy test succeeded: %s", out)
 }
