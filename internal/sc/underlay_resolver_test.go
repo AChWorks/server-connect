@@ -6,7 +6,6 @@ import (
 	"net"
 	"net/netip"
 	"os"
-	"os/exec"
 	"runtime"
 	"strings"
 	"sync/atomic"
@@ -176,59 +175,56 @@ func TestUnderlayExplicitResolverUnavailableFailsClosed(t *testing.T) {
 	}
 }
 
-// Test Linux DNS route selection in a disposable namespace: UDP and TCP may
-// select distinct tables even when the resolver's IP and port are identical.
-// The host-owned iproute2 ancestry check runs independently on the real host.
+// Native route/rule setup is passed exclusively to /usr/bin/unshare -Urn,
+// which must create a fresh disposable user+network namespace before the shell
+// can change any interface or policy rule. The marker-selected Go child performs
+// only read-only checks; running it directly cannot mutate the host.
 func TestUnderlayDNSFlowPolicyInPrivateNamespace(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("Linux kernel routing required")
 	}
 	if os.Getenv("SC_TEST_DNS_NETNS") == "child" {
-		runIP := func(args ...string) {
-			t.Helper()
-			cmd := exec.Command(nativeIPPath, args...)
-			if output, err := cmd.CombinedOutput(); err != nil {
-				t.Fatalf("private namespace ip %q: %v output=%s", args, err, output)
-			}
-		}
-		runIP("link", "set", "lo", "up")
-		runIP("link", "add", "scdns0", "type", "dummy")
-		runIP("addr", "add", "10.91.0.1/24", "dev", "scdns0")
-		runIP("link", "set", "scdns0", "up")
-		runIP("-4", "route", "add", "198.51.100.0/24", "dev", "lo")
-		runIP("-4", "route", "add", "198.51.100.0/24", "dev", "scdns0", "table", "100")
-		runIP("-4", "rule", "add", "pref", "100", "ipproto", "udp", "dport", "5353", "table", "100")
-		runIP("-4", "rule", "add", "pref", "101", "ipproto", "tcp", "dport", "5353", "table", "100")
 		ip := netip.MustParseAddr("198.51.100.9")
-		if rules, err := inspectTCPPolicyRules(ip); err != nil || len(rules) == 0 {
-			t.Fatalf("representable DNS policies not parsed: %v", err)
-		}
-		route, err := matchingResolverTransportRoute(ip, 5353, os.Geteuid())
-		if err != nil || route.Device != "scdns0" {
-			t.Fatalf("matching UDP/TCP flow should select dummy: %+v %v", route, err)
-		}
-		runIP("-4", "rule", "del", "pref", "101")
-		if _, err := matchingResolverTransportRoute(ip, 5353, os.Geteuid()); ErrorCode(err) != "underlay_policy_unsupported" {
-			t.Fatalf("different UDP/TCP route was not refused: %v", err)
+		switch os.Getenv("SC_TEST_DNS_PHASE") {
+		case "matching":
+			if rules, err := inspectTCPPolicyRules(ip); err != nil || len(rules) == 0 {
+				t.Fatalf("representable DNS policies not parsed: %v", err)
+			}
+			route, err := matchingResolverTransportRoute(ip, 5353, os.Geteuid())
+			if err != nil || route.Device != "scdns0" {
+				t.Fatalf("matching UDP/TCP flow should select dummy: %+v %v", route, err)
+			}
+		case "diverged":
+			if _, err := matchingResolverTransportRoute(ip, 5353, os.Geteuid()); ErrorCode(err) != "underlay_policy_unsupported" {
+				t.Fatalf("different UDP/TCP route was not refused: %v", err)
+			}
+		default:
+			t.Fatal("unrecognized read-only DNS regression phase")
 		}
 		return
 	}
 	if _, err := os.Stat(nativeIPPath); err != nil {
 		t.Skip("native iproute2 missing")
 	}
-	if _, err := exec.LookPath("unshare"); err != nil {
-		t.Skip("unshare missing")
-	}
-	if err := exec.Command("unshare", "-Urn", "/usr/bin/true").Run(); err != nil {
-		t.Skipf("unprivileged disposable namespace unavailable: %v", err)
-	}
+	requireDisposableUserNetNamespace(t)
+	const script = `set -eu
+ip=/usr/bin/ip
+"$ip" link set lo up
+"$ip" link add scdns0 type dummy
+"$ip" addr add 10.91.0.1/24 dev scdns0
+"$ip" link set scdns0 up
+"$ip" -4 route add 198.51.100.0/24 dev lo
+"$ip" -4 route add 198.51.100.0/24 dev scdns0 table 100
+"$ip" -4 rule add pref 100 ipproto udp dport 5353 table 100
+"$ip" -4 rule add pref 101 ipproto tcp dport 5353 table 100
+SC_TEST_DNS_NETNS=child SC_TEST_DNS_PHASE=matching "$1" -test.run=^TestUnderlayDNSFlowPolicyInPrivateNamespace$ -test.timeout=4s -test.v
+"$ip" -4 rule del pref 101
+SC_TEST_DNS_NETNS=child SC_TEST_DNS_PHASE=diverged "$1" -test.run=^TestUnderlayDNSFlowPolicyInPrivateNamespace$ -test.timeout=4s -test.v`
 	ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "unshare", "-Urn", os.Args[0], "-test.run=^TestUnderlayDNSFlowPolicyInPrivateNamespace$", "-test.v")
-	cmd.Env = append(os.Environ(), "SC_TEST_DNS_NETNS=child")
-	out, err := cmd.CombinedOutput()
+	out, stderr, err := runBoundedTestProcess(ctx, "/usr/bin/unshare", "-Urn", "/usr/bin/sh", "-c", script, "dns-isolated", os.Args[0])
 	if err != nil || ctx.Err() != nil {
-		t.Fatalf("DNS route policy in private namespace failed: %v context=%v output=%s", err, ctx.Err(), out)
+		t.Fatalf("DNS route policy in private namespace failed: %v context=%v stdout=%s stderr=%s", err, ctx.Err(), out, stderr)
 	}
 	t.Logf("private namespace UDP/TCP policy succeeded: %s", out)
 }

@@ -64,6 +64,23 @@ func output(j bool, value any, err error) int {
 	}
 	return 0
 }
+
+// Host drift is an explicit operator diagnostic: on an observed failure,
+// retain component-level evidence in the interactive and text CLI, without
+// changing the shared error semantics of unrelated commands.
+func outputHostDrift(j bool, report sc.HostDriftReport, err error) int {
+	if report.Mode == "" {
+		return output(j, nil, err)
+	}
+	if !j && err != nil {
+		if output(false, report, nil) != 0 {
+			return 1
+		}
+		fmt.Fprintf(os.Stderr, "Error [%s]: %v\n", sc.ErrorCode(err), err)
+		return 1
+	}
+	return output(j, report, err)
+}
 func parseOpts(args []string) (bool, *sc.Manager, []string, error) {
 	opts := flag.NewFlagSet("server-connect", flag.ContinueOnError)
 	opts.SetOutput(io.Discard)
@@ -243,6 +260,15 @@ func run(j bool, m *sc.Manager, args []string) int {
 		}
 		report, err := sc.InspectHostRoutes(*endpoint, *management)
 		return output(j, report, err)
+	case "host-drift":
+		opts := flag.NewFlagSet(name, flag.ContinueOnError)
+		opts.SetOutput(io.Discard)
+		baseline := opts.String("baseline", "", "private JSON file from --json host-preflight")
+		if e := opts.Parse(args); e != nil || len(opts.Args()) != 0 || *baseline == "" {
+			return output(j, nil, sc.Fault("invalid_arguments", "host-drift requires --baseline FILE"))
+		}
+		report, err := sc.InspectHostDrift(*baseline)
+		return outputHostDrift(j, report, err)
 	case "underlay-tcp":
 		opts := flag.NewFlagSet(name, flag.ContinueOnError)
 		opts.SetOutput(io.Discard)
@@ -349,6 +375,8 @@ Commands:
   selective-plan --endpoint IP --management-peer IP --tunnel-if NAME
                  --destination CIDR [--destination CIDR...]
                               Advisory selective routing preview; never applies
+  host-drift --baseline FILE Compare a prior private preflight JSON with now
+                              Nonzero on drift; never authorizes activation
   underlay-tcp --endpoint IP --port N [--hostname NAME]
                               Optional hostname must resolve to pinned IP before interface-bound TCP probe
   underlay-dns --hostname NAME --endpoint IP --resolver IP [--resolver-port 53]
@@ -364,6 +392,8 @@ traffic globally. Path diagnostics never fall back to Direct, do not echo
 targets in results, and do not establish tunnel health or start recovery.
 Host preflight is observational: a route lookup does not
 prove connectivity, safety, routing ownership or readiness to activate TUN.
+Host drift compares separate, non-atomic network observations without changing
+the host, and is never an activation guard or a recovery journal.
 An explicit underlay-tcp probe binds a TCP socket to the kernel-selected
 interface and sends no application data. With --hostname, current host name
 resolution must include the explicit pinned --endpoint IP before TCP probing.
@@ -378,7 +408,7 @@ routing changes, authenticate DNS, or authorize tunnel activation.
 func menu(m *sc.Manager) int {
 	in := bufio.NewReader(os.Stdin)
 	for {
-		fmt.Println("\nServer Connect | 1 Status  2 Profiles  3 Import  4 Select  5 Connect  6 Test  7 Disconnect  8 Remove  9 APT Update  10 Host Preflight  11 Path Diagnostics  12 Selective Plan  13 Underlay TCP  14 Underlay DNS  0 Exit")
+		fmt.Println("\nServer Connect | 1 Status  2 Profiles  3 Import  4 Select  5 Connect  6 Test  7 Disconnect  8 Remove  9 APT Update  10 Host Preflight  11 Path Diagnostics  12 Selective Plan  13 Underlay TCP  14 Underlay DNS  15 Host Drift  0 Exit")
 		fmt.Print("Choice: ")
 		raw, e := in.ReadString('\n')
 		if e != nil {
@@ -477,6 +507,17 @@ func menu(m *sc.Manager) int {
 			resolver, _ := in.ReadString('\n')
 			run(false, m, []string{"underlay-dns", "--hostname", strings.TrimSpace(host),
 				"--endpoint", strings.TrimSpace(endpoint), "--resolver", strings.TrimSpace(resolver)})
+		case "15":
+			fmt.Print("Private host-preflight JSON baseline path: ")
+			path, err := in.ReadString('\n')
+			if err != nil {
+				return 0
+			}
+			if strings.TrimSpace(path) == "" {
+				fmt.Println("Canceled; no baseline supplied")
+				continue
+			}
+			run(false, m, []string{"host-drift", "--baseline", strings.TrimSpace(path)})
 		case "9":
 			fmt.Print("APT update refreshes system package indexes using the selected proxy. Type UPDATE to confirm: ")
 			confirmation, err := in.ReadString('\n')

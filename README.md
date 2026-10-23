@@ -134,6 +134,57 @@ candidate, not a published stable release.
 
 The explicit resolver diagnostic is menu option **14**; existing Path Diagnostics **11**, Selective Plan **12**, and Underlay TCP **13** are retained.
 
+### Compare host routes and policy rules against a recorded baseline (Issue #2 development)
+
+Capture a baseline on the host *before* the intended maintenance or experiment;
+keep it private because interface and route information can be sensitive:
+
+```sh
+umask 077
+server-connect --json host-preflight --endpoint 198.51.100.10 --management-peer 203.0.113.42 > ./host-baseline.json
+server-connect --json host-drift --baseline ./host-baseline.json
+```
+
+The comparison repeats native, read-only Linux route/rule/link inspection
+including the **same literal** endpoint and management-peer queries from the
+baseline, but retains their addresses only as private lookup inputs. The Host
+Drift report does **not** print those baseline target addresses in JSON, text
+or menu output; component names indicate whether each optional lookup was
+compared. It reports per-component SHA-256 fingerprints (never raw baseline
+contents), `changed` flags and a nonzero `host_drift_detected` error when
+an observation differs. The **non-JSON CLI and interactive menu option 15**
+also display the safe per-component report on detected drift, together with
+an explicit classified failure; they never silently print only a generic
+error. Route and link arrays ignore enumeration-order differences;
+policy-rule ordering remains significant. Invalid, oversized,
+symlinked, non-private or structurally incomplete baseline files are
+rejected **before** any kernel inspection (including empty link inventories,
+identity-free kernel route lookups, policy rules lacking priority/action, or
+missing explicit `snapshot_atomic: false` and `activation_ready: false`
+assertions); no baseline file paths or raw file content appear in errors or
+diagnostic output. Legitimate empty route/rule families and verified
+iproute2 6.15 policy-rule formats are supported: table/lookup, numeric
+goto, terminal `action` (`blackhole`, `unreachable`, `prohibit`,
+`throw`, `anycast`, `multicast`, `xresolve`), null-valued `nop`
+and `l3mdev`, and deprecated NAT markers (`masquerade: null` or
+`nat_gateway`). Route-style policy `type` and
+boolean-valued native action markers are rejected as incomplete evidence.
+These formats are based on
+[iproute2 v6.15 print_rule()](https://github.com/iproute2/iproute2/blob/v6.15.0/ip/iprule.c)
+and actual isolated Linux namespace captures; validation establishes only
+minimal shape, not baseline authenticity or compatibility with unverified
+future `iproute2` serializers.
+
+**Important:** both snapshots are non-atomic and the saved file is
+operator-provided, not a trusted/cryptographically authenticated kernel
+record. A matching comparison is **not proof** of network resource ownership,
+DNS/bootstrap reachability, safe SSH or HTTP(S) replies, nftables/conntrack,
+independent activation/rollback guards or production readiness. It never
+touches routes, rules, services, DNS or manager state. A changing route report
+is a diagnostic requiring operator investigation, **not an instruction for
+Server Connect to overwrite foreign-owned network configuration**. This
+command is a development diagnostic and is not a routed-mode release.
+
 ### Proxy Only compatibility and application opt-in
 
 - The link importer deliberately supports a **subset** of VLESS TCP/WebSocket and TLS/Reality query fields, rejecting unrecognized or incompatible parameters. **Local TCP VLESS through the pinned sing-box core has live integration evidence; TLS/WebSocket/Reality interoperability with real foreign providers is NOT_RUN.** Import and `validate` establish syntax/core-configuration acceptance, not remote reachability.

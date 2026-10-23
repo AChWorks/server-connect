@@ -84,7 +84,8 @@ jobs:
           # C compiler required by the journal race detector.
           DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends iproute2 gcc libc6-dev
           test -x /usr/bin/ip
-          go test ./internal/sc -run '^(TestPreflight|TestUnderlay)' -count=1 -v
+          go test ./internal/sc -run '^(TestPreflight|TestUnderlay|TestHostDrift)' -count=1 -v
+          go test ./cmd/server-connect -run '^(TestHostDriftCLI|TestHostDriftMenu)' -count=1 -v
           # Journal checks are non-networking: exercise descriptor identity,
           # strict JSON, crash/restart semantics and nonblocking FIFO rejection.
           go test -race ./internal/sc -run '^(TestActivationJournal|TestSharedLifecycleFlock)' -count=1 -timeout=120s -v
@@ -134,8 +135,11 @@ jobs:
           assert {r['family'] for r in plan['rules']} == {'ipv4','ipv6'}
           assert len(plan['observation_sha256']) == len(plan['plan_sha256']) == 64
           PYMIXED
+          umask 077
           build/ci/server-connect-cli --json host-preflight --endpoint 127.0.0.1 \
             --management-peer 127.0.0.2 > build/ci/host-preflight.json
+          build/ci/server-connect-cli --json host-drift --baseline build/ci/host-preflight.json \
+            > build/ci/host-drift-ok.json
           python3 - <<'PYQA'
           import json
           with open('build/ci/host-preflight.json') as source:
@@ -147,6 +151,35 @@ jobs:
           assert report['snapshot_atomic'] is False
           assert report['endpoint']['target'] == '127.0.0.1'
           assert report['management_peer']['target'] == '127.0.0.2'
+          with open('build/ci/host-drift-ok.json') as source:
+              drift=json.load(source)
+          assert drift['ok'] is True
+          assert drift['data']['read_only'] is True
+          assert drift['data']['activation_ready'] is False
+          assert drift['data']['snapshot_atomic'] is False
+          assert drift['data']['current_observed'] is True
+          assert drift['data']['changed'] is False
+          assert len(drift['data']['components']) == 7
+          report['ipv4_routes'].append({'dst':'203.0.113.0/24','dev':'synthetic-test-only'})
+          with open('build/ci/host-preflight.json','w') as output:
+              json.dump(response, output)
+          PYQA
+          if build/ci/server-connect-cli --json host-drift --baseline build/ci/host-preflight.json \
+            > build/ci/host-drift-changed.json; then
+            echo 'A synthetic baseline route change was not detected' >&2
+            exit 1
+          fi
+          python3 - <<'PYQA'
+          import json
+          with open('build/ci/host-drift-changed.json') as source:
+              drift=json.load(source)
+          assert drift['ok'] is False
+          assert drift['error']['code'] == 'host_drift_detected'
+          assert drift['data']['changed'] is True
+          assert drift['data']['read_only'] is True
+          assert drift['data']['activation_ready'] is False
+          assert drift['data']['current_observed'] is True
+          assert sum(c['changed'] for c in drift['data']['components']) == 1
           PYQA
           # Invalid destinations must fail before any network activity.
           if build/ci/server-connect-cli --json underlay-tcp --endpoint example.org --port 443 > build/ci/invalid-underlay.json; then
