@@ -89,7 +89,14 @@ if o.get("ok") is not True:
 print(o["data"]["id"])
 ')
     "$manager" select "$selected" >/dev/null
-    "$manager" connect >/dev/null
+    if ! "$manager" connect >/dev/null; then
+      # Only local disposable dummy-profile services appear in these logs.
+      # Never emit runtime.json, password files or imported URLs.
+      echo 'ISOLATED_VLESS_CONNECT=FAIL (guest service diagnostics)' >&2
+      systemctl show server-connect.service sc-qa-vless.service         --property=Id,ActiveState,SubState,Result,ExecMainStatus,ExecMainCode         --no-pager >&2 || true
+      journalctl --no-pager --output=cat -n 35         -u server-connect.service -u sc-qa-vless.service >&2 || true
+      exit 1
+    fi
     positive
     echo 'INSTALLED_VLESS_PROXY_ONLY=PASS (real selected loopback VLESS + Direct)'
     ;;
