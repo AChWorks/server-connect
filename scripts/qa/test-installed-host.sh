@@ -166,6 +166,18 @@ docker exec "$container" /bin/sh -c '
 '
 echo 'ISOLATED_LOOPBACK_DEFAULT=PASS (disconnected guest fixture only)'
 
+# The guest's /run is a fresh Docker-managed tmpfs, not a bind of host /run.
+# The systemd credential staging helper uses mount namespaces; ensure the
+# isolated tmpfs allows its service-credential mounts to propagate within the
+# guest. This must not change the GitHub runner's mount namespace.
+docker exec "$container" /bin/sh -c '
+  set -eu
+  printf "GUEST_RUN_PROPAGATION_BEFORE=%s\n" "$(findmnt -n -o PROPAGATION -T /run)"
+  mount --make-rshared /run
+  test "$(findmnt -n -o PROPAGATION -T /run)" = shared
+  printf "GUEST_RUN_PROPAGATION_AFTER=shared\n"
+'
+
 docker cp "$root/scripts/qa/host-qa-assertions.sh" "$container:/root/qa-host-assertions.sh"
 
 docker cp "$bundle" "$container:/root/sc-qa-bundle.tar.gz"
