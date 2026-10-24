@@ -69,8 +69,9 @@ case "$1" in
   setup)
     [ "$#" -eq 1 ]
     test "$(ps -p 1 -o comm=)" = systemd
-    test "$(ip -4 route show default)" = "default dev lo scope link metric 4242"
-    test -z "$(ip -6 route show default)"
+    # The parent harness already checks the guest-only route and snapshots
+    # every route/rule/link across installs; no duplicate rendering-sensitive
+    # iproute2 text assertion is needed here.
     [ -x /root/server-connect/bin/sing-box ]
     cat > /root/sc-qa-vless.json <<'CONF'
 {"log":{"level":"warn"},"inbounds":[{"type":"vless","tag":"qa-inbound","listen":"127.0.0.1","listen_port":19182,"users":[{"uuid":"c2902f3a-1c25-41ef-a8dc-760b483aa247"}]}],"outbounds":[{"type":"direct","tag":"direct"}]}
