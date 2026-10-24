@@ -4,9 +4,11 @@ ENV DEBIAN_FRONTEND=noninteractive
 ENV container=docker
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
-      ca-certificates curl gzip iproute2 procps python3 strace systemd systemd-sysv \
-      tar util-linux \
+      ca-certificates curl gzip iproute2 openssh-client openssh-server passwd procps \
+      python3 strace systemd systemd-sysv tar util-linux \
  && rm -rf /var/lib/apt/lists/*
+# Dedicated unprivileged disposable guest account; no host or production users.
+RUN useradd --create-home --shell /bin/sh scqa
 STOPSIGNAL SIGRTMIN+3
 # Emit startup evidence to Docker logs even if the init scope fails early.
 CMD ["/sbin/init", "--log-target=console", "--log-level=info"]

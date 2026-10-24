@@ -120,6 +120,33 @@ assert_network_unchanged() {
   fi
   echo "NETWORK_PRESERVATION($phase)=PASS"
 }
+verify_host_services() {
+  local phase=$1
+  docker exec "$container" /bin/sh /root/qa-host-coexistence.sh probe
+  echo "ISOLATED_SSH_HTTP($phase)=PASS"
+}
+
+# Exercise real new SSH sessions and a separate HTTP origin on guest loopback.
+# Docker --network none stays in force. Keep both services running while the
+# installer is traced so they verify actual non-product service coexistence.
+docker exec "$container" /sbin/ip link set lo up
+docker cp "$root/scripts/qa/host-coexistence.sh" "$container:/root/qa-host-coexistence.sh"
+docker exec "$container" /bin/sh /root/qa-host-coexistence.sh start
+host_ready=no
+for attempt in $(seq 1 20); do
+  if docker exec "$container" /bin/sh /root/qa-host-coexistence.sh probe >/dev/null 2>&1; then
+    host_ready=yes
+    break
+  fi
+  sleep 1
+done
+if [[ $host_ready != yes ]]; then
+  echo 'Isolated loopback SSH/HTTP fixtures did not become ready' >&2
+  docker exec "$container" /bin/sh /root/qa-host-coexistence.sh probe
+  exit 1
+fi
+echo 'ISOLATED_SSH_HTTP(initial)=PASS'
+
 docker cp "$root/scripts/qa/host-qa-assertions.sh" "$container:/root/qa-host-assertions.sh"
 
 docker cp "$bundle" "$container:/root/sc-qa-bundle.tar.gz"
@@ -182,6 +209,7 @@ verify_clean_uninstall() {
 
 run_offline verify-only --verify-only
 assert_network_unchanged verify-only "$offline_before"
+verify_host_services verify-only
 docker exec "$container" /bin/sh -c 'test ! -e /opt/server-connect && test ! -e /var/lib/server-connect'
 
 echo '=== Negative offline acceptance: missing pinned core must reject BEFORE mutation ==='
@@ -216,12 +244,14 @@ docker exec "$container" /bin/sh -c '
   (cd /root/server-connect && sha256sum --quiet --check checksums.sha256)
 '
 assert_network_unchanged missing-core "$offline_before"
+verify_host_services missing-core
 
 assert_no_offline_fetch missing-core
 echo 'OFFLINE_MISSING_CORE_FAIL_CLOSED=PASS (installer NOT applied)'
 run_offline first-install --offline
 verify_direct_install
 assert_network_unchanged first-install "$offline_before"
+verify_host_services first-install
 docker exec "$container" /bin/sh -c '
   printf "SC_QA_RETAIN_PROFILE_BYTES\n" > /var/lib/server-connect/profiles/qa-retained
   chmod 0600 /var/lib/server-connect/profiles/qa-retained
@@ -229,15 +259,17 @@ docker exec "$container" /bin/sh -c '
 run_offline reinstall --offline
 verify_direct_install
 assert_network_unchanged reinstall "$offline_before"
+verify_host_services reinstall
 run_offline uninstall --uninstall
 verify_clean_uninstall
 assert_network_unchanged uninstall "$offline_before"
+verify_host_services uninstall
 
 echo 'DISCONNECTED_OFFLINE_CYCLE=PASS'
 
 echo '=== Isolated LOOPBACK acquisition followed by the SAME real installer ==='
-# Docker --network none remains active; only this container loopback is enabled.
-docker exec "$container" /sbin/ip link set lo up
+# Docker --network none remains active; loopback was enabled for the existing
+# SSH/HTTP fixtures and remains the only networking available.
 online_before=$(network_digest)
 docker exec "$container" /bin/sh -c 'mkdir -m 0700 /root/qa-http'
 docker cp "$bundle" "$container:/root/qa-http/bundle.tar.gz"
@@ -259,12 +291,14 @@ docker exec "$container" /usr/bin/env -i \
   --archive-url http://localhost:19179/bundle.tar.gz --sha256 "$digest"
 verify_direct_install
 assert_network_unchanged loopback-online-install "$online_before"
+verify_host_services loopback-online-install
 run_offline online-then-uninstall --uninstall
 verify_clean_uninstall
 assert_network_unchanged loopback-online-uninstall "$online_before"
+verify_host_services loopback-online-uninstall
 
 docker exec "$container" /bin/sh -c \
   'test -z "$(find /root -maxdepth 1 -name ".server-connect-bootstrap.*" -print)"'
 echo 'LOCAL_LOOPBACK_ONLINE_INSTALL=PASS'
 echo 'LIMITATION: QA bundle is digest-matched but NOT a publisher-authenticated public release'
-echo 'LIMITATION: Docker systemd tests do not prove SSH/aaPanel coexistence, foreign VPN reachability, reboot or field safety'
+echo 'LIMITATION: guest-loopback SSH/HTTP checks do not prove external SSH/aaPanel, foreign VPN reachability, reboot or field safety'
