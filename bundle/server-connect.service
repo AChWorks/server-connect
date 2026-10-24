@@ -1,4 +1,5 @@
 # Server Connect managed unit; Proxy Only; owns no system routes.
+# Disposable CI path-filter proof only; do not merge this comment-only PR.
 [Unit]
 Description=Server Connect authenticated loopback proxy (sing-box)
 After=network.target
