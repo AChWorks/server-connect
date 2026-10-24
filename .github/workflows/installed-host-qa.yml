@@ -1,10 +1,14 @@
 name: Installed-host QA (isolated)
 
+# GitHub executes pull_request_target workflow definitions from the trusted
+# default branch, not from the PR merge. Never move the privileged job back to
+# pull_request: that would make its admission rule PR-modifiable.
 on:
-  pull_request:
+  pull_request_target:
     paths:
       - '.github/workflows/installed-host-qa.yml'
       - 'bundle/install.sh'
+      - 'bundle/server-connect.service'
       - 'scripts/bootstrap-online.sh'
       - 'scripts/package.sh'
       - 'scripts/qa/**'
@@ -17,30 +21,76 @@ on:
 permissions:
   contents: read
 
+# pull_request_target uses the default branch ref for every PR; key by PR
+# number so separate authorized candidates cannot cancel one another.
 concurrency:
-  group: sc-installed-host-${{ github.ref }}
+  group: sc-installed-host-${{ github.event_name == 'pull_request_target' && format('pr-{0}', github.event.pull_request.number) || github.ref }}
   cancel-in-progress: true
 
 jobs:
   debian13-systemd-lifecycle:
-    # Privileged disposable systemd testing must never execute fork PR content.
-    # The checkout is still token-read-only and must not receive secrets.
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    # Admission comes from trusted default-branch YAML, NOT PR-modifiable YAML.
+    # A same-name fork or forged PR title is insufficient: require repository
+    # identity AND name. Dispatch requires repository Actions write permission
+    # and references a branch/tag in this repository.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'pull_request_target' &&
+      github.event.pull_request.head.repo.id == github.event.repository.id &&
+      github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: ubuntu-24.04
     timeout-minutes: 25
     env:
       GOPROXY: 'off'
       GOTOOLCHAIN: 'local'
     steps:
-      - name: Checkout exact candidate without retained credentials
+      # The trusted job executes code only from a head repository that is
+      # identical to this repository (enforced by the base-defined job gate).
+      # For PRs retain the previous merge-tree coverage rather than silently
+      # exercising the default-branch checkout of pull_request_target.
+      - name: Checkout exact permitted candidate without retained credentials
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ github.event_name == 'pull_request_target' && format('refs/pull/{0}/merge', github.event.pull_request.number) || github.sha }}
+          fetch-depth: 2
           persist-credentials: false
+
+      - name: Fail closed on candidate identity mismatch
+        shell: bash
+        env:
+          EVENT: ${{ github.event_name }}
+          CHECKOUT_EVENT_SHA: ${{ github.sha }}
+          EXPECTED_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          EXPECTED_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          EXPECTED_HEAD_REPO_ID: ${{ github.event.pull_request.head.repo.id }}
+          EXPECTED_BASE_REPO_ID: ${{ github.event.repository.id }}
+          EXPECTED_HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          EXPECTED_BASE_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          if [[ $EVENT == pull_request_target ]]; then
+            [[ $EXPECTED_HEAD_REPO_ID =~ ^[0-9]+$ ]]
+            [[ $EXPECTED_HEAD_REPO_ID == "$EXPECTED_BASE_REPO_ID" ]]
+            [[ $EXPECTED_HEAD_REPO == "$EXPECTED_BASE_REPO" ]]
+            [[ $(git rev-parse HEAD^1) == "$EXPECTED_BASE_SHA" ]]
+            [[ $(git rev-parse HEAD^2) == "$EXPECTED_HEAD_SHA" ]]
+            echo "TRUSTED_PR_MERGE_IDENTITY=PASS (verified both parents)"
+          elif [[ $EVENT == workflow_dispatch ]]; then
+            [[ $(git rev-parse HEAD) == "$CHECKOUT_EVENT_SHA" ]]
+            echo "TRUSTED_DISPATCH_CANDIDATE_IDENTITY=PASS"
+          else
+            echo "Unsupported privileged CI event: $EVENT" >&2
+            exit 1
+          fi
+          git log -1 --format='Validated git commit: %H'
+          printf 'Validated git tree: '
+          git rev-parse HEAD^{tree}
 
       - name: Fail-closed offline trace, network, and SSH/HTTP probe regressions
         shell: bash
         run: |
           set -euo pipefail
+          python3 scripts/qa/test-installed-workflow-policy.py
           sh -n scripts/qa/host-qa-assertions.sh
           sh -n scripts/qa/host-coexistence.sh
           sh -n scripts/qa/host-proxy-only.sh
