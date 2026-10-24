@@ -69,37 +69,49 @@ case "$1" in
   setup)
     [ "$#" -eq 1 ]
     test "$(ps -p 1 -o comm=)" = systemd
-    test -z "$(ip -4 route show default)" && test -z "$(ip -6 route show default)"
+    test "$(ip -4 route show default)" = "default dev lo scope link metric 4242"
+    test -z "$(ip -6 route show default)"
     [ -x /root/server-connect/bin/sing-box ]
     cat > /root/sc-qa-vless.json <<'CONF'
 {"log":{"level":"warn"},"inbounds":[{"type":"vless","tag":"qa-inbound","listen":"127.0.0.1","listen_port":19182,"users":[{"uuid":"c2902f3a-1c25-41ef-a8dc-760b483aa247"}]}],"outbounds":[{"type":"direct","tag":"direct"}]}
 CONF
     chmod 0600 /root/sc-qa-vless.json
-    # A disposable, credential-only native systemd service proves that the
-    # systemd broker supplies a read-only credential to a DynamicUser unit.
-    # A system scope D-Bus broker is absent in this isolated guest; use
-    # systemctl's supported private bus and wait for the transient unit state.
-    printf 'SC_QA_CREDENTIAL_TEST_ONLY' > /root/sc-qa-credential-source
+    # A separate native systemd service tests the guest's *credential
+    # transport*, independent of Server Connect. Static disposable values only.
+    # A system-scope D-Bus broker is absent in this guest; avoid --wait/--pipe.
+    test_guest_credential() {
+      label=$1
+      property=$2
+      unit="sc-qa-cred-$label.service"
+      systemd-run --quiet --unit="sc-qa-cred-$label" \
+        --property=DynamicUser=yes --property="$property" \
+        /bin/sh -c 'test "$(cat "$CREDENTIALS_DIRECTORY/sc-qa")" = SC_QA_CREDENTIAL_TEST_ONLY' || return 1
+      for attempt in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+        state=$(systemctl show "$unit" --property=ActiveState --value) || return 1
+        result=$(systemctl show "$unit" --property=Result --value) || return 1
+        if [ "$state" = inactive ] && [ "$result" = success ]; then
+          echo "ISOLATED_CREDENTIAL_$label=PASS"
+          return 0
+        fi
+        if [ "$result" != success ]; then break; fi
+        sleep 0.1
+      done
+      echo "ISOLATED_CREDENTIAL_$label=FAIL ($state/$result)" >&2
+      journalctl --no-pager --output=cat -n 10 -u "$unit" >&2 || true
+      return 1
+    }
+    credential_issue=no
+    test_guest_credential set "SetCredential=sc-qa:SC_QA_CREDENTIAL_TEST_ONLY" ||
+      credential_issue=yes
+    printf SC_QA_CREDENTIAL_TEST_ONLY > /root/sc-qa-credential-source
     chmod 0600 /root/sc-qa-credential-source
-    systemd-run --quiet --unit=sc-qa-credential-preflight       --property=DynamicUser=yes       --property=LoadCredential=sc-qa:/root/sc-qa-credential-source       /bin/sh -c 'test "$(cat "$CREDENTIALS_DIRECTORY/sc-qa")" = SC_QA_CREDENTIAL_TEST_ONLY'
-    credential_ok=no
-    for attempt in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
-      state=$(systemctl show sc-qa-credential-preflight.service         --property=ActiveState --value)
-      result=$(systemctl show sc-qa-credential-preflight.service         --property=Result --value)
-      if [ "$state" = inactive ] && [ "$result" = success ]; then
-        credential_ok=yes
-        break
-      fi
-      if [ "$result" != success ]; then break; fi
-      sleep 0.1
-    done
-    if [ "$credential_ok" != yes ]; then
-      echo "ISOLATED_CREDENTIAL_PREFLIGHT=FAIL ($state/$result)" >&2
-      journalctl --no-pager --output=cat -n 12         -u sc-qa-credential-preflight.service >&2 || true
+    test_guest_credential load "LoadCredential=sc-qa:/root/sc-qa-credential-source" ||
+      credential_issue=yes
+    rm -f /root/sc-qa-credential-source
+    if [ "$credential_issue" != no ]; then
+      echo 'ISOLATED_CREDENTIAL_TRANSPORT=FAIL (guest capability, not product verification)' >&2
       exit 1
     fi
-    rm -f /root/sc-qa-credential-source
-    echo 'ISOLATED_CREDENTIAL_PREFLIGHT=PASS'
     /root/server-connect/bin/sing-box check -c /root/sc-qa-vless.json
     systemd-run --quiet --unit=sc-qa-vless --property=Restart=no \
       /root/server-connect/bin/sing-box run -c /root/sc-qa-vless.json
