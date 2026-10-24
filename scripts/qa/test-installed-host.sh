@@ -10,13 +10,21 @@ if [[ $(printenv GITHUB_ACTIONS || true) != true || $(printenv CI || true) != tr
   echo 'Only ephemeral GitHub Actions runners may execute this QA harness' >&2
   exit 2
 fi
-if [[ $# != 2 || ! -f $1 || ! -f $2 ]]; then
-  echo 'Usage: test-installed-host.sh BUNDLE.tar.gz BOOTSTRAP.sh' >&2
+if [[ $# != 4 || ! -f $1 || ! -f $2 || ! -f $3 || ! -f $4 ]]; then
+  echo 'Usage: test-installed-host.sh BASE.tar.gz BOOTSTRAP.sh UPDATE.tar.gz BAD-UPDATE.tar.gz' >&2
   exit 2
 fi
 bundle=$(realpath -- "$1")
 bootstrap=$(realpath -- "$2")
+update_bundle=$(realpath -- "$3")
+bad_update_bundle=$(realpath -- "$4")
 digest=$(sha256sum "$bundle" | cut -d' ' -f1)
+update_digest=$(sha256sum "$update_bundle" | cut -d' ' -f1)
+bad_update_digest=$(sha256sum "$bad_update_bundle" | cut -d' ' -f1)
+[[ $digest != "$update_digest" && $update_digest != "$bad_update_digest" ]] || {
+  echo "Upgrade QA requires three distinct artifacts" >&2
+  exit 2
+}
 root=$(cd -- "$(dirname -- "$0")/../.." && pwd -P)
 cd "$root"
 tmpdir=/tmp
@@ -147,9 +155,34 @@ if [[ $host_ready != yes ]]; then
 fi
 echo 'ISOLATED_SSH_HTTP(initial)=PASS'
 
+# The pinned sing-box direct outbound requires a detectable default interface
+# even when its only test destination is guest loopback. Provide a *guest-only*
+# synthetic default dev lo; Docker --network none forbids external connectivity.
+# Capture it in the baseline BEFORE any Server Connect lifecycle operation.
+docker exec "$container" /sbin/ip -4 route add default dev lo metric 4242
+docker exec "$container" /bin/sh -c '
+  test "$(ip -4 route show default)" = "default dev lo scope link metric 4242"
+  test -z "$(ip -6 route show default)"
+'
+echo 'ISOLATED_LOOPBACK_DEFAULT=PASS (disconnected guest fixture only)'
+
+# The guest's /run is a fresh Docker-managed tmpfs, not a bind of host /run.
+# The systemd credential staging helper uses mount namespaces; ensure the
+# isolated tmpfs allows its service-credential mounts to propagate within the
+# guest. This must not change the GitHub runner's mount namespace.
+docker exec "$container" /bin/sh -c '
+  set -eu
+  printf "GUEST_RUN_PROPAGATION_BEFORE=%s\n" "$(findmnt -n -o PROPAGATION -T /run)"
+  mount --make-rshared /run
+  test "$(findmnt -n -o PROPAGATION -T /run)" = shared
+  printf "GUEST_RUN_PROPAGATION_AFTER=shared\n"
+'
+
 docker cp "$root/scripts/qa/host-qa-assertions.sh" "$container:/root/qa-host-assertions.sh"
 
 docker cp "$bundle" "$container:/root/sc-qa-bundle.tar.gz"
+docker cp "$update_bundle" "$container:/root/sc-qa-update.tar.gz"
+docker cp "$bad_update_bundle" "$container:/root/sc-qa-bad-update.tar.gz"
 docker cp "$bootstrap" "$container:/root/sc-qa-bootstrap.sh"
 docker exec "$container" /bin/sh -c '
   set -eu
@@ -159,18 +192,52 @@ docker exec "$container" /bin/sh -c '
   test "$(stat -c %u /root/server-connect/install.sh)" = 0
 '
 [[ $(docker exec "$container" sha256sum /root/sc-qa-bundle.tar.gz | cut -d' ' -f1) == "$digest" ]]
+[[ $(docker exec "$container" sha256sum /root/sc-qa-update.tar.gz | cut -d' ' -f1) == "$update_digest" ]]
+[[ $(docker exec "$container" sha256sum /root/sc-qa-bad-update.tar.gz | cut -d' ' -f1) == "$bad_update_digest" ]]
+docker exec "$container" /bin/sh -c '
+  set -eu
+  for variant in update bad-update; do
+    mkdir -m 0700 "/root/server-connect-$variant"
+    tar -xzf "/root/sc-qa-$variant.tar.gz" \
+      -C "/root/server-connect-$variant" \
+      --strip-components=1 --no-same-owner --no-same-permissions
+    (cd "/root/server-connect-$variant" &&
+      sha256sum --quiet --check checksums.sha256)
+  done
+'
 offline_before=$(network_digest)
 
 run_offline() {
-  label=$1
-  action=$2
+  local label=$1 action=$2 source_dir=/root/server-connect
+  if [[ $# -ge 3 ]]; then source_dir=$3; fi
   echo "=== Disconnected offline $label ==="
   docker exec "$container" /usr/bin/strace -ff -qq -yy -s 128 \
     -e trace=%network,%process \
     -o "/root/qa-strace/$label" /usr/bin/env -i \
     HOME=/root PATH=/usr/sbin:/usr/bin:/sbin:/bin LC_ALL=C \
-    /bin/sh /root/server-connect/install.sh "$action"
+    /bin/sh "$source_dir/install.sh" "$action"
   assert_no_offline_fetch "$label"
+}
+# An active proxy is intentionally permitted to open its existing loopback
+# readiness socket. The strict no-AF_INET offline trace scanner applies only
+# to Direct/inactive phases; do not report ZERO for these active updates.
+run_active_offline() {
+  local label=$1 source_dir=$2
+  echo "=== Disconnected guest active-proxy update $label ==="
+  docker exec "$container" /usr/bin/env -i \
+    HOME=/root PATH=/usr/sbin:/usr/bin:/sbin:/bin LC_ALL=C \
+    /bin/sh "$source_dir/install.sh" --offline
+}
+run_active_offline_expect_failure() {
+  local label=$1 source_dir=$2
+  echo "=== Disconnected guest expected active-update failure $label ==="
+  if docker exec "$container" /usr/bin/env -i \
+    HOME=/root PATH=/usr/sbin:/usr/bin:/sbin:/bin LC_ALL=C \
+    /bin/sh "$source_dir/install.sh" --offline \
+    >"$scratch/$label.stdout" 2>"$scratch/$label.stderr"; then
+    echo "Broken candidate unexpectedly installed: $label" >&2
+    exit 1
+  fi
 }
 assert_no_offline_fetch() {
   label=$1
@@ -260,6 +327,79 @@ run_offline reinstall --offline
 verify_direct_install
 assert_network_unchanged reinstall "$offline_before"
 verify_host_services reinstall
+echo '=== Installed real VLESS Proxy Only and owned offline update ==='
+docker cp "$root/scripts/qa/host-proxy-only.sh" "$container:/root/qa-proxy-only.sh"
+docker exec "$container" /bin/sh /root/qa-proxy-only.sh setup
+assert_network_unchanged installed-vless-proxy "$offline_before"
+verify_host_services installed-vless-proxy
+docker exec "$container" /bin/sh /root/qa-proxy-only.sh upstream-failure
+assert_network_unchanged vless-upstream-failure "$offline_before"
+verify_host_services vless-upstream-failure
+docker exec "$container" /bin/sh /root/qa-proxy-only.sh core-failure
+assert_network_unchanged proxy-core-failure "$offline_before"
+verify_host_services proxy-core-failure
+
+original_link=$(docker exec "$container" readlink /opt/server-connect/current)
+original_manager=$(docker exec "$container" sha256sum \
+  /opt/server-connect/current/bin/server-connect | cut -d' ' -f1)
+run_offline update-verify --verify-only /root/server-connect-update
+assert_network_unchanged update-verify "$offline_before"
+verify_host_services update-verify
+run_active_offline update-distinct /root/server-connect-update
+updated_link=$(docker exec "$container" readlink /opt/server-connect/current)
+updated_manager=$(docker exec "$container" sha256sum \
+  /opt/server-connect/current/bin/server-connect | cut -d' ' -f1)
+[[ $original_link != "$updated_link" && $original_manager != "$updated_manager" ]] || {
+  echo 'Offline update did not change the installed manager artifact' >&2
+  exit 1
+}
+docker exec "$container" /bin/sh /root/qa-proxy-only.sh positive
+assert_network_unchanged update-distinct "$offline_before"
+verify_host_services update-distinct
+echo 'INSTALLED_DISTINCT_BINARY_UPDATE=PASS (same-source QA builds)'
+
+# The third binary is different and carries a deliberately broken service
+# ExecStart. It must fail after switching and restore the ACTIVE prior proxy.
+bad_release=$(docker exec "$container" /bin/sh -c '
+  set -eu
+  cd /root/server-connect-bad-update
+  hash=$(sha256sum bin/server-connect bin/sing-box |
+    cut -d" " -f1 | sha256sum | cut -c 1-16)
+  printf "releases/0.1.0-dev-%s" "$hash"
+')
+[[ $bad_release != "$updated_link" && $bad_release != "$original_link" ]] || {
+  echo 'Broken QA update did not have a distinct release identity' >&2
+  exit 1
+}
+original_unit_digest=$(docker exec "$container" sha256sum \
+  /etc/systemd/system/server-connect.service | cut -d' ' -f1)
+run_active_offline_expect_failure update-broken-unit /root/server-connect-bad-update
+grep -F 'candidate failed; attempting owned lifecycle rollback' \
+  "$scratch/update-broken-unit.stdout" >/dev/null || {
+  echo 'Broken update did not enter post-switch owned rollback' >&2
+  cat "$scratch/update-broken-unit.stdout" >&2
+  exit 1
+}
+grep -F 'previous owned service state restored; profiles retained' \
+  "$scratch/update-broken-unit.stdout" >/dev/null || {
+  echo 'Broken update did not confirm prior service restoration' >&2
+  cat "$scratch/update-broken-unit.stdout" >&2
+  exit 1
+}
+[[ $(docker exec "$container" readlink /opt/server-connect/current) == "$updated_link" ]]
+[[ $(docker exec "$container" sha256sum \
+  /opt/server-connect/current/bin/server-connect | cut -d' ' -f1) == "$updated_manager" ]]
+[[ $(docker exec "$container" sha256sum \
+  /etc/systemd/system/server-connect.service | cut -d' ' -f1) == "$original_unit_digest" ]]
+docker exec "$container" test ! -e "/opt/server-connect/$bad_release"
+docker exec "$container" /bin/sh /root/qa-proxy-only.sh positive
+assert_network_unchanged update-rollback "$offline_before"
+verify_host_services update-rollback
+echo 'INSTALLED_FAILED_UPDATE_ROLLBACK=PASS (active previous service restored)'
+
+docker exec "$container" /bin/sh /root/qa-proxy-only.sh disconnect
+assert_network_unchanged disconnect "$offline_before"
+verify_host_services disconnect
 run_offline uninstall --uninstall
 verify_clean_uninstall
 assert_network_unchanged uninstall "$offline_before"
