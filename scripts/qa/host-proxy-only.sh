@@ -75,6 +75,12 @@ case "$1" in
 {"log":{"level":"warn"},"inbounds":[{"type":"vless","tag":"qa-inbound","listen":"127.0.0.1","listen_port":19182,"users":[{"uuid":"c2902f3a-1c25-41ef-a8dc-760b483aa247"}]}],"outbounds":[{"type":"direct","tag":"direct"}]}
 CONF
     chmod 0600 /root/sc-qa-vless.json
+    # Validate actual credential plumbing, not just unit metadata. Never emit
+    # secrets or private source paths as test output.
+    printf 'SC_QA_CREDENTIAL_TEST_ONLY' > /root/sc-qa-credential-source
+    chmod 0600 /root/sc-qa-credential-source
+    systemd-run --quiet --wait --pipe --collect --unit=sc-qa-credential-preflight       --property=LoadCredential=sc-qa:/root/sc-qa-credential-source       /bin/sh -c 'test "$(cat "$CREDENTIALS_DIRECTORY/sc-qa")" = SC_QA_CREDENTIAL_TEST_ONLY'
+    rm -f /root/sc-qa-credential-source
     /root/server-connect/bin/sing-box check -c /root/sc-qa-vless.json
     systemd-run --quiet --unit=sc-qa-vless --property=Restart=no \
       /root/server-connect/bin/sing-box run -c /root/sc-qa-vless.json
@@ -93,7 +99,7 @@ print(o["data"]["id"])
       # Only local disposable dummy-profile services appear in these logs.
       # Never emit runtime.json, password files or imported URLs.
       echo 'ISOLATED_VLESS_CONNECT=FAIL (guest service diagnostics)' >&2
-      systemctl show server-connect.service sc-qa-vless.service         --property=Id,ActiveState,SubState,Result,ExecMainStatus,ExecMainCode         --no-pager >&2 || true
+      systemctl show server-connect.service sc-qa-vless.service         --property=Id,ActiveState,SubState,Result,ExecMainStatus,ExecMainCode,LoadCredential,DynamicUser,FragmentPath         --no-pager >&2 || true
       journalctl --no-pager --output=cat -n 35         -u server-connect.service -u sc-qa-vless.service >&2 || true
       exit 1
     fi

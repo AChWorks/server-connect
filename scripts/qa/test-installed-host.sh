@@ -155,6 +155,17 @@ if [[ $host_ready != yes ]]; then
 fi
 echo 'ISOLATED_SSH_HTTP(initial)=PASS'
 
+# The pinned sing-box direct outbound requires a detectable default interface
+# even when its only test destination is guest loopback. Provide a *guest-only*
+# synthetic default dev lo; Docker --network none forbids external connectivity.
+# Capture it in the baseline BEFORE any Server Connect lifecycle operation.
+docker exec "$container" /sbin/ip -4 route add default dev lo metric 4242
+docker exec "$container" /bin/sh -c '
+  test "$(ip -4 route show default)" = "default dev lo scope link metric 4242"
+  test -z "$(ip -6 route show default)"
+'
+echo 'ISOLATED_LOOPBACK_DEFAULT=PASS (disconnected guest fixture only)'
+
 docker cp "$root/scripts/qa/host-qa-assertions.sh" "$container:/root/qa-host-assertions.sh"
 
 docker cp "$bundle" "$container:/root/sc-qa-bundle.tar.gz"
