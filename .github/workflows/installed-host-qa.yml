@@ -37,14 +37,17 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Fail-closed offline trace and network snapshot regressions
+      - name: Fail-closed offline trace, network, and SSH/HTTP probe regressions
         shell: bash
         run: |
           set -euo pipefail
           sh -n scripts/qa/host-qa-assertions.sh
+          sh -n scripts/qa/host-coexistence.sh
           bash -n scripts/qa/test-host-qa-assertions.sh
+          bash -n scripts/qa/test-host-coexistence.sh
           bash -n scripts/qa/test-installed-host.sh
           bash scripts/qa/test-host-qa-assertions.sh
+          bash scripts/qa/test-host-coexistence.sh
 
       - name: Pinned Go compiler
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
