@@ -43,6 +43,8 @@ jobs:
           set -euo pipefail
           sh -n scripts/qa/host-qa-assertions.sh
           sh -n scripts/qa/host-coexistence.sh
+          sh -n scripts/qa/host-proxy-only.sh
+          sh -n scripts/qa/make-update-fixtures.sh
           bash -n scripts/qa/test-host-qa-assertions.sh
           bash -n scripts/qa/test-host-coexistence.sh
           bash -n scripts/qa/test-installed-host.sh
@@ -67,6 +69,7 @@ jobs:
             https://github.com/SagerNet/sing-box/releases/download/v1.14.3/sing-box-1.14.3-linux-amd64.tar.gz
           printf '%s\n' 'e2bdf179c15a3652955dc44867e33ca0965c9c9b91b34267dcc5a5d639a5feee  build/installed-qa/sing-box.tar.gz' | sha256sum --check
           scripts/package.sh "$PWD/build/installed-qa/sing-box.tar.gz"
+          scripts/qa/make-update-fixtures.sh dist/server-connect-0.1.0-dev-debian13-amd64-local-qa.tar.gz build/installed-qa
           test -f dist/server-connect-0.1.0-dev-debian13-amd64-local-qa.tar.gz
           sha256sum dist/server-connect-0.1.0-dev-debian13-amd64-local-qa.tar.gz
 
@@ -78,4 +81,6 @@ jobs:
           sh -n scripts/qa/test-installed-host.sh
           bash scripts/qa/test-installed-host.sh \
             dist/server-connect-0.1.0-dev-debian13-amd64-local-qa.tar.gz \
-            scripts/bootstrap-online.sh
+            scripts/bootstrap-online.sh \
+            build/installed-qa/server-connect-hostqa-update-valid.tar.gz \
+            build/installed-qa/server-connect-hostqa-update-invalid-unit.tar.gz
