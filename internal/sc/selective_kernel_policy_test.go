@@ -68,6 +68,7 @@ check foreign_before_rollback -4 route get 9.9.9.9
 # This validates the reason the planner refuses overlapping host routes.
 "$ip" -4 route add 8.8.8.0/24 dev scdirect0 table 20100
 "$ip" -4 rule add pref 100 to 8.8.8.0/24 table 20100
+check native_foreign_rule -4 rule show
 check intercepted_ipv4 -4 route get 8.8.8.8
 "$ip" -4 rule del pref 100 to 8.8.8.0/24 table 20100
 "$ip" -4 route del 8.8.8.0/24 dev scdirect0 table 20100
@@ -135,6 +136,35 @@ check restored_unrelated_ipv6 -6 route get 2001:4860:4860::8888`
 			t.Fatalf("invalid isolated route-get record %q", line)
 		}
 		name, raw := parts[0], parts[1]
+		if name == "native_foreign_rule" {
+			if seen[name] {
+				t.Fatal("duplicate native foreign rule capture")
+			}
+			seen[name] = true
+			var rules []map[string]json.RawMessage
+			if err := json.Unmarshal([]byte(raw), &rules); err != nil || len(rules) == 0 {
+				t.Fatalf("invalid native RPDB rule report: %v (%q)", err, raw)
+			}
+			found := false
+			for _, rule := range rules {
+				if priority, ok := selectiveInt(rule["priority"]); ok && priority == 100 {
+					bits, ok := selectiveInt(rule["dstlen"])
+					found = ok && bits == 24 && selectiveText(rule["dst"]) == "8.8.8.0"
+				}
+			}
+			if !found {
+				t.Fatalf("native iproute2 did not expose the expected separate dst/dstlen: %s", raw)
+			}
+			req, host := fixtureSelectiveRequest(), fixtureSelectiveHost()
+			req.Destinations = []string{"8.8.8.128/25"}
+			host.IPv4Rules = json.RawMessage(raw)
+			host.IPv4Routes = json.RawMessage("[{\"dst\":\"default\",\"dev\":\"eth0\"},{\"dst\":\"default\",\"table\":20100,\"dev\":\"eth1\"}]")
+			plan, err := planFromFixture(t, req, host)
+			if ErrorCode(err) != "route_plan_uncertain" || plan.PlanSHA256 != "" || len(plan.Rules) != 0 {
+				t.Fatalf("captured native higher-priority rule was ignored: plan=%+v err=%v", plan, err)
+			}
+			continue
+		}
 		if name == "ipv6_table_after_rollback" {
 			if seen[name] {
 				t.Fatal("duplicate IPv6 owned-table evidence")
@@ -201,7 +231,7 @@ check restored_unrelated_ipv6 -6 route get 2001:4860:4860::8888`
 	}
 	if !ruleReportsSeen["ipv4_rules_after_rollback"] ||
 		!ruleReportsSeen["ipv6_rules_after_rollback"] ||
-		!seen["ipv6_table_after_rollback"] || !foreignPolicyFound {
+		!seen["ipv6_table_after_rollback"] || !seen["native_foreign_rule"] || !foreignPolicyFound {
 		t.Errorf("owned cleanup evidence incomplete or foreign policy lost: rules=%v v6_table=%v foreign=%v",
 			ruleReportsSeen, seen["ipv6_table_after_rollback"], foreignPolicyFound)
 	}

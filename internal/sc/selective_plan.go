@@ -206,6 +206,11 @@ func selectiveText(raw json.RawMessage) string {
 }
 
 func selectiveInt(raw json.RawMessage) (int, bool) {
+	// encoding/json silently leaves non-pointer integers at zero for null.
+	// A missing kernel numeric selector must never become a trusted zero.
+	if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		return 0, false
+	}
 	var value int
 	if json.Unmarshal(raw, &value) == nil {
 		return value, value >= 0
@@ -265,6 +270,57 @@ func selectiveRoutePrefix(dst json.RawMessage, isIPv6 bool) (netip.Prefix, bool,
 	return p.Masked(), false, nil
 }
 
+// Parse the actual native iproute2 rule selector without guessing the
+// prefix length of a bare IP. Older CIDR-shaped JSON is accepted, but
+// mismatched/unknown split selectors must never prove non-interference.
+func selectiveRuleDestination(row map[string]json.RawMessage, ipv6 bool) (netip.Prefix, bool, error) {
+	invalid := func() (netip.Prefix, bool, error) {
+		return netip.Prefix{}, false, Fault("route_plan_uncertain", "policy rule destination prefix is incomplete or unsupported")
+	}
+	raw, lengthRaw := row["dst"], row["dstlen"]
+	if len(raw) == 0 {
+		if len(lengthRaw) != 0 {
+			return invalid()
+		}
+		return netip.Prefix{}, false, nil
+	}
+	name := selectiveText(raw)
+	if name == "all" || name == "default" {
+		if len(lengthRaw) != 0 {
+			length, ok := selectiveInt(lengthRaw)
+			if !ok || length != 0 {
+				return invalid()
+			}
+		}
+		return netip.Prefix{}, false, nil
+	}
+	prefix, err := netip.ParsePrefix(name)
+	if err == nil {
+		if len(lengthRaw) != 0 {
+			length, ok := selectiveInt(lengthRaw)
+			if !ok || length != prefix.Bits() {
+				return invalid()
+			}
+		}
+	} else {
+		address, parseErr := netip.ParseAddr(name)
+		if parseErr != nil || len(lengthRaw) == 0 {
+			return invalid()
+		}
+		length, ok := selectiveInt(lengthRaw)
+		if !ok || length > address.BitLen() {
+			return invalid()
+		}
+		prefix = netip.PrefixFrom(address, length)
+	}
+	if !prefix.IsValid() || prefix.Addr().Zone() != "" ||
+		prefix.Addr().Is4In6() || prefix.Addr().Is6() != ipv6 ||
+		prefix.Masked() != prefix {
+		return invalid()
+	}
+	return prefix, true, nil
+}
+
 // An existing RPDB rule may terminate lookup before a proposed rule.
 // Since a selective preview has no source, mark or interface constraint,
 // those selectors cannot prove that a foreign rule is disjoint.
@@ -283,28 +339,16 @@ func selectiveEarlierRuleMayPreempt(rule selectiveObservedRule, destination neti
 	if len(rule.row["not"]) != 0 || len(rule.row["invert"]) != 0 || len(rule.row["flags"]) != 0 {
 		return uncertain()
 	}
-	if raw := rule.row["dst"]; len(raw) != 0 {
-		text := selectiveText(raw)
-		if text == "" {
-			return uncertain()
-		}
-		if text != "all" && text != "default" {
-			selected, err := netip.ParsePrefix(text)
-			if err != nil {
-				address, parseErr := netip.ParseAddr(text)
-				if parseErr != nil {
-					return uncertain()
-				}
-				selected = netip.PrefixFrom(address, address.BitLen())
-			}
-			if !selected.IsValid() || selected.Addr().Zone() != "" ||
-				selected.Addr().Is4In6() || selected.Addr().Is6() != destination.Addr().Is6() {
-				return uncertain()
-			}
-			if !selected.Overlaps(destination) {
-				return false, nil
-			}
-		}
+	// Native iproute2 -j rule reports "dst":"8.8.8.0" together
+	// with "dstlen":24, not necessarily one CIDR string. Interpreting
+	// the bare address as /32 would incorrectly declare an overlapping
+	// high-precedence /24 rule disjoint from a selected /25.
+	selected, constrained, err := selectiveRuleDestination(rule.row, destination.Addr().Is6())
+	if err != nil {
+		return uncertain()
+	}
+	if constrained && !selected.Overlaps(destination) {
+		return false, nil
 	}
 	// Unsupported actions, dynamic tables, suppressors, and jumps can
 	// terminate routing evaluation without any table route.
@@ -324,7 +368,7 @@ func selectiveEarlierRuleMayPreempt(rule selectiveObservedRule, destination neti
 	for key := range rule.row {
 		switch key {
 		case "priority", "table", "src", "dst", "fwmark", "fwmask", "iif",
-			"oif", "tos", "uidrange", "ipproto", "sport", "dport", "tun_id",
+			"oif", "dstlen", "tos", "uidrange", "ipproto", "sport", "dport", "tun_id",
 			"protocol", "realms", "action", "type":
 		default:
 			return uncertain()
