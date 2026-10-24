@@ -114,8 +114,20 @@ CONF
       exit 1
     fi
     /root/server-connect/bin/sing-box check -c /root/sc-qa-vless.json
-    systemd-run --quiet --unit=sc-qa-vless --property=Restart=no \
-      /root/server-connect/bin/sing-box run -c /root/sc-qa-vless.json
+    # Transient systemd-run units are garbage-collected after stop; this
+    # disposable guest needs a restartable QA-owned unit for failure tests.
+    cat > /run/systemd/system/sc-qa-vless.service <<'UNIT'
+[Unit]
+Description=Isolated test-only VLESS upstream
+
+[Service]
+Type=simple
+ExecStart=/root/server-connect/bin/sing-box run -c /root/sc-qa-vless.json
+Restart=no
+UNIT
+    chmod 0644 /run/systemd/system/sc-qa-vless.service
+    systemctl daemon-reload
+    systemctl start sc-qa-vless.service
     # This is a fixed, non-sensitive QA-only profile with no reachable foreign peer.
     printf '%s\n' 'vless://c2902f3a-1c25-41ef-a8dc-760b483aa247@127.0.0.1:19182?type=tcp&security=none#CI-Guest' |
       "$manager" --json import --file - > /root/sc-qa-import.json
