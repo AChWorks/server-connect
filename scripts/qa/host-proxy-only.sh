@@ -167,6 +167,7 @@ print(o["data"]["id"])
       echo 'Opted-in application leaked to Direct when VLESS upstream stopped' >&2
       exit 1
     fi
+    /bin/sh /root/qa-apt-only.sh negative upstream-stopped
     active_ready
     systemctl start "$upstream"
     positive
@@ -179,6 +180,7 @@ print(o["data"]["id"])
     if systemctl is-active --quiet server-connect.service; then exit 1; fi
     positive_probe direct
     negative_proxy_probe
+    /bin/sh /root/qa-apt-only.sh negative core-stopped
     systemctl start server-connect.service
     positive
     echo 'INSTALLED_CORE_STOP_ISOLATED=PASS'
