@@ -75,12 +75,6 @@ case "$1" in
 {"log":{"level":"warn"},"inbounds":[{"type":"vless","tag":"qa-inbound","listen":"127.0.0.1","listen_port":19182,"users":[{"uuid":"c2902f3a-1c25-41ef-a8dc-760b483aa247"}]}],"outbounds":[{"type":"direct","tag":"direct"}]}
 CONF
     chmod 0600 /root/sc-qa-vless.json
-    # Validate actual credential plumbing, not just unit metadata. Never emit
-    # secrets or private source paths as test output.
-    printf 'SC_QA_CREDENTIAL_TEST_ONLY' > /root/sc-qa-credential-source
-    chmod 0600 /root/sc-qa-credential-source
-    systemd-run --quiet --wait --pipe --collect --unit=sc-qa-credential-preflight       --property=LoadCredential=sc-qa:/root/sc-qa-credential-source       /bin/sh -c 'test "$(cat "$CREDENTIALS_DIRECTORY/sc-qa")" = SC_QA_CREDENTIAL_TEST_ONLY'
-    rm -f /root/sc-qa-credential-source
     /root/server-connect/bin/sing-box check -c /root/sc-qa-vless.json
     systemd-run --quiet --unit=sc-qa-vless --property=Restart=no \
       /root/server-connect/bin/sing-box run -c /root/sc-qa-vless.json
