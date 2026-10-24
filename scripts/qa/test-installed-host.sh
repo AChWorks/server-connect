@@ -81,7 +81,6 @@ docker run -d --name "$container" --hostname sc-qa \
   --network none --privileged --cgroupns=private \
   --tmpfs /run:rw,nosuid,nodev,mode=755 \
   --tmpfs /run/lock:rw,nosuid,nodev,mode=755 \
-  --tmpfs /run/credentials:rw,nosuid,nodev,mode=755 \
   "$image" >/dev/null
 started=yes
 [[ $(docker inspect --format '{{.HostConfig.NetworkMode}}' "$container") == none ]]
