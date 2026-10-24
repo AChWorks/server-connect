@@ -56,17 +56,21 @@ CONF
     test "$#" -eq 1
     systemctl is-active --quiet sc-qa-ssh.service
     systemctl is-active --quiet sc-qa-web.service
-    test "$(curl -q --fail --silent --show-error --max-time 3 \
-      --noproxy '*' http://127.0.0.1:19180/index.html)" = SC_QA_WEB_OK
+    # A matching stdout marker is insufficient if curl later fails. Keep the
+    # command status separate from the response-body assertion.
+    http_response=$(curl -q --fail --silent --show-error --max-time 3 \
+      --noproxy '*' http://127.0.0.1:19180/index.html) || exit 1
+    test "$http_response" = SC_QA_WEB_OK || exit 1
     # This is a NEW authenticated SSH connection at every lifecycle phase.
     # Known-host verification is pinned to the locally generated host key.
-    test "$(timeout 8 ssh -F /dev/null -i /root/qa-ssh/clientkey \
+    ssh_response=$(timeout 8 ssh -F /dev/null -i /root/qa-ssh/clientkey \
       -p 19222 -o BatchMode=yes -o IdentitiesOnly=yes \
       -o ConnectTimeout=3 -o ConnectionAttempts=1 \
       -o PasswordAuthentication=no -o StrictHostKeyChecking=yes \
       -o UserKnownHostsFile=/root/qa-ssh/known_hosts \
       -o GlobalKnownHostsFile=/dev/null -o LogLevel=ERROR \
-      scqa@127.0.0.1 'printf SC_QA_SSH_OK')" = SC_QA_SSH_OK
+      scqa@127.0.0.1 'printf SC_QA_SSH_OK') || exit 1
+    test "$ssh_response" = SC_QA_SSH_OK || exit 1
     ;;
   *)
     echo 'Usage: host-coexistence.sh start|probe (isolated CI guest only)' >&2

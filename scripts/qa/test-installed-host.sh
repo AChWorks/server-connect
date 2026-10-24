@@ -300,5 +300,38 @@ verify_host_services loopback-online-uninstall
 docker exec "$container" /bin/sh -c \
   'test -z "$(find /root -maxdepth 1 -name ".server-connect-bootstrap.*" -print)"'
 echo 'LOCAL_LOOPBACK_ONLINE_INSTALL=PASS'
+
+# Destructive fixture tests come LAST: nothing after this block requires the
+# two independent guest-loopback services to remain available. A stopped
+# service must never be described as a successfully completed lifecycle probe.
+echo '=== Negative fixture acceptance (disposable guest only) ==='
+# Stop HTTP first while SSH is still active: a rejected probe must be
+# attributable to the stopped HTTP unit, not a previously failed SSH unit.
+docker exec "$container" systemctl stop sc-qa-web.service
+docker exec "$container" /bin/true
+docker exec "$container" systemctl is-active --quiet sc-qa-ssh.service
+if docker exec "$container" curl -q --fail --silent --show-error --max-time 3 \
+  --noproxy '*' http://127.0.0.1:19180/index.html \
+  >"$scratch/stopped-http.stdout" 2>"$scratch/stopped-http.stderr"; then
+  echo 'ISOLATED_HTTP_UNREACHABLE=FAIL (GET unexpectedly succeeded)' >&2
+  exit 1
+fi
+if docker exec "$container" /bin/sh /root/qa-host-coexistence.sh probe \
+  >"$scratch/stopped-http-probe.stdout" 2>"$scratch/stopped-http-probe.stderr"; then
+  echo 'ISOLATED_HTTP_STOPPED=FAIL (probe accepted stopped HTTP)' >&2
+  exit 1
+fi
+echo 'ISOLATED_HTTP_STOPPED=PASS'
+
+# Stop SSH next: the probe tests SSH service state BEFORE the HTTP fixture,
+# so an unrelated already-stopped HTTP service cannot mask an SSH false PASS.
+docker exec "$container" systemctl stop sc-qa-ssh.service
+docker exec "$container" /bin/true
+if docker exec "$container" /bin/sh /root/qa-host-coexistence.sh probe \
+  >"$scratch/stopped-ssh.stdout" 2>"$scratch/stopped-ssh.stderr"; then
+  echo 'ISOLATED_SSH_STOPPED=FAIL (probe accepted stopped SSH)' >&2
+  exit 1
+fi
+echo 'ISOLATED_SSH_STOPPED=PASS'
 echo 'LIMITATION: QA bundle is digest-matched but NOT a publisher-authenticated public release'
 echo 'LIMITATION: guest-loopback SSH/HTTP checks do not prove external SSH/aaPanel, foreign VPN reachability, reboot or field safety'
