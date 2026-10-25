@@ -53,12 +53,12 @@ assert_fpm_selected() {
   expectation=$1
   phase=$2
   stage="selected-$phase:service-active"
-  systemctl is-active --quiet "$fpm_unit"
-  systemctl is-active --quiet "$origin_unit"
+  systemctl is-active --quiet "$fpm_unit" || return 1
+  systemctl is-active --quiet "$origin_unit" || return 1
   nonce=$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')
-  test "$(printf %s "$nonce" | wc -c)" -eq 16
+  test "$(printf %s "$nonce" | wc -c)" -eq 16 || return 1
   stage="selected-$phase:direct-origin"
-  direct_nonce "$nonce"
+  direct_nonce "$nonce" || return 1
   # Fail closed on a missing FastCGI executable, nonzero return or missing JSON.
   stage="selected-$phase:fastcgi"
   result=$(timeout --kill-after=2s 12s /usr/bin/env -i \
@@ -71,6 +71,29 @@ assert_fpm_selected() {
       return 1
     }
   printf '%s\n' "$result" | python3 /root/qa-wp-fcgi-check.py "$expectation" "$phase"
+}
+
+# 'systemctl start' on a Type=simple unit does not prove the VLESS listener
+# has bound or that the selected WordPress HTTP API can reach the origin.
+# Bound the convergence window and require a new real authenticated request
+# with fresh random nonce; never equate systemd-active with recovery evidence.
+await_fpm_recovered() {
+  phase=$1
+  attempt=1
+  while [ "$attempt" -le 12 ]; do
+    if assert_fpm_selected positive "$phase" >/dev/null 2>&1; then
+      echo "INSTALLED_WORDPRESS_FPM($phase)=PASS (positive; attempts=$attempt)"
+      return 0
+    fi
+    if [ "$attempt" -eq 12 ]; then break; fi
+    sleep 1
+    attempt=$((attempt + 1))
+  done
+  echo "INSTALLED_WORDPRESS_FPM($phase)=FAIL (real API not recovered within bounded retries)" >&2
+  # Preserve exact typed FastCGI failure on the last real request, never the
+  # intermediate transient failures or credential-bearing PHP configuration.
+  assert_fpm_selected positive "$phase"
+  return 1
 }
 
 setup() {
@@ -270,7 +293,7 @@ upstream_failure() {
   # FPM and independent Direct origin stay UP while only the selected VLESS dies.
   assert_fpm_selected negative "$phase-upstream-stopped"
   systemctl start sc-qa-vless.service
-  assert_fpm_selected positive "$phase-recovered"
+  await_fpm_recovered "$phase-recovered"
 }
 
 core_failure() {
@@ -279,7 +302,7 @@ core_failure() {
   if systemctl is-active --quiet server-connect.service; then return 1; fi
   assert_fpm_selected negative core-stopped
   systemctl start server-connect.service
-  assert_fpm_selected positive core-recovered
+  await_fpm_recovered core-recovered
 }
 
 cleanup() {
