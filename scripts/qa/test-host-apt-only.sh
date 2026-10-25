@@ -221,6 +221,112 @@ rm -f "$scratch/state/.apt-ephemeral-intentionally-retained"
 printf 'invalid\n' > "$scratch/base/host-apt-policy.sha256"
 require_fail 'invalid expected APT policy digest' /bin/sh "$fixture" verify-host-policy
 
+# Exercise the ACTUAL inline config_digest function with nested files.
+# sitecustomize raises errors from os.scandir() and Path.read_bytes(), without
+# editing the digest implementation or requiring root/permission changes.
+mkdir -p "$scratch/native-apt/nested/deep" "$scratch/inject-python"
+printf 'APT::Periodic::Enable "0";\n' > "$scratch/native-apt/nested/deep/config"
+cat > "$scratch/inject-python/sitecustomize.py" <<'QA_SCAN_FAULT'
+import errno
+import os
+from pathlib import Path
+
+mode = os.environ.get("SC_QA_DIGEST_FAULT")
+target = os.environ.get("SC_QA_DIGEST_TARGET")
+if mode and target:
+    if mode in ("scan-permission", "scan-io"):
+        scandir = os.scandir
+        def faulty_scandir(path):
+            if os.fspath(path) == target:
+                if mode == "scan-permission":
+                    raise PermissionError(errno.EACCES, "disposable injected nested directory failure", target)
+                raise OSError(errno.EIO, "disposable injected nested directory failure", target)
+            return scandir(path)
+        os.scandir = faulty_scandir
+    elif mode == "read-io":
+        read_bytes = Path.read_bytes
+        def faulty_read_bytes(path):
+            if os.fspath(path) == target:
+                raise OSError(errno.EIO, "disposable injected file read failure", target)
+            return read_bytes(path)
+        Path.read_bytes = faulty_read_bytes
+QA_SCAN_FAULT
+# The sourced function is byte-identical to the guest's real config_digest.
+# Only the existing hermetic test's absolute fixture path substitution applies.
+awk '/^case "/ {exit} {print}' "$fixture" > "$scratch/digest-functions.sh"
+[ -s "$scratch/digest-functions.sh" ] || exit 1
+/bin/sh -c '. "$1"; config_digest' QA "$scratch/digest-functions.sh" \
+  > "$scratch/base/host-apt-policy.sha256"
+require_pass 'baseline includes nested APT file' \
+  'INSTALLED_APT_NATIVE_HOST_POLICY_UNCHANGED=PASS' \
+  /bin/sh "$fixture" verify-host-policy
+
+for fault in scan-permission scan-io; do
+  target=$scratch/native-apt/nested
+  require_fail "nested $fault during final policy inventory" \
+    env PYTHONPATH="$scratch/inject-python" SC_QA_DIGEST_FAULT="$fault" \
+    SC_QA_DIGEST_TARGET="$target" /bin/sh "$fixture" verify-host-policy
+  # The same config_digest is used by initial baseline creation in setup.
+  if env PYTHONPATH="$scratch/inject-python" SC_QA_DIGEST_FAULT="$fault" \
+    SC_QA_DIGEST_TARGET="$target" /bin/sh -c \
+    '. "$1"; config_digest' QA "$scratch/digest-functions.sh" >"$out" 2>"$err"; then
+    echo "Incomplete initial APT policy baseline accepted: $fault" >&2
+    exit 1
+  fi
+  if [[ -s $out ]]; then
+    echo "A partial policy baseline hash escaped: $fault" >&2
+    exit 1
+  fi
+done
+require_fail 'nested APT policy content read error' \
+  env PYTHONPATH="$scratch/inject-python" SC_QA_DIGEST_FAULT=read-io \
+  SC_QA_DIGEST_TARGET="$scratch/native-apt/nested/deep/config" \
+  /bin/sh "$fixture" verify-host-policy
+
+mv "$scratch/native-apt" "$scratch/native-apt-saved"
+require_fail 'missing APT policy root' /bin/sh "$fixture" verify-host-policy
+ln -s "$scratch/native-apt-saved" "$scratch/native-apt"
+require_fail 'symlink-substituted APT policy root' \
+  /bin/sh "$fixture" verify-host-policy
+rm "$scratch/native-apt"
+mv "$scratch/native-apt-saved" "$scratch/native-apt"
+
+printf 'APT::Periodic::Enable "1";\n' > "$scratch/native-apt/nested/deep/config"
+require_fail 'modified nested APT policy file' \
+  /bin/sh "$fixture" verify-host-policy
+printf 'APT::Periodic::Enable "0";\n' > "$scratch/native-apt/nested/deep/config"
+require_pass 'restored full nested policy inventory' \
+  'INSTALLED_APT_NATIVE_HOST_POLICY_UNCHANGED=PASS' \
+  /bin/sh "$fixture" verify-host-policy
+# The inventory must still observe regular-file mode and symlink identity
+# while deliberately not traversing symlink targets.
+original_mode=$(stat -c '%a' "$scratch/native-apt/nested/deep/config")
+if [[ $original_mode == 600 ]]; then changed_mode=644; else changed_mode=600; fi
+chmod "$changed_mode" "$scratch/native-apt/nested/deep/config"
+require_fail 'APT policy file mode mutation' \
+  /bin/sh "$fixture" verify-host-policy
+chmod "$original_mode" "$scratch/native-apt/nested/deep/config"
+require_pass 'restored APT file mode' \
+  'INSTALLED_APT_NATIVE_HOST_POLICY_UNCHANGED=PASS' \
+  /bin/sh "$fixture" verify-host-policy
+
+ln -s nested/deep/config "$scratch/native-apt/config-link"
+/bin/sh -c '. "$1"; config_digest' QA "$scratch/digest-functions.sh" \
+  > "$scratch/base/host-apt-policy.sha256"
+require_pass 'symlink identity included in APT inventory' \
+  'INSTALLED_APT_NATIVE_HOST_POLICY_UNCHANGED=PASS' \
+  /bin/sh "$fixture" verify-host-policy
+rm "$scratch/native-apt/config-link"
+ln -s nested/deep/other "$scratch/native-apt/config-link"
+require_fail 'APT policy symlink target mutation' \
+  /bin/sh "$fixture" verify-host-policy
+rm "$scratch/native-apt/config-link"
+ln -s nested/deep/config "$scratch/native-apt/config-link"
+require_pass 'restored APT symlink identity' \
+  'INSTALLED_APT_NATIVE_HOST_POLICY_UNCHANGED=PASS' \
+  /bin/sh "$fixture" verify-host-policy
+echo 'HOST_APT_STRICT_NESTED_POLICY_WALK_REGRESSIONS=PASS'
+
 # Real GNU timeout SIGTERM -> SIGKILL behavior, including a descendant
 # that deliberately ignores TERM; all processes are in a disposable session.
 SC_QA_APT_TEST_ROOT=$scratch /usr/bin/python3 - <<'PY'

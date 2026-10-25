@@ -19,8 +19,20 @@ import hashlib, os, stat
 root = Path('/etc/apt')
 if not root.is_dir() or root.is_symlink():
     raise SystemExit('Native APT policy directory unavailable')
+# pathlib.Path.rglob() on Python 3.13 silently suppresses nested scandir
+# errors. A partial inventory would then yield a valid-looking SHA-256.
+# os.walk(onerror=raise) is mandatory: no skipped subtree can compare equal.
+def fail_on_scan(error):
+    raise error
+
+paths = []
+for parent, dirs, files in os.walk(root, topdown=True, onerror=fail_on_scan, followlinks=False):
+    dirs.sort()
+    files.sort()
+    paths.extend(Path(parent) / entry for entry in dirs)
+    paths.extend(Path(parent) / entry for entry in files)
 records = []
-for path in sorted(root.rglob('*')):
+for path in sorted(paths):
     name = str(path)
     m = path.lstat()
     kind = stat.S_IFMT(m.st_mode)
