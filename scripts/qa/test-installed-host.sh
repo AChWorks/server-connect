@@ -335,13 +335,19 @@ docker cp "$root/scripts/qa/host-proxy-only.sh" "$container:/root/qa-proxy-only.
 docker cp "$root/scripts/qa/host-apt-only.sh" "$container:/root/qa-apt-only.sh"
 docker exec "$container" /bin/sh /root/qa-proxy-only.sh setup
 docker exec "$container" /bin/sh /root/qa-apt-only.sh setup
+docker cp "$root/scripts/qa/host-wordpress-fpm.sh" "$container:/root/qa-wp-fpm.sh"
+docker cp "$root/scripts/qa/wp-nonce-origin.py" "$container:/root/qa-wp-nonce-origin.py"
+docker cp "$root/scripts/qa/wp-fcgi-check.py" "$container:/root/qa-wp-fcgi-check.py"
+docker exec "$container" /bin/sh /root/qa-wp-fpm.sh setup
 docker exec "$container" /bin/sh /root/qa-apt-only.sh positive initial
 assert_network_unchanged installed-vless-proxy "$offline_before"
 verify_host_services installed-vless-proxy
 docker exec "$container" /bin/sh /root/qa-proxy-only.sh upstream-failure
+docker exec "$container" /bin/sh /root/qa-wp-fpm.sh upstream-failure initial
 assert_network_unchanged vless-upstream-failure "$offline_before"
 verify_host_services vless-upstream-failure
 docker exec "$container" /bin/sh /root/qa-proxy-only.sh core-failure
+docker exec "$container" /bin/sh /root/qa-wp-fpm.sh core-failure
 assert_network_unchanged proxy-core-failure "$offline_before"
 verify_host_services proxy-core-failure
 
@@ -361,7 +367,9 @@ updated_manager=$(docker exec "$container" sha256sum \
 }
 docker exec "$container" /bin/sh /root/qa-proxy-only.sh positive
 docker exec "$container" /bin/sh /root/qa-apt-only.sh positive after-upgrade
+docker exec "$container" /bin/sh /root/qa-wp-fpm.sh positive after-upgrade
 docker exec "$container" /bin/sh /root/qa-proxy-only.sh upstream-failure upstream-after-upgrade
+docker exec "$container" /bin/sh /root/qa-wp-fpm.sh upstream-failure after-upgrade
 assert_network_unchanged update-distinct "$offline_before"
 verify_host_services update-distinct
 echo 'INSTALLED_DISTINCT_BINARY_UPDATE=PASS (same-source QA builds)'
@@ -402,22 +410,27 @@ grep -F 'previous owned service state restored; profiles retained' \
 docker exec "$container" test ! -e "/opt/server-connect/$bad_release"
 docker exec "$container" /bin/sh /root/qa-proxy-only.sh positive
 docker exec "$container" /bin/sh /root/qa-apt-only.sh positive after-rollback
+docker exec "$container" /bin/sh /root/qa-wp-fpm.sh positive after-rollback
 docker exec "$container" /bin/sh /root/qa-proxy-only.sh upstream-failure upstream-after-rollback
+docker exec "$container" /bin/sh /root/qa-wp-fpm.sh upstream-failure after-rollback
 assert_network_unchanged update-rollback "$offline_before"
 verify_host_services update-rollback
 echo 'INSTALLED_FAILED_UPDATE_ROLLBACK=PASS (active previous service restored)'
 
 docker exec "$container" /bin/sh /root/qa-proxy-only.sh disconnect
 docker exec "$container" /bin/sh /root/qa-apt-only.sh negative disconnected
+docker exec "$container" /bin/sh /root/qa-wp-fpm.sh negative-disconnected
 docker exec "$container" /bin/sh /root/qa-apt-only.sh verify-host-policy
 assert_network_unchanged disconnect "$offline_before"
 verify_host_services disconnect
+docker exec "$container" /bin/sh /root/qa-wp-fpm.sh cleanup
 run_offline uninstall --uninstall
 verify_clean_uninstall
 assert_network_unchanged uninstall "$offline_before"
 verify_host_services uninstall
 
 echo 'DISCONNECTED_OFFLINE_CYCLE=PASS'
+echo 'LIMITATION: WordPress/PHP-FPM verification used disconnected guest loopback and QA-only WP_PROXY_*; real hosting/foreign field acceptance is NOT_RUN'
 
 echo '=== Isolated LOOPBACK acquisition followed by the SAME real installer ==='
 # Docker --network none remains active; loopback was enabled for the existing
