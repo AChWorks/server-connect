@@ -11,14 +11,30 @@ origin_unit=sc-qa-wp-origin.service
 socket=/run/sc-qa-wp-fpm.sock
 manager=/usr/local/bin/server-connect
 origin=http://127.0.0.2:19185/nonce
+stage=init
+# A failed 'test' under set -e is otherwise silent in privileged CI logs.
+# Stage is a fixed non-secret label; no WordPress credentials or URLs logged.
+report_failure() {
+  status=$?
+  if [ "$status" -ne 0 ]; then
+    echo "INSTALLED_WORDPRESS_FPM_FAILURE(stage=$stage,exit=$status)" >&2
+  fi
+}
+trap report_failure EXIT
 
 require_guest() {
+  stage=guest-root
   test "$(id -u)" -eq 0
+  stage=guest-systemd
   test "$(ps -p 1 -o comm=)" = systemd
+  stage=guest-script
   test -f /root/qa-wp-fpm.sh
+  stage=installed-manager
   test -x "$manager"
   # Unlike local-dev tests, this is the disconnected, installed guest only.
+  stage=guest-default-route
   test "$(ip -4 route show default)" = "default dev lo scope link metric 4242"
+  stage=guest-ipv6-default
   test -z "$(ip -6 route show default)"
 }
 
@@ -32,12 +48,15 @@ direct_nonce() {
 assert_fpm_selected() {
   expectation=$1
   phase=$2
+  stage="selected-$phase:service-active"
   systemctl is-active --quiet "$fpm_unit"
   systemctl is-active --quiet "$origin_unit"
   nonce=$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')
   test "$(printf %s "$nonce" | wc -c)" -eq 16
+  stage="selected-$phase:direct-origin"
   direct_nonce "$nonce"
   # Fail closed on a missing FastCGI executable, nonzero return or missing JSON.
+  stage="selected-$phase:fastcgi"
   result=$(timeout --kill-after=2s 12s /usr/bin/env -i \
     REQUEST_METHOD=GET SCRIPT_FILENAME="$site/qa-http.php" \
     SCRIPT_NAME=/qa-http.php QUERY_STRING="nonce=$nonce" \
@@ -52,12 +71,16 @@ assert_fpm_selected() {
 
 setup() {
   require_guest
+  stage=wordpress-fixture
   test -d /opt/sc-qa-wordpress-core
+  stage=php-native-binaries
   test -x /usr/sbin/php-fpm8.4
   test -x /usr/bin/cgi-fcgi
   test -x /usr/bin/php
+  stage=fixture-collisions
   test ! -e /var/lib/sc-qa-wp
   test ! -e "$socket"
+  stage=fixture-copy
   mkdir -m 0755 /var/lib/sc-qa-wp
   cp -a /opt/sc-qa-wordpress-core "$site"
   # Only the disposable SQLite database directory is writable by the worker.
@@ -108,6 +131,7 @@ echo "WORDPRESS_SQLITE_INSTALLED=PASS\n";
 PHP
   chmod 0644 "$site/qa-init.php"
   # Real WordPress install, not a mocked API or a hand-written HTTP client.
+  stage=wordpress-db-install
   /usr/sbin/runuser -u www-data -- /usr/bin/php "$site/qa-init.php"
   rm -f "$site/qa-init.php"
 
@@ -171,6 +195,7 @@ security.limit_extensions = .php
 php_admin_value[auto_prepend_file] = /var/lib/sc-qa-wp/proxy-prepend.php
 CONF
   chmod 0600 /root/qa-wp-fpm.conf
+  stage=fpm-config-validation
   /usr/sbin/php-fpm8.4 --test --fpm-config /root/qa-wp-fpm.conf
 
   cat > /run/systemd/system/sc-qa-wp-origin.service <<'UNIT'
@@ -190,6 +215,7 @@ ExecStart=/usr/sbin/php-fpm8.4 --nodaemonize --fpm-config /root/qa-wp-fpm.conf
 Restart=no
 UNIT
   chmod 0644 /run/systemd/system/sc-qa-wp-*.service
+  stage=fpm-origin-unit-start
   systemctl daemon-reload
   systemctl start "$origin_unit" "$fpm_unit"
   ready=no
@@ -204,6 +230,7 @@ UNIT
     sleep 1
   done
   test "$ready" = yes || { echo 'Isolated WordPress FPM/origin startup failed' >&2; exit 1; }
+  stage=first-fpm-request
   assert_fpm_selected positive initial
 }
 
