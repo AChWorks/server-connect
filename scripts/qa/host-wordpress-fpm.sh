@@ -232,7 +232,21 @@ UNIT
     fi
     sleep 1
   done
-  test "$ready" = yes || { echo 'Isolated WordPress FPM/origin startup failed' >&2; exit 1; }
+  if [ "$ready" != yes ]; then
+    echo 'Isolated WordPress FPM/origin startup failed (disposable guest only)' >&2
+    # These service units and logs are generated entirely by this QA fixture.
+    # Avoid echoing WordPress configuration, HTTP URLs, imported profiles or keys.
+    systemctl show "$origin_unit" "$fpm_unit" --no-pager \
+      --property=Id,LoadState,ActiveState,SubState,Result,ExecMainCode,ExecMainStatus >&2 || true
+    journalctl --no-pager --output=cat -n 16 \
+      -u "$origin_unit" -u "$fpm_unit" >&2 || true
+    if [ -S "$socket" ]; then
+      echo 'WORDPRESS_FPM_SOCKET=present' >&2
+    else
+      echo 'WORDPRESS_FPM_SOCKET=missing' >&2
+    fi
+    exit 1
+  fi
   stage=first-fpm-request
   assert_fpm_selected positive initial
 }
