@@ -9,6 +9,7 @@ site=/var/lib/sc-qa-wp/site
 fpm_unit=sc-qa-wp-fpm.service
 origin_unit=sc-qa-wp-origin.service
 socket=/run/sc-qa-wp-fpm.sock
+fpm_error=/run/sc-qa-wp-fpm-error.log
 manager=/usr/local/bin/server-connect
 origin=http://127.0.0.2:19185/nonce
 stage=init
@@ -83,6 +84,7 @@ setup() {
   stage=fixture-collisions
   test ! -e /var/lib/sc-qa-wp
   test ! -e "$socket"
+  test ! -e "$fpm_error"
   stage=fixture-copy
   mkdir -m 0755 /var/lib/sc-qa-wp
   cp -a /opt/sc-qa-wordpress-core "$site"
@@ -178,10 +180,14 @@ echo wp_json_encode([
 PHP
   chmod 0644 "$site/qa-http.php"
 
+  # PHP-FPM opening /dev/stderr from a systemd service can fail with ENXIO.
+  # Keep an observable root-private QA error file on the guest's /run tmpfs.
+  : > "$fpm_error"
+  chmod 0600 "$fpm_error"
   cat > /root/qa-wp-fpm.conf <<'CONF'
 [global]
 pid = /run/sc-qa-wp-fpm.pid
-error_log = /dev/stderr
+error_log = /run/sc-qa-wp-fpm-error.log
 daemonize = no
 [scqa]
 user = www-data
@@ -240,6 +246,9 @@ UNIT
       --property=Id,LoadState,ActiveState,SubState,Result,ExecMainCode,ExecMainStatus >&2 || true
     journalctl --no-pager --output=cat -n 16 \
       -u "$origin_unit" -u "$fpm_unit" >&2 || true
+    if [ -f "$fpm_error" ]; then
+      tail -n 16 "$fpm_error" >&2 || true
+    fi
     if [ -S "$socket" ]; then
       echo 'WORDPRESS_FPM_SOCKET=present' >&2
     else
@@ -279,7 +288,9 @@ cleanup() {
   systemctl daemon-reload
   test -f "$site/wp-config.php"
   rm -rf -- /var/lib/sc-qa-wp
+  rm -f -- "$fpm_error"
   test ! -e /var/lib/sc-qa-wp
+  test ! -e "$fpm_error"
   echo 'ISOLATED_WORDPRESS_FPM_FIXTURE_CLEANUP=PASS'
 }
 
