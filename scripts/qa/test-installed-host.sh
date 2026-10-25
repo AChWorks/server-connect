@@ -27,6 +27,9 @@ bad_update_digest=$(sha256sum "$bad_update_bundle" | cut -d' ' -f1)
 }
 root=$(cd -- "$(dirname -- "$0")/../.." && pwd -P)
 cd "$root"
+# Exercise the actual guest APT negative classifier with disposable fakes
+# before any privileged Docker work; this is not a substitute for real APT.
+bash scripts/qa/test-host-apt-only.sh
 tmpdir=/tmp
 if [[ -n $(printenv RUNNER_TEMP || true) ]]; then tmpdir=$(printenv RUNNER_TEMP); fi
 scratch=$(mktemp -d "$tmpdir/server-connect-hostqa.XXXXXXXX")
@@ -329,7 +332,10 @@ assert_network_unchanged reinstall "$offline_before"
 verify_host_services reinstall
 echo '=== Installed real VLESS Proxy Only and owned offline update ==='
 docker cp "$root/scripts/qa/host-proxy-only.sh" "$container:/root/qa-proxy-only.sh"
+docker cp "$root/scripts/qa/host-apt-only.sh" "$container:/root/qa-apt-only.sh"
 docker exec "$container" /bin/sh /root/qa-proxy-only.sh setup
+docker exec "$container" /bin/sh /root/qa-apt-only.sh setup
+docker exec "$container" /bin/sh /root/qa-apt-only.sh positive initial
 assert_network_unchanged installed-vless-proxy "$offline_before"
 verify_host_services installed-vless-proxy
 docker exec "$container" /bin/sh /root/qa-proxy-only.sh upstream-failure
@@ -354,6 +360,8 @@ updated_manager=$(docker exec "$container" sha256sum \
   exit 1
 }
 docker exec "$container" /bin/sh /root/qa-proxy-only.sh positive
+docker exec "$container" /bin/sh /root/qa-apt-only.sh positive after-upgrade
+docker exec "$container" /bin/sh /root/qa-proxy-only.sh upstream-failure upstream-after-upgrade
 assert_network_unchanged update-distinct "$offline_before"
 verify_host_services update-distinct
 echo 'INSTALLED_DISTINCT_BINARY_UPDATE=PASS (same-source QA builds)'
@@ -393,11 +401,15 @@ grep -F 'previous owned service state restored; profiles retained' \
   /etc/systemd/system/server-connect.service | cut -d' ' -f1) == "$original_unit_digest" ]]
 docker exec "$container" test ! -e "/opt/server-connect/$bad_release"
 docker exec "$container" /bin/sh /root/qa-proxy-only.sh positive
+docker exec "$container" /bin/sh /root/qa-apt-only.sh positive after-rollback
+docker exec "$container" /bin/sh /root/qa-proxy-only.sh upstream-failure upstream-after-rollback
 assert_network_unchanged update-rollback "$offline_before"
 verify_host_services update-rollback
 echo 'INSTALLED_FAILED_UPDATE_ROLLBACK=PASS (active previous service restored)'
 
 docker exec "$container" /bin/sh /root/qa-proxy-only.sh disconnect
+docker exec "$container" /bin/sh /root/qa-apt-only.sh negative disconnected
+docker exec "$container" /bin/sh /root/qa-apt-only.sh verify-host-policy
 assert_network_unchanged disconnect "$offline_before"
 verify_host_services disconnect
 run_offline uninstall --uninstall

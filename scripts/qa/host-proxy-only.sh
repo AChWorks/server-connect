@@ -155,7 +155,15 @@ print(o["data"]["id"])
     positive
     ;;
   upstream-failure)
-    [ "$#" -eq 1 ]
+    # Repeat the same full negative VLESS/apt checks after both update paths.
+    case "$#" in
+      1) apt_phase=upstream-stopped ;;
+      2) case "$2" in
+           upstream-after-upgrade|upstream-after-rollback) apt_phase=$2 ;;
+           *) exit 2 ;;
+         esac ;;
+      *) exit 2 ;;
+    esac
     positive
     systemctl stop "$upstream"
     if systemctl is-active --quiet "$upstream"; then exit 1; fi
@@ -167,6 +175,7 @@ print(o["data"]["id"])
       echo 'Opted-in application leaked to Direct when VLESS upstream stopped' >&2
       exit 1
     fi
+    /bin/sh /root/qa-apt-only.sh negative "$apt_phase"
     active_ready
     systemctl start "$upstream"
     positive
@@ -179,6 +188,7 @@ print(o["data"]["id"])
     if systemctl is-active --quiet server-connect.service; then exit 1; fi
     positive_probe direct
     negative_proxy_probe
+    /bin/sh /root/qa-apt-only.sh negative core-stopped
     systemctl start server-connect.service
     positive
     echo 'INSTALLED_CORE_STOP_ISOLATED=PASS'
