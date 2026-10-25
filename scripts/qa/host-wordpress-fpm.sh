@@ -31,9 +31,12 @@ require_guest() {
   test -f /root/qa-wp-fpm.sh
   stage=installed-manager
   test -x "$manager"
-  # Unlike local-dev tests, this is the disconnected, installed guest only.
-  stage=guest-default-route
-  test "$(ip -4 route show default)" = "default dev lo scope link metric 4242"
+  # Require the Docker --network none guest's loopback-only interface set.
+  # Exact route text is not a stable guard after a systemd/VLESS lifecycle;
+  # the parent harness independently hashes the complete guest route/rule/link
+  # inventory against its pre-product baseline before and after this fixture.
+  stage=guest-netns-isolation
+  test "$(ls -1 /sys/class/net)" = lo
   stage=guest-ipv6-default
   test -z "$(ip -6 route show default)"
 }

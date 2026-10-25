@@ -335,6 +335,9 @@ docker cp "$root/scripts/qa/host-proxy-only.sh" "$container:/root/qa-proxy-only.
 docker cp "$root/scripts/qa/host-apt-only.sh" "$container:/root/qa-apt-only.sh"
 docker exec "$container" /bin/sh /root/qa-proxy-only.sh setup
 docker exec "$container" /bin/sh /root/qa-apt-only.sh setup
+# Do not discard route invariants to make the FPM fixture start: verify the
+# full observed route/rule/link snapshot rather than brittle one-line CLI text.
+assert_network_unchanged wordpress-preflight "$offline_before"
 docker cp "$root/scripts/qa/host-wordpress-fpm.sh" "$container:/root/qa-wp-fpm.sh"
 docker cp "$root/scripts/qa/wp-nonce-origin.py" "$container:/root/qa-wp-nonce-origin.py"
 docker cp "$root/scripts/qa/wp-fcgi-check.py" "$container:/root/qa-wp-fcgi-check.py"
