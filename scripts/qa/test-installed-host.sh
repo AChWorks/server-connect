@@ -30,6 +30,10 @@ cd "$root"
 # Exercise the actual guest APT negative classifier with disposable fakes
 # before any privileged Docker work; this is not a substitute for real APT.
 bash scripts/qa/test-host-apt-only.sh
+# Run candidate-version WordPress fail-closed regressions inside this script,
+# since pull_request_target uses the trusted main workflow definition.
+PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/qa/test-wp-fcgi-check.py
+PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/qa/test-wp-proxy-prepend.py
 tmpdir=/tmp
 if [[ -n $(printenv RUNNER_TEMP || true) ]]; then tmpdir=$(printenv RUNNER_TEMP); fi
 scratch=$(mktemp -d "$tmpdir/server-connect-hostqa.XXXXXXXX")
@@ -341,6 +345,7 @@ assert_network_unchanged wordpress-preflight "$offline_before"
 docker cp "$root/scripts/qa/host-wordpress-fpm.sh" "$container:/root/qa-wp-fpm.sh"
 docker cp "$root/scripts/qa/wp-nonce-origin.py" "$container:/root/qa-wp-nonce-origin.py"
 docker cp "$root/scripts/qa/wp-fcgi-check.py" "$container:/root/qa-wp-fcgi-check.py"
+docker cp "$root/scripts/qa/wp-proxy-prepend.py" "$container:/root/qa-wp-proxy-prepend.py"
 docker exec "$container" /bin/sh /root/qa-wp-fpm.sh setup
 docker exec "$container" /bin/sh /root/qa-apt-only.sh positive initial
 assert_network_unchanged installed-vless-proxy "$offline_before"

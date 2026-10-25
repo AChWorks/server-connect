@@ -140,13 +140,14 @@ PHP
   /usr/sbin/runuser -u www-data -- /usr/bin/php "$site/qa-init.php"
   rm -f "$site/qa-init.php"
 
-  cat > /var/lib/sc-qa-wp/proxy-prepend.php <<'PHP'
-<?php
-// QA-only, FPM-pool-local settings. The product does NOT edit WordPress.
-define('WP_PROXY_HOST', '127.0.0.1');
-define('WP_PROXY_PORT', 20807);
-define('WP_PROXY_BYPASS_HOSTS', 'localhost');
-PHP
+  # Obtain this CI-only FPM pool's credentials through the manager's own
+  # selected-proxy interface, not by interpreting its private state format.
+  # The helper validates the exact local authenticated endpoint and creates
+  # a root-only PHP include with O_EXCL; no credentials reach stdout or CI.
+  stage=proxy-credential-handoff
+  test ! -e /var/lib/sc-qa-wp/proxy-prepend.php
+  /usr/bin/env -i HOME=/root PATH=/usr/sbin:/usr/bin:/sbin:/bin LC_ALL=C \
+    "$manager" exec -- /usr/bin/python3 -I -B /root/qa-wp-proxy-prepend.py
   chown root:www-data /var/lib/sc-qa-wp/proxy-prepend.php
   chmod 0640 /var/lib/sc-qa-wp/proxy-prepend.php
 
@@ -172,6 +173,7 @@ echo wp_json_encode([
     'php_sapi' => PHP_SAPI,
     'wp_installed' => is_blog_installed(),
     'proxy_enabled' => $proxy->is_enabled(),
+    'proxy_authenticated' => $proxy->use_authentication(),
     'proxy_selected' => $proxy->send_through_proxy($target),
     'localhost_exempt' => !$proxy->send_through_proxy('http://localhost:19185/'),
     'status' => $code,

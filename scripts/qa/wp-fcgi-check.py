@@ -42,7 +42,9 @@ def validate(raw: bytes, expected: str) -> None:
         raise ValueError("FastCGI JSON body not an object")
     if data.get("php_sapi") != "fpm-fcgi" or data.get("wp_installed") is not True:
         raise ValueError("Genuine installed WordPress PHP-FPM not verified")
-    if data.get("proxy_enabled") is not True or data.get("proxy_selected") is not True:
+    if (data.get("proxy_enabled") is not True or
+            data.get("proxy_authenticated") is not True or
+            data.get("proxy_selected") is not True):
         raise ValueError("WordPress did not explicitly select the proxy path")
     if data.get("localhost_exempt") is not True:
         raise ValueError("WordPress localhost exemption changed")
