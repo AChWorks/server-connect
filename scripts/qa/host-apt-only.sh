@@ -6,6 +6,8 @@ set -eu
 umask 077
 
 manager=/usr/local/bin/server-connect
+apt_cache=/usr/bin/apt-cache
+apt_timeout=/usr/bin/timeout
 base=/srv/sc-qa-apt
 source_file=$base/sources.list
 origin=http://127.0.0.1:19180/sc-qa-apt
@@ -14,8 +16,11 @@ config_digest() {
   python3 - <<'PY'
 from pathlib import Path
 import hashlib, os, stat
+root = Path('/etc/apt')
+if not root.is_dir() or root.is_symlink():
+    raise SystemExit('Native APT policy directory unavailable')
 records = []
-for path in sorted(Path('/etc/apt').rglob('*')):
+for path in sorted(root.rglob('*')):
     name = str(path)
     m = path.lstat()
     kind = stat.S_IFMT(m.st_mode)
@@ -75,52 +80,142 @@ PY
   # Direct HTTP is a control, not evidence of selected-path APT.
   curl -q --fail --silent --show-error --max-time 4 --noproxy '*'     "$origin/dists/qa/Release" >/dev/null
   config_digest > "$base/host-apt-policy.sha256"
+  baseline=$(cat "$base/host-apt-policy.sha256") || exit 1
+  assert_digest "$baseline" || exit 1
   echo 'INSTALLED_APT_FIXTURE=PASS (local unsigned index; trusted=yes disposable QA only)'
+}
+
+fail_apt() {
+  echo "INSTALLED_APT_QA=FAIL ($1; private guest diagnostics retained)" >&2
+  return 1
+}
+
+assert_digest() {
+  case "$1" in *[!0-9a-f]*|'') return 1;; esac
+  [ "$(printf '%s' "$1" | wc -c)" -eq 64 ]
+}
+
+# Negative evidence must distinguish APT method failure from a manager
+# initialization error, a broken timeout wrapper or an unrelated command.
+# Never echo APT logs: a real APT origin might carry credential-bearing URLs.
+check_failure_cause() {
+  phase=$1
+  rc=$2
+  log_file=$3
+  [ -f "$log_file" ] && [ -r "$log_file" ] && [ -s "$log_file" ] ||
+    { fail_apt "missing private APT command evidence: $phase"; return 1; }
+  case "$rc" in
+    0|124|125|126|127|137)
+      fail_apt "unexpected/timeout/infrastructure exit $rc: $phase"
+      return 1 ;;
+  esac
+  case "$phase" in
+    upstream-stopped|upstream-after-upgrade|upstream-after-rollback)
+      [ "$rc" -eq 100 ] ||
+        { fail_apt "upstream failure was not native APT exit 100: $phase"; return 1; }
+      # Native APT failed to acquire the known guest-local origin, not a
+      # manager error that exits before the APT method is launched.
+      grep -Eq '^Err:[0-9]+ http://127\.0\.0\.1:19180/sc-qa-apt ' "$log_file" &&
+        grep -Fq 'E: Failed to fetch http://127.0.0.1:19180/sc-qa-apt/' "$log_file" ||
+        { fail_apt "native APT origin acquisition failure not established: $phase"; return 1; }
+      ;;
+    core-stopped|disconnected)
+      [ "$rc" -eq 1 ] && [ "$(cat "$log_file")" = 'Error: local proxy is not active' ] ||
+        { fail_apt "expected precise manager proxy-unavailable rejection: $phase"; return 1; }
+      ;;
+    *) fail_apt "unsupported negative phase: $phase"; return 1 ;;
+  esac
+}
+
+# apt-cache show for a nonexistent package returns 100 with exactly this
+# diagnostic in forced C locale. A command/configuration error, missing
+# executable or partial read is NOT equivalent to an absent index.
+check_absent_index() {
+  lists=$1
+  label=$2
+  out=$base/$label.cache-out
+  err=$base/$label.cache-err
+  rc=0
+  LC_ALL=C "$apt_cache" \
+    -o "Dir::Etc::sourcelist=$source_file" \
+    -o "Dir::Etc::sourceparts=-" \
+    -o "Dir::State::lists=$lists" \
+    show sc-qa-apt-route-proof >"$out" 2>"$err" || rc=$?
+  observed=$(cat "$err") ||
+    { fail_apt "native apt-cache diagnostic unreadable: $label"; return 1; }
+  [ "$rc" -eq 100 ] && [ ! -s "$out" ] &&
+    [ "$observed" = 'E: No packages found' ] ||
+    { fail_apt "native apt-cache absence could not be verified: $label"; return 1; }
 }
 
 run_selected() {
   label=$1
   expected=$2
   case "$label" in
-    initial|upstream-stopped|core-stopped|after-upgrade|after-rollback|disconnected) ;;
+    initial|upstream-stopped|core-stopped|after-upgrade|after-rollback|disconnected|upstream-after-upgrade|upstream-after-rollback) ;;
     *) echo "Unrecognized APT QA phase" >&2; return 2 ;;
   esac
+  [ -x "$manager" ] && [ -x "$apt_cache" ] && [ -x "$apt_timeout" ] &&
+    [ -x /usr/bin/apt-get ] && [ -r "$source_file" ] ||
+    { fail_apt "native commands/fixture not executable or readable"; return 1; }
+  if [ "$expected" = failure ]; then
+    case "$label" in
+      upstream-stopped|upstream-after-upgrade|upstream-after-rollback)
+        systemctl is-active --quiet server-connect.service ||
+          { fail_apt "selected local proxy unit unavailable during upstream failure"; return 1; }
+        ready=$("$manager" --json ready 2>/dev/null) ||
+          { fail_apt "selected local listener not ready during upstream failure"; return 1; }
+        printf '%s\n' "$ready" | python3 -c '
+import json, sys
+o=json.load(sys.stdin)
+if o.get("ok") is not True or (o.get("data") or {}).get("local_listener_ready") is not True:
+    raise SystemExit("Selected local listener is not ready")
+' || { fail_apt "local listener state not verified"; return 1; }
+        ;;
+    esac
+  fi
+
   lists=$base/lists-$label
   archives=$base/archives-$label
   test ! -e "$lists"
   mkdir -m 0755 -p "$lists/partial" "$archives/partial"
   log=$base/$label.log
-  # APT gets a fresh private source and empty index directory every time.
-  # No /etc/apt modification, no host package installation, no foreign fetch.
-  # A bounded process lifetime rejects indefinitely hung selected paths.
-  status=0
-  timeout 35 "$manager" apt -- apt-get update     -o "Dir::Etc::sourcelist=$source_file"     -o "Dir::Etc::sourceparts=-"     -o "Dir::State::lists=$lists"     -o "Dir::Cache::archives=$archives"     -o "Dir::Cache::pkgcache=/dev/null"     -o "Dir::Cache::srcpkgcache=/dev/null"     -o "APT::Get::List-Cleanup=0"     -o "Debug::NoLocking=1" >"$log" 2>&1 || status=$?
+  # One isolated guest source fixture, but FRESH lists/archives per phase.
+  # GNU timeout signals its subprocess group and enforces SIGKILL after 5s;
+  # any timeout or command-infrastructure failure invalidates the test.
+  rc=0
+  LC_ALL=C "$apt_timeout" --kill-after=5s 35s "$manager" apt -- apt-get update \
+    -o "Dir::Etc::sourcelist=$source_file" \
+    -o "Dir::Etc::sourceparts=-" \
+    -o "Dir::State::lists=$lists" \
+    -o "Dir::Cache::archives=$archives" \
+    -o "Dir::Cache::pkgcache=/dev/null" \
+    -o "Dir::Cache::srcpkgcache=/dev/null" \
+    -o "APT::Get::List-Cleanup=0" \
+    -o "Debug::NoLocking=1" >"$log" 2>&1 || rc=$?
 
   if [ "$expected" = success ]; then
-    if [ "$status" -ne 0 ]; then
-      echo "INSTALLED_APT_SELECTED($label)=FAIL (APT exit $status; private guest diagnostics retained)" >&2
+    if [ "$rc" -ne 0 ]; then
+      fail_apt "native APT update exited $rc: $label"
       return 1
     fi
-    # This checks actual native package-index acquisition, not an HTTP 200
-    # from a generic client or a cached index from a previous phase.
-    result=$(apt-cache       -o "Dir::Etc::sourcelist=$source_file"       -o "Dir::Etc::sourceparts=-"       -o "Dir::State::lists=$lists"       show sc-qa-apt-route-proof) || return 1
-    printf '%s\n' "$result" | grep -Fx 'Package: sc-qa-apt-route-proof' >/dev/null
+    # Successful native index acquisition, not a cached prior-phase result.
+    out=$base/$label.cache-out
+    err=$base/$label.cache-err
+    LC_ALL=C "$apt_cache" \
+      -o "Dir::Etc::sourcelist=$source_file" \
+      -o "Dir::Etc::sourceparts=-" \
+      -o "Dir::State::lists=$lists" \
+      show sc-qa-apt-route-proof >"$out" 2>"$err" ||
+      { fail_apt "native apt-cache failed after successful APT update: $label"; return 1; }
+    grep -Fxq 'Package: sc-qa-apt-route-proof' "$out" &&
+      [ ! -s "$err" ] ||
+      { fail_apt "expected fresh package index missing: $label"; return 1; }
     printf 'INSTALLED_APT_SELECTED(%s)=PASS (native apt-get index through selected loopback VLESS)\n' "$label"
   else
-    if [ "$status" -eq 0 ]; then
-      echo "INSTALLED_APT_FAIL_CLOSED($label)=FAIL (unexpected successful APT update)" >&2
-      return 1
-    fi
-    if [ "$status" -eq 124 ] || [ "$status" -eq 137 ]; then
-      echo "INSTALLED_APT_FAIL_CLOSED($label)=FAIL (APT hung until timeout)" >&2
-      return 1
-    fi
-    # A failed acquisition must not silently supply a previous cached index.
-    if apt-cache       -o "Dir::Etc::sourcelist=$source_file"       -o "Dir::Etc::sourceparts=-"       -o "Dir::State::lists=$lists"       show sc-qa-apt-route-proof >/dev/null 2>&1; then
-      echo "INSTALLED_APT_FAIL_CLOSED($label)=FAIL (index unexpectedly available)" >&2
-      return 1
-    fi
-    printf 'INSTALLED_APT_FAIL_CLOSED(%s)=PASS (native update failed, no cached index)\n' "$label"
+    check_failure_cause "$label" "$rc" "$log" || return 1
+    check_absent_index "$lists" "$label" || return 1
+    printf 'INSTALLED_APT_FAIL_CLOSED(%s)=PASS (classified failure, verified native empty APT index)\n' "$label"
   fi
 }
 
@@ -139,11 +234,21 @@ case "${1:-}" in
     ;;
   verify-host-policy)
     test "$#" -eq 1
-    test "$(config_digest)" = "$(cat "$base/host-apt-policy.sha256")"
-    if find /var/lib/server-connect -name '.apt-ephemeral-*' -print | grep .; then
-      echo 'Persisted private APT proxy descriptor path' >&2
-      exit 1
-    fi
+    [ -f "$base/host-apt-policy.sha256" ] && [ ! -L "$base/host-apt-policy.sha256" ] &&
+      [ -r "$base/host-apt-policy.sha256" ] ||
+      { fail_apt 'expected APT policy digest missing or unreadable'; exit 1; }
+    original=$(cat "$base/host-apt-policy.sha256") ||
+      { fail_apt 'expected policy digest read failed'; exit 1; }
+    current=$(config_digest) ||
+      { fail_apt 'current policy digest computation failed'; exit 1; }
+    assert_digest "$original" && assert_digest "$current" && [ "$original" = "$current" ] ||
+      { fail_apt 'native APT policy digest invalid or changed'; exit 1; }
+    [ -d /var/lib/server-connect ] ||
+      { fail_apt 'installed state directory unavailable for descriptor audit'; exit 1; }
+    descriptors=$(find /var/lib/server-connect -name '.apt-ephemeral-*' -print) ||
+      { fail_apt 'private descriptor inventory incomplete'; exit 1; }
+    [ -z "$descriptors" ] ||
+      { fail_apt 'persistent private APT proxy descriptor present'; exit 1; }
     echo 'INSTALLED_APT_NATIVE_HOST_POLICY_UNCHANGED=PASS'
     ;;
   *)

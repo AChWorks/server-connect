@@ -99,6 +99,8 @@ jobs:
           bash -n scripts/qa/test-host-qa-assertions.sh
           bash -n scripts/qa/test-host-coexistence.sh
           bash -n scripts/qa/test-installed-host.sh
+          bash -n scripts/qa/test-host-apt-only.sh
+          bash scripts/qa/test-host-apt-only.sh
           bash scripts/qa/test-host-qa-assertions.sh
           bash scripts/qa/test-host-coexistence.sh
 
