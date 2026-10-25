@@ -11,7 +11,7 @@ origin_unit=sc-qa-wp-origin.service
 socket=/run/sc-qa-wp-fpm.sock
 fpm_error=/run/sc-qa-wp-fpm-error.log
 manager=/usr/local/bin/server-connect
-origin=http://127.0.0.2:19185/nonce
+origin=http://127.0.0.1:19185/nonce
 stage=init
 # A failed 'test' under set -e is otherwise silent in privileged CI logs.
 # Stage is a fixed non-secret label; no WordPress credentials or URLs logged.
@@ -161,7 +161,7 @@ if (!is_string($nonce) || !preg_match('/^[0-9a-f]{16}$/', $nonce)) {
     http_response_code(400);
     exit('{"error":"invalid nonce"}');
 }
-$target = 'http://127.0.0.2:19185/nonce?value=' . $nonce;
+$target = 'http://127.0.0.1:19185/nonce?value=' . $nonce;
 $proxy = new WP_HTTP_Proxy();
 $result = wp_remote_get($target, ['timeout' => 4, 'redirection' => 0, 'headers' => ['Cache-Control' => 'no-cache']]);
 $code = is_wp_error($result) ? 502 : (int) wp_remote_retrieve_response_code($result);

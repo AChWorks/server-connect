@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Disposable disconnected guest: independent nonce-echo HTTP origin (127.0.0.2)."""
+"""Disposable disconnected guest: independent nonce-echo HTTP origin (127.0.0.1)."""
 
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.parse import parse_qs, urlsplit
@@ -26,4 +26,4 @@ class Handler(BaseHTTPRequestHandler):
         pass
 
 
-HTTPServer(("127.0.0.2", 19185), Handler).serve_forever()
+HTTPServer(("127.0.0.1", 19185), Handler).serve_forever()
