@@ -84,14 +84,33 @@ UNIT
   # previous negative cycle MUST NOT let a new cycle inherit its success
   # criterion. Reset the exact QA service before arming the new deadline.
   previous_result=$(systemctl show "$service" -p Result --value)
-  if test "$previous_result" = exit-code; then
-    echo 'ISOLATED_ACTIVATION_GUARD_PREVIOUS_FAILURE=OBSERVED (will invalidate)'
-  fi
-  systemctl reset-failed "$service"
-  test "$(systemctl show "$service" -p ActiveState --value)" = inactive
-  test "$(systemctl show "$service" -p Result --value)" = success
+  case "$previous_result" in
+    exit-code)
+      # Only a CACHED failed unit can be reset: attempting reset-failed on
+      # the never-loaded first-cycle service fails on Debian 13 systemd.
+      # A new unit with no prior result has nothing to invalidate.
+      echo 'ISOLATED_ACTIVATION_GUARD_PREVIOUS_FAILURE=OBSERVED (will invalidate)'
+      systemctl reset-failed "$service"
+      ;;
+    success|'') ;;
+    *) echo 'Unexpected previous QA service result' >&2; return 1 ;;
+  esac
+  case "$(systemctl show "$service" -p ActiveState --value)" in
+    inactive|'') ;;
+    *) echo 'QA guard service was not inactive before arming' >&2; return 1 ;;
+  esac
+  case "$(systemctl show "$service" -p Result --value)" in
+    success|'') ;;
+    *) echo 'Stale QA service failure survived prearm cleanup' >&2; return 1 ;;
+  esac
   previous_start=$(systemctl show "$service" -p ExecMainStartTimestampMonotonic --value)
-  case "$previous_start" in ''|*[!0-9]*) echo 'Invalid previous service timestamp' >&2; return 1 ;; esac
+  # For a newly defined or unloaded (including reset-failed) unit,
+  # systemd may omit previous execution data. No stale execution is trusted:
+  # every accepted invocation must start after the NEW timer arm/injection.
+  case "$previous_start" in
+    '') previous_start=0 ;;
+    *[!0-9]*) echo 'Invalid previous service timestamp' >&2; return 1 ;;
+  esac
   printf '%s\n' "$previous_start" > "$state/previous-start-us"
   test ! -e "$state/refusal-proof"
   test ! -e "$state/injected-us"
@@ -327,7 +346,10 @@ assert_no_stale_refusal() {
     return 1
   fi
   test ! -e "$state/refusal-proof"
-  test "$(systemctl show "$service" -p Result --value)" = success
+  case "$(systemctl show "$service" -p Result --value)" in
+    success|'') ;;
+    *) echo 'Stale systemd failure remains before the new deadline' >&2; return 1 ;;
+  esac
   echo "ISOLATED_ACTIVATION_GUARD_STALE_REFUSAL_REJECTED=PASS (kind=$1)"
 }
 
