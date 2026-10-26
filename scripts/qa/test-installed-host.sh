@@ -455,21 +455,63 @@ docker cp "$root/scripts/qa/host-activation-guard.sh" \
   "$container:/root/qa-activation-guard.sh"
 docker cp "$root/scripts/qa/activation-guard-inspect.py" \
   "$container:/root/qa-activation-guard-inspect.py"
-docker exec "$container" /bin/sh /root/qa-activation-guard.sh arm
-if docker exec "$container" /bin/sh /root/qa-activation-guard.sh crash-controller; then
-  echo 'Disposable activation controller unexpectedly survived intentional SIGKILL' >&2
-  exit 1
-else
-  killed_exit=$?
-  [[ $killed_exit == 137 ]] || {
-    echo "Activation controller did not exit through expected SIGKILL (exit=$killed_exit)" >&2
+# Run a distinct independently armed timer for each precise mutation stage.
+# This makes interrupted partial apply an observable negative/positive gate,
+# rather than assuming the entire route/rule transaction was applied first.
+for guard_stage in link route rule; do
+  docker exec "$container" /bin/sh /root/qa-activation-guard.sh arm
+  if crash_output=$(docker exec "$container" /bin/sh /root/qa-activation-guard.sh crash-controller "$guard_stage" 2>&1); then
+    echo "Disposable controller unexpectedly survived SIGKILL at $guard_stage" >&2
     exit 1
-  }
-fi
-docker exec "$container" /bin/sh /root/qa-activation-guard.sh await-recovery
-docker exec "$container" /bin/sh /root/qa-activation-guard.sh cleanup
-assert_network_unchanged isolated-activation-guard-fixture "$offline_before"
-verify_host_services isolated-activation-guard-fixture
+  else
+    killed_exit=$?
+    printf '%s\n' "$crash_output"
+    [[ $killed_exit == 137 ]] || {
+      echo "Unexpected controller exit at $guard_stage (exit=$killed_exit)" >&2
+      exit 1
+    }
+    [[ $crash_output == *"ISOLATED_ACTIVATION_CONTROLLER_BOUNDARY=$guard_stage"* ]] || {
+      echo "No verified controller boundary witness for $guard_stage" >&2
+      exit 1
+    }
+  fi
+  docker exec "$container" /bin/sh /root/qa-activation-guard.sh await-recovery "$guard_stage"
+  docker exec "$container" /bin/sh /root/qa-activation-guard.sh cleanup
+  assert_network_unchanged "isolated-activation-guard-$guard_stage" "$offline_before"
+  verify_host_services "isolated-activation-guard-$guard_stage"
+  echo "ISOLATED_ACTIVATION_GUARD_STAGE_${guard_stage}=PASS"
+done
+# Three independent negative Linux cases: a foreign address, a foreign
+# route in another table and a foreign interface altname are injected AFTER
+# SIGKILL. Each new systemd cycle must be fresh (monotonic timer/service
+# timestamps + service invocation identity); retained prior failure status
+# must not turn a second run green before its own eight-second deadline.
+# Only controlled disposable QA cleanup removes the surviving foreign state.
+for conflict_kind in address other-table-route altname; do
+  docker exec "$container" /bin/sh /root/qa-activation-guard.sh arm
+  if crash_output=$(docker exec "$container" /bin/sh /root/qa-activation-guard.sh crash-controller link 2>&1); then
+    echo "Negative-test controller unexpectedly survived SIGKILL ($conflict_kind)" >&2
+    exit 1
+  else
+    killed_exit=$?
+    printf '%s\n' "$crash_output"
+    [[ $killed_exit == 137 && $crash_output == *"ISOLATED_ACTIVATION_CONTROLLER_BOUNDARY=link"* ]] || {
+      echo "Negative-test controller SIGKILL witness missing ($conflict_kind)" >&2
+      exit 1
+    }
+  fi
+  docker exec "$container" /bin/sh /root/qa-activation-guard.sh inject-conflict "$conflict_kind"
+  # The real verifier must NOT accept a stale negative service Result before
+  # this cycle's deadline. This check uses the same evidence predicate as
+  # the eventual positive refusal assertion.
+  docker exec "$container" /bin/sh /root/qa-activation-guard.sh assert-no-stale-refusal "$conflict_kind"
+  docker exec "$container" /bin/sh /root/qa-activation-guard.sh await-refusal "$conflict_kind"
+  docker exec "$container" /bin/sh /root/qa-activation-guard.sh cleanup-refusal "$conflict_kind"
+  docker exec "$container" /bin/sh /root/qa-activation-guard.sh cleanup
+  assert_network_unchanged "isolated-guard-foreign-$conflict_kind" "$offline_before"
+  verify_host_services "isolated-guard-foreign-$conflict_kind"
+  echo "ISOLATED_ACTIVATION_GUARD_FOREIGN_${conflict_kind}=PASS"
+done
 echo 'ISOLATED_ACTIVATION_GUARD_FEASIBILITY=PASS (not product guard/reboot proof)'
 
 echo '=== Isolated LOOPBACK acquisition followed by the SAME real installer ==='

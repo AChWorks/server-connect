@@ -16,32 +16,146 @@ def fixture(mode):
     routes = []
     rules = []
     lookups = {}
-    if mode in ("applied", "recovered"):
+    dependencies = {"addresses4": [], "addresses6": [], "routes4": [],
+                    "routes6": [], "rules6": [], "nexthops": []}
+    if mode in ("applied", "partial_link", "partial_route", "recovered"):
         resources = [mod.FOREIGN]
-        if mode == "applied":
+        if mode in ("applied", "partial_link", "partial_route"):
             resources.insert(0, mod.OWNED)
-        for name, alias, cidr, priority in resources:
-            links.append({"ifname": name, "ifalias": alias,
-                          "linkinfo": {"info_kind": "dummy"}})
-            # Literal normalized native Debian 13 `ip -j -N` fixture
-            # captured from a disposable user+network namespace, not a
-            # hand-waved minimal synthetic subset.
-            routes.append({"dst": cidr, "dev": name, "table": str(mod.TABLE),
-                           "scope": "253", "flags": []})
-            rules.append({"priority": priority, "table": str(mod.TABLE),
-                          "src": "all", "dst": cidr.split('/')[0],
-                          "dstlen": int(cidr.split('/')[1])})
+        for name, alias, cidr, priority, mac in resources:
+            links.append({
+                "ifname": name, "ifalias": alias, "linkinfo": {"info_kind": "dummy"},
+                "address": mac, "mtu": 1500, "link_type": "ether",
+                "broadcast": "ff:ff:ff:ff:ff:ff", "qdisc": "noqueue",
+                "group": "default", "linkmode": "DEFAULT", "operstate": "UNKNOWN",
+                "txqlen": 1000, "promiscuity": 0, "allmulti": 0,
+                "inet6_addr_gen_mode": "none",
+                "flags": ["BROADCAST", "NOARP", "UP", "LOWER_UP"],
+            })
+            dependencies["routes6"].append({
+                "type": "5", "dst": "ff00::/8", "dev": name,
+                "table": "255", "protocol": "2", "metric": 256,
+                "flags": [], "pref": "medium",
+            })
+            if name != mod.OWNED[0] or mode in ("applied", "partial_route"):
+                routes.append({"dst": cidr, "dev": name, "table": str(mod.TABLE),
+                               "scope": "253", "flags": []})
+            if name != mod.OWNED[0] or mode == "applied":
+                rules.append({"priority": priority, "table": str(mod.TABLE),
+                              "src": "all", "dst": cidr.split('/')[0],
+                              "dstlen": int(cidr.split('/')[1])})
         lookups = {"selected": [{"dev": mod.OWNED[0] if mode == "applied" else "lo"}],
                    "foreign": [{"dev": mod.FOREIGN[0]}],
                    "direct": [{"dev": "lo"}]}
-    return links, routes, rules, lookups
+    dependencies["routes4"] = copy.deepcopy(routes)
+    return links, routes, rules, lookups, dependencies
 
 
 class IsolatedActivationGuardClassifier(unittest.TestCase):
     def test_exact_modes(self):
-        for mode in ("preflight", "applied", "recovered", "clean"):
+        for mode in ("preflight", "partial_link", "partial_route", "applied", "recovered", "clean"):
             with self.subTest(mode=mode):
                 mod.validate(mode, *fixture(mode))
+
+    def test_exact_partial_stage_inference_and_no_orphan_adoption(self):
+        for mode in ("partial_link", "partial_route", "applied"):
+            with self.subTest(stage=mode):
+                self.assertEqual(mod.infer_rollback_stage(*fixture(mode)), mode)
+        for mode in ("preflight", "recovered", "clean"):
+            with self.subTest(unsafe_stage=mode):
+                with self.assertRaises(ValueError):
+                    mod.infer_rollback_stage(*fixture(mode))
+
+    def test_partial_identity_mutations_refuse_any_rollback_stage(self):
+        for mode in ("partial_link", "partial_route"):
+            mutations = [
+                (0, 1, "ifalias", "foreign-replaced-owned-link"),
+                (0, 2, "ifalias", "foreign-replaced-foreign-link"),
+                (1, -1, "metric", 57),  # changed foreign route
+                (2, -1, "protocol", 123),  # changed foreign policy
+                (3, "selected", "dev", "scqao0"),  # false Direct
+            ]
+            if mode == "partial_route":
+                mutations += [(1, 0, "metric", 57), (1, 0, "protocol", "123")]
+            for section, idx, key, value in mutations:
+                with self.subTest(mode=mode, section=section, key=key):
+                    parts = list(copy.deepcopy(fixture(mode)))
+                    if section == 3:
+                        parts[3][idx][0][key] = value
+                    else:
+                        parts[section][idx][key] = value
+                    with self.assertRaises(ValueError):
+                        mod.infer_rollback_stage(*parts)
+            # Unrecorded partial progress must never be normalized into an
+            # apparently valid earlier stage when any stray owned key exists.
+            parts = list(copy.deepcopy(fixture(mode)))
+            parts[2].append({"priority": 30800, "table": str(mod.TABLE),
+                             "src": "all", "dst": "8.8.8.0", "dstlen": 24})
+            if mode == "partial_route":
+                parts[2][-1]["metric"] = 1
+            with self.subTest(mode=mode, case="unexpected_early_rule"):
+                with self.assertRaises(ValueError):
+                    mod.infer_rollback_stage(*parts)
+        parts = list(copy.deepcopy(fixture("partial_link")))
+        parts[0][1]["linkinfo"] = None
+        with self.assertRaises(ValueError):
+            mod.infer_rollback_stage(*parts)
+
+    def test_r1_interface_and_dependency_mutations_fail_closed(self):
+        # The exact fixed QA stage is valid; changing the link, adding an
+        # address, or adding a route in ANY table makes deletion unsafe.
+        for mode in ("partial_link", "partial_route", "applied"):
+            with self.subTest(mode=mode, case="native_healthy"):
+                self.assertEqual(mod.infer_rollback_stage(*fixture(mode)), mode)
+            mutations = [
+                ("mtu_changed", lambda p: p[0][1].update(mtu=1400)),
+                ("foreign_altname", lambda p: p[0][1].update(
+                    altnames=["qa-foreign-added"])),
+                ("foreign_link_unknown", lambda p: p[0][1].update(
+                    foreign_extended_attribute=1)),
+                ("foreign_queue_metadata", lambda p: p[0][1].update(
+                    gso_max_size=2048)),
+                ("foreign_master", lambda p: p[0][1].update(master="foreign-br0")),
+                ("changed_mac", lambda p: p[0][1].update(address="02:53:43:ab:cd:ef")),
+                ("changed_promisc", lambda p: p[0][1].update(promiscuity=1)),
+                ("unexpected_ipv4_address", lambda p: p[4]["addresses4"].append({
+                    "ifname": mod.OWNED[0], "addr_info": [{"family": "inet",
+                    "local": "192.0.2.77", "prefixlen": 32}]})),
+                ("unexpected_ipv6_address", lambda p: p[4]["addresses6"].append({
+                    "ifname": mod.OWNED[0], "addr_info": [{"family": "inet6",
+                    "local": "2001:db8::77", "prefixlen": 128}]})),
+                ("foreign_route_other_table", lambda p: p[4]["routes4"].append({
+                    "dst": "203.0.113.0/24", "dev": mod.OWNED[0],
+                    "table": "20121", "scope": "253", "flags": []})),
+                ("foreign_ipv6_route", lambda p: p[4]["routes6"].append({
+                    "dst": "2001:db8::/64", "dev": mod.OWNED[0],
+                    "table": "20122", "flags": []})),
+                ("foreign_nexthop", lambda p: p[4]["nexthops"].append({
+                    "id": 10, "dev": mod.OWNED[0]})),
+                ("foreign_ipv6_iif", lambda p: p[4]["rules6"].append({
+                    "priority": 100, "table": "254", "iif": mod.OWNED[0]})),
+                ("foreign_ipv4_oif", lambda p: p[2].append({
+                    "priority": 100, "table": "254", "oif": mod.OWNED[0]})),
+            ]
+            for name, change in mutations:
+                with self.subTest(mode=mode, case=name):
+                    parts = list(copy.deepcopy(fixture(mode)))
+                    change(parts)
+                    with self.assertRaises(ValueError):
+                        mod.infer_rollback_stage(*parts)
+        # Even a foreign interface identity must be non-adoptable.
+        for name, change in [
+            ("foreign_link_master", lambda p: p[0][-1].update(master="br0")),
+            ("foreign_link_altname", lambda p: p[0][-1].update(
+                altnames=["qa-foreign-secondary"])),
+            ("foreign_ipv4_addr", lambda p: p[4]["addresses4"].append({
+                "ifname": mod.FOREIGN[0], "addr_info": [{"local": "192.0.2.1"}]})),
+        ]:
+            with self.subTest(case=name):
+                parts = list(copy.deepcopy(fixture("applied")))
+                change(parts)
+                with self.assertRaises(ValueError):
+                    mod.infer_rollback_stage(*parts)
 
     def test_wrong_resource_identity_or_false_recovery_rejected(self):
         cases = (
@@ -93,11 +207,11 @@ class IsolatedActivationGuardClassifier(unittest.TestCase):
     def test_required_r1_exact_native_json_is_accepted(self):
         for mode in ("applied", "recovered"):
             with self.subTest(mode=mode):
-                links, routes, rules, lookups = fixture(mode)
+                links, routes, rules, lookups, dependencies = fixture(mode)
                 self.assertTrue(all(rule.get("src") == "all" for rule in rules))
                 self.assertTrue(all(route.get("scope") == "253" for route in routes))
                 self.assertTrue(all(route.get("flags") == [] for route in routes))
-                mod.validate(mode, links, routes, rules, lookups)
+                mod.validate(mode, links, routes, rules, lookups, dependencies)
 
     def test_unowned_extra_route_or_missing_live_lookup_rejected(self):
         for mode in ("applied", "recovered"):
@@ -118,7 +232,7 @@ class IsolatedActivationGuardClassifier(unittest.TestCase):
                     mod.validate(mode, *sections)
 
     def test_additional_table_rule_refused_even_with_unused_priority(self):
-        for mode in ("preflight", "applied", "recovered", "clean"):
+        for mode in ("preflight", "partial_link", "partial_route", "applied", "recovered", "clean"):
             sections = list(fixture(mode))
             sections[2].append({"priority": 30890, "table": mod.TABLE,
                                 "dst": "1.1.1.0", "dstlen": 24})
@@ -140,10 +254,10 @@ class IsolatedActivationGuardClassifier(unittest.TestCase):
                          [{**row, "table": str(mod.TABLE)}])
         with self.assertRaises(ValueError):
             mod.routes_from_all([row, None])
+        parts = list(copy.deepcopy(fixture("applied")))
+        parts[1][0] = dict(row, table=254)
         with self.assertRaises(ValueError):
-            mod.validate("applied", *([fixture("applied")[0],
-                                       [dict(row, table=254), fixture("applied")[1][1]],
-                                       fixture("applied")[2], fixture("applied")[3]]))
+            mod.validate("applied", *parts)
 
     def test_untrusted_shapes_and_preflight_refuse(self):
         with self.assertRaises(ValueError):
