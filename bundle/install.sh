@@ -259,8 +259,13 @@ fi
 # Installation and offline update share this path. No networking is performed.
 require_guard_inactive()
 # The shared .lock is held across observation, activation and rollback.
-release_hash=$(sha256sum "$SOURCE_DIR/bin/server-connect" "$SOURCE_DIR/bin/sing-box" | cut -d' ' -f1 | sha256sum | cut -c 1-16)
-release_name="0.1.0-dev-$release_hash"
+# Bind the installed release identity to the verified exact binary bytes in
+# one assignment. A malformed or absent hash must not be interpreted as a
+# valid named release or proceed into service changes.
+release_name="0.1.0-dev-$(sha256sum "$SOURCE_DIR/bin/server-connect" "$SOURCE_DIR/bin/sing-box" | cut -d' ' -f1 | sha256sum | cut -c 1-16)"
+release_suffix=${release_name#0.1.0-dev-}
+case "$release_suffix" in ''|*[!0123456789abcdef]*) die 'candidate binary release digest is invalid' ;; esac
+[ "${#release_suffix}" -eq 16 ] || die 'candidate binary release digest length is invalid'
 release="$PREFIX/releases/$release_name"
 previous=''
 if [ -L "$PREFIX/current" ]; then previous=$(readlink "$PREFIX/current");fi
