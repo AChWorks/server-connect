@@ -212,6 +212,8 @@ development diagnostic is not an activation/release capability.
 
 ### Proxy Only compatibility and application opt-in
 
+`server-connect --json status` distinguishes the saved desired state from the native systemd service observation; it does **not** claim a healthy outbound path. If native systemd inspection is unavailable or an active service's ownership cannot be verified, status now returns a classified nonzero error and bounded diagnostic state rather than reporting an unverified service as healthy. Internal service control uses only the trusted native `/usr/bin/systemctl` with a fixed sanitized child environment, not an operator-provided `PATH` or inherited systemd/DBus overrides.
+
 - The link importer deliberately supports a **subset** of VLESS TCP/WebSocket and TLS/Reality query fields, rejecting unrecognized or incompatible parameters. **Local TCP VLESS through the pinned sing-box core has live integration evidence; TLS/WebSocket/Reality interoperability with real foreign providers is NOT_RUN.** Import and `validate` establish syntax/core-configuration acceptance, not remote reachability.
 - A selected application may opt in explicitly with `server-connect exec -- curl ...`, or with its own authenticated HTTP/SOCKS proxy settings. `server-connect probe --via proxy --url https://...` tests the selected path; `--via direct` independently tests host Direct connectivity. These commands require an already installed, selected and running development candidate.
 - **Multi-target, read-only path diagnostics (Issue #3 foundation; not an active health guard):**

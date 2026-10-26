@@ -313,17 +313,31 @@ func (m *Manager) Remove(id string) error {
 func (m *Manager) unitActive() (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 	defer cancel()
-	b, e := exec.CommandContext(ctx, "systemctl", "is-active", DefaultUnit).CombinedOutput()
-	state := strings.TrimSpace(string(b))
-	if e != nil && state != "inactive" && state != "failed" && state != "unknown" {
-		return "unknown", errors.New("systemd service state unavailable")
+	cmd, err := trustedSystemctlCommand(ctx, "is-active", DefaultUnit)
+	if err != nil {
+		return "unknown", err
 	}
-	switch state {
-	case "active", "inactive", "failed":
+	b, e := cmd.CombinedOutput()
+	if ctx.Err() != nil {
+		return "unknown", errors.New("systemd service observation timed out")
+	}
+	return parseUnitActivity(b, e)
+}
+
+// systemctl is-active uses a successful zero exit for active and systemd's
+// standard inactive exit code 3 for inactive/failed. A printed state from an
+// otherwise broken command (signal, bus error, missing unit, etc.) is not proof.
+func parseUnitActivity(output []byte, runErr error) (string, error) {
+	state := strings.TrimSpace(string(output))
+	if state == "active" && runErr == nil {
 		return state, nil
-	default:
-		return "unknown", errors.New("systemd returned unknown service state")
 	}
+	var exitErr *exec.ExitError
+	if (state == "inactive" || state == "failed") &&
+		errors.As(runErr, &exitErr) && exitErr.ExitCode() == 3 {
+		return state, nil
+	}
+	return "unknown", Fault("service_state_unavailable", "native systemd service state could not be verified")
 }
 
 // verifyUnitOwnership executes before any lifecycle mutation. Merely choosing
@@ -359,8 +373,12 @@ func (m *Manager) verifyUnitOwnership() error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 	defer cancel()
-	output, err := exec.CommandContext(ctx, "systemctl", "show", DefaultUnit,
-		"--property=LoadState", "--property=FragmentPath", "--property=DropInPaths", "--property=Transient").Output()
+	cmd, err := trustedSystemctlCommand(ctx, "show", DefaultUnit,
+		"--property=LoadState", "--property=FragmentPath", "--property=DropInPaths", "--property=Transient")
+	if err != nil {
+		return err
+	}
+	output, err := cmd.Output()
 	if err != nil {
 		return errors.New("systemd ownership could not be inspected")
 	}
@@ -411,7 +429,11 @@ func (m *Manager) systemctl(args ...string) error {
 	defer cancel()
 	base := append([]string{}, args...)
 	base = append(base, DefaultUnit)
-	if e := exec.CommandContext(ctx, "systemctl", base...).Run(); e != nil {
+	cmd, err := trustedSystemctlCommand(ctx, base...)
+	if err != nil {
+		return err
+	}
+	if e := cmd.Run(); e != nil {
 		if ctx.Err() != nil {
 			return errors.New("systemctl operation timed out")
 		}
@@ -420,14 +442,31 @@ func (m *Manager) systemctl(args ...string) error {
 	return nil
 }
 func (m *Manager) Status() (Status, error) {
+	return m.statusWithService(m.unitActive, m.verifyUnitOwnership)
+}
+
+// A service status is a machine-visible observation, not an optimistic
+// default. Independent test readers cover unavailable systemd and ownership
+// conflicts without installing or changing any service on the host.
+func (m *Manager) statusWithService(observe func() (string, error), verifyOwnership func() error) (Status, error) {
 	var status Status
-	e := m.withLock(func() error {
-		s, e := m.load()
-		if e != nil {
-			return e
+	err := m.withLock(func() error {
+		s, err := m.load()
+		if err != nil {
+			return err
 		}
-		observed, _ := m.unitActive()
+		observed, inspectErr := observe()
 		status = Status{Desired: s.Desired, Observed: observed, Selected: s.Selected, Port: s.Port, CoreVersion: CoreVersion, Health: "not_tested"}
+		if inspectErr != nil || (observed != "active" && observed != "inactive" && observed != "failed") {
+			status.Observed = "unknown"
+			status.Health = "service_state_unavailable"
+			// Retain the specific, already sanitized native-binary trust failure.
+			// Arbitrary subprocess errors can contain unsafe raw host details.
+			if inspectErr != nil && ErrorCode(inspectErr) == "service_binary_untrusted" {
+				return inspectErr
+			}
+			return Fault("service_state_unavailable", "native systemd service state cannot be verified")
+		}
 		if s.Desired == "proxy" && observed != "active" {
 			status.Health = "core_unavailable"
 		}
@@ -437,12 +476,13 @@ func (m *Manager) Status() (Status, error) {
 		if s.Desired == "direct" && observed == "failed" {
 			status.Health = "historical_proxy_failure_direct_unaffected"
 		}
-		if observed == "active" && m.verifyUnitOwnership() != nil {
+		if observed == "active" && verifyOwnership() != nil {
 			status.Health = "service_ownership_conflict"
+			return Fault("service_conflict", "active systemd unit ownership is unverified")
 		}
 		return nil
 	})
-	return status, e
+	return status, err
 }
 func (m *Manager) password() (string, error) {
 	path := filepath.Join(m.Dir, "proxy-auth")
