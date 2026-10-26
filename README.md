@@ -53,6 +53,24 @@ A valid preview returns a deterministic bounded set of **candidate** table/prior
 
 **Safety boundary:** the output always states `read_only: true`, `activation_ready: false`, `snapshot_atomic: false`, `guard_armed: false`, `ownership_verified: false`. No table or priority is actually reserved; nothing is applied or saved. An unchanged preview, hash or apparently unused ID **does not** prove network ownership or safe SSH/HTTP(S) replies, domestic reachability, DNS/bootstrap or a bound VPN path. Do not run the displayed candidate policy manually. The internal fsync-backed PREPARED/UNCERTAIN intent journal does not attest route ownership or apply network changes. Guarded owned-route activation and rollback, an independent 600-second Activation Guard, authenticated new-session confirmation, reboot/timeout recovery and Runtime Health Guard (#3) remain separate mandatory implementation and acceptance gates.
 
+#### Private, unarmed Selective intent staging (Issue #2 development)
+
+The CLI can now bind a fresh Selective preview to a version-1 **private journal intent**, and explicitly abandon **only** its untouched PREPARED revision:
+
+~~~sh
+server-connect --json selective-stage-intent --endpoint 198.51.100.10 \
+  --management-peer 203.0.113.42 --tunnel-if scplan0 \
+  --destination 8.8.8.0/24
+server-connect --json activation-journal-status
+server-connect --json selective-abandon-intent --operation-id OPERATION_ID --revision 1
+~~~
+
+Use actual endpoints instead of documentation placeholders. Staging performs **two independent, non-atomic native preflights**, requires identical observation and plan SHA-256 fingerprints, and durably records a deterministic proposed *route/rule intent* linked to those fingerprints. It refuses ambiguous kernel observations, conflicting prior journals, incomplete/modified plan identities, and drift during staging. The journal is descriptor-pinned, mode 0600 and fsync-backed; only bounded phase, ID, revision and resource count reach the CLI. The returned ID is an exact-match identifier, **not** proof of host authorization. The private v1 record has an explicit `unarmed_selective_v1` subtype and persisted endpoint, management peer, interface, table and route/rule identities. Selective abandonment checks that complete binding, exact paired route/rule resource keys, prior absence, and the original deterministic plan digest **before** removing the verified inode. Legacy generic PREPARED journals, modified/uncertain records and unsupported future variants cannot be removed by `selective-abandon-intent`; they retain their evidence. The journal is protected against accidental and inconsistent edits, **not authenticated against a privileged actor who can rewrite all of its contents and recompute unkeyed SHA-256**. Staging creates private state (unlike `selective-plan`), may prevent starting another stage until the prior record is deliberately abandoned, and never writes `runtime.json` or `proxy-auth`.
+
+The stage and abandon command responses are **receipts for the exact committed operation**, not fresh global journal snapshots after the transaction. A concurrent authorized manager may already have abandoned A or staged B when the caller receives A's response; the returned ID always belongs to A, never to B. A successful abandon response reports `phase: absent`, `present: false`, and **the ID/revision of the removed operation**. Use `activation-journal-status` separately to inspect the current journal; even a current `absent` result cannot prove network safety.
+
+**Critical boundary:** `prepared` means **no kernel mutation and no armed recovery guard**. It does not establish an owned TUN/interface, actually reserve the proposed table/rules, install routes or start sing-box; all `guard_armed`, `activation_ready` and `recovery_verified` fields remain **false**. This journal label is NOT the normative guarded PREPARED activation state in `SAFETY-RECOVERY.md`. After even two matching snapshots, another system can change kernel networking before a future activation. Real route execution must re-observe natively under its own guarded transaction and independently verify an armed reboot-capable rollback and ongoing health guard before applying anything. `selective-abandon-intent` fails closed on mismatched ID/revision, uncertain/corrupt journals or replay and **never** deletes network resources. Do not use these developer commands as a routing workaround or a production activation interface.
+
 ### Explicit underlay TCP diagnostic (Issue #2 dependent development)
 
 For a *known* literal TCP endpoint and port, run

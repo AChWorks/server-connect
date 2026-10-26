@@ -33,6 +33,13 @@ func (m *Manager) InspectActivationJournal() (ActivationJournalStatus, error) {
 		}
 		return ActivationJournalStatus{}, err
 	}
+	return activationJournalStatusFromRecord(journal), nil
+}
+
+// A bounded status built from an EXACT journal record. Used both by live
+// inspection and by stage receipts, which must never re-read an unrelated
+// operation after the acknowledged filesystem lock has been released.
+func activationJournalStatusFromRecord(journal activationJournal) ActivationJournalStatus {
 	return ActivationJournalStatus{
 		Phase:                  journal.Phase,
 		Present:                true,
@@ -42,5 +49,5 @@ func (m *Manager) InspectActivationJournal() (ActivationJournalStatus, error) {
 		ResourceCount:          len(journal.Changes),
 		RequiresOperatorReview: true,
 		// All unsupported activation and recovery claims remain false.
-	}, nil
+	}
 }

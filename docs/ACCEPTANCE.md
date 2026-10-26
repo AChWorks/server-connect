@@ -1,6 +1,6 @@
 # Test and release acceptance
 
-**Current status:** genuine pinned-core Proxy Only, selected application paths and isolated Debian 13 systemd install/lifecycle behavior have source and CI evidence; **no authenticated public release, actual foreign-VPN field acceptance, fully implemented production guards or complete release-matrix acceptance exists.** PR/CI logs own exact candidate evidence. This is a **test contract**, not a claim that all scenarios pass.
+**Current status:** genuine pinned-core Proxy Only, selected application paths and isolated Debian 13 systemd install/lifecycle behavior have source and CI evidence; **no authenticated public release, actual foreign-VPN field acceptance, fully implemented production guards or complete release-matrix acceptance exists.** The Selective developer `selective-stage-intent`/`selective-abandon-intent` workflow writes only private, unarmed route/rule intent or removes its exact untouched revision. Its receipts are bound to the original operation, while strict subtype/binding/plan-digest and complete pair validation reject foreign or modified records. Read-only double observations, journal fsync and unkeyed digests do not prove an atomic baseline, authenticated filesystem provenance, installed TUN, guard, kernel ownership or recovery. PR/CI logs own exact candidate evidence. This is a **test contract**, not a claim that all scenarios pass.
 
 ## Evidence grades
 

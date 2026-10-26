@@ -88,6 +88,19 @@ var activationJournalFields = map[string]bool{
 	"plan_sha256": true, "changes": true,
 }
 
+// The exact v1 selective subtype is opt-in. Legacy generic records cannot
+// be silently reinterpreted as selective, and future variants fail closed.
+var selectiveJournalFields = map[string]bool{
+	"version": true, "revision": true, "operation_id": true, "phase": true,
+	"created_unix": true, "observation_sha256": true,
+	"plan_sha256": true, "changes": true,
+	"intent_type": true, "selective": true,
+}
+var selectiveJournalBindingFields = map[string]bool{
+	"endpoint": true, "management_peer": true,
+	"tunnel_interface": true, "route_table": true,
+}
+
 var activationChangeFields = map[string]bool{
 	"kind": true, "key": true, "before": true,
 	"intended": true, "stage": true,
@@ -110,12 +123,23 @@ func strictActivationJournalJSON(data []byte) error {
 	if err := rejectAmbiguousJournalJSON(data); err != nil {
 		return err
 	}
-	if err := requireExactJournalKeys(data, activationJournalFields); err != nil {
-		return err
-	}
 	var root map[string]json.RawMessage
 	if err := json.Unmarshal(data, &root); err != nil {
 		return activationJournalError("activation journal root is malformed")
+	}
+	if raw, hasType := root["intent_type"]; hasType {
+		var intentType string
+		if err := json.Unmarshal(raw, &intentType); err != nil || intentType != selectiveIntentType {
+			return activationJournalError("unsupported activation intent subtype")
+		}
+		if err := requireExactJournalKeys(data, selectiveJournalFields); err != nil {
+			return err
+		}
+		if err := requireExactJournalKeys(root["selective"], selectiveJournalBindingFields); err != nil {
+			return err
+		}
+	} else if err := requireExactJournalKeys(data, activationJournalFields); err != nil {
+		return err
 	}
 	var rows []json.RawMessage
 	if err := json.Unmarshal(root["changes"], &rows); err != nil ||
