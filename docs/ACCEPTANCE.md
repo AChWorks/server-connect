@@ -63,7 +63,10 @@ private journal digest, and actual independently invoked recovery after a
 crash. Stopping the timer or masking the recovery service while pending must
 not produce a false `guard_scheduled` or `trial_recovered` receipt,
 including when `systemctl show` still reports cached `loaded/static` for
-an actual `/run/systemd/system` mask. After an
+an actual `/run/systemd/system` mask. The negative guest exercise separately
+reloads systemd before asserting the masked watchdog cannot run at all;
+merely writing a mask symlink does not prove its old cached unit stopped
+executing. After an
 externally impaired service is restored, the overdue experiment must recover
 without deleting foreign rules. A deliberately reintroduced protocol-tagged
 rule after successful recovery must fail live status reinspection until the

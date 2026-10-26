@@ -267,13 +267,8 @@ systemctl mask --runtime "$service"
 load_state=$(systemctl show "$service" -p LoadState --value)
 file_state=$(systemctl show "$service" -p UnitFileState --value)
 printf 'PRODUCT_GUARD_TRIAL_MASKED_UNIT_OBSERVATION=LoadState:%s,UnitFileState:%s\n' "$load_state" "$file_state"
-# A masked target can prevent the timer itself from starting. That is a
-# degraded-watchdog observation, NOT grounds for declaring recovery.
-if systemctl start "$timer";then
- systemctl is-active --quiet "$timer"
-else
- [ "$(systemctl show "$timer" -p ActiveState --value)" = inactive ]
-fi
+# First prove that the product refuses the *cached* systemd positive
+# state while the real runtime mask is already on disk.
 if "$SC" --json activation-trial-recover >/run/sc-qa-masked-service.log 2>&1;then
  echo 'Masked watchdog was incorrectly reported as scheduled' >&2;exit 1
 fi
@@ -283,11 +278,26 @@ with open('/run/sc-qa-masked-service.log',encoding='utf-8') as f: r=json.load(f)
 assert not r['ok'] and r['error']['code']=='guard_unavailable',r
 PYMASK
 rm -f /run/sc-qa-masked-service.log
+echo PRODUCT_GUARD_TRIAL_CACHED_MASK_FALSE_GUARD_REFUSED=PASS
+# A mask file alone does not necessarily stop a *cached* loaded unit from
+# being invoked by systemd. Reload while the timer is stopped so the next
+# probe actually tests an UNAVAILABLE executor, not one still executable.
+systemctl daemon-reload
+[ "$(systemctl show "$service" -p LoadState --value)" = masked ]
+# A masked target can prevent the timer itself from starting. That is a
+# degraded-watchdog observation, NOT grounds for declaring recovery.
+if systemctl start "$timer";then
+ systemctl is-active --quiet "$timer"
+else
+ [ "$(systemctl show "$timer" -p ActiveState --value)" = inactive ]
+fi
 sleep 11
 [ "$(phase)" = trial_pending ]
 [ "$pending_sha" = "$(/usr/bin/sha256sum /var/lib/server-connect/route-activation-journal.json | cut -d' ' -f1)" ]
 "$ip" -4 rule show | grep -F '9.9.9.0/24' >/dev/null
+systemctl stop "$timer"
 systemctl unmask --runtime "$service"
+systemctl daemon-reload
 [ "$(systemctl show "$service" -p LoadState --value)" = loaded ]
 systemctl reset-failed "$service" || true
 systemctl restart "$timer"
