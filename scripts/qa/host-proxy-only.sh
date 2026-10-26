@@ -54,6 +54,113 @@ if o.get("ok") is not True or (o.get("data") or {}).get("local_listener_ready") 
     sys.exit("Installed manager listener was not ready")
 '
 }
+# This exercises independent proxy-aware consumers, not merely curl.
+# A Python parent also launches an actual wget grandchild, approximating
+# a panel-managed installer process tree while NOT claiming aaPanel itself
+# has opted in or that arbitrary binaries honor HTTP proxy variables.
+selected_wget() {
+  "$manager" exec -- /usr/bin/wget -q -T 6 -t 1 -O - "$target"
+}
+
+selected_python_parent() {
+  # Separate outage cases are essential: a failed urllib fetch must not
+  # short-circuit the independently required wget child-process assertion.
+  "$manager" exec -- /usr/bin/python3 -I -B -c '
+import subprocess, sys, urllib.error, urllib.request
+mode, url = sys.argv[1:]
+if mode in ("positive", "urllib-down"):
+    try:
+        with urllib.request.urlopen(url, timeout=6) as response:
+            if response.status != 200 or response.read().strip() != b"SC_QA_WEB_OK":
+                sys.exit(12)
+    except urllib.error.URLError:
+        if mode != "urllib-down":
+            raise
+        print("SC_QA_PYTHON_URLLIB_PROXY_DOWN")
+        sys.exit(0)
+    if mode == "urllib-down":
+        sys.exit("Python urllib silently reached Direct")
+if mode in ("positive", "child-down"):
+    try:
+        child = subprocess.run(
+            ["/usr/bin/wget", "-q", "-T", "6", "-t", "1", "-O", "-", url],
+            capture_output=True, timeout=9, check=False)
+    except subprocess.TimeoutExpired:
+        sys.exit(14)
+    if mode == "child-down":
+        if child.returncode == 0 or b"SC_QA_WEB_OK" in child.stdout:
+            sys.exit("Python-spawned wget reached the independent Direct origin")
+        print("SC_QA_PYTHON_WGET_CHILD_PROXY_DOWN")
+        sys.exit(0)
+    if child.returncode != 0 or child.stdout.strip() != b"SC_QA_WEB_OK":
+        sys.exit(13)
+if mode != "positive":
+    sys.exit(2)
+print("SC_QA_PYTHON_SUBPROCESS_SELECTED")
+' "$1" "$target"
+}
+
+selected_git() {
+  "$manager" exec -- /usr/bin/git -c http.lowSpeedTime=6 -c http.lowSpeedLimit=1 \
+    ls-remote --exit-code http://127.0.0.1:19180/sc-qa-git.git HEAD
+}
+
+selected_apps_positive() {
+  wget_positive=$(selected_wget) || {
+    echo 'Selected wget failed despite active upstream' >&2; return 1
+  }
+  [ "$wget_positive" = SC_QA_WEB_OK ] || {
+    echo 'Selected wget did not return the independent origin marker' >&2; return 1
+  }
+  python_positive=$(selected_python_parent positive) || {
+    echo 'Selected Python urllib and spawned wget failed despite active upstream' >&2; return 1
+  }
+  [ "$python_positive" = SC_QA_PYTHON_SUBPROCESS_SELECTED ] || {
+    echo 'Selected Python parent did not confirm both consumers' >&2; return 1
+  }
+  expected=$(/usr/bin/git --git-dir=/root/qa-web/sc-qa-git.git rev-parse HEAD)
+  actual=$(selected_git)
+  test "$(printf '%s\n' "$actual" | cut -f1)" = "$expected"
+  test "$(printf '%s\n' "$actual" | cut -f2)" = HEAD
+  echo 'INSTALLED_SELECTED_NONCURL_APPS=PASS (wget, Python urllib->wget, Git HTTP)'
+}
+
+selected_apps_negative() {
+  # A client silently using Direct while the VLESS upstream is down would
+  # succeed against the guest-local origin; such a false pass is forbidden.
+  if wget_negative=$(selected_wget 2>/dev/null); then
+    echo 'Wget silently reached Direct after selected VLESS failure' >&2; return 1
+  fi
+  case "$wget_negative" in
+    *SC_QA_WEB_OK*)
+      echo 'Wget leaked Direct origin data despite reporting an error' >&2; return 1 ;;
+  esac
+  # The urllib request and spawned wget MUST be invoked separately while
+  # the upstream is down. Running the normal positive sequence alone would
+  # exit on urllib failure before ever reaching its child.
+  python_negative=$(selected_python_parent urllib-down) || {
+    echo 'Python urllib outage probe failed without a classified proxy failure' >&2; return 1
+  }
+  if [ "$python_negative" != SC_QA_PYTHON_URLLIB_PROXY_DOWN ]; then
+    echo 'Python urllib silently reached Direct after VLESS failure' >&2; return 1
+  fi
+  echo 'INSTALLED_SELECTED_PYTHON_URLLIB_FAIL_CLOSED=PASS'
+  child_negative=$(selected_python_parent child-down) || {
+    echo 'Python-spawned wget outage probe did not complete' >&2; return 1
+  }
+  if [ "$child_negative" != SC_QA_PYTHON_WGET_CHILD_PROXY_DOWN ]; then
+    echo 'Python-spawned wget silently reached Direct after VLESS failure' >&2; return 1
+  fi
+  echo 'INSTALLED_SELECTED_PYTHON_WGET_CHILD_FAIL_CLOSED=PASS'
+  if git_negative=$(selected_git 2>/dev/null); then
+    echo 'Git silently reached Direct after selected VLESS failure' >&2; return 1
+  fi
+  if [ -n "$git_negative" ]; then
+    echo 'Git emitted origin refs despite selected VLESS failure' >&2; return 1
+  fi
+  echo 'INSTALLED_SELECTED_NONCURL_FAIL_CLOSED=PASS'
+}
+
 positive() {
   systemctl is-active --quiet "$upstream"
   active_ready
@@ -63,6 +170,7 @@ positive() {
   response=$("$manager" exec -- curl -q --fail --silent --show-error \
     --max-time 8 "$target") || exit 1
   [ "$response" = SC_QA_WEB_OK ] || exit 1
+  selected_apps_positive
   test "$(cat /var/lib/server-connect/profiles/qa-retained)" = SC_QA_RETAIN_PROFILE_BYTES
 }
 case "$1" in
@@ -175,6 +283,7 @@ print(o["data"]["id"])
       echo 'Opted-in application leaked to Direct when VLESS upstream stopped' >&2
       exit 1
     fi
+    selected_apps_negative
     /bin/sh /root/qa-apt-only.sh negative "$apt_phase"
     active_ready
     systemctl start "$upstream"

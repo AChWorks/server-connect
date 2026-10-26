@@ -16,6 +16,16 @@ case "${1:-}" in
     mkdir -p /run/sshd
     chmod 0755 /run/sshd
     printf '%s\n' SC_QA_WEB_OK > /root/qa-web/index.html
+    # Fixed disposable static Git origin for testing Git's own HTTP client,
+    # not only curl. No credentials or third-party remote repositories.
+    mkdir -m 0700 /root/qa-git-source
+    /usr/bin/git -C /root/qa-git-source init -q
+    printf 'SC_QA_GIT_OK\n' > /root/qa-git-source/readme.txt
+    /usr/bin/git -C /root/qa-git-source add readme.txt
+    /usr/bin/git -C /root/qa-git-source -c user.name=Fixture \
+      -c user.email=fixture.invalid@example.invalid commit -qm 'test-only initial object'
+    /usr/bin/git clone -q --bare /root/qa-git-source /root/qa-web/sc-qa-git.git
+    /usr/bin/git --git-dir=/root/qa-web/sc-qa-git.git update-server-info
     ssh-keygen -q -t ed25519 -N '' -f /root/qa-ssh/hostkey
     ssh-keygen -q -t ed25519 -N '' -f /root/qa-ssh/clientkey
     mkdir -m 0700 /home/scqa/.ssh
