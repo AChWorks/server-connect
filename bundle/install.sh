@@ -380,7 +380,14 @@ on_exit() {
  code=$?
  trap - EXIT HUP INT TERM
  if [ "$code" -ne 0 ] && [ "$operation_done" != yes ];then rollback_candidate;fi
- remove_backup
+ if [ "${failed:-no}" = yes ];then
+  # If old unit/service restoration failed, preserving the exact previous
+  # unit bytes is essential for console recovery. Never erase the only
+  # candidate-independent copy solely because the shell is exiting.
+  say "RECOVERY_REQUIRED: exact previous unit backups retained: ${unit_backup:-none} ${guard_backup:-none}"
+ else
+  remove_backup
+ fi
  exit "$code"
 }
 trap on_exit EXIT

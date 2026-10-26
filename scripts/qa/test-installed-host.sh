@@ -40,6 +40,7 @@ PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/qa/test-wp-proxy-prepend.py
 # ambiguous kernel identities before the privileged disconnected guest runs.
 sh -n scripts/qa/host-activation-guard.sh
 sh -n scripts/qa/host-product-guard-trial.sh
+bash scripts/qa/test-installer-rollback-backups.sh
 PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/qa/test-activation-guard-inspect.py
 # Separate reboot-scheduling QA remains a disposable-container proof only.
 bash -n scripts/qa/test-activation-boot-qa.sh
