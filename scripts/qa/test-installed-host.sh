@@ -34,6 +34,10 @@ bash scripts/qa/test-host-apt-only.sh
 # since pull_request_target uses the trusted main workflow definition.
 PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/qa/test-wp-fcgi-check.py
 PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/qa/test-wp-proxy-prepend.py
+# The guard feasibility probe must be strictly guest-local and must reject
+# ambiguous kernel identities before the privileged disconnected guest runs.
+sh -n scripts/qa/host-activation-guard.sh
+PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/qa/test-activation-guard-inspect.py
 tmpdir=/tmp
 if [[ -n $(printenv RUNNER_TEMP || true) ]]; then tmpdir=$(printenv RUNNER_TEMP); fi
 scratch=$(mktemp -d "$tmpdir/server-connect-hostqa.XXXXXXXX")
@@ -441,6 +445,32 @@ verify_host_services uninstall
 
 echo 'DISCONNECTED_OFFLINE_CYCLE=PASS'
 echo 'LIMITATION: WordPress/PHP-FPM verification used disconnected guest loopback and QA-only WP_PROXY_*; real hosting/foreign field acceptance is NOT_RUN'
+
+echo '=== Independent activation-deadline feasibility in disconnected guest (QA ONLY) ==='
+# Fixed dummy links and policy exist only inside the disposable Docker
+# --network none namespace. systemd PID1 independently triggers rollback
+# after a killed child. This is NOT a product Activation Guard, a real VPN,
+# persistent reboot recovery or authorization to route a physical host.
+docker cp "$root/scripts/qa/host-activation-guard.sh" \
+  "$container:/root/qa-activation-guard.sh"
+docker cp "$root/scripts/qa/activation-guard-inspect.py" \
+  "$container:/root/qa-activation-guard-inspect.py"
+docker exec "$container" /bin/sh /root/qa-activation-guard.sh arm
+if docker exec "$container" /bin/sh /root/qa-activation-guard.sh crash-controller; then
+  echo 'Disposable activation controller unexpectedly survived intentional SIGKILL' >&2
+  exit 1
+else
+  killed_exit=$?
+  [[ $killed_exit == 137 ]] || {
+    echo "Activation controller did not exit through expected SIGKILL (exit=$killed_exit)" >&2
+    exit 1
+  }
+fi
+docker exec "$container" /bin/sh /root/qa-activation-guard.sh await-recovery
+docker exec "$container" /bin/sh /root/qa-activation-guard.sh cleanup
+assert_network_unchanged isolated-activation-guard-fixture "$offline_before"
+verify_host_services isolated-activation-guard-fixture
+echo 'ISOLATED_ACTIVATION_GUARD_FEASIBILITY=PASS (not product guard/reboot proof)'
 
 echo '=== Isolated LOOPBACK acquisition followed by the SAME real installer ==='
 # Docker --network none remains active; loopback was enabled for the existing

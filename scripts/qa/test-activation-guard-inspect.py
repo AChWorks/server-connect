@@ -1,0 +1,162 @@
+#!/usr/bin/env python3
+"""Hermetic false-PASS tests for isolated QA-only kernel inventory verifier."""
+import copy
+import importlib.util
+from pathlib import Path
+import unittest
+
+spec = importlib.util.spec_from_file_location(
+    "sc_activation_guard_inspector", Path(__file__).with_name("activation-guard-inspect.py"))
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+
+
+def fixture(mode):
+    links = [{"ifname": "lo"}]
+    routes = []
+    rules = []
+    lookups = {}
+    if mode in ("applied", "recovered"):
+        resources = [mod.FOREIGN]
+        if mode == "applied":
+            resources.insert(0, mod.OWNED)
+        for name, alias, cidr, priority in resources:
+            links.append({"ifname": name, "ifalias": alias,
+                          "linkinfo": {"info_kind": "dummy"}})
+            # Literal normalized native Debian 13 `ip -j -N` fixture
+            # captured from a disposable user+network namespace, not a
+            # hand-waved minimal synthetic subset.
+            routes.append({"dst": cidr, "dev": name, "table": str(mod.TABLE),
+                           "scope": "253", "flags": []})
+            rules.append({"priority": priority, "table": str(mod.TABLE),
+                          "src": "all", "dst": cidr.split('/')[0],
+                          "dstlen": int(cidr.split('/')[1])})
+        lookups = {"selected": [{"dev": mod.OWNED[0] if mode == "applied" else "lo"}],
+                   "foreign": [{"dev": mod.FOREIGN[0]}],
+                   "direct": [{"dev": "lo"}]}
+    return links, routes, rules, lookups
+
+
+class IsolatedActivationGuardClassifier(unittest.TestCase):
+    def test_exact_modes(self):
+        for mode in ("preflight", "applied", "recovered", "clean"):
+            with self.subTest(mode=mode):
+                mod.validate(mode, *fixture(mode))
+
+    def test_wrong_resource_identity_or_false_recovery_rejected(self):
+        cases = (
+            ("applied", 0, 1, "ifalias", "foreign-replaced-interface"),
+            ("applied", 1, 0, "dev", "wrong-device"),
+            ("applied", 2, 0, "table", 254),
+            ("applied", 2, 0, "dstlen", None),
+            ("applied", 2, 0, "priority", "30800"),
+            ("applied", 2, 0, "dst", "0.0.0.0"),
+            ("applied", 2, 0, "not", True),
+            ("recovered", 0, 1, "ifname", "scqao0"),
+            ("recovered", 1, 0, "dst", "8.8.8.0/24"),
+            ("recovered", 2, 0, "priority", 30800),
+        )
+        for mode, section, idx, key, value in cases:
+            with self.subTest(mode=mode, section=section, key=key):
+                sections = list(copy.deepcopy(fixture(mode)))
+                sections[section][idx][key] = value
+                with self.assertRaises(ValueError):
+                    mod.validate(mode, *sections)
+
+    def test_required_r1_changed_native_metadata_must_fail_before_rollback(self):
+        # Required finding R1: matching device/destination/table/priority
+        # MUST NOT authorize destructive rollback of an adopted foreign rule
+        # or route with additional/different kernel identity fields.
+        mutations = (
+            ("rule_protocol", 2, 0, "protocol", "55"),
+            ("rule_src", 2, 0, "src", "192.0.2.0"),
+            ("rule_srclen", 2, 0, "srclen", 24),
+            ("rule_uid_start", 2, 0, "uid_start", 1000),
+            ("rule_uid_end", 2, 0, "uid_end", 3000),
+            ("rule_realms", 2, 0, "realms", "1234"),
+            ("rule_unrecognized_attr", 2, 0, "extension_selector", "foreign"),
+            ("route_protocol", 1, 0, "protocol", "188"),
+            ("route_scope", 1, 0, "scope", "254"),
+            ("route_metric", 1, 0, "metric", 100),
+            ("route_prefsrc", 1, 0, "prefsrc", "10.210.1.2"),
+            ("route_flags", 1, 0, "flags", ["onlink"]),
+            ("route_unrecognized_attr", 1, 0, "extension_route", "foreign"),
+        )
+        for case, section, index, key, value in mutations:
+            for owner in (0, 1):
+                with self.subTest(case=case, owner=owner):
+                    sections = list(copy.deepcopy(fixture("applied")))
+                    sections[section][index + owner][key] = value
+                    with self.assertRaises(ValueError):
+                        mod.validate("applied", *sections)
+
+    def test_required_r1_exact_native_json_is_accepted(self):
+        for mode in ("applied", "recovered"):
+            with self.subTest(mode=mode):
+                links, routes, rules, lookups = fixture(mode)
+                self.assertTrue(all(rule.get("src") == "all" for rule in rules))
+                self.assertTrue(all(route.get("scope") == "253" for route in routes))
+                self.assertTrue(all(route.get("flags") == [] for route in routes))
+                mod.validate(mode, links, routes, rules, lookups)
+
+    def test_unowned_extra_route_or_missing_live_lookup_rejected(self):
+        for mode in ("applied", "recovered"):
+            sections = list(fixture(mode))
+            sections[1].append({"dst": "1.1.1.0/24", "dev": "lo", "table": mod.TABLE})
+            with self.subTest(mode=mode, case="unowned_route"):
+                with self.assertRaises(ValueError):
+                    mod.validate(mode, *sections)
+            sections = list(fixture(mode))
+            sections[3]["selected"] = [{"dev": "lo" if mode == "applied" else "scqao0"}]
+            with self.subTest(mode=mode, case="wrong_selected_path"):
+                with self.assertRaises(ValueError):
+                    mod.validate(mode, *sections)
+            sections = list(fixture(mode))
+            sections[3]["direct"] = [{"dev": "scqao0"}]
+            with self.subTest(mode=mode, case="lost_direct_path"):
+                with self.assertRaises(ValueError):
+                    mod.validate(mode, *sections)
+
+    def test_additional_table_rule_refused_even_with_unused_priority(self):
+        for mode in ("preflight", "applied", "recovered", "clean"):
+            sections = list(fixture(mode))
+            sections[2].append({"priority": 30890, "table": mod.TABLE,
+                                "dst": "1.1.1.0", "dstlen": 24})
+            with self.subTest(mode=mode):
+                with self.assertRaises(ValueError):
+                    mod.validate(mode, *sections)
+
+    def test_missing_detailed_link_kind_rejected(self):
+        parts = list(fixture("applied"))
+        parts[0][1].pop("linkinfo")
+        with self.assertRaises(ValueError):
+            mod.validate("applied", *parts)
+
+    def test_native_all_table_discovery_not_false_empty(self):
+        row = {"dst": "8.8.8.0/24", "dev": mod.OWNED[0], "table": mod.TABLE}
+        self.assertEqual(mod.routes_from_all([{"dst": "default", "dev": "lo"}, row]), [row])
+        self.assertEqual(mod.routes_from_all([{"table": "local", "dst": "127.0.0.1"}]), [])
+        self.assertEqual(mod.routes_from_all([{**row, "table": str(mod.TABLE)}]),
+                         [{**row, "table": str(mod.TABLE)}])
+        with self.assertRaises(ValueError):
+            mod.routes_from_all([row, None])
+        with self.assertRaises(ValueError):
+            mod.validate("applied", *([fixture("applied")[0],
+                                       [dict(row, table=254), fixture("applied")[1][1]],
+                                       fixture("applied")[2], fixture("applied")[3]]))
+
+    def test_untrusted_shapes_and_preflight_refuse(self):
+        with self.assertRaises(ValueError):
+            mod.validate("unknown", *fixture("clean"))
+        parts = list(fixture("preflight"))
+        parts[0].append({"ifname": "eth0"})
+        with self.assertRaises(ValueError):
+            mod.validate("preflight", *parts)
+        parts = list(fixture("applied"))
+        parts[2] = None
+        with self.assertRaises(ValueError):
+            mod.validate("applied", *parts)
+
+
+if __name__ == "__main__":
+    unittest.main()
