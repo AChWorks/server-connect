@@ -9,6 +9,8 @@ on:
       - '.github/workflows/installed-host-qa.yml'
       - 'bundle/install.sh'
       - 'bundle/server-connect.service'
+      - 'bundle/server-connect-activation-recover.service'
+      - 'bundle/server-connect-activation-recover.timer'
       - 'scripts/bootstrap-online.sh'
       - 'scripts/package.sh'
       - 'scripts/qa/**'
