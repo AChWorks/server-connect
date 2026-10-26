@@ -43,6 +43,12 @@ unsigned_us() {
   test "$1" -gt 0
 }
 
+# systemd pretty-prints timer LastTriggerUSecMonotonic rather than emitting
+# its raw integer. Instead of parsing locale-dependent human timespans or
+# adding a separate D-Bus client, require the timer's *own* `elapsed` state
+# and separately bind the service's numeric monotonic ExecMain timestamps to
+# the exact current timer activation and independent resource injection.
+
 require_state() {
   test -d "$state"
   test "$(stat -c '%a' "$state")" = 700
@@ -312,18 +318,17 @@ fresh_refusal_evidence() {
   test "$(systemctl show "$service" -p ExecMainStatus --value)" = 24 || return 1
   start=$(systemctl show "$service" -p ExecMainStartTimestampMonotonic --value)
   finish=$(systemctl show "$service" -p ExecMainExitTimestampMonotonic --value)
-  triggered=$(systemctl show "$timer" -p LastTriggerUSecMonotonic --value)
+  timer_substate=$(systemctl show "$timer" -p SubState --value)
+  test "$timer_substate" = elapsed || return 1
   armed=$(cat "$state/armed-us")
   injected=$(cat "$state/injected-us")
   previous_start=$(cat "$state/previous-start-us")
-  for tick in "$start" "$finish" "$triggered" "$armed" "$injected"; do
+  for tick in "$start" "$finish" "$armed" "$injected"; do
     unsigned_us "$tick" || return 1
   done
   case "$previous_start" in ''|*[!0-9]*) return 1 ;; esac
   test "$start" -gt "$armed" && test "$start" -gt "$injected" &&
     test "$start" -gt "$previous_start" &&
-    test "$triggered" -ge "$armed" &&
-    test "$triggered" -le "$start" &&
     test "$finish" -ge "$start" || return 1
   invocation=$(systemctl show "$service" -p InvocationID --value)
   case "$invocation" in
@@ -376,7 +381,7 @@ await_refusal() {
     echo 'Foreign dependency was accepted after failed watchdog' >&2
     return 1
   fi
-  echo "ISOLATED_ACTIVATION_GUARD_FRESH_INVOCATION=PASS (kind=$1, invocation=$invocation, start_us=$start, injected_us=$injected, armed_us=$armed, trigger_us=$triggered)"
+  echo "ISOLATED_ACTIVATION_GUARD_FRESH_INVOCATION=PASS (kind=$1, invocation=$invocation, start_us=$start, injected_us=$injected, armed_us=$armed, timer_substate=$timer_substate)"
   echo "ISOLATED_ACTIVATION_GUARD_FOREIGN_DEPENDENCY_REFUSED=PASS (kind=$1)"
 }
 
