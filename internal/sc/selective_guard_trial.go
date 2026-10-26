@@ -277,6 +277,13 @@ func trialGuardScheduled() error {
 			fields["DropInPaths"] != "" || fields["Transient"] != "no" {
 			return Fault("guard_unavailable", "independent recovery unit identity mismatch")
 		}
+		// The installed oneshot has no [Install] section and must stay
+		// static. A runtime mask can leave a cached loaded FragmentPath;
+		// checking only LoadState/FragmentPath can falsely attest the
+		// watchdog while a pending kernel rule is no longer supervised.
+		if name == trialRecoveryUnit && fields["UnitFileState"] != "static" {
+			return Fault("guard_unavailable", "independent recovery service no longer static and available")
+		}
 		if name == trialRecoveryTimer && (fields["ActiveState"] != "active" || fields["UnitFileState"] != "enabled" || fields["Unit"] != trialRecoveryUnit) {
 			return Fault("guard_unavailable", "independent recovery timer not enabled and running")
 		}
