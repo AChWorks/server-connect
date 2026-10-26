@@ -426,6 +426,26 @@ func selectiveCanonicalLookup(lookup *HostRouteLookup, target netip.Addr) (HostR
 	return HostRouteLookup{Target: target.String(), Family: family, KernelRoute: canonical}, nil
 }
 
+// Shared with durable intent staging: the exact digest formula must not
+// diverge between the advisory planner and the persisted journal boundary.
+func selectivePlanDigest(plan SelectiveRoutePlan) (string, error) {
+	intentBytes, err := json.Marshal(struct {
+		Endpoint, Peer, Device string
+		Table                  int
+		Routes                 []PlannedRoute
+		Rules                  []PlannedRule
+		Observed               string
+	}{
+		plan.Endpoint, plan.ManagementPeer, plan.TunnelInterface,
+		plan.RouteTable, plan.Routes, plan.Rules, plan.ObservationSHA256,
+	})
+	if err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256(intentBytes)
+	return hex.EncodeToString(sum[:]), nil
+}
+
 func buildSelectivePlan(intent validatedSelective, host HostPreflight) (SelectiveRoutePlan, error) {
 	uncertain := func(message string) (SelectiveRoutePlan, error) {
 		return SelectiveRoutePlan{}, Fault("route_plan_uncertain", message)
@@ -617,22 +637,11 @@ func buildSelectivePlan(intent validatedSelective, host HostPreflight) (Selectiv
 	}
 	fingerprint := sha256.Sum256(observed)
 	plan.ObservationSHA256 = hex.EncodeToString(fingerprint[:])
-	// Do not hash the limitations or self-referential plan digest.
-	intentBytes, err := json.Marshal(struct {
-		Endpoint, Peer, Device string
-		Table                  int
-		Routes                 []PlannedRoute
-		Rules                  []PlannedRule
-		Observed               string
-	}{
-		plan.Endpoint, plan.ManagementPeer, plan.TunnelInterface,
-		plan.RouteTable, plan.Routes, plan.Rules, plan.ObservationSHA256,
-	})
+	// Do not hash limitations or the self-referential plan digest.
+	plan.PlanSHA256, err = selectivePlanDigest(plan)
 	if err != nil {
 		return uncertain("cannot fingerprint advisory plan")
 	}
-	sum := sha256.Sum256(intentBytes)
-	plan.PlanSHA256 = hex.EncodeToString(sum[:])
 	if len(plan.Rules) != len(intent.prefixes) {
 		return uncertain(fmt.Sprintf("incomplete preview for %d destinations", len(intent.prefixes)))
 	}

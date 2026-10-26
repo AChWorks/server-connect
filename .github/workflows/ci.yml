@@ -143,7 +143,78 @@ jobs:
           assert {r['family'] for r in plan['rules']} == {'ipv4','ipv6'}
           assert len(plan['observation_sha256']) == len(plan['plan_sha256']) == 64
           PYMIXED
+          # Native Debian 13 CLI end-to-end: private PREPARED intent only.
+          # No kernel resource is installed or reserved. Test real native
+          # iproute2 observation, durable journal, exact abandonment, and
+          # no persistent runtime credentials or host route changes.
           umask 077
+          intent_dir=$(mktemp -d /var/tmp/sc-stage-ci.XXXXXXXX)
+          [[ "$intent_dir" == /var/tmp/sc-stage-ci.* ]]
+          trap 'rm -rf -- "$intent_dir"' EXIT
+          build/ci/server-connect-cli --json --state-dir "$intent_dir" selective-stage-intent \
+            --endpoint 198.51.100.10 --management-peer 203.0.113.42 \
+            --tunnel-if scpreview0 --destination 8.8.8.0/24 \
+            > build/ci/selective-staged.json
+          build/ci/server-connect-cli --json --state-dir "$intent_dir" activation-journal-status \
+            > build/ci/selective-staged-reloaded.json
+          python3 - <<'PYSTAGE'
+          import json
+          from pathlib import Path
+          staged=json.loads(Path('build/ci/selective-staged.json').read_text())
+          saved=json.loads(Path('build/ci/selective-staged-reloaded.json').read_text())
+          for response in (staged,saved):
+              assert response['ok'] is True
+              data=response['data']
+              assert data['present'] is True and data['phase']=='prepared'
+              assert data['revision']==1 and data['resource_count']==2
+              assert data['requires_operator_review'] is True
+              for field in ('activation_ready','guard_armed','recovery_verified','host_network_inspected'):
+                  assert data[field] is False
+              for private in ('before','intended','198.51.100.10','203.0.113.42','8.8.8.0/24'):
+                  assert private not in json.dumps(response)
+          operation=staged['data']['operation_id']
+          assert len(operation)==32 and operation==saved['data']['operation_id']
+          Path('build/ci/selective-operation-id.txt').write_text(operation)
+          PYSTAGE
+          test -f "$intent_dir/route-activation-journal.json"
+          test ! -e "$intent_dir/runtime.json"
+          test ! -e "$intent_dir/proxy-auth"
+          operation_id=$(cat build/ci/selective-operation-id.txt)
+          if build/ci/server-connect-cli --json --state-dir "$intent_dir" selective-abandon-intent \
+            --operation-id 00000000000000000000000000000000 --revision 1 \
+            > build/ci/selective-wrong-id.json; then
+            echo 'Wrong operation identity removed staged intent' >&2
+            exit 1
+          fi
+          build/ci/server-connect-cli --json --state-dir "$intent_dir" selective-abandon-intent \
+            --operation-id "$operation_id" --revision 1 \
+            > build/ci/selective-abandoned.json
+          if build/ci/server-connect-cli --json --state-dir "$intent_dir" selective-abandon-intent \
+            --operation-id "$operation_id" --revision 1 \
+            > build/ci/selective-replay.json; then
+            echo 'Old operation replay incorrectly succeeded' >&2
+            exit 1
+          fi
+          test ! -e "$intent_dir/route-activation-journal.json"
+          build/ci/server-connect-cli --json selective-plan \
+            --endpoint 198.51.100.10 --management-peer 203.0.113.42 \
+            --tunnel-if scpreview0 --destination 8.8.8.0/24 \
+            > build/ci/selective-post-stage-plan.json
+          python3 - <<'PYSTAGEEND'
+          import json
+          from pathlib import Path
+          data=lambda name: json.loads(Path('build/ci/'+name).read_text())
+          assert data('selective-wrong-id.json')['error']['code']=='activation_journal_conflict'
+          assert data('selective-abandoned.json')['data']['phase']=='absent'
+          assert data('selective-replay.json')['error']['code']=='activation_journal_missing'
+          original=data('selective-plan.json')['data']
+          after=data('selective-post-stage-plan.json')['data']
+          assert original['plan_sha256']==after['plan_sha256']
+          assert original['observation_sha256']==after['observation_sha256']
+          PYSTAGEEND
+          rm -rf -- "$intent_dir"
+          trap - EXIT
+          echo 'NATIVE_SELECTIVE_INTENT_STAGE_AND_ABANDON=PASS (no activation)'
           build/ci/server-connect-cli --json host-preflight --endpoint 127.0.0.1 \
             --management-peer 127.0.0.2 > build/ci/host-preflight.json
           build/ci/server-connect-cli --json host-drift --baseline build/ci/host-preflight.json \

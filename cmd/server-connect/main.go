@@ -249,7 +249,7 @@ func run(j bool, m *sc.Manager, args []string) int {
 		}
 		res, e := m.Probe(*via, *target)
 		return output(j, res, e)
-	case "selective-plan":
+	case "selective-plan", "selective-stage-intent":
 		opts := flag.NewFlagSet(name, flag.ContinueOnError)
 		opts.SetOutput(io.Discard)
 		endpoint := opts.String("endpoint", "", "literal existing VPN endpoint IP")
@@ -258,16 +258,37 @@ func run(j bool, m *sc.Manager, args []string) int {
 		var destinations destinationFlags
 		opts.Var(&destinations, "destination", "explicit public CIDR; repeat per destination")
 		if e := opts.Parse(args); e != nil || len(opts.Args()) != 0 {
-			return output(j, nil, sc.Fault("invalid_arguments", "invalid selective-plan options"))
+			return output(j, nil, sc.Fault("invalid_arguments", "invalid selective planning/staging options"))
 		}
-		plan, err := sc.PreviewSelectiveRoutes(sc.SelectivePlanRequest{
+		request := sc.SelectivePlanRequest{
 			EndpointIP: *endpoint, ManagementPeerIP: *management,
 			TunnelInterface: *tunnel, Destinations: destinations,
-		})
+		}
+		if name == "selective-stage-intent" {
+			status, err := m.StageSelectiveIntent(request)
+			if err != nil {
+				return output(j, nil, err)
+			}
+			return output(j, status, nil)
+		}
+		plan, err := sc.PreviewSelectiveRoutes(request)
 		if err != nil {
 			return output(j, nil, err)
 		}
 		return output(j, plan, nil)
+	case "selective-abandon-intent":
+		opts := flag.NewFlagSet(name, flag.ContinueOnError)
+		opts.SetOutput(io.Discard)
+		id := opts.String("operation-id", "", "exact previously returned operation ID")
+		revision := opts.Uint64("revision", 0, "exact untouched prepared revision")
+		if e := opts.Parse(args); e != nil || len(opts.Args()) != 0 || *id == "" || *revision != 1 {
+			return output(j, nil, sc.Fault("invalid_arguments", "abandon requires an exact operation ID and prepared revision 1"))
+		}
+		status, err := m.AbandonSelectiveIntent(*id, *revision)
+		if err != nil {
+			return output(j, nil, err)
+		}
+		return output(j, status, nil)
 	case "diagnose-path":
 		opts := flag.NewFlagSet(name, flag.ContinueOnError)
 		opts.SetOutput(io.Discard)
@@ -408,6 +429,10 @@ Commands:
   selective-plan --endpoint IP --management-peer IP --tunnel-if NAME
                  --destination CIDR [--destination CIDR...]
                               Advisory selective routing preview; never applies
+  selective-stage-intent     Same options as selective-plan; privately persist
+                              an unarmed PREPARED intent; never changes routes
+  selective-abandon-intent --operation-id HEX32 --revision 1
+                              Remove only exact untouched PREPARED intent
   host-drift --baseline FILE Compare a prior private preflight JSON with now
                               Nonzero on drift; never authorizes activation
   underlay-tcp --endpoint IP --port N [--hostname NAME]
@@ -429,8 +454,12 @@ Host drift compares separate, non-atomic network observations without changing
 the host, and is never an activation guard or a recovery journal.
 Activation-journal-status shows only safe metadata for the internal v1
 PREPARED/UNCERTAIN journal, never private resource before/intended snapshots.
-Even an absent journal cannot prove safe networking, guard arming or recovery.
-It may initialize a private state directory/lock but never changes host routes.
+Selective-stage-intent makes two non-atomic native observations and records
+an advisory PREPARED intent; it is NOT a guard, host reservation or TUN start.
+Only selective-abandon-intent can safely discard the exact untouched revision;
+UNCERTAIN and modified journals cannot be abandoned. Even an absent journal
+cannot prove safe networking, guard arming or recovery. These commands may
+initialize a private state directory/lock but never change host routes.
 An explicit underlay-tcp probe binds a TCP socket to the kernel-selected
 interface and sends no application data. With --hostname, current host name
 resolution must include the explicit pinned --endpoint IP before TCP probing.

@@ -21,6 +21,8 @@ A successful rollback is **verified restoration of the last safe host network co
 | RECOVERING | Guard is reconciling owned resources to safe baseline | Verify then DIRECT/previous verified or explicit UNCERTAIN |
 | UNCERTAIN | Identity/foreign-resource conflict or incomplete rollback | Preserve evidence, restrict further mutation, operator recovery |
 
+The current version-1 `selective-stage-intent` developer command records only an **unarmed** journal labelled `prepared` after two non-atomic read-only observations; it does **not** satisfy this table's guarded PREPARED state, does not prove an owned interface, and is not authorization to apply network changes. The unarmed record can be abandoned by exact operation/revision while untouched; `uncertain` cannot. Future guarded activation must establish independent rollback and revalidate every live network identity after this advisory stage.
+
 Persist only necessary durable state with per-operation identity, original observed values including **absence**, expected objects, last verified safe state, and mutation progress. Prevent concurrent/stale operations and force fresh observation under lock before touching host state. Never treat a commit of desired state as evidence that foreign packets reach a peer.
 
 ## 3. Activation Guard
