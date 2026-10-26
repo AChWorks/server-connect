@@ -376,6 +376,7 @@ updated_manager=$(docker exec "$container" sha256sum \
 docker exec "$container" /bin/sh /root/qa-proxy-only.sh positive
 docker exec "$container" /bin/sh /root/qa-apt-only.sh positive after-upgrade
 docker exec "$container" /bin/sh /root/qa-wp-fpm.sh positive after-upgrade
+docker exec "$container" /bin/sh /root/qa-wp-fpm.sh http-proxy-auth after-upgrade
 docker exec "$container" /bin/sh /root/qa-proxy-only.sh upstream-failure upstream-after-upgrade
 docker exec "$container" /bin/sh /root/qa-wp-fpm.sh upstream-failure after-upgrade
 assert_network_unchanged update-distinct "$offline_before"
@@ -419,6 +420,7 @@ docker exec "$container" test ! -e "/opt/server-connect/$bad_release"
 docker exec "$container" /bin/sh /root/qa-proxy-only.sh positive
 docker exec "$container" /bin/sh /root/qa-apt-only.sh positive after-rollback
 docker exec "$container" /bin/sh /root/qa-wp-fpm.sh positive after-rollback
+docker exec "$container" /bin/sh /root/qa-wp-fpm.sh http-proxy-auth after-rollback
 docker exec "$container" /bin/sh /root/qa-proxy-only.sh upstream-failure upstream-after-rollback
 docker exec "$container" /bin/sh /root/qa-wp-fpm.sh upstream-failure after-rollback
 assert_network_unchanged update-rollback "$offline_before"

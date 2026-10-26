@@ -49,6 +49,39 @@ direct_nonce() {
   test "$body" = "SC_QA_WP_NONCE:$nonce"
 }
 
+# Exercise the installed mixed HTTP listener itself. A successful WordPress
+# request verifies authenticated access, but cannot prove that an HTTP client
+# lacking the credentials is rejected. Do not print proxy responses or secrets.
+# Curl runs with an empty environment and an explicit empty noproxy list so
+# 127.0.0.1 cannot silently bypass the proxy under a runner configuration.
+assert_http_proxy_auth_rejected() {
+  phase=$1
+  stage="http-proxy-auth-$phase"
+  systemctl is-active --quiet server-connect.service || return 1
+  systemctl is-active --quiet sc-qa-vless.service || return 1
+  systemctl is-active --quiet "$origin_unit" || return 1
+  nonce=$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')
+  test "$(printf %s "$nonce" | wc -c)" -eq 16 || return 1
+  direct_nonce "$nonce" || return 1
+  # HTTP 407, rather than merely a timeout or transport error, specifically
+  # establishes that this live listener demands proxy authentication.
+  noauth_code=$(/usr/bin/env -i PATH=/usr/bin:/bin LC_ALL=C \
+    /usr/bin/curl -q --silent --max-time 4 --noproxy '' \
+    --proxy http://127.0.0.1:20807 --output /dev/null \
+    --write-out '%{http_code}' "$origin?value=$nonce") || return 1
+  test "$noauth_code" = 407 || return 1
+  # Fixed deliberately invalid test credential, never the actual manager
+  # secret; --proxy-basic forces an incorrect authorization attempt.
+  wrong_code=$(/usr/bin/env -i PATH=/usr/bin:/bin LC_ALL=C \
+    /usr/bin/curl -q --silent --max-time 4 --noproxy '' \
+    --proxy http://127.0.0.1:20807 --proxy-basic \
+    --proxy-user 'sc:000000000000000000000000000000000000000000000000' \
+    --output /dev/null --write-out '%{http_code}' \
+    "$origin?value=$nonce") || return 1
+  test "$wrong_code" = 407 || return 1
+  echo "INSTALLED_WORDPRESS_HTTP_PROXY_AUTH($phase)=PASS (missing+wrong rejected)"
+}
+
 assert_fpm_selected() {
   expectation=$1
   phase=$2
@@ -283,6 +316,7 @@ UNIT
   fi
   stage=first-fpm-request
   assert_fpm_selected positive initial
+  assert_http_proxy_auth_rejected initial
 }
 
 upstream_failure() {
@@ -314,18 +348,30 @@ cleanup() {
   test -f "$site/wp-config.php"
   rm -rf -- /var/lib/sc-qa-wp
   rm -f -- "$fpm_error"
+  # These root-level helpers/config are copied or generated exclusively for
+  # this single disposable guest. They must not survive runtime fixture cleanup.
+  rm -f -- /root/qa-wp-fpm.conf /root/qa-wp-fcgi-check.py \
+    /root/qa-wp-nonce-origin.py /root/qa-wp-proxy-prepend.py \
+    /root/qa-wp-fpm.sh
   test ! -e /var/lib/sc-qa-wp
   test ! -e "$fpm_error"
-  echo 'ISOLATED_WORDPRESS_FPM_FIXTURE_CLEANUP=PASS'
+  for path in /root/qa-wp-fpm.conf /root/qa-wp-fcgi-check.py \
+    /root/qa-wp-nonce-origin.py /root/qa-wp-proxy-prepend.py \
+    /root/qa-wp-fpm.sh /run/systemd/system/sc-qa-wp-fpm.service \
+    /run/systemd/system/sc-qa-wp-origin.service; do
+    test ! -e "$path" && test ! -L "$path" || return 1
+  done
+  echo 'ISOLATED_WORDPRESS_FPM_FIXTURE_CLEANUP=PASS (runtime+root-helpers)'
 }
 
 require_guest
 case "$1" in
   setup) test "$#" -eq 1; setup ;;
   positive) test "$#" -eq 2; assert_fpm_selected positive "$2" ;;
+  http-proxy-auth) test "$#" -eq 2; assert_http_proxy_auth_rejected "$2" ;;
   upstream-failure) test "$#" -eq 2; upstream_failure "$2" ;;
   core-failure) test "$#" -eq 1; core_failure ;;
   negative-disconnected) test "$#" -eq 1; assert_fpm_selected negative disconnected ;;
   cleanup) test "$#" -eq 1; cleanup ;;
-  *) echo 'Usage: host-wordpress-fpm.sh setup|positive PHASE|upstream-failure PHASE|core-failure|negative-disconnected|cleanup' >&2; exit 2 ;;
+  *) echo 'Usage: host-wordpress-fpm.sh setup|positive PHASE|http-proxy-auth PHASE|upstream-failure PHASE|core-failure|negative-disconnected|cleanup' >&2; exit 2 ;;
 esac
