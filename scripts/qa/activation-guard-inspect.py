@@ -74,12 +74,14 @@ def validate_route(row, resource):
 
 def validate_link(row, resource):
     name, alias, cidr, priority = resource
+    details = row.get("linkinfo")
     return (row.get("ifname") == name and row.get("ifalias") == alias and
-            row.get("linkinfo", {}).get("info_kind") == "dummy")
+            type(details) is dict and details.get("info_kind") == "dummy")
 
 
 def validate(mode, links, routes, rules, lookups):
-    if mode not in ("preflight", "applied", "recovered", "clean"):
+    if mode not in ("preflight", "partial_link", "partial_route",
+                    "applied", "recovered", "clean"):
         raise ValueError("unsupported fixture observation mode")
     for rows in (links, routes, rules):
         if type(rows) is not list or any(type(x) is not dict for x in rows):
@@ -87,27 +89,43 @@ def validate(mode, links, routes, rules, lookups):
     aliases = {row.get("ifname"): row for row in links}
     if len(aliases) != len(links) or not all(type(k) is str for k in aliases):
         raise ValueError("kernel link identity is ambiguous")
-    owned_required = mode == "applied"
-    foreign_required = mode in ("applied", "recovered")
-    for resource, expected in ((OWNED, owned_required), (FOREIGN, foreign_required)):
+
+    # The independent timer may fire after ANY native mutation. Do not
+    # require the full fixture or trust a controller-written stage marker:
+    # every individual present object must have its COMPLETE native identity,
+    # and every absent object must genuinely be absent before any deletion.
+    owned_link = mode in ("partial_link", "partial_route", "applied")
+    owned_route = mode in ("partial_route", "applied")
+    owned_rule = mode == "applied"
+    foreign_present = mode in ("partial_link", "partial_route", "applied", "recovered")
+    for resource, want_link, want_route, want_rule in (
+            (OWNED, owned_link, owned_route, owned_rule),
+            (FOREIGN, foreign_present, foreign_present, foreign_present)):
         name, alias, cidr, priority = resource
         device = aliases.get(name)
         matching_routes = [x for x in routes if x.get("dst") == cidr]
         matching_rules = [x for x in rules if x.get("priority") == priority]
-        if expected:
+        if want_link:
             if device is None or not validate_link(device, resource):
                 raise ValueError("fixture network interface identity was replaced")
+        elif device is not None:
+            raise ValueError("fixture network interface unexpectedly present")
+        if want_route:
             if len(matching_routes) != 1 or not validate_route(matching_routes[0], resource):
                 raise ValueError("fixture route is absent, duplicated or changed")
+        elif matching_routes:
+            raise ValueError("fixture route unexpectedly present")
+        if want_rule:
             if len(matching_rules) != 1 or not validate_rule(matching_rules[0], resource):
                 raise ValueError("fixture policy rule is absent, duplicated or changed")
-        elif device is not None or matching_routes or matching_rules:
-            raise ValueError("fixture-owned resource unexpectedly survived")
-    # A third-party RPDB policy referencing our reserved table is a conflict
-    # even when its priority does not match either test-owned rule. Do not
-    # assume that unused priorities imply exclusive table ownership.
-    expected_priorities = ({OWNED[3], FOREIGN[3]} if mode == "applied" else
-                           {FOREIGN[3]} if mode == "recovered" else set())
+        elif matching_rules:
+            raise ValueError("fixture policy rule unexpectedly present")
+
+    # Unknown policy in the reserved table is never taken over even when
+    # its priority is distinct from either expected fixture-owned rule.
+    expected_priorities = ({FOREIGN[3]} if foreign_present else set())
+    if owned_rule:
+        expected_priorities.add(OWNED[3])
     actual_priorities = set()
     for row in rules:
         if in_qa_table(row):
@@ -117,24 +135,37 @@ def validate(mode, links, routes, rules, lookups):
             actual_priorities.add(priority)
     if actual_priorities != expected_priorities:
         raise ValueError("unexpected policy rule in reserved QA table")
-    # This disposable guest's reserved table must contain only its exact two
-    # planned resources. An unknown third entry prevents any destructive undo.
-    expected_routes = 2 if mode == "applied" else 1 if mode == "recovered" else 0
+    expected_routes = int(foreign_present) + int(owned_route)
     if len(routes) != expected_routes:
         raise ValueError("unexpected route in reserved QA table")
     if mode in ("preflight", "clean"):
         if set(aliases) != {"lo"}:
             raise ValueError("the disposable guest is not loopback-only")
-    if mode in ("applied", "recovered"):
+    if foreign_present:
         if type(lookups) is not dict or set(lookups) != {"selected", "foreign", "direct"}:
             raise ValueError("guest route lookups are missing")
-        want = {"selected": OWNED[0] if mode == "applied" else "lo",
+        want = {"selected": OWNED[0] if owned_rule else "lo",
                 "foreign": FOREIGN[0], "direct": "lo"}
         for label, device in want.items():
             entries = lookups[label]
             if (type(entries) is not list or len(entries) != 1 or
                     type(entries[0]) is not dict or entries[0].get("dev") != device):
                 raise ValueError("live guest kernel did not select expected route for " + label)
+
+
+def infer_rollback_stage(links, routes, rules, lookups):
+    # All supported stages are mutually exclusive. If an object is missing,
+    # modified, duplicated or foreign, NO rollback command is authorized.
+    matches = []
+    for mode in ("partial_link", "partial_route", "applied"):
+        try:
+            validate(mode, links, routes, rules, lookups)
+        except ValueError:
+            continue
+        matches.append(mode)
+    if len(matches) != 1:
+        raise ValueError("no unique fully verified native rollback stage")
+    return matches[0]
 
 
 def native_json(*args):
@@ -164,11 +195,14 @@ def main():
     routes = routes_from_all(native_json("-N", "-4", "route", "show", "table", "all"))
     rules = native_json("-N", "-4", "rule", "show")
     lookups = {}
-    if mode in ("applied", "recovered"):
+    if mode in ("applied", "partial_link", "partial_route", "recovered", "classify"):
         for label, ip in (("selected", "8.8.8.8"), ("foreign", "9.9.9.9"),
                           ("direct", "198.51.100.99")):
             lookups[label] = native_json("-4", "route", "get", ip)
-    validate(mode, links, routes, rules, lookups)
+    if mode == "classify":
+        print(infer_rollback_stage(links, routes, rules, lookups))
+    else:
+        validate(mode, links, routes, rules, lookups)
 
 
 if __name__ == "__main__":

@@ -73,30 +73,48 @@ UNIT
 
 crash_controller() {
   require_state
+  test "$#" -eq 1
+  stage=$1
+  case "$stage" in link|route|rule) ;; *) return 2 ;; esac
   systemctl is-active --quiet "$timer"
   test ! -e "$state/rollback-proof"
   verify_kernel preflight
-  # The only native network mutations in this entire test are fixed dummy
-  # link and RPDB objects within the disconnected Docker guest namespace.
-  "$ip" link add scqao0 type dummy
-  "$ip" link set dev scqao0 alias sc-qa-guard-owned-v1
-  "$ip" -4 addr add 10.210.1.2/24 dev scqao0
-  "$ip" link set dev scqao0 up
-  "$ip" -4 route add 8.8.8.0/24 dev scqao0 table 20120
-  "$ip" -4 rule add pref 30800 to 8.8.8.0/24 table 20120
-  # A simulated foreign owner is added AFTER arming. The watchdog must not
-  # delete its distinct rule, route or interface in the same table.
+
+  # Add independent foreign policy first, then perform each owned mutation.
+  # Its resources occupy the SAME table but must survive the watchdog.
   "$ip" link add scqaf0 type dummy
   "$ip" link set dev scqaf0 alias sc-qa-guard-foreign-v1
   "$ip" -4 addr add 10.211.1.2/24 dev scqaf0
   "$ip" link set dev scqaf0 up
   "$ip" -4 route add 9.9.9.0/24 dev scqaf0 table 20120
   "$ip" -4 rule add pref 30801 to 9.9.9.0/24 table 20120
+  verify_kernel recovered
+
+  # Stage 1: link exists, but own route/rule are absent.
+  "$ip" link add scqao0 type dummy
+  "$ip" link set dev scqao0 alias sc-qa-guard-owned-v1
+  "$ip" -4 addr add 10.210.1.2/24 dev scqao0
+  "$ip" link set dev scqao0 up
+  verify_kernel partial_link
+  if test "$stage" = link; then kill_controller; fi
+
+  # Stage 2: route exists, but own RPDB rule remains absent.
+  "$ip" -4 route add 8.8.8.0/24 dev scqao0 table 20120
+  verify_kernel partial_route
+  if test "$stage" = route; then kill_controller; fi
+
+  # Stage 3: owned route and RPDB rule are both present.
+  "$ip" -4 rule add pref 30800 to 8.8.8.0/24 table 20120
   verify_kernel applied
+  kill_controller
+}
+
+kill_controller() {
   test "$(cat "$state/identity")" = sc-qa-activation-guard-v1
-  printf 'controller-arrived-before-sigkill\n' > "$state/controller-marker"
-  # A separate child is deliberately SIGKILLed, while systemd PID 1 owns
-  # the independent deadline and can still execute the guard service.
+  # No stage marker or post-mutation on-disk state is written by the
+  # controller: an actual crash can happen before either write. The
+  # watchdog must infer owned progress from current native kernel evidence.
+  echo "ISOLATED_ACTIVATION_CONTROLLER_BOUNDARY=$stage"
   kill -KILL "$$"
   echo 'UNREACHABLE_CONTROLLERS_MUST_NOT_SUCCEED' >&2
   exit 1
@@ -104,40 +122,55 @@ crash_controller() {
 
 rollback() {
   require_state
-  test -f "$state/controller-marker"
+  test ! -e "$state/controller-marker"
   test ! -e "$state/rollback-proof"
-  # No mutation unless the *currently observed* kernel route, policy rule,
-  # interface alias and simulated foreign objects all have exact identities.
-  # A missing/changed object fails closed rather than deleting by table ID.
-  verify_kernel applied
-  "$ip" -4 rule del pref 30800 to 8.8.8.0/24 table 20120
-  "$ip" -4 route del 8.8.8.0/24 dev scqao0 table 20120
+  # Require a unique, strictly validated native state BEFORE any deletion.
+  # Do not trust the crashed controller's marker to select cleanup commands.
+  # This remains a fixed disposable fixture, not race-free host ownership.
+  rollback_stage=$(verify_kernel classify)
+  case "$rollback_stage" in
+    applied)
+      "$ip" -4 rule del pref 30800 to 8.8.8.0/24 table 20120
+      ;;
+    partial_route|partial_link) ;;
+    *) echo 'Invalid native rollback stage' >&2; return 1 ;;
+  esac
+  case "$rollback_stage" in
+    applied|partial_route)
+      "$ip" -4 route del 8.8.8.0/24 dev scqao0 table 20120
+      ;;
+  esac
   "$ip" link del dev scqao0
   verify_kernel recovered
-  printf 'independent-deadline-rollback-complete\n' > "$state/rollback-proof"
-  echo 'ISOLATED_ACTIVATION_GUARD_ROLLBACK=PASS (independent systemd service)'
+  printf 'independent-deadline-rollback-complete:%s\n' "$rollback_stage" > "$state/rollback-proof"
+  echo "ISOLATED_ACTIVATION_GUARD_ROLLBACK=PASS (stage=$rollback_stage)"
 }
 
 await_recovery() {
   require_state
-  test "$(cat "$state/controller-marker")" = controller-arrived-before-sigkill
+  test "$#" -eq 1
+  stage=$1
+  case "$stage" in link|route|rule) ;; *) return 2 ;; esac
+  test ! -e "$state/controller-marker"
   attempt=0
   while test "$attempt" -lt 20; do
     if test -f "$state/rollback-proof"; then break; fi
     sleep 1
     attempt=$((attempt + 1))
   done
-  if test "$(cat "$state/rollback-proof" 2>/dev/null || true)" != independent-deadline-rollback-complete ||
+  expected_stage=$stage
+  case "$stage" in link) expected_stage=partial_link ;; route) expected_stage=partial_route ;; rule) expected_stage=applied ;; esac
+  if test "$(cat "$state/rollback-proof" 2>/dev/null || true)" != "independent-deadline-rollback-complete:$expected_stage" ||
      test "$(systemctl show "$service" -p Result --value)" != success; then
-    echo 'ISOLATED_ACTIVATION_GUARD=FAIL (independent rollback did not complete)' >&2
+    echo 'ISOLATED_ACTIVATION_GUARD=FAIL (independent stage rollback did not complete)' >&2
     systemctl show "$service" "$timer" --no-pager \
       --property=Id,LoadState,ActiveState,SubState,Result,ExecMainCode,ExecMainStatus >&2 || true
     journalctl --no-pager --output=cat -n 20 -u "$service" >&2 || true
     return 1
   fi
   verify_kernel recovered
-  echo 'ISOLATED_ACTIVATION_GUARD_TIMEOUT_SIGKILL=PASS'
-  echo 'ISOLATED_ACTIVATION_GUARD_FOREIGN_POLICY_PRESERVED=PASS'
+  echo "ISOLATED_ACTIVATION_GUARD_TIMEOUT_SIGKILL=PASS (stage=$stage)"
+  echo "ISOLATED_ACTIVATION_GUARD_FOREIGN_POLICY_PRESERVED=PASS (stage=$stage)"
 }
 
 cleanup() {
@@ -161,9 +194,9 @@ cleanup() {
 require_disposable_guest
 case "${1-}" in
   arm) test "$#" -eq 1; arm ;;
-  crash-controller) test "$#" -eq 1; crash_controller ;;
+  crash-controller) test "$#" -eq 2; crash_controller "$2" ;;
   rollback) test "$#" -eq 1; rollback ;;
-  await-recovery) test "$#" -eq 1; await_recovery ;;
+  await-recovery) test "$#" -eq 2; await_recovery "$2" ;;
   cleanup) test "$#" -eq 1; cleanup ;;
-  *) echo 'Usage: host-activation-guard.sh arm|crash-controller|rollback|await-recovery|cleanup' >&2; exit 2 ;;
+  *) echo 'Usage: host-activation-guard.sh arm|crash-controller link|route|rule|rollback|await-recovery link|route|rule|cleanup' >&2; exit 2 ;;
 esac

@@ -16,21 +16,21 @@ def fixture(mode):
     routes = []
     rules = []
     lookups = {}
-    if mode in ("applied", "recovered"):
+    if mode in ("applied", "partial_link", "partial_route", "recovered"):
         resources = [mod.FOREIGN]
-        if mode == "applied":
+        if mode in ("applied", "partial_link", "partial_route"):
             resources.insert(0, mod.OWNED)
         for name, alias, cidr, priority in resources:
             links.append({"ifname": name, "ifalias": alias,
                           "linkinfo": {"info_kind": "dummy"}})
-            # Literal normalized native Debian 13 `ip -j -N` fixture
-            # captured from a disposable user+network namespace, not a
-            # hand-waved minimal synthetic subset.
-            routes.append({"dst": cidr, "dev": name, "table": str(mod.TABLE),
-                           "scope": "253", "flags": []})
-            rules.append({"priority": priority, "table": str(mod.TABLE),
-                          "src": "all", "dst": cidr.split('/')[0],
-                          "dstlen": int(cidr.split('/')[1])})
+            if name != mod.OWNED[0] or mode in ("applied", "partial_route"):
+                # Exact supported native Debian 13 `ip -j -N` shape.
+                routes.append({"dst": cidr, "dev": name, "table": str(mod.TABLE),
+                               "scope": "253", "flags": []})
+            if name != mod.OWNED[0] or mode == "applied":
+                rules.append({"priority": priority, "table": str(mod.TABLE),
+                              "src": "all", "dst": cidr.split('/')[0],
+                              "dstlen": int(cidr.split('/')[1])})
         lookups = {"selected": [{"dev": mod.OWNED[0] if mode == "applied" else "lo"}],
                    "foreign": [{"dev": mod.FOREIGN[0]}],
                    "direct": [{"dev": "lo"}]}
@@ -39,9 +39,53 @@ def fixture(mode):
 
 class IsolatedActivationGuardClassifier(unittest.TestCase):
     def test_exact_modes(self):
-        for mode in ("preflight", "applied", "recovered", "clean"):
+        for mode in ("preflight", "partial_link", "partial_route", "applied", "recovered", "clean"):
             with self.subTest(mode=mode):
                 mod.validate(mode, *fixture(mode))
+
+    def test_exact_partial_stage_inference_and_no_orphan_adoption(self):
+        for mode in ("partial_link", "partial_route", "applied"):
+            with self.subTest(stage=mode):
+                self.assertEqual(mod.infer_rollback_stage(*fixture(mode)), mode)
+        for mode in ("preflight", "recovered", "clean"):
+            with self.subTest(unsafe_stage=mode):
+                with self.assertRaises(ValueError):
+                    mod.infer_rollback_stage(*fixture(mode))
+
+    def test_partial_identity_mutations_refuse_any_rollback_stage(self):
+        for mode in ("partial_link", "partial_route"):
+            mutations = [
+                (0, 1, "ifalias", "foreign-replaced-owned-link"),
+                (0, 2, "ifalias", "foreign-replaced-foreign-link"),
+                (1, -1, "metric", 57),  # changed foreign route
+                (2, -1, "protocol", 123),  # changed foreign policy
+                (3, "selected", "dev", "scqao0"),  # false Direct
+            ]
+            if mode == "partial_route":
+                mutations += [(1, 0, "metric", 57), (1, 0, "protocol", "123")]
+            for section, idx, key, value in mutations:
+                with self.subTest(mode=mode, section=section, key=key):
+                    parts = list(copy.deepcopy(fixture(mode)))
+                    if section == 3:
+                        parts[3][idx][0][key] = value
+                    else:
+                        parts[section][idx][key] = value
+                    with self.assertRaises(ValueError):
+                        mod.infer_rollback_stage(*parts)
+            # Unrecorded partial progress must never be normalized into an
+            # apparently valid earlier stage when any stray owned key exists.
+            parts = list(copy.deepcopy(fixture(mode)))
+            parts[2].append({"priority": 30800, "table": str(mod.TABLE),
+                             "src": "all", "dst": "8.8.8.0", "dstlen": 24})
+            if mode == "partial_route":
+                parts[2][-1]["metric"] = 1
+            with self.subTest(mode=mode, case="unexpected_early_rule"):
+                with self.assertRaises(ValueError):
+                    mod.infer_rollback_stage(*parts)
+        parts = list(copy.deepcopy(fixture("partial_link")))
+        parts[0][1]["linkinfo"] = None
+        with self.assertRaises(ValueError):
+            mod.infer_rollback_stage(*parts)
 
     def test_wrong_resource_identity_or_false_recovery_rejected(self):
         cases = (
@@ -118,7 +162,7 @@ class IsolatedActivationGuardClassifier(unittest.TestCase):
                     mod.validate(mode, *sections)
 
     def test_additional_table_rule_refused_even_with_unused_priority(self):
-        for mode in ("preflight", "applied", "recovered", "clean"):
+        for mode in ("preflight", "partial_link", "partial_route", "applied", "recovered", "clean"):
             sections = list(fixture(mode))
             sections[2].append({"priority": 30890, "table": mod.TABLE,
                                 "dst": "1.1.1.0", "dstlen": 24})

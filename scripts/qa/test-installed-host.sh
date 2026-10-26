@@ -455,21 +455,27 @@ docker cp "$root/scripts/qa/host-activation-guard.sh" \
   "$container:/root/qa-activation-guard.sh"
 docker cp "$root/scripts/qa/activation-guard-inspect.py" \
   "$container:/root/qa-activation-guard-inspect.py"
-docker exec "$container" /bin/sh /root/qa-activation-guard.sh arm
-if docker exec "$container" /bin/sh /root/qa-activation-guard.sh crash-controller; then
-  echo 'Disposable activation controller unexpectedly survived intentional SIGKILL' >&2
-  exit 1
-else
-  killed_exit=$?
-  [[ $killed_exit == 137 ]] || {
-    echo "Activation controller did not exit through expected SIGKILL (exit=$killed_exit)" >&2
+# Run a distinct independently armed timer for each precise mutation stage.
+# This makes interrupted partial apply an observable negative/positive gate,
+# rather than assuming the entire route/rule transaction was applied first.
+for guard_stage in link route rule; do
+  docker exec "$container" /bin/sh /root/qa-activation-guard.sh arm
+  if docker exec "$container" /bin/sh /root/qa-activation-guard.sh crash-controller "$guard_stage"; then
+    echo "Disposable controller unexpectedly survived SIGKILL at $guard_stage" >&2
     exit 1
-  }
-fi
-docker exec "$container" /bin/sh /root/qa-activation-guard.sh await-recovery
-docker exec "$container" /bin/sh /root/qa-activation-guard.sh cleanup
-assert_network_unchanged isolated-activation-guard-fixture "$offline_before"
-verify_host_services isolated-activation-guard-fixture
+  else
+    killed_exit=$?
+    [[ $killed_exit == 137 ]] || {
+      echo "Unexpected controller exit at $guard_stage (exit=$killed_exit)" >&2
+      exit 1
+    }
+  fi
+  docker exec "$container" /bin/sh /root/qa-activation-guard.sh await-recovery "$guard_stage"
+  docker exec "$container" /bin/sh /root/qa-activation-guard.sh cleanup
+  assert_network_unchanged "isolated-activation-guard-$guard_stage" "$offline_before"
+  verify_host_services "isolated-activation-guard-$guard_stage"
+  echo "ISOLATED_ACTIVATION_GUARD_STAGE_${guard_stage}=PASS"
+done
 echo 'ISOLATED_ACTIVATION_GUARD_FEASIBILITY=PASS (not product guard/reboot proof)'
 
 echo '=== Isolated LOOPBACK acquisition followed by the SAME real installer ==='
