@@ -460,13 +460,18 @@ docker cp "$root/scripts/qa/activation-guard-inspect.py" \
 # rather than assuming the entire route/rule transaction was applied first.
 for guard_stage in link route rule; do
   docker exec "$container" /bin/sh /root/qa-activation-guard.sh arm
-  if docker exec "$container" /bin/sh /root/qa-activation-guard.sh crash-controller "$guard_stage"; then
+  if crash_output=$(docker exec "$container" /bin/sh /root/qa-activation-guard.sh crash-controller "$guard_stage" 2>&1); then
     echo "Disposable controller unexpectedly survived SIGKILL at $guard_stage" >&2
     exit 1
   else
     killed_exit=$?
+    printf '%s\n' "$crash_output"
     [[ $killed_exit == 137 ]] || {
       echo "Unexpected controller exit at $guard_stage (exit=$killed_exit)" >&2
+      exit 1
+    }
+    [[ $crash_output == *"ISOLATED_ACTIVATION_CONTROLLER_BOUNDARY=$guard_stage"* ]] || {
+      echo "No verified controller boundary witness for $guard_stage" >&2
       exit 1
     }
   fi
