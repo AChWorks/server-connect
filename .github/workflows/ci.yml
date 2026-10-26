@@ -244,3 +244,60 @@ jobs:
             exit 1
           fi
           echo 'QA-only build/acquisition passed; no public binary published.'
+
+  # This extra disposable container starts without Python or the curl CLI.
+  # The development online bootstrap must install only its missing native
+  # Debian prerequisites and still reject an unreachable archive without
+  # ever invoking the product installer. No customer host is touched.
+  online-prerequisites-debian13:
+    runs-on: ubuntu-24.04
+    container:
+      image: debian:trixie-slim
+    timeout-minutes: 12
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Prepare minimal native Debian checkout tooling
+        run: |
+          set -euo pipefail
+          . /etc/os-release
+          test "$ID" = debian && test "$VERSION_ID" = 13
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends git ca-certificates
+          ! command -v python3
+          ! command -v curl
+      - name: Checkout source without write credentials
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Missing prerequisites are no-op for verify-only but acquired for real online install
+        run: |
+          set -euo pipefail
+          digest=0000000000000000000000000000000000000000000000000000000000000000
+          archive=https://127.0.0.1:19/qa-no-listener
+          # --verify-only is a strict nonmutating path even when root.
+          if /usr/bin/env -i HOME=/root PATH=/usr/sbin:/usr/bin:/sbin:/bin LC_ALL=C \
+            /bin/sh scripts/bootstrap-online.sh --archive-url "$archive" --sha256 "$digest" \
+            --verify-only > /tmp/sc-pre-verify.log 2>&1; then
+            echo 'Missing Python unexpectedly passed --verify-only' >&2; exit 1
+          fi
+          grep -F 'no packages installed' /tmp/sc-pre-verify.log
+          ! command -v python3
+          ! command -v curl
+          # Actual root online mode acquires the native prerequisites.
+          # Curl must fail at the deliberately closed loopback port AFTER
+          # the prerequisite and bounded archive prerequisites are ready.
+          if /usr/bin/env -i HOME=/root PATH=/usr/sbin:/usr/bin:/sbin:/bin LC_ALL=C \
+            /bin/sh scripts/bootstrap-online.sh --archive-url "$archive" --sha256 "$digest" \
+            > /tmp/sc-pre-actual.log 2>&1; then
+            echo 'Nonexistent archive unexpectedly installed' >&2; exit 1
+          fi
+          grep -F 'Installing missing Debian 13 online-bootstrap prerequisites' /tmp/sc-pre-actual.log
+          grep -F 'Online acquisition failed or exceeded the transfer ceiling' /tmp/sc-pre-actual.log
+          command -v python3
+          command -v curl
+          python3 -I -S -c 'import resource, tarfile, urllib.parse'
+          test ! -e /usr/local/bin/server-connect
+          test -z "$(find /root -maxdepth 1 -name '.server-connect-bootstrap.*' -print)"
+          echo 'DEBIAN13_MINIMAL_ONLINE_PREREQUISITES=PASS (no product installation)'

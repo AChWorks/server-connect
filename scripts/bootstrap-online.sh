@@ -38,6 +38,85 @@ max_download_bytes=$(printf '%s' "$max_download_bytes" | sed 's/^0*//')
 [ -n "$max_download_bytes" ] || max_download_bytes=0
 [ "${#max_download_bytes}" -le 10 ] && [ "$max_download_bytes" -ge 1 ] &&
  [ "$max_download_bytes" -le 100663296 ] || { echo 'Download ceiling outside supported range' >&2;exit 2; }
+# A real connected installation may acquire *missing* native Debian 13
+# prerequisites via the host's existing signed APT policy. This is a separate
+# OS package transaction, not a second Server Connect installer. --verify-only
+# NEVER changes OS packages, even when invoked as root.
+case "$url" in
+ https://?*|http://127.0.0.1:*|http://localhost:*) ;;
+ *) echo 'Unsupported URL scheme or missing authority' >&2; exit 2;;
+esac
+user_id=$(id -u)
+if [ "$verify_only" != yes ] && [ "$user_id" -ne 0 ]; then
+ echo 'Run the online installation command as root; non-root --verify-only is supported.' >&2
+ exit 1
+fi
+# Essential native coreutils are part of the supported Debian 13 base.
+# Never reinstall/repair an unexpectedly damaged essential package
+# automatically in the privileged acquisition path.
+command -v sha256sum >/dev/null 2>&1 &&
+command -v stat >/dev/null 2>&1 &&
+command -v timeout >/dev/null 2>&1 || {
+ echo 'Supported Debian 13 base must provide native sha256sum, stat and timeout' >&2
+ exit 1
+}
+set --
+command -v curl >/dev/null 2>&1 || set -- "$@" curl
+command -v python3 >/dev/null 2>&1 || set -- "$@" python3
+case "$url" in
+ https://*)
+  [ -r /etc/ssl/certs/ca-certificates.crt ] || set -- "$@" ca-certificates ;;
+esac
+if [ "$#" -gt 0 ]; then
+ if [ "$verify_only" = yes ]; then
+  echo 'Online --verify-only needs existing curl, Python 3 and HTTPS CA certificates; no packages installed' >&2
+  exit 1
+ fi
+ # The first advertised online target is Debian 13. Never guess an apt
+ # command or install packages on another distribution.
+ [ -r /etc/os-release ] || { echo 'OS identity unavailable; cannot safely install online prerequisites' >&2; exit 1; }
+ . /etc/os-release
+ [ "${ID:-}" = debian ] && [ "${VERSION_ID:-}" = 13 ] &&
+ [ -x /usr/bin/apt-get ] || {
+  echo 'Automatic online prerequisites are supported only on Debian 13 with native APT' >&2
+  exit 1
+ }
+ # Refuse an unsafe root staging parent BEFORE any OS package mutation.
+ [ -d /root ] && [ ! -L /root ] &&
+ [ "$(stat -c '%u' /root)" = 0 ] || {
+  echo 'Trusted root-owned staging is required before prerequisite installation' >&2
+  exit 1
+ }
+ root_mode=$(stat -c '%a' /root) || exit 1
+ [ "$((0$root_mode & 022))" -eq 0 ] || {
+  echo 'Root staging parent is group/other writable' >&2
+  exit 1
+ }
+ echo 'Installing missing Debian 13 online-bootstrap prerequisites through native APT' >&2
+ # Fixed package names only; no user-provided package, source, repository or
+ # global APT policy changes. Failure leaves the Server Connect install alone.
+ unset APT_CONFIG DPKG_ROOT
+ if ! DEBIAN_FRONTEND=noninteractive /usr/bin/apt-get \
+   -o Acquire::AllowInsecureRepositories=false \
+   -o Acquire::AllowDowngradeToInsecureRepositories=false \
+   -o APT::Get::AllowUnauthenticated=false \
+   -o APT::Update::Error-Mode=any \
+   -o Acquire::Retries=1 \
+   -o Acquire::http::Timeout=15 \
+   -o Acquire::https::Timeout=15 update; then
+  echo 'Debian prerequisite index update failed; no Server Connect installation attempted' >&2
+  exit 1
+ fi
+ if ! DEBIAN_FRONTEND=noninteractive /usr/bin/apt-get \
+   -o APT::Get::AllowUnauthenticated=false \
+   -o Acquire::Retries=1 \
+   -o Acquire::http::Timeout=15 \
+   -o Acquire::https::Timeout=15 \
+   install -y --no-remove --no-install-recommends "$@"; then
+  echo 'Debian prerequisites could not be installed; no Server Connect installation attempted' >&2
+  exit 1
+ fi
+fi
 command -v curl >/dev/null 2>&1 || { echo 'A supported downloader (curl) is required for the online bootstrap' >&2;exit 1; }
 command -v sha256sum >/dev/null 2>&1 || { echo 'sha256sum is required' >&2;exit 1; }
 command -v stat >/dev/null 2>&1 || { echo 'stat is required for trusted staging' >&2;exit 1; }
