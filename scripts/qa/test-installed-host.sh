@@ -44,6 +44,8 @@ PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/qa/test-activation-guard-inspect.py
 # them through signed native Debian APT, installs the SAME QA archive through
 # the actual online bootstrap, then disconnects to prove offline uninstall.
 # It must finish and clean up before the disconnected lifetime harness starts.
+# Run bounded fake-Docker failure-path regressions before privileged Docker.
+bash scripts/qa/test-docker-owned-cleanup.sh
 bash -n scripts/qa/test-online-minimal-host.sh
 bash scripts/qa/test-online-minimal-host.sh "$bundle" "$bootstrap"
 tmpdir=/tmp
@@ -52,35 +54,21 @@ scratch=$(mktemp -d "$tmpdir/server-connect-hostqa.XXXXXXXX")
 suffix=$(basename "$scratch" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9')
 container="sc-hostqa-$suffix"
 image="sc-hostqa:$suffix"
+# This original disconnected guest uses the same exact-name cleanup.
+# A partially created container/image must not remain after Docker failure.
+source "$root/scripts/qa/docker-owned-cleanup.sh"
 started=no
-image_built=no
 cleanup() {
   original_rc=$?
   trap - EXIT
-  cleanup_failed=no
-  if [[ $started == yes ]]; then
-    if (( original_rc != 0 )); then
-      echo 'Disposable systemd diagnostics (failure only):' >&2
-      docker logs --tail 100 "$container" >&2 ||
-        echo 'Warning: could not collect container logs' >&2
-    fi
-    if ! docker rm -f "$container" >/dev/null; then
-      echo "QA cleanup failed: docker container $container" >&2
-      cleanup_failed=yes
-    fi
+  if [[ $started == yes && $original_rc -ne 0 ]]; then
+    echo 'Disposable systemd diagnostics (failure only):' >&2
+    docker logs --tail 100 "$container" >&2 ||
+      echo 'Warning: could not collect container logs' >&2
   fi
-  if [[ $image_built == yes ]]; then
-    if ! docker image rm "$image" >/dev/null; then
-      echo "QA cleanup failed: docker image $image" >&2
-      cleanup_failed=yes
-    fi
+  if ! sc_qa_cleanup_owned_docker "$container" "$image" "$scratch"; then
+    if [[ $original_rc -eq 0 ]]; then original_rc=1; fi
   fi
-  if ! rm -rf -- "$scratch"; then
-    echo 'QA cleanup failed: disposable scratch directory' >&2
-    cleanup_failed=yes
-  fi
-  # Preserve the original test failure; never silently pass failed cleanup.
-  if [[ $original_rc -eq 0 && $cleanup_failed == yes ]]; then original_rc=1; fi
   exit "$original_rc"
 }
 
@@ -90,7 +78,6 @@ trap 'exit 143' TERM
 
 echo '=== Disposable Debian 13 preparation (network permitted BEFORE isolation) ==='
 docker build --pull -f scripts/qa/Dockerfile.host-systemd -t "$image" scripts/qa
-image_built=yes
 # Delegate the container's PRIVATE cgroup v2 filesystem through Docker.
 # NEVER bind-mount the host cgroup root into a private cgroup namespace:
 # it creates inconsistent ownership and can stop systemd before boot.

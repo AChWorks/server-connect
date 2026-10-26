@@ -1,6 +1,6 @@
 # Safe activation, health, and recovery contract
 
-- **Status:** normative safety requirements for future implementation; **not tested**.
+- **Status:** normative requirements for the still-unimplemented production Activation Guard and Runtime Health Guard. Isolated QA-only activation rollback feasibility tests exist, but do **not** demonstrate product guard integration, reboot/power-loss recovery or physical acceptance.
 - **Source of product intent:** [PROJECT-SPEC.md](PROJECT-SPEC.md). This document details the behaviors necessary to implement those requirements.
 
 ## 1. Operational principle

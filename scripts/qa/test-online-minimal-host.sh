@@ -25,33 +25,20 @@ scratch=$(mktemp -d "$scratch_root/sc-online-minimal.XXXXXXXX")
 suffix=$(basename "$scratch" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9')
 container="sc-online-minimal-$suffix"
 image="sc-online-minimal:$suffix"
+# Cleanup inspects the actual exact task-owned Docker names, including
+# container-created/start-failed and image-tagged/build-failed cases.
+source "$root/scripts/qa/docker-owned-cleanup.sh"
 started=no
-image_built=no
 cleanup() {
   original_rc=$?
   trap - EXIT
-  cleanup_failed=no
-  if [[ $started == yes ]]; then
-    if (( original_rc != 0 )); then
-      echo 'Connected disposable Debian systemd diagnostics (failure only):' >&2
-      docker logs --tail 100 "$container" >&2 || true
-    fi
-    if ! docker rm -f "$container" >/dev/null; then
-      echo "Could not remove disposable Docker container $container" >&2
-      cleanup_failed=yes
-    fi
+  if [[ $started == yes && $original_rc -ne 0 ]]; then
+    echo 'Connected disposable Debian systemd diagnostics (failure only):' >&2
+    docker logs --tail 100 "$container" >&2 || true
   fi
-  if [[ $image_built == yes ]]; then
-    if ! docker image rm "$image" >/dev/null; then
-      echo "Could not remove disposable Docker image $image" >&2
-      cleanup_failed=yes
-    fi
+  if ! sc_qa_cleanup_owned_docker "$container" "$image" "$scratch"; then
+    if [[ $original_rc -eq 0 ]]; then original_rc=1; fi
   fi
-  if ! rm -rf -- "$scratch"; then
-    echo 'Could not remove task-owned test scratch' >&2
-    cleanup_failed=yes
-  fi
-  if [[ $original_rc -eq 0 && $cleanup_failed == yes ]]; then original_rc=1; fi
   exit "$original_rc"
 }
 trap cleanup EXIT
@@ -61,7 +48,6 @@ trap 'exit 143' TERM
 echo '=== Build native Debian 13 minimal systemd fixture while runner is disposable ==='
 docker build --pull -f scripts/qa/Dockerfile.online-minimal-systemd \
   -t "$image" scripts/qa
-image_built=yes
 # Bridge networking is required ONLY for the guest's native Debian APT
 # prerequisite acquisition. No host networking, host files, credentials,
 # custom APT repositories or external VPN endpoints are attached.

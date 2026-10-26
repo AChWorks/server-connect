@@ -1,6 +1,6 @@
 # Architecture and integration boundaries
 
-- **Status:** authoritative design contract; an initial Proxy Only source candidate is under development. Host-wide guarded routing is not implemented or accepted.
+- **Status:** authoritative design contract; a Proxy Only development candidate has source and isolated installed-host CI evidence. Host-wide guarded routing, production guards and physical field acceptance remain unimplemented or unproven; this is not a released build.
 - **Product requirements:** [PROJECT-SPEC.md](PROJECT-SPEC.md) — canonical.
 
 ## 1. Shape
