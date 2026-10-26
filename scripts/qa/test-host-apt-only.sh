@@ -330,6 +330,7 @@ echo 'HOST_APT_STRICT_NESTED_POLICY_WALK_REGRESSIONS=PASS'
 # Real GNU timeout SIGTERM -> SIGKILL behavior, including a descendant
 # that deliberately ignores TERM; all processes are in a disposable session.
 SC_QA_APT_TEST_ROOT=$scratch /usr/bin/python3 - <<'PY'
+import errno
 import os
 from pathlib import Path
 import subprocess
@@ -362,13 +363,15 @@ if result.returncode == 0 or not pidfile.exists():
 pid = int(pidfile.read_text())
 for attempt in range(20):
     statfile = Path(f"/proc/{pid}/stat")
-    # PID1 may reap the killed descendant between stat/existence checks and
-    # the read itself. A missing /proc entry is a SUCCESSFUL termination,
-    # never an unexpected Python traceback that fails otherwise healthy CI.
+    # After kill(), procfs may report ENOENT or ESRCH as PID1 reaps the
+    # descendant. Only these two missing-process errors count as termination;
+    # unexpected I/O/permission failures must not prove a process exited.
     try:
         status = statfile.read_text()
-    except FileNotFoundError:
-        break
+    except OSError as exc:
+        if exc.errno in (errno.ENOENT, errno.ESRCH):
+            break
+        raise
     # A zombie is not executing. PID1 may reap it asynchronously.
     state = status.rsplit(") ", 1)[1].split()[0]
     if state == "Z":

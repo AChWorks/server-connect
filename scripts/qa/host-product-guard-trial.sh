@@ -68,9 +68,15 @@ if "$SC" selective-trial-apply --operation-id "$op" --revision 1 \
 fi
 [ "$(phase)" = trial_pending ]
 "$ip" -4 rule show | grep -F '9.9.9.0/24' >/dev/null
-if /bin/sh /root/server-connect/install.sh --uninstall >/dev/null 2>&1;then
+if /bin/sh /root/server-connect/install.sh --uninstall \
+ >/run/sc-qa-trial-uninstall.log 2>&1;then
  echo 'Uninstall incorrectly removed active independent guard' >&2;exit 1
 fi
+if ! grep -F 'pending, uncertain or invalid activation journal; refuse installer mutation' \
+ /run/sc-qa-trial-uninstall.log >/dev/null;then
+ echo 'Uninstall refusal did not prove pending-journal protection' >&2;exit 1
+fi
+rm -f /run/sc-qa-trial-uninstall.log
 [ -f /etc/systemd/system/server-connect-activation-recover.service ]
 wait_recovered
 if "$SC" --json activation-trial-clear --operation-id "$op" --revision 2 >/dev/null 2>&1;then

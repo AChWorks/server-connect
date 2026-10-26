@@ -233,7 +233,9 @@ if [ "$ACTION" = --uninstall ]; then
  if systemctl is-failed --quiet server-connect.service; then
   systemctl reset-failed server-connect.service || say 'WARNING: failed owned service state could not be cleared'
  fi
- systemctl disable server-connect-activation-recover.timer || die 'cannot disable owned recovery timer'
+ if [ -f "$GUARD_TIMER" ];then
+  systemctl disable server-connect-activation-recover.timer || die 'cannot disable owned recovery timer'
+ fi
  rm -f -- "$COMMAND" "$UNIT" "$PREFIX/current" "$PREFIX/unit.sha256" "$PREFIX/.owner" \
   "$GUARD_SERVICE" "$GUARD_TIMER" \
   "$PREFIX/server-connect-activation-recover.service.sha256" \
