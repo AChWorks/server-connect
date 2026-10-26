@@ -1,0 +1,16 @@
+# QA-only native Debian 13 guest with systemd, deliberately without
+# curl/Python. Only use on a disposable GitHub-hosted Docker runner.
+FROM debian:trixie-slim
+ENV DEBIAN_FRONTEND=noninteractive
+ENV container=docker
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+      systemd systemd-sysv iproute2 util-linux \
+      busybox-static ca-certificates tar gzip findutils \
+ && rm -rf /var/lib/apt/lists/* \
+ && ! command -v python3 \
+ && ! command -v curl \
+ && test -x /usr/bin/mktemp \
+ && test -x /usr/bin/apt-get
+STOPSIGNAL SIGRTMIN+3
+CMD ["/sbin/init", "--log-target=console", "--log-level=info"]

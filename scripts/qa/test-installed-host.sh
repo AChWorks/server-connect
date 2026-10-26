@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
-# Exact QA-only lifecycle in an ephemeral Debian 13 systemd container.
-# All installation paths run with Docker --network none. NEVER run on a
-# production host; public publisher authenticity is out of scope.
+# Exact QA-only lifecycle in ephemeral Debian 13 systemd containers.
+# The original installer/lifecycle guest remains Docker --network none.
+# A separate short-lived connected guest tests online prerequisite acquisition
+# before its own network is disconnected. NEVER run on a production host;
+# public publisher authenticity is out of scope.
 set -euo pipefail
 umask 077
 # A privileged container needs an already disposable, credential-free runner.
@@ -38,6 +40,12 @@ PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/qa/test-wp-proxy-prepend.py
 # ambiguous kernel identities before the privileged disconnected guest runs.
 sh -n scripts/qa/host-activation-guard.sh
 PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/qa/test-activation-guard-inspect.py
+# This distinct ephemeral systemd guest begins without Python/curl, acquires
+# them through signed native Debian APT, installs the SAME QA archive through
+# the actual online bootstrap, then disconnects to prove offline uninstall.
+# It must finish and clean up before the disconnected lifetime harness starts.
+bash -n scripts/qa/test-online-minimal-host.sh
+bash scripts/qa/test-online-minimal-host.sh "$bundle" "$bootstrap"
 tmpdir=/tmp
 if [[ -n $(printenv RUNNER_TEMP || true) ]]; then tmpdir=$(printenv RUNNER_TEMP); fi
 scratch=$(mktemp -d "$tmpdir/server-connect-hostqa.XXXXXXXX")
