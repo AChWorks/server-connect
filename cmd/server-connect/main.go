@@ -160,6 +160,12 @@ func run(j bool, m *sc.Manager, args []string) int {
 		args = rest
 	}
 	switch name {
+	case "installer-check-guard-clear":
+		if len(args) != 0 || os.Geteuid() != 0 {
+			return output(j, nil, sc.Fault("invalid_arguments", "installer-only command"))
+		}
+		err := m.InstallerCheckGuardClear()
+		return output(j, map[string]bool{"guard_clear": err == nil}, err)
 	case "installer-check-service":
 		if len(args) != 0 || os.Geteuid() != 0 {
 			return output(j, nil, sc.Fault("invalid_arguments", "installer-only command"))
@@ -289,6 +295,42 @@ func run(j bool, m *sc.Manager, args []string) int {
 			return output(j, nil, err)
 		}
 		return output(j, check, nil)
+	case "activation-trial-recover", "activation-trial-status":
+		if len(args) != 0 {
+			return output(j, nil, sc.Fault("invalid_arguments", "rule-trial recovery/status accepts no options"))
+		}
+		if name == "activation-trial-recover" {
+			receipt, err := m.RecoverGuardedRuleTrial()
+			status := output(j, receipt, err)
+			if sc.ErrorCode(err) == "trial_resource_conflict" {
+				// Native systemd ExecMainStatus=41 identifies exact foreign
+				// kernel-object refusal. Other errors remain ordinary nonzero;
+				// no generic service failure can prove the conflict fixture.
+				return 41
+			}
+			return status
+		}
+		receipt, err := m.InspectGuardedRuleTrial()
+		return output(j, receipt, err)
+	case "selective-trial-apply", "activation-trial-clear":
+		opts := flag.NewFlagSet(name, flag.ContinueOnError)
+		opts.SetOutput(io.Discard)
+		id := opts.String("operation-id", "", "exact staged or recovered operation ID")
+		revision := opts.Uint64("revision", 0, "exact operation revision")
+		deadline := opts.Int("deadline-seconds", 600, "disposable rule trial deadline in seconds")
+		interrupt := opts.Bool("qa-kill-after-rule", false, "deliberate SIGKILL in disposable guest")
+		if e := opts.Parse(args); e != nil || len(opts.Args()) != 0 {
+			return output(j, nil, sc.Fault("invalid_arguments", "invalid rule trial options"))
+		}
+		if name == "activation-trial-clear" {
+			if *deadline != 600 || *interrupt || *revision != 3 {
+				return output(j, nil, sc.Fault("invalid_arguments", "clear requires exact recovered revision 3"))
+			}
+			err := m.ClearRecoveredRuleTrial(*id, *revision)
+			return output(j, map[string]any{"operation_id": *id, "cleared": err == nil}, err)
+		}
+		receipt, err := m.BeginGuardedRuleTrial(*id, *revision, *deadline, *interrupt)
+		return output(j, receipt, err)
 	case "selective-abandon-intent":
 		opts := flag.NewFlagSet(name, flag.ContinueOnError)
 		opts.SetOutput(io.Discard)
@@ -448,6 +490,12 @@ Commands:
                               Reinspect exact unarmed intent; no activation
   selective-abandon-intent --operation-id HEX32 --revision 1
                               Remove only exact untouched PREPARED intent
+  selective-trial-apply --operation-id HEX32 --revision 1 [--deadline-seconds 600]
+                              DISPOSABLE DOCKER-ONLY rule-only trial; never VPN activation
+  activation-trial-status     Inspect only the guarded rule trial state
+  activation-trial-recover    Independent systemd trial timeout/reboot recovery
+  activation-trial-clear --operation-id HEX32 --revision 3
+                              Clear exact recovered rule-trial journal
   host-drift --baseline FILE Compare a prior private preflight JSON with now
                               Nonzero on drift; never authorizes activation
   underlay-tcp --endpoint IP --port N [--hostname NAME]
@@ -475,6 +523,11 @@ Selective-verify-intent performs two fresh, NON-ATOMIC native kernel reads
 against the exact journal operation under the Manager lock. Success is an
 observation receipt, not a reserved route, owner proof, armed guard, or token
 authorizing later apply; external kernel writers are not locked.
+Experimental rule-only trial needs a disconnected disposable systemd Docker guest,
+preinstalled independent recovery units and an enabled live recovery timer.
+It creates one selected-prefix RPDB rule pointing at an EMPTY table. It has
+no VPN path, no production activation, no SSH confirmation and no Runtime
+Health Guard. It must expire and cannot be used on a real server.
 Only selective-abandon-intent can discard the exact untouched revision;
 UNCERTAIN and modified journals cannot be abandoned. Even an absent journal
 cannot prove safe networking, guard arming or recovery. These commands may

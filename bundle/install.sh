@@ -14,6 +14,8 @@ PREFIX=/opt/server-connect
 STATE=/var/lib/server-connect
 UNIT=/etc/systemd/system/server-connect.service
 COMMAND=/usr/local/bin/server-connect
+GUARD_SERVICE=/etc/systemd/system/server-connect-activation-recover.service
+GUARD_TIMER=/etc/systemd/system/server-connect-activation-recover.timer
 SOURCE_DIR=$(dirname -- "$0")
 ACTION=${1:---offline}
 
@@ -63,7 +65,7 @@ check_platform() {
  [ -d /run/systemd/system ] || die 'systemd is not PID 1; use a supported systemd host'
 }
 verify_payload() {
- for name in bin/server-connect bin/sing-box bin/libcronet.so server-connect.service install.sh THIRD-PARTY-LICENSES/sing-box-LICENSE manifest.json; do
+ for name in bin/server-connect bin/sing-box bin/libcronet.so server-connect.service server-connect-activation-recover.service server-connect-activation-recover.timer install.sh THIRD-PARTY-LICENSES/sing-box-LICENSE manifest.json; do
   check_root_file "$SOURCE_DIR/$name"
  done
  check_root_file "$SOURCE_DIR/checksums.sha256"
@@ -111,6 +113,41 @@ check_service_owner() {
  *) die 'systemd service provenance not safely absent or owned'
  esac
 }
+# Independently installed recovery units start DISABLED. The exact owner and
+# manifest digest of each are checked before ANY subsequent replacement.
+check_guard_units() {
+ for kind in service timer; do
+  name=server-connect-activation-recover.$kind
+  target=/etc/systemd/system/$name
+  digest_file=$PREFIX/$name.sha256
+  props=$(systemctl show "$name" --property=LoadState --property=FragmentPath --property=DropInPaths --property=Transient) ||
+    die 'cannot inspect independent recovery unit provenance'
+  load=$(printf '%s\n' "$props" | sed -n 's/^LoadState=//p')
+  fragment=$(printf '%s\n' "$props" | sed -n 's/^FragmentPath=//p')
+  dropins=$(printf '%s\n' "$props" | sed -n 's/^DropInPaths=//p')
+  transient=$(printf '%s\n' "$props" | sed -n 's/^Transient=//p')
+  if [ -e "$target" ] || [ -L "$target" ] || [ -e "$digest_file" ] || [ -L "$digest_file" ]; then
+   check_root_file "$target"
+   check_root_file "$digest_file"
+   printf '%s  %s\n' "$(cat "$digest_file")" "$target" | sha256sum --quiet --check - ||
+    die 'recovery unit differs from owned manifest'
+   [ "$load" = loaded ] && [ "$fragment" = "$target" ] && [ -z "$dropins" ] && [ "$transient" = no ] ||
+    die 'effective recovery unit identity conflict'
+  else
+   [ "$load" = not-found ] && [ -z "$fragment" ] && [ -z "$dropins" ] && [ "$transient" = no ] ||
+    die 'foreign recovery unit name already registered'
+  fi
+ done
+}
+# An active timer or oneshot may own pending kernel state. Updating or
+# uninstalling its recovery executable would sever the only independent guard.
+require_guard_inactive() {
+ for name in server-connect-activation-recover.timer server-connect-activation-recover.service; do
+  case "$(systemctl show "$name" -p ActiveState --value)" in
+   inactive) ;; *) die 'independent recovery guard active or uncertain; refuse installer change' ;;
+  esac
+ done
+}
 check_owned() {
  if [ -e "$PREFIX" ] || [ -L "$PREFIX" ]; then
   check_root_dir "$PREFIX"
@@ -148,6 +185,7 @@ check_platform
 verify_payload
 check_owned
 check_service_owner
+check_guard_units
 
 if [ "$ACTION" = --verify-only ]; then say 'local bundle and owned-resource preflight PASS; publisher signature must be independently verified'; exit 0;fi
 
@@ -162,6 +200,8 @@ if [ -e "$STATE/.lock" ] || [ -L "$STATE/.lock" ]; then check_root_file "$STATE/
 exec 9>"$STATE/.lock"
 chmod 0600 "$STATE/.lock"
 flock -w 30 -x 9 || die 'another Server Connect operation holds the lifecycle lock'
+"$SOURCE_DIR/bin/server-connect" installer-check-guard-clear >/dev/null ||
+ die 'pending, uncertain or invalid activation journal; refuse installer mutation'
 check_owned
 check_service_owner
 if [ "$unit_identity" = owned ]; then
@@ -170,6 +210,7 @@ if [ "$unit_identity" = owned ]; then
 fi
 
 if [ "$ACTION" = --uninstall ]; then
+ require_guard_inactive
  [ -f "$PREFIX/.owner" ] || die 'Server Connect not installed'
  # Validate all release ownership before destructive changes to the service/unit.
  if [ -d "$PREFIX/releases" ]; then
@@ -192,7 +233,13 @@ if [ "$ACTION" = --uninstall ]; then
  if systemctl is-failed --quiet server-connect.service; then
   systemctl reset-failed server-connect.service || say 'WARNING: failed owned service state could not be cleared'
  fi
- rm -f -- "$COMMAND" "$UNIT" "$PREFIX/current" "$PREFIX/unit.sha256" "$PREFIX/.owner"
+ if [ -f "$GUARD_TIMER" ];then
+  systemctl disable server-connect-activation-recover.timer || die 'cannot disable owned recovery timer'
+ fi
+ rm -f -- "$COMMAND" "$UNIT" "$PREFIX/current" "$PREFIX/unit.sha256" "$PREFIX/.owner" \
+  "$GUARD_SERVICE" "$GUARD_TIMER" \
+  "$PREFIX/server-connect-activation-recover.service.sha256" \
+  "$PREFIX/server-connect-activation-recover.timer.sha256"
  systemctl daemon-reload || die 'unit removed but daemon-reload failed; inspect systemd'
  if [ -d "$PREFIX/releases" ] && [ ! -L "$PREFIX/releases" ]; then
   for release in "$PREFIX"/releases/*; do
@@ -210,9 +257,15 @@ if [ "$ACTION" = --uninstall ]; then
 fi
 
 # Installation and offline update share this path. No networking is performed.
+require_guard_inactive
 # The shared .lock is held across observation, activation and rollback.
-release_hash=$(sha256sum "$SOURCE_DIR/bin/server-connect" "$SOURCE_DIR/bin/sing-box" | cut -d' ' -f1 | sha256sum | cut -c 1-16)
-release_name="0.1.0-dev-$release_hash"
+# Bind the installed release identity to the verified exact binary bytes in
+# one assignment. A malformed or absent hash must not be interpreted as a
+# valid named release or proceed into service changes.
+release_name="0.1.0-dev-$(sha256sum "$SOURCE_DIR/bin/server-connect" "$SOURCE_DIR/bin/sing-box" | cut -d' ' -f1 | sha256sum | cut -c 1-16)"
+release_suffix=${release_name#0.1.0-dev-}
+case "$release_suffix" in ''|*[!0123456789abcdef]*) die 'candidate binary release digest is invalid' ;; esac
+[ "${#release_suffix}" -eq 16 ] || die 'candidate binary release digest length is invalid'
 release="$PREFIX/releases/$release_name"
 previous=''
 if [ -L "$PREFIX/current" ]; then previous=$(readlink "$PREFIX/current");fi
@@ -228,12 +281,14 @@ prefix_created=no
 command_created=no
 release_created=no
 unit_backup=''
+guard_backup=''
 stage=''
 rollback_needed=no
 operation_done=no
 
 remove_backup() {
  if [ -n "$unit_backup" ] && [ -f "$unit_backup" ];then rm -f -- "$unit_backup";fi
+ if [ -n "$guard_backup" ] && [ -d "$guard_backup" ];then rm -f -- "$guard_backup"/*;rmdir "$guard_backup";fi
 }
 rollback_candidate() {
  # Do not claim rollback if a stop, restore or previous restart failed.
@@ -258,6 +313,20 @@ rollback_candidate() {
    rm -f -- "$UNIT" "$PREFIX/unit.sha256" ||
     { say 'RECOVERY_REQUIRED: new unit removal failed';failed=yes; }
   fi
+  # Restore precisely the previous two independent unit bytes (or absence).
+  for kind in service timer;do
+   name=server-connect-activation-recover.$kind
+   path=/etc/systemd/system/$name
+   digest=$PREFIX/$name.sha256
+   if [ -n "$guard_backup" ] && [ -f "$guard_backup/$name" ];then
+    install -m 0644 "$guard_backup/$name" "$path" ||
+     { say "RECOVERY_REQUIRED: prior recovery $kind unit restoration failed";failed=yes; }
+    install -m 0644 "$guard_backup/$name.sha256" "$digest" ||
+     { say "RECOVERY_REQUIRED: prior recovery $kind digest restoration failed";failed=yes; }
+   else
+    rm -f -- "$path" "$digest" || failed=yes
+   fi
+  done
   if [ "$command_created" = yes ] && [ -L "$COMMAND" ] &&
      [ "$(readlink "$COMMAND")" = "$PREFIX/current/bin/server-connect" ];then
     rm -f -- "$COMMAND" || { say 'RECOVERY_REQUIRED: new command link removal failed';failed=yes; }
@@ -297,6 +366,7 @@ rollback_candidate() {
     { say 'RECOVERY_REQUIRED: candidate release directory retained';failed=yes; }
  fi
  if [ "$failed" = no ] && [ "$prefix_created" = yes ];then
+  remove_backup
   # Fresh install failed: no previous release/command/unit was present.
   rm -f -- "$PREFIX/.owner" || failed=yes
   rmdir "$PREFIX/releases" "$PREFIX" 2>/dev/null ||
@@ -312,7 +382,14 @@ on_exit() {
  code=$?
  trap - EXIT HUP INT TERM
  if [ "$code" -ne 0 ] && [ "$operation_done" != yes ];then rollback_candidate;fi
- remove_backup
+ if [ "${failed:-no}" = yes ];then
+  # If old unit/service restoration failed, preserving the exact previous
+  # unit bytes is essential for console recovery. Never erase the only
+  # candidate-independent copy solely because the shell is exiting.
+  say "RECOVERY_REQUIRED: exact previous unit backups retained: ${unit_backup:-none} ${guard_backup:-none}"
+ else
+  remove_backup
+ fi
  exit "$code"
 }
 trap on_exit EXIT
@@ -366,6 +443,17 @@ if [ -e "$STATE/runtime.json" ];then
   die 'candidate rejects retained runtime configuration; existing service unchanged'
 fi
 
+# Capture the EXACT previous guard unit bytes before the candidate can
+# replace them. Guard is inactive by the preceding authoritative inspection.
+guard_backup=$(mktemp -d "$PREFIX/.guard-backup.XXXXXXXX") || die 'guard unit backup unavailable'
+for kind in service timer;do
+ name=server-connect-activation-recover.$kind
+ if [ -f "/etc/systemd/system/$name" ];then
+  install -m 0644 "/etc/systemd/system/$name" "$guard_backup/$name"
+  install -m 0644 "$PREFIX/$name.sha256" "$guard_backup/$name.sha256"
+ fi
+done
+
 if [ -f "$UNIT" ];then
  unit_backup=$(mktemp "$PREFIX/.unit-backup.XXXXXXXX") || die 'unit backup unavailable'
  install -m 0644 "$UNIT" "$unit_backup"
@@ -386,8 +474,16 @@ if [ ! -e "$COMMAND" ] && [ ! -L "$COMMAND" ];then
 fi
 install -m 0644 "$SOURCE_DIR/server-connect.service" "$UNIT" || die 'owned unit installation failed'
 sha256sum "$UNIT" | cut -d' ' -f1 > "$PREFIX/unit.sha256" || die 'owned unit digest write failed'
+for kind in service timer;do
+ name=server-connect-activation-recover.$kind
+ install -m 0644 "$SOURCE_DIR/$name" "/etc/systemd/system/$name" || die 'recovery unit installation failed'
+ sha256sum "/etc/systemd/system/$name" | cut -d' ' -f1 > "$PREFIX/$name.sha256" ||
+  die 'recovery unit digest write failed'
+ chmod 0644 "$PREFIX/$name.sha256" || die 'recovery unit digest mode failed'
+done
 chmod 0644 "$PREFIX/unit.sha256" || die 'unit digest permissions failed'
 systemctl daemon-reload || die 'systemd daemon reload failed'
+check_guard_units
 
 "$PREFIX/current/bin/server-connect" installer-check-service >/dev/null ||
  die 'installed unit provenance could not be verified'

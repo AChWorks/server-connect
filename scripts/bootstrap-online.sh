@@ -267,6 +267,8 @@ def check_staging_capacity(next_write):
 REQUIRED_FILES = {
     "server-connect/install.sh",
     "server-connect/server-connect.service",
+    "server-connect/server-connect-activation-recover.service",
+    "server-connect/server-connect-activation-recover.timer",
     "server-connect/manifest.json",
     "server-connect/checksums.sha256",
     "server-connect/bin/server-connect",

@@ -20,14 +20,14 @@ GOTOOLCHAIN=local GOPROXY=off CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -tr
 cp "$up/sing-box" "$work/server-connect/bin/sing-box"
 cp "$up/libcronet.so" "$work/server-connect/bin/libcronet.so"
 cp "$up/LICENSE" "$work/server-connect/THIRD-PARTY-LICENSES/sing-box-LICENSE"
-cp bundle/install.sh bundle/server-connect.service "$work/server-connect/"
+cp bundle/install.sh bundle/server-connect.service bundle/server-connect-activation-recover.service bundle/server-connect-activation-recover.timer "$work/server-connect/"
 chmod 0755 "$work/server-connect/install.sh" "$work/server-connect/bin/server-connect" "$work/server-connect/bin/sing-box"
 source_revision=$(git rev-parse HEAD)
 if git diff --quiet && git diff --cached --quiet && [ -z "$(git ls-files --others --exclude-standard)" ]; then source_state=clean;else source_state=dirty;fi
 printf '{"schema":1,"manager":"0.1.0-dev","core":"sing-box 1.14.3","core_archive_sha256":"%s","source_revision":"%s","source_state":"%s","target":"debian-13-amd64","redistribution":"not authorized; local QA only"}\n' "$EXPECTED" "$source_revision" "$source_state" > "$work/server-connect/manifest.json"
 (
  cd "$work/server-connect"
- sha256sum bin/server-connect bin/sing-box bin/libcronet.so server-connect.service install.sh THIRD-PARTY-LICENSES/sing-box-LICENSE manifest.json > checksums.sha256
+ sha256sum bin/server-connect bin/sing-box bin/libcronet.so server-connect.service server-connect-activation-recover.service server-connect-activation-recover.timer install.sh THIRD-PARTY-LICENSES/sing-box-LICENSE manifest.json > checksums.sha256
  sha256sum --quiet -c checksums.sha256
  ./bin/server-connect version --json
  ./bin/sing-box version | head -n 1

@@ -3,6 +3,32 @@
 - **Status:** normative requirements for the still-unimplemented production Activation Guard and Runtime Health Guard. Isolated QA-only in-boot rollback and disconnected Docker-restart pending-intent tests exist. The latter checks durable private fixture state and fresh boot-service no-op/conflict behavior after its kernel namespace resets. Neither demonstrates product guard integration, physical reboot/power-loss recovery or field acceptance.
 - **Source of product intent:** [PROJECT-SPEC.md](PROJECT-SPEC.md). This document details the behaviors necessary to implement those requirements.
 
+## Experimental product-integrated rule-only guard (not production ready)
+
+The development candidate now installs a root-owned independent recovery
+service and timer **disabled by default**. In a strict disconnected Docker
+systemd guest, the real Manager can durably transition an exact single-IPv4
+unarmed Selective intent into a v2 `trial_pending` record, after verifying an
+active independent timer and before creating any kernel rule. Only a
+protocol-tagged **RPDB rule to an empty routing table** is created; no tunnel,
+route, DNS, firewall, default route or product-active policy is installed.
+Its exact operation ID, plan/observations, boot identity, monotonic deadline,
+prior absence and proposed identity are protected by the existing shared
+Manager lock and fsync-safe private journal. Recovery inspects the native
+priority and exact selector; unknown/foreign identity refuses deletion and
+retains evidence. Successful rule-only recovery writes `trial_recovered`
+revision 3. Distinct `trial_rule_recovered` does **not** set the product-level
+`recovery_verified` or `activation_ready` fields. The actual kernel journal
+is blocked from generic v1 abandonment, and the installer refuses to remove
+its independent recovery units while pending/uncertain evidence exists.
+
+This is a **bounded prerequisite experiment**, not a network-effective route
+activation, general ownership proof, physically rebooted field deployment,
+or demonstration of the required fresh SSH confirmation and ongoing health
+supervision. Follow-up implementation must reuse the guarded transaction
+rather than treating an experiment-only protocol tag as unconditional
+ownership. No production host may invoke the trial path.
+
 ## 1. Operational principle
 
 The recovery mechanism must **not need the VPN to work**. It must not need GitHub, Cloudflare, an external API, functioning DNS, or the sing-box process to perform its local fallback. The local console/provider rescue option remains an emergency requirement; no in-host mechanism can repair an unbootable kernel or provider-side outage.

@@ -9,6 +9,8 @@ on:
       - '.github/workflows/installed-host-qa.yml'
       - 'bundle/install.sh'
       - 'bundle/server-connect.service'
+      - 'bundle/server-connect-activation-recover.service'
+      - 'bundle/server-connect-activation-recover.timer'
       - 'scripts/bootstrap-online.sh'
       - 'scripts/package.sh'
       - 'scripts/qa/**'
@@ -105,6 +107,7 @@ jobs:
           bash -n scripts/qa/test-host-qa-assertions.sh
           bash -n scripts/qa/test-host-coexistence.sh
           bash -n scripts/qa/test-installed-host.sh
+          bash -n scripts/qa/test-real-rollback-failure.sh
           bash -n scripts/qa/test-activation-boot-qa.sh
           python3 - <<'PYQA'
           import ast

@@ -56,6 +56,26 @@ A separate, newly created **Debian 13 systemd Docker guest with `--network none`
 
 This is **evidence of service scheduling after Docker restart, private journal survival, operation-specific no-op acknowledgment and negative foreign-state refusal**. It is deliberately **NOT** a production guard or an installed Server Connect feature. Docker restart recreates the network namespace and thereby drops transient route/link state without a product rollback; it does **not** simulate physical kernel reboot, recovery of persistent host routing policy, a durable product Activation Guard, ownership-safe post-mutation reconciliation, power-loss durability or live VPN/SSH/hosting acceptance. Every corresponding physical reboot/field criterion below remains **NOT_RUN**.
 
+### Product-integrated guarded IPv4 rule trial (new isolated acceptance)
+
+The installed development manager and independently installed, initially
+**disabled** systemd recovery units now have an experimental *single RPDB rule*
+transaction. The acceptance harness in disconnected Debian 13 `Docker
+--network none` must enable/verify the exact timer, stage the exact native
+Selective intent, durably pre-record the v2 pending journal, kill the Manager
+after one real protocol-tagged rule is added, and observe **fresh** independent
+systemd timeout recovery. It must establish the exact before/after native
+rule inventory and continued loopback SSH/HTTP operation. A second negative
+run must replace the rule with an independently created foreign protocol at
+the same priority, observe a fresh, **cause-specific systemd exit 41** watchdog refusal
+without deletion or journal modification, remove only the injected fixture, and recover/clear
+the original operation. Stale IDs, pending uninstall, malformed journals,
+invalid rule metadata and wrong revision must be refused. Broad source tests
+must exercise schema, duplicate-member, foreign-rule and nonproduction
+receipt guards. These checks do not prove a real Linux TUN route, internet
+through the VPN, production Activation Guard, physical power-loss recovery,
+SSH confirmation, or Runtime Health Guard. Those matrix items remain NOT_RUN.
+
 ## Required matrix
 
 | Scenario | What must be demonstrated | Minimum evidence |
