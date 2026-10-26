@@ -296,11 +296,20 @@ func run(j bool, m *sc.Manager, args []string) int {
 		}
 		return output(j, check, nil)
 	case "activation-trial-recover", "activation-trial-status":
-		if len(args) != 0 {
-			return output(j, nil, sc.Fault("invalid_arguments", "rule-trial recovery/status accepts no options"))
+		qaPoint := ""
+		if name == "activation-trial-recover" {
+			opts := flag.NewFlagSet(name, flag.ContinueOnError)
+			opts.SetOutput(io.Discard)
+			point := opts.String("qa-kill-at", "", "disposable-only recovery interruption point")
+			if e := opts.Parse(args); e != nil || len(opts.Args()) != 0 {
+				return output(j, nil, sc.Fault("invalid_arguments", "invalid rule-trial recovery options"))
+			}
+			qaPoint = *point
+		} else if len(args) != 0 {
+			return output(j, nil, sc.Fault("invalid_arguments", "rule-trial status accepts no options"))
 		}
 		if name == "activation-trial-recover" {
-			receipt, err := m.RecoverGuardedRuleTrial()
+			receipt, err := m.RecoverGuardedRuleTrial(qaPoint)
 			status := output(j, receipt, err)
 			if sc.ErrorCode(err) == "trial_resource_conflict" {
 				// Native systemd ExecMainStatus=41 identifies exact foreign
@@ -318,18 +327,25 @@ func run(j bool, m *sc.Manager, args []string) int {
 		id := opts.String("operation-id", "", "exact staged or recovered operation ID")
 		revision := opts.Uint64("revision", 0, "exact operation revision")
 		deadline := opts.Int("deadline-seconds", 600, "disposable rule trial deadline in seconds")
-		interrupt := opts.Bool("qa-kill-after-rule", false, "deliberate SIGKILL in disposable guest")
+		interrupt := opts.Bool("qa-kill-after-rule", false, "legacy disposable-only SIGKILL after rule add")
+		qaPoint := opts.String("qa-kill-at", "", "disposable-only apply interruption point")
 		if e := opts.Parse(args); e != nil || len(opts.Args()) != 0 {
 			return output(j, nil, sc.Fault("invalid_arguments", "invalid rule trial options"))
 		}
+		if *interrupt && *qaPoint != "" {
+			return output(j, nil, sc.Fault("invalid_arguments", "only one QA interruption point is allowed"))
+		}
 		if name == "activation-trial-clear" {
-			if *deadline != 600 || *interrupt || *revision != 3 {
+			if *deadline != 600 || *interrupt || *qaPoint != "" || *revision != 3 {
 				return output(j, nil, sc.Fault("invalid_arguments", "clear requires exact recovered revision 3"))
 			}
 			err := m.ClearRecoveredRuleTrial(*id, *revision)
 			return output(j, map[string]any{"operation_id": *id, "cleared": err == nil}, err)
 		}
-		receipt, err := m.BeginGuardedRuleTrial(*id, *revision, *deadline, *interrupt)
+		if *interrupt {
+			*qaPoint = "after-add"
+		}
+		receipt, err := m.BeginGuardedRuleTrial(*id, *revision, *deadline, *qaPoint)
 		return output(j, receipt, err)
 	case "selective-abandon-intent":
 		opts := flag.NewFlagSet(name, flag.ContinueOnError)

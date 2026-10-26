@@ -3,6 +3,8 @@ package sc
 import (
 	"bytes"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -147,10 +149,10 @@ func TestGuardedRuleTrialNativeIdentityRefusesForeignAndReplay(t *testing.T) {
 // custom state at trial start would create an irrecoverable rule after crash.
 func TestGuardedRuleTrialRejectsUnwatchedCustomState(t *testing.T) {
 	m := New(privateJournalTempDir(t), "", 0)
-	if _, err := m.BeginGuardedRuleTrial(strings.Repeat("a", 32), 1, 8, false); ErrorCode(err) != "trial_unsupported" {
+	if _, err := m.BeginGuardedRuleTrial(strings.Repeat("a", 32), 1, 8, ""); ErrorCode(err) != "trial_unsupported" {
 		t.Fatalf("custom state trial could strand an RPDB rule: %v", err)
 	}
-	if _, err := m.RecoverGuardedRuleTrial(); ErrorCode(err) != "trial_unsupported" {
+	if _, err := m.RecoverGuardedRuleTrial(""); ErrorCode(err) != "trial_unsupported" {
 		t.Fatalf("unwatched recovery dir accepted: %v", err)
 	}
 	if _, err := m.InspectGuardedRuleTrial(); ErrorCode(err) != "trial_unsupported" {
@@ -158,5 +160,56 @@ func TestGuardedRuleTrialRejectsUnwatchedCustomState(t *testing.T) {
 	}
 	if err := m.ClearRecoveredRuleTrial(strings.Repeat("a", 32), 3); ErrorCode(err) != "trial_unsupported" {
 		t.Fatalf("unwatched clear dir accepted: %v", err)
+	}
+}
+
+// Only explicitly supported boundaries may terminate the disposable guest
+// controller. Recovery-only points must never be accepted during apply.
+func TestGuardedRuleTrialQACrashBoundaryAdmission(t *testing.T) {
+	for _, phase := range []string{"apply", "recover"} {
+		for _, point := range []string{"", "before-journal", "after-journal", "after-add", "after-delete", "before-recovered-journal", "unknown"} {
+			accepted := point == "" || (phase == "apply" && (point == "before-journal" || point == "after-journal" || point == "after-add")) || (phase == "recover" && (point == "after-delete" || point == "before-recovered-journal"))
+			err := trialValidateQACrashPoint(phase, point)
+			if accepted && err != nil {
+				t.Fatalf("%s/%s unexpectedly rejected: %v", phase, point, err)
+			}
+			if !accepted && ErrorCode(err) != "invalid_arguments" {
+				t.Fatalf("%s/%s not rejected: %v", phase, point, err)
+			}
+		}
+	}
+	if ErrorCode(trialValidateQACrashPoint("other", "after-add")) != "invalid_arguments" {
+		t.Fatal("unknown QA phase unexpectedly accepted")
+	}
+}
+
+// /etc has higher systemd precedence than /run, so a suspicious runtime
+// mask can coexist with an apparently healthy loaded/static /etc unit.
+// The runtime filesystem is a separate observation boundary.
+func TestGuardedRuleTrialRuntimeMaskRefusesCachedUnitState(t *testing.T) {
+	dir := t.TempDir()
+	for _, name := range []string{trialRecoveryUnit, trialRecoveryTimer} {
+		if err := trialNoRuntimeUnitOverride(dir, name); err != nil {
+			t.Fatalf("absent override refused for %s: %v", name, err)
+		}
+		path := filepath.Join(dir, name)
+		if err := os.Symlink("/dev/null", path); err != nil {
+			t.Fatal(err)
+		}
+		if err := trialNoRuntimeUnitOverride(dir, name); ErrorCode(err) != "guard_unavailable" {
+			t.Fatalf("runtime mask accepted: %s, %v", name, err)
+		}
+		if err := os.Remove(path); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte("foreign runtime override"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if err := trialNoRuntimeUnitOverride(dir, name); ErrorCode(err) != "guard_unavailable" {
+			t.Fatalf("runtime override accepted: %s, %v", name, err)
+		}
+		if err := os.Remove(path); err != nil {
+			t.Fatal(err)
+		}
 	}
 }

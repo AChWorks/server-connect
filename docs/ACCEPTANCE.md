@@ -50,6 +50,35 @@ The installed-host Debian 13 Docker `--network none` guest exercises an **experi
 
 This is a **feasibility proof of independent in-boot timeout + process-death rollback semantics**, not an installed product route-activation feature or evidence of actual external VPN transport, authenticated fresh SSH/console confirmation, durable activation journal, every mutation-stage crash, persistent reboot/power-loss recovery, real conflicting network owners, or a running Runtime Health Guard. It **must not** set `activation_ready=true`, expose Selective/Broad activation to operators or close guarded-routing Issue #2. Mandatory actual activation, reboot and health-guard acceptance in the matrix below remain NOT_RUN until separately implemented and tested on authorized disposable hosts.
 
+### Product-integrated RPDB trial interruption and unavailable-watchdog evidence
+
+The installed disconnected Debian 13 systemd Docker acceptance also tests
+**the installed Server Connect Manager**, its private v2 journal, real native
+`iproute2` rule mutation and independently scheduled service/timer. The
+candidate test now includes pre-journal SIGKILL (untouched v1 journal),
+post-journal/pre-add SIGKILL (pending v2 but no kernel rule), post-add SIGKILL,
+post-delete SIGKILL and post-native-absence/pre-recovered-journal SIGKILL.
+Each checks exact pending/recovered revision, native rule absence or presence,
+private journal digest, and actual independently invoked recovery after a
+crash. Stopping the timer or masking the recovery service while pending must
+not produce a false `guard_scheduled` or `trial_recovered` receipt,
+including when `systemctl show` reports `loaded/static` because `/etc`
+service units take precedence over a competing `/run/systemd/system` mask.
+This is an override-conflict refusal, **not** proof that the runtime mask
+disabled the unit. The distinct negative guest exercise then replaces only
+the installed guest-owned `/etc` unit with an effective mask, verifies
+`LoadState=masked`, retains the exact previous unit bytes and digest,
+checks the pending journal/real rule after deadline, and restores the unit
+before independently rearming recovery. After an
+externally impaired service is restored, the overdue experiment must recover
+without deleting foreign rules. A deliberately reintroduced protocol-tagged
+rule after successful recovery must fail live status reinspection until the
+separate lab fixture removes it. Only an **exact-candidate completed CI job
+and original guest logs** establish PASS for these scenarios. Local Go and
+shell tests alone do not prove Linux kernel/systemd recovery; none of this
+proves independent liveness repair for routed operation, physical reboot,
+authenticated host ownership or Runtime Health Guard #3.
+
 ### Independent boot-time pending-intent observation (disposable QA only)
 
 A separate, newly created **Debian 13 systemd Docker guest with `--network none`** exercises **three Docker restart cycles** independently of the installed product and earlier in-boot timer fixture. The positive cycle persists a QA-only pending-operation record with file and directory fsync under the guest's private `/var/lib`, enables a dedicated oneshot recovery service, and restarts the guest. A freshly executed boot service may acknowledge only the clean-network **no-op** for that exact operation. Two subsequent negative restarts preserve the same pending-operation journal bytes and independently inject **(1) an unexpected dummy interface without a table route** and **(2) a table-20120 route via the existing `lo` interface without an unexpected link**. The recovery service must refuse with **distinct cause-specific exit codes and structured stderr diagnostics**, checked against the actual failed systemd service invocation; unrelated invalid invocation, journal or native `ip` inspection errors must fail closed but cannot satisfy the conflict acceptance. The outer harness verifies new Docker starts, ordered actual unit execution, exact operation identity, untouched pending bytes, observed and preserved foreign objects, and removal of only its own labelled disposable Docker guest.

@@ -112,6 +112,42 @@ fi
 no_trial_rule
 printf '%s\n' 'PRODUCT_GUARD_TRIAL_SIGKILL_TIMEOUT=PASS'
 
+# Deterministic SIGKILL on both sides of the durable pending-journal
+# boundary: a pre-journal crash must leave the original unarmed v1 intent;
+# a post-journal/pre-add crash must be reconciled by installed systemd despite
+# there being NO trial rule to delete. Both use the real installed manager.
+op=$(stage)
+old_sha=$(/usr/bin/sha256sum /var/lib/server-connect/route-activation-journal.json | cut -d' ' -f1)
+if "$SC" --json selective-trial-apply --operation-id "$op" --revision 1 \
+ --qa-kill-at after-delete >/run/sc-qa-invalid-point.log 2>&1;then
+ echo 'Recovery-only crash point was incorrectly accepted for apply' >&2;exit 1
+fi
+/usr/bin/python3 - <<'PYINVALID'
+import json
+with open('/run/sc-qa-invalid-point.log',encoding='utf-8') as f: r=json.load(f)
+assert r['error']['code']=='invalid_arguments' and not r['ok']
+PYINVALID
+rm -f /run/sc-qa-invalid-point.log
+[ "$old_sha" = "$(/usr/bin/sha256sum /var/lib/server-connect/route-activation-journal.json | cut -d' ' -f1)" ]
+pre_exit=0
+"$SC" selective-trial-apply --operation-id "$op" --revision 1 \
+ --deadline-seconds 8 --qa-kill-at before-journal >/dev/null 2>&1 || pre_exit=$?
+[ "$pre_exit" -eq 137 ]
+[ "$old_sha" = "$(/usr/bin/sha256sum /var/lib/server-connect/route-activation-journal.json | cut -d' ' -f1)" ]
+no_trial_rule
+"$SC" --json selective-abandon-intent --operation-id "$op" --revision 1 >/dev/null
+echo PRODUCT_GUARD_TRIAL_PRE_JOURNAL_SIGKILL=PASS
+op=$(stage)
+post_exit=0
+"$SC" selective-trial-apply --operation-id "$op" --revision 1 \
+ --deadline-seconds 6 --qa-kill-at after-journal >/dev/null 2>&1 || post_exit=$?
+[ "$post_exit" -eq 137 ] && [ "$(phase)" = trial_pending ]
+no_trial_rule
+wait_recovered
+"$SC" --json activation-trial-clear --operation-id "$op" --revision 3 >/dev/null
+no_trial_rule
+echo PRODUCT_GUARD_TRIAL_POST_JOURNAL_PRE_ADD_SIGKILL=PASS
+
 # iproute2 renders configurable rt_protos/rt_tables aliases by default.
 # A system administrator's naming choices must NOT strand an owned rule:
 # the real installed watchdog must observe numeric kernel identities via -N.
@@ -160,6 +196,156 @@ done
 rm -f "$alias_backup"/*
 rmdir "$alias_backup"
 printf '%s\n' 'PRODUCT_GUARD_TRIAL_NUMERIC_ALIAS_RECOVERY=PASS (custom protocol/table names, actual timer and SIGKILL)'
+
+
+# A stopped independent timer must not produce a positive scheduled-guard
+# receipt from an earlier journal. Expired recovery is still possible by
+# operator invocation; after deleting the real rule a SIGKILL must leave
+# pending evidence, then a separately restarted timer must finish recovery.
+op=$(stage)
+"$SC" --json selective-trial-apply --operation-id "$op" --revision 1 --deadline-seconds 9 >/dev/null
+[ "$(phase)" = trial_pending ]
+systemctl stop "$timer"
+[ "$(systemctl show "$timer" -p ActiveState --value)" = inactive ]
+pending_sha=$(/usr/bin/sha256sum /var/lib/server-connect/route-activation-journal.json | cut -d' ' -f1)
+if "$SC" --json activation-trial-recover >/run/sc-qa-timer-stopped.log 2>&1;then
+ echo 'Stopped timer was incorrectly reported as scheduled' >&2;exit 1
+fi
+/usr/bin/python3 - <<'PYUNAVAILABLE'
+import json
+with open('/run/sc-qa-timer-stopped.log',encoding='utf-8') as f: r=json.load(f)
+assert r['ok'] is False and r['error']['code']=='guard_unavailable',r
+PYUNAVAILABLE
+rm -f /run/sc-qa-timer-stopped.log
+[ "$pending_sha" = "$(/usr/bin/sha256sum /var/lib/server-connect/route-activation-journal.json | cut -d' ' -f1)" ]
+[ "$(phase)" = trial_pending ]
+"$ip" -4 rule show | grep -F '9.9.9.0/24' >/dev/null
+sleep 10
+rec_exit=0
+"$SC" activation-trial-recover --qa-kill-at after-delete >/dev/null 2>&1 || rec_exit=$?
+[ "$rec_exit" -eq 137 ]
+[ "$(phase)" = trial_pending ]
+[ "$pending_sha" = "$(/usr/bin/sha256sum /var/lib/server-connect/route-activation-journal.json | cut -d' ' -f1)" ]
+no_trial_rule
+systemctl start "$timer"
+wait_recovered
+"$SC" --json activation-trial-clear --operation-id "$op" --revision 3 >/dev/null
+echo PRODUCT_GUARD_TRIAL_DEGRADED_TIMER_AND_POST_DELETE_SIGKILL=PASS
+
+# The second recovery boundary is after absent-rule reinspection but before
+# marking the exact journal recovered. The timer must reconcile a pending
+# journal whose rule is already gone, without claiming pre-crash success.
+op=$(stage)
+"$SC" --json selective-trial-apply --operation-id "$op" --revision 1 --deadline-seconds 6 >/dev/null
+systemctl stop "$timer"
+sleep 8
+pending_sha=$(/usr/bin/sha256sum /var/lib/server-connect/route-activation-journal.json | cut -d' ' -f1)
+rec_exit=0
+"$SC" activation-trial-recover --qa-kill-at before-recovered-journal >/dev/null 2>&1 || rec_exit=$?
+[ "$rec_exit" -eq 137 ] && [ "$(phase)" = trial_pending ]
+[ "$pending_sha" = "$(/usr/bin/sha256sum /var/lib/server-connect/route-activation-journal.json | cut -d' ' -f1)" ]
+no_trial_rule
+systemctl start "$timer"
+wait_recovered
+"$SC" --json activation-trial-clear --operation-id "$op" --revision 3 >/dev/null
+echo PRODUCT_GUARD_TRIAL_PRE_RECOVERED_JOURNAL_SIGKILL=PASS
+
+# Two distinct degraded-watchdog cases: an unexpected lower-precedence
+# runtime override, and an EFFECTIVE mask of the actual installed unit.
+# Systemd's /etc unit wins over /run, so a --runtime mask of an /etc unit
+# is NOT evidence the executor was disabled. The product must still distrust
+# the competing runtime declaration even when systemctl reports loaded/static.
+op=$(stage)
+"$SC" --json selective-trial-apply --operation-id "$op" --revision 1 --deadline-seconds 22 >/dev/null
+pending_sha=$(/usr/bin/sha256sum /var/lib/server-connect/route-activation-journal.json | cut -d' ' -f1)
+systemctl is-active --quiet "$timer"
+systemctl mask --runtime "$service"
+[ "$(readlink "/run/systemd/system/$service")" = /dev/null ]
+load_state=$(systemctl show "$service" -p LoadState --value)
+file_state=$(systemctl show "$service" -p UnitFileState --value)
+printf 'PRODUCT_GUARD_TRIAL_RUNTIME_OVERRIDE_OBSERVATION=LoadState:%s,UnitFileState:%s\n' "$load_state" "$file_state"
+if "$SC" --json activation-trial-recover >/run/sc-qa-runtime-override.log 2>&1;then
+ echo 'Competing runtime override incorrectly reported a scheduled guard' >&2;exit 1
+fi
+/usr/bin/python3 - <<'PYMASK'
+import json
+with open('/run/sc-qa-runtime-override.log',encoding='utf-8') as f: r=json.load(f)
+assert not r['ok'] and r['error']['code']=='guard_unavailable',r
+PYMASK
+rm -f /run/sc-qa-runtime-override.log
+[ "$(phase)" = trial_pending ]
+[ "$pending_sha" = "$(/usr/bin/sha256sum /var/lib/server-connect/route-activation-journal.json | cut -d' ' -f1)" ]
+systemctl unmask --runtime "$service"
+[ ! -L "/run/systemd/system/$service" ]
+echo PRODUCT_GUARD_TRIAL_RUNTIME_OVERRIDE_FALSE_GUARD_REFUSED=PASS
+
+# An effective /etc mask requires moving the existing /etc unit out of the
+# way. This privileged sabotage is permitted ONLY inside this disposable,
+# no-network Docker guest; preserve exact bytes/metadata before mutation.
+systemctl stop "$timer"
+service_path="/etc/systemd/system/$service"
+service_backup=/run/sc-qa-owned-service-before-mask
+[ -f "$service_path" ] && [ ! -L "$service_path" ] && [ ! -e "$service_backup" ]
+unit_sha=$(/usr/bin/sha256sum "$service_path" | cut -d' ' -f1)
+cp -p "$service_path" "$service_backup"
+[ "$unit_sha" = "$(/usr/bin/sha256sum "$service_backup" | cut -d' ' -f1)" ]
+rm "$service_path"
+ln -s /dev/null "$service_path"
+[ "$(readlink "$service_path")" = /dev/null ]
+systemctl daemon-reload
+[ "$(systemctl show "$service" -p LoadState --value)" = masked ]
+# Start the timer under an actually unavailable executor. It may fail to
+# schedule; neither outcome is a recovered journal nor allowed to hide the
+# still-present real kernel rule.
+if systemctl start "$timer";then
+ systemctl is-active --quiet "$timer"
+else
+ [ "$(systemctl show "$timer" -p ActiveState --value)" = inactive ]
+fi
+sleep 24
+[ "$(phase)" = trial_pending ]
+[ "$pending_sha" = "$(/usr/bin/sha256sum /var/lib/server-connect/route-activation-journal.json | cut -d' ' -f1)" ]
+"$ip" -4 rule show | grep -F '9.9.9.0/24' >/dev/null
+# Restore exactly the previously installed, digest-pinned product unit. Do
+# not treat timer running as proof of recovery; native rule and journal must
+# reconcile after the unit has been restored and independently rearmed.
+systemctl stop "$timer"
+[ "$(readlink "$service_path")" = /dev/null ]
+rm "$service_path"
+cp -p "$service_backup" "$service_path"
+[ "$unit_sha" = "$(/usr/bin/sha256sum "$service_path" | cut -d' ' -f1)" ]
+rm "$service_backup"
+systemctl daemon-reload
+[ "$(systemctl show "$service" -p LoadState --value)" = loaded ]
+systemctl reset-failed "$service" || true
+systemctl restart "$timer"
+wait_recovered
+"$SC" --json activation-trial-clear --operation-id "$op" --revision 3 >/dev/null
+no_trial_rule
+echo PRODUCT_GUARD_TRIAL_EFFECTIVE_MASK_NO_FALSE_RECOVERY=PASS
+
+# After a completed recovery, a new external rule at the exact selector
+# cannot be silently accepted as an unchanged previously recovered kernel.
+op=$(stage)
+"$SC" --json selective-trial-apply --operation-id "$op" --revision 1 --deadline-seconds 4 >/dev/null
+wait_recovered
+"$ip" -4 rule add pref 30000 to 9.9.9.0/24 table 20000 protocol 247
+if "$SC" --json activation-trial-status >/run/sc-qa-reintroduced-rule.log 2>&1;then
+ echo 'Stale recovered journal incorrectly proved current kernel absence' >&2;exit 1
+fi
+/usr/bin/python3 - <<'PYREINTRO'
+import json
+with open('/run/sc-qa-reintroduced-rule.log',encoding='utf-8') as f: r=json.load(f)
+assert not r['ok'] and r['error']['code']=='trial_recovery_uncertain',r
+PYREINTRO
+rm -f /run/sc-qa-reintroduced-rule.log
+# This *lab-owned injected fixture* is removed by the test, not by product
+# recovery: protocol 247 alone cannot authenticate a foreign writer.
+"$ip" -4 rule del pref 30000 to 9.9.9.0/24 table 20000 protocol 247
+"$SC" --json activation-trial-clear --operation-id "$op" --revision 3 >/dev/null
+systemctl reset-failed "$service"
+no_trial_rule
+echo PRODUCT_GUARD_TRIAL_STALE_RECOVERED_KERNEL_REFUSAL=PASS
 
 # Negative ownership challenge: another actor replaces the exact priority
 # with a foreign native rule. Watchdog must refuse removal and retain journal.

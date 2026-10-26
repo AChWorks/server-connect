@@ -22,6 +22,25 @@ revision 3. Distinct `trial_rule_recovered` does **not** set the product-level
 is blocked from generic v1 abandonment, and the installer refuses to remove
 its independent recovery units while pending/uncertain evidence exists.
 
+The installed disposable-only trial also rechecks the **current native
+kernel rule** before returning an existing `trial_recovered` receipt; a
+reintroduced exact selector or modified foreign priority now refuses a
+misleading recovered response. When the timer/service becomes unavailable
+*during a still-pending deadline*, manual recovery returns `guard_unavailable`
+rather than asserting `guard_scheduled`. This does not automatically restart
+an externally disabled or masked watchdog: its overdue operation can recover
+when the independent service becomes available again, or through controlled
+operator recovery after expiry. Runtime unit masks/overrides in
+`/run/systemd/system` are rejected by direct filesystem inspection: `systemctl`
+may still report `loaded/static` because an installed `/etc` unit takes
+precedence over a lower-priority runtime mask. A runtime mask alone cannot
+prove that executor stopped; the guest acceptance separately masks the
+actual installed service while preserving/restoring its exact bytes. A persistent
+unmonitored rule is therefore
+an **unresolved unsafe/uncertain condition**, not success. These checks do not
+make a protocol tag an authenticated ownership credential or replace Runtime
+Health Guard #3.
+
 This is a **bounded prerequisite experiment**, not a network-effective route
 activation, general ownership proof, physically rebooted field deployment,
 or demonstration of the required fresh SSH confirmation and ongoing health
