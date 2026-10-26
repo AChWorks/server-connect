@@ -190,6 +190,35 @@ jobs:
           test ! -e "$intent_dir/runtime.json"
           test ! -e "$intent_dir/proxy-auth"
           operation_id=$(cat build/ci/selective-operation-id.txt)
+          journal_before=$(sha256sum "$intent_dir/route-activation-journal.json" | cut -d' ' -f1)
+          if build/ci/server-connect-cli --json --state-dir "$intent_dir" selective-verify-intent \
+            --operation-id 00000000000000000000000000000000 --revision 1 \
+            > build/ci/selective-live-wrong-id.json; then
+            echo 'Wrong operation was accepted as a live selective reinspection' >&2
+            exit 1
+          fi
+          build/ci/server-connect-cli --json --state-dir "$intent_dir" selective-verify-intent \
+            --operation-id "$operation_id" --revision 1 \
+            > build/ci/selective-live-verified.json
+          [[ $(sha256sum "$intent_dir/route-activation-journal.json" | cut -d' ' -f1) == "$journal_before" ]]
+          python3 - <<'PYLIVE'
+          import json
+          from pathlib import Path
+          response=json.loads(Path('build/ci/selective-live-verified.json').read_text())
+          wrong=json.loads(Path('build/ci/selective-live-wrong-id.json').read_text())
+          assert wrong['ok'] is False and wrong['error']['code']=='activation_journal_conflict'
+          assert 'data' not in wrong
+          assert response['ok'] is True
+          data=response['data']
+          assert data['operation_id']==Path('build/ci/selective-operation-id.txt').read_text()
+          assert data['phase']=='prepared' and data['revision']==1
+          assert data['read_only'] is True and data['observations_match_stored_intent'] is True
+          for flag in ('snapshot_atomic','activation_ready','guard_armed','ownership_verified','recovery_verified'):
+              assert data[flag] is False
+          for private in ('before','intended','198.51.100.10','203.0.113.42','8.8.8.0/24','plan_sha256','observation_sha256'):
+              assert private not in json.dumps(response)
+          PYLIVE
+          echo 'NATIVE_SELECTIVE_INTENT_REOBSERVE=PASS (read only, not an activation guard)'
           if build/ci/server-connect-cli --json --state-dir "$intent_dir" selective-abandon-intent \
             --operation-id 00000000000000000000000000000000 --revision 1 \
             > build/ci/selective-wrong-id.json; then
@@ -206,6 +235,11 @@ jobs:
             exit 1
           fi
           test ! -e "$intent_dir/route-activation-journal.json"
+          if build/ci/server-connect-cli --json --state-dir "$intent_dir" selective-verify-intent \
+            --operation-id "$operation_id" --revision 1 > build/ci/selective-live-replay.json; then
+            echo 'Abandoned operation unexpectedly verified as live' >&2
+            exit 1
+          fi
           build/ci/server-connect-cli --json selective-plan \
             --endpoint 198.51.100.10 --management-peer 203.0.113.42 \
             --tunnel-if scpreview0 --destination 8.8.8.0/24 \
@@ -222,6 +256,7 @@ jobs:
           for field in ('activation_ready','guard_armed','recovery_verified','host_network_inspected'):
               assert acknowledged[field] is False
           assert data('selective-replay.json')['error']['code']=='activation_journal_missing'
+          assert data('selective-live-replay.json')['error']['code']=='activation_journal_missing'
           original=data('selective-plan.json')['data']
           after=data('selective-post-stage-plan.json')['data']
           assert original['plan_sha256']==after['plan_sha256']

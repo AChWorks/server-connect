@@ -276,6 +276,19 @@ func run(j bool, m *sc.Manager, args []string) int {
 			return output(j, nil, err)
 		}
 		return output(j, plan, nil)
+	case "selective-verify-intent":
+		opts := flag.NewFlagSet(name, flag.ContinueOnError)
+		opts.SetOutput(io.Discard)
+		id := opts.String("operation-id", "", "exact previously staged operation ID")
+		revision := opts.Uint64("revision", 0, "exact PREPARED revision")
+		if e := opts.Parse(args); e != nil || len(opts.Args()) != 0 || *id == "" || *revision != 1 {
+			return output(j, nil, sc.Fault("invalid_arguments", "verification requires an exact operation ID and PREPARED revision 1"))
+		}
+		check, err := m.VerifySelectiveIntentLive(*id, *revision)
+		if err != nil {
+			return output(j, nil, err)
+		}
+		return output(j, check, nil)
 	case "selective-abandon-intent":
 		opts := flag.NewFlagSet(name, flag.ContinueOnError)
 		opts.SetOutput(io.Discard)
@@ -431,6 +444,8 @@ Commands:
                               Advisory selective routing preview; never applies
   selective-stage-intent     Same options as selective-plan; privately persist
                               an unarmed PREPARED intent; never changes routes
+  selective-verify-intent --operation-id HEX32 --revision 1
+                              Reinspect exact unarmed intent; no activation
   selective-abandon-intent --operation-id HEX32 --revision 1
                               Remove only exact untouched PREPARED intent
   host-drift --baseline FILE Compare a prior private preflight JSON with now
@@ -456,7 +471,11 @@ Activation-journal-status shows only safe metadata for the internal v1
 PREPARED/UNCERTAIN journal, never private resource before/intended snapshots.
 Selective-stage-intent makes two non-atomic native observations and records
 an advisory PREPARED intent; it is NOT a guard, host reservation or TUN start.
-Only selective-abandon-intent can safely discard the exact untouched revision;
+Selective-verify-intent performs two fresh, NON-ATOMIC native kernel reads
+against the exact journal operation under the Manager lock. Success is an
+observation receipt, not a reserved route, owner proof, armed guard, or token
+authorizing later apply; external kernel writers are not locked.
+Only selective-abandon-intent can discard the exact untouched revision;
 UNCERTAIN and modified journals cannot be abandoned. Even an absent journal
 cannot prove safe networking, guard arming or recovery. These commands may
 initialize a private state directory/lock but never change host routes.
