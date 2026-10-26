@@ -481,11 +481,13 @@ for guard_stage in link route rule; do
   verify_host_services "isolated-activation-guard-$guard_stage"
   echo "ISOLATED_ACTIVATION_GUARD_STAGE_${guard_stage}=PASS"
 done
-# Negative native Linux cases: independent foreign address and foreign route
-# in another table are attached AFTER controller SIGKILL. The separate
-# systemd service MUST refuse link deletion, retain that resource, and fail;
-# only subsequent explicit disposable test cleanup removes the injection.
-for conflict_kind in address other-table-route; do
+# Three independent negative Linux cases: a foreign address, a foreign
+# route in another table and a foreign interface altname are injected AFTER
+# SIGKILL. Each new systemd cycle must be fresh (monotonic timer/service
+# timestamps + service invocation identity); retained prior failure status
+# must not turn a second run green before its own eight-second deadline.
+# Only controlled disposable QA cleanup removes the surviving foreign state.
+for conflict_kind in address other-table-route altname; do
   docker exec "$container" /bin/sh /root/qa-activation-guard.sh arm
   if crash_output=$(docker exec "$container" /bin/sh /root/qa-activation-guard.sh crash-controller link 2>&1); then
     echo "Negative-test controller unexpectedly survived SIGKILL ($conflict_kind)" >&2
@@ -499,6 +501,10 @@ for conflict_kind in address other-table-route; do
     }
   fi
   docker exec "$container" /bin/sh /root/qa-activation-guard.sh inject-conflict "$conflict_kind"
+  # The real verifier must NOT accept a stale negative service Result before
+  # this cycle's deadline. This check uses the same evidence predicate as
+  # the eventual positive refusal assertion.
+  docker exec "$container" /bin/sh /root/qa-activation-guard.sh assert-no-stale-refusal "$conflict_kind"
   docker exec "$container" /bin/sh /root/qa-activation-guard.sh await-refusal "$conflict_kind"
   docker exec "$container" /bin/sh /root/qa-activation-guard.sh cleanup-refusal "$conflict_kind"
   docker exec "$container" /bin/sh /root/qa-activation-guard.sh cleanup

@@ -72,12 +72,46 @@ def validate_route(row, resource):
             type(row["flags"]) is list and row["flags"] == [])
 
 
+# Exactly the known, supported native Debian 13 dummy-link JSON fields.
+# `ip -j -d link show` omits counters unless separately requested, and the
+# ifindex may legitimately vary across disposable guest cycles. Any new link
+# attribute (including `altnames`, `master`, `link`, XDP, netns ownership,
+# new mutable attributes or unknown kernel extensions) MUST block link deletion.
+# Do not silently adopt extra state with a partial denylist.
+LINK_KEYS_NATIVE = frozenset({
+    "ifindex", "ifname", "flags", "mtu", "qdisc", "operstate", "linkmode",
+    "group", "txqlen", "link_type", "address", "broadcast", "promiscuity",
+    "allmulti", "min_mtu", "max_mtu", "linkinfo", "inet6_addr_gen_mode",
+    "num_tx_queues", "num_rx_queues", "gso_max_size", "gso_max_segs",
+    "tso_max_size", "tso_max_segs", "gro_max_size", "gso_ipv4_max_size",
+    "gro_ipv4_max_size", "ifalias",
+})
+
+# Mutable or deletion-relevant values of our zero-address, fixed-MAC dummy
+# fixture. Kernel-assigned ifindex is intentionally not tied to a constant.
+LINK_NATIVE_OPTIONAL_DEFAULTS = {
+    "min_mtu": 0, "max_mtu": 0,
+    "num_tx_queues": 1, "num_rx_queues": 1,
+    "gso_max_size": 65536, "gso_max_segs": 65535,
+    "tso_max_size": 65536, "tso_max_segs": 65535,
+    "gro_max_size": 65536, "gso_ipv4_max_size": 65536,
+    "gro_ipv4_max_size": 65536,
+}
+
+
 def validate_link(row, resource):
     name, alias, cidr, priority, mac = resource
     # This fixed guest fixture deliberately has NO assigned IPv4/IPv6
     # addresses and a deterministic MAC, so foreign link modifications
     # can be rejected from native evidence without adoption-by-name.
     # Kernel-generated ifindex/queue sizing are not ownership tokens.
+    if (not frozenset(row).issubset(LINK_KEYS_NATIVE) or
+            any(type(row[key]) is not int or row[key] != expected
+                for key, expected in LINK_NATIVE_OPTIONAL_DEFAULTS.items()
+                if key in row) or
+            ("ifindex" in row and
+             (type(row["ifindex"]) is not int or row["ifindex"] <= 0))):
+        return False
     return (row.get("ifname") == name and row.get("ifalias") == alias and
             row.get("linkinfo") == {"info_kind": "dummy"} and
             row.get("address") == mac and row.get("mtu") == 1500 and

@@ -109,6 +109,12 @@ class IsolatedActivationGuardClassifier(unittest.TestCase):
                 self.assertEqual(mod.infer_rollback_stage(*fixture(mode)), mode)
             mutations = [
                 ("mtu_changed", lambda p: p[0][1].update(mtu=1400)),
+                ("foreign_altname", lambda p: p[0][1].update(
+                    altnames=["qa-foreign-added"])),
+                ("foreign_link_unknown", lambda p: p[0][1].update(
+                    foreign_extended_attribute=1)),
+                ("foreign_queue_metadata", lambda p: p[0][1].update(
+                    gso_max_size=2048)),
                 ("foreign_master", lambda p: p[0][1].update(master="foreign-br0")),
                 ("changed_mac", lambda p: p[0][1].update(address="02:53:43:ab:cd:ef")),
                 ("changed_promisc", lambda p: p[0][1].update(promiscuity=1)),
@@ -140,6 +146,8 @@ class IsolatedActivationGuardClassifier(unittest.TestCase):
         # Even a foreign interface identity must be non-adoptable.
         for name, change in [
             ("foreign_link_master", lambda p: p[0][-1].update(master="br0")),
+            ("foreign_link_altname", lambda p: p[0][-1].update(
+                altnames=["qa-foreign-secondary"])),
             ("foreign_ipv4_addr", lambda p: p[4]["addresses4"].append({
                 "ifname": mod.FOREIGN[0], "addr_info": [{"local": "192.0.2.1"}]})),
         ]:
