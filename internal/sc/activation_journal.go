@@ -43,14 +43,18 @@ type activationJournalChange struct {
 }
 
 type activationJournal struct {
-	Version           int                       `json:"version"`
-	Revision          uint64                    `json:"revision"`
-	OperationID       string                    `json:"operation_id"`
-	Phase             string                    `json:"phase"`
-	CreatedUnix       int64                     `json:"created_unix"`
-	ObservationSHA256 string                    `json:"observation_sha256"`
-	PlanSHA256        string                    `json:"plan_sha256"`
-	Changes           []activationJournalChange `json:"changes"`
+	Version           int    `json:"version"`
+	Revision          uint64 `json:"revision"`
+	OperationID       string `json:"operation_id"`
+	Phase             string `json:"phase"`
+	CreatedUnix       int64  `json:"created_unix"`
+	ObservationSHA256 string `json:"observation_sha256"`
+	PlanSHA256        string `json:"plan_sha256"`
+	// Optional v1 subtype: legacy generic records remain readable, but only
+	// explicitly bound unarmed Selective intents can use Selective abandonment.
+	IntentType string                    `json:"intent_type,omitempty"`
+	Selective  *selectiveJournalBinding  `json:"selective,omitempty"`
+	Changes    []activationJournalChange `json:"changes"`
 }
 
 func activationJournalError(message string) error {
@@ -97,6 +101,10 @@ func validateActivationJournal(j activationJournal) error {
 		(j.Phase != "uncertain" || j.Revision != 2) {
 		return activationJournalError("unsupported activation journal phase/revision combination")
 	}
+	if (j.IntentType == "" && j.Selective != nil) ||
+		(j.IntentType != "" && (j.IntentType != selectiveIntentType || j.Selective == nil)) {
+		return activationJournalError("unsupported journal intent subtype or missing selective binding")
+	}
 	seen := make(map[string]bool, len(j.Changes))
 	for _, change := range j.Changes {
 		if (change.Kind != "route" && change.Kind != "rule" && change.Kind != "interface") ||
@@ -120,6 +128,9 @@ func validateActivationJournal(j activationJournal) error {
 		if bytes.Equal(before, intended) {
 			return activationJournalError("journal resource has no distinct prior and intended states")
 		}
+	}
+	if j.IntentType == selectiveIntentType {
+		return validateSelectiveJournalRecord(j)
 	}
 	return nil
 }
@@ -174,6 +185,13 @@ func (m *Manager) prepareActivationJournal(observationSHA, planSHA string, chang
 // Test-only injectable sync distinguishes failure before the acknowledgment
 // from a completed journal write. Production always uses syscall.Fsync.
 func (m *Manager) prepareActivationJournalWithParentSync(observationSHA, planSHA string, changes []activationJournalChange, parentSync func(int) error) (activationJournal, error) {
+	return m.prepareActivationJournalWithOptions(observationSHA, planSHA, changes, nil, parentSync)
+}
+
+// The same descriptor-pinned write path and Manager lock own generic and
+// selective journal writes. A selective binding is copied before acquisition;
+// there is no unprotected follow-up mutation of an already committed record.
+func (m *Manager) prepareActivationJournalWithOptions(observationSHA, planSHA string, changes []activationJournalChange, binding *selectiveJournalBinding, parentSync func(int) error) (activationJournal, error) {
 	id, err := randomHex(16)
 	if err != nil {
 		return activationJournal{}, journalFSUnavailable("cannot generate operation identity")
@@ -190,6 +208,10 @@ func (m *Manager) prepareActivationJournalWithParentSync(observationSHA, planSHA
 		Phase: "prepared", CreatedUnix: time.Now().UTC().Unix(),
 		ObservationSHA256: observationSHA, PlanSHA256: planSHA,
 		Changes: copied,
+	}
+	if binding != nil {
+		copiedBinding := *binding
+		record.IntentType, record.Selective = selectiveIntentType, &copiedBinding
 	}
 	if err := validateActivationJournal(record); err != nil {
 		return activationJournal{}, err

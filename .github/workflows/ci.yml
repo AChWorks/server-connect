@@ -177,6 +177,15 @@ jobs:
           Path('build/ci/selective-operation-id.txt').write_text(operation)
           PYSTAGE
           test -f "$intent_dir/route-activation-journal.json"
+          python3 - "$intent_dir/route-activation-journal.json" <<'PYSTAGEDISK'
+          import json,sys
+          with open(sys.argv[1]) as private_file:
+              journal=json.load(private_file)
+          assert journal['intent_type']=='unarmed_selective_v1'
+          assert set(journal['selective'])=={'endpoint','management_peer','tunnel_interface','route_table'}
+          assert [entry['kind'] for entry in journal['changes']]==['route','rule']
+          assert len(journal['plan_sha256'])==len(journal['observation_sha256'])==64
+          PYSTAGEDISK
           test ! -e "$intent_dir/runtime.json"
           test ! -e "$intent_dir/proxy-auth"
           operation_id=$(cat build/ci/selective-operation-id.txt)
@@ -205,7 +214,12 @@ jobs:
           from pathlib import Path
           data=lambda name: json.loads(Path('build/ci/'+name).read_text())
           assert data('selective-wrong-id.json')['error']['code']=='activation_journal_conflict'
-          assert data('selective-abandoned.json')['data']['phase']=='absent'
+          acknowledged=data('selective-abandoned.json')['data']
+          assert acknowledged['phase']=='absent' and acknowledged['present'] is False
+          assert acknowledged['operation_id']==Path('build/ci/selective-operation-id.txt').read_text()
+          assert acknowledged['revision']==1
+          for field in ('activation_ready','guard_armed','recovery_verified','host_network_inspected'):
+              assert acknowledged[field] is False
           assert data('selective-replay.json')['error']['code']=='activation_journal_missing'
           original=data('selective-plan.json')['data']
           after=data('selective-post-stage-plan.json')['data']

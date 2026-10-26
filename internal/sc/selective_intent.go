@@ -1,10 +1,12 @@
 package sc
 
 import (
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
+	"syscall"
 )
 
 // Staging is a durable RECORD of advisory intent, not a route reservation,
@@ -21,6 +23,15 @@ func (m *Manager) StageSelectiveIntent(req SelectivePlanRequest) (ActivationJour
 // inspect is a read-only test seam. Production always uses native iproute2.
 func (m *Manager) stageSelectiveIntentWithInspector(req SelectivePlanRequest,
 	inspect func(endpointIP, managementPeerIP string) (HostPreflight, error)) (ActivationJournalStatus, error) {
+	return m.stageSelectiveIntentWithAfterCommit(req, inspect, nil)
+}
+
+// afterCommit is a private deterministic test seam: its invocation occurs
+// AFTER the lock-protected durable write and BEFORE returning the receipt.
+// Production always passes nil. It cannot change which operation was written.
+func (m *Manager) stageSelectiveIntentWithAfterCommit(req SelectivePlanRequest,
+	inspect func(endpointIP, managementPeerIP string) (HostPreflight, error),
+	afterCommit func(activationJournal)) (ActivationJournalStatus, error) {
 	intent, err := validateSelectiveRequest(req)
 	if err != nil {
 		return ActivationJournalStatus{}, err
@@ -52,12 +63,22 @@ func (m *Manager) stageSelectiveIntentWithInspector(req SelectivePlanRequest,
 	if err != nil {
 		return ActivationJournalStatus{}, err
 	}
-	if _, err := m.prepareActivationJournal(plan.ObservationSHA256, plan.PlanSHA256, changes); err != nil {
+	binding := &selectiveJournalBinding{
+		Endpoint: plan.Endpoint, ManagementPeer: plan.ManagementPeer,
+		TunnelInterface: plan.TunnelInterface, RouteTable: plan.RouteTable,
+	}
+	record, err := m.prepareActivationJournalWithOptions(
+		plan.ObservationSHA256, plan.PlanSHA256, changes, binding, syscall.Fsync)
+	if err != nil {
 		return ActivationJournalStatus{}, err
 	}
-	// Re-read through the verified private journal lock and strict schema.
-	// This can fail closed if a concurrent administrator changes the record.
-	return m.InspectActivationJournal()
+	if afterCommit != nil {
+		afterCommit(record)
+	}
+	// Receipt of the exact fsync-acknowledged operation. Another authorized
+	// manager may change the journal immediately afterward; this response
+	// MUST NEVER silently become that other manager's operation status.
+	return activationJournalStatusFromRecord(record), nil
 }
 
 // Each kernel object is linked by identity to the SAME deterministic plan
@@ -124,11 +145,49 @@ func selectiveJournalChanges(p SelectiveRoutePlan) ([]activationJournalChange, e
 // post-mutation phases cannot be removed through this method. This never
 // executes systemctl, iproute2, or any other network command.
 func (m *Manager) AbandonSelectiveIntent(operationID string, revision uint64) (ActivationJournalStatus, error) {
-	if err := m.abandonPreparedActivationJournal(operationID, revision); err != nil {
+	return m.abandonSelectiveIntentWithAfterRemove(operationID, revision, nil)
+}
+
+// afterRemove is a private test seam for a competing authorized manager's
+// operation after this exact deletion commits, before its receipt is returned.
+func (m *Manager) abandonSelectiveIntentWithAfterRemove(operationID string, revision uint64,
+	afterRemove func()) (ActivationJournalStatus, error) {
+	var receipt ActivationJournalStatus
+	err := m.withActivationJournalLock(syscall.Fsync, func(store *activationJournalDir) error {
+		record, identity, err := loadActivationJournalLocked(store)
 		if errors.Is(err, os.ErrNotExist) {
-			return ActivationJournalStatus{}, Fault("activation_journal_missing", "no prepared activation journal exists")
+			return Fault("activation_journal_missing", "no prepared activation journal exists")
 		}
+		if err != nil {
+			return err
+		}
+		if !journalHex32.MatchString(operationID) ||
+			subtle.ConstantTimeCompare([]byte(record.OperationID), []byte(operationID)) != 1 ||
+			record.Phase != "prepared" || record.Revision != 1 || revision != record.Revision {
+			return Fault("activation_journal_conflict", "only the exact untouched prepared revision may be abandoned")
+		}
+		if record.IntentType != selectiveIntentType || record.Selective == nil {
+			return Fault("activation_journal_conflict", "journal is not an unarmed selective intent")
+		}
+		// Loading already checks every resource, digest and binding for typed
+		// records. Explicitly revalidate before the inode-pinned deletion.
+		if err := validateSelectiveJournalRecord(record); err != nil {
+			return err
+		}
+		if err := store.removeJournal(identity); err != nil {
+			return err
+		}
+		// This is an operation-specific deletion RECEIPT, not a live global
+		// assertion that no other manager created B after we released the lock.
+		receipt = ActivationJournalStatus{Phase: "absent", OperationID: record.OperationID,
+			Revision: record.Revision}
+		return nil
+	})
+	if err != nil {
 		return ActivationJournalStatus{}, err
 	}
-	return m.InspectActivationJournal()
+	if afterRemove != nil {
+		afterRemove()
+	}
+	return receipt, nil
 }
