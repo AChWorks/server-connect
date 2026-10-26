@@ -54,6 +54,59 @@ if o.get("ok") is not True or (o.get("data") or {}).get("local_listener_ready") 
     sys.exit("Installed manager listener was not ready")
 '
 }
+# This exercises independent proxy-aware consumers, not merely curl.
+# A Python parent also launches an actual wget grandchild, approximating
+# a panel-managed installer process tree while NOT claiming aaPanel itself
+# has opted in or that arbitrary binaries honor HTTP proxy variables.
+selected_wget() {
+  "$manager" exec -- /usr/bin/wget -q -T 6 -t 1 -O - "$target"
+}
+
+selected_python_parent() {
+  "$manager" exec -- /usr/bin/python3 -I -B -c '
+import subprocess, sys, urllib.request
+url = sys.argv[1]
+with urllib.request.urlopen(url, timeout=6) as response:
+    if response.status != 200 or response.read().strip() != b"SC_QA_WEB_OK":
+        sys.exit(12)
+child = subprocess.run(["/usr/bin/wget", "-q", "-T", "6", "-t", "1", "-O", "-", url],
+                       capture_output=True, timeout=9, check=True)
+if child.stdout.strip() != b"SC_QA_WEB_OK":
+    sys.exit(13)
+print("SC_QA_PYTHON_SUBPROCESS_SELECTED")
+' "$target"
+}
+
+selected_git() {
+  "$manager" exec -- /usr/bin/git -c http.lowSpeedTime=6 -c http.lowSpeedLimit=1 \
+    ls-remote --exit-code http://127.0.0.1:19180/sc-qa-git.git HEAD
+}
+
+selected_apps_positive() {
+  test "$(selected_wget)" = SC_QA_WEB_OK
+  test "$(selected_python_parent)" = SC_QA_PYTHON_SUBPROCESS_SELECTED
+  expected=$(/usr/bin/git --git-dir=/root/qa-web/sc-qa-git.git rev-parse HEAD)
+  actual=$(selected_git)
+  test "$(printf '%s\n' "$actual" | cut -f1)" = "$expected"
+  test "$(printf '%s\n' "$actual" | cut -f2)" = HEAD
+  echo 'INSTALLED_SELECTED_NONCURL_APPS=PASS (wget, Python urllib->wget, Git HTTP)'
+}
+
+selected_apps_negative() {
+  # A client silently using Direct while the VLESS upstream is down would
+  # succeed against the guest-local origin; such a false pass is forbidden.
+  if selected_wget >/dev/null 2>&1; then
+    echo 'Wget silently reached Direct after selected VLESS failure' >&2; return 1
+  fi
+  if selected_python_parent >/dev/null 2>&1; then
+    echo 'Python or nested wget silently reached Direct after VLESS failure' >&2; return 1
+  fi
+  if selected_git >/dev/null 2>&1; then
+    echo 'Git silently reached Direct after selected VLESS failure' >&2; return 1
+  fi
+  echo 'INSTALLED_SELECTED_NONCURL_FAIL_CLOSED=PASS'
+}
+
 positive() {
   systemctl is-active --quiet "$upstream"
   active_ready
@@ -63,6 +116,7 @@ positive() {
   response=$("$manager" exec -- curl -q --fail --silent --show-error \
     --max-time 8 "$target") || exit 1
   [ "$response" = SC_QA_WEB_OK ] || exit 1
+  selected_apps_positive
   test "$(cat /var/lib/server-connect/profiles/qa-retained)" = SC_QA_RETAIN_PROFILE_BYTES
 }
 case "$1" in
@@ -175,6 +229,7 @@ print(o["data"]["id"])
       echo 'Opted-in application leaked to Direct when VLESS upstream stopped' >&2
       exit 1
     fi
+    selected_apps_negative
     /bin/sh /root/qa-apt-only.sh negative "$apt_phase"
     active_ready
     systemctl start "$upstream"
