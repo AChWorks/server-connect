@@ -85,6 +85,12 @@ class IsolatedActivationGuardClassifier(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     mod.validate(mode, *sections)
 
+    def test_missing_detailed_link_kind_rejected(self):
+        parts = list(fixture("applied"))
+        parts[0][1].pop("linkinfo")
+        with self.assertRaises(ValueError):
+            mod.validate("applied", *parts)
+
     def test_untrusted_shapes_and_preflight_refuse(self):
         with self.assertRaises(ValueError):
             mod.validate("unknown", *fixture("clean"))

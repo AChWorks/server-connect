@@ -138,7 +138,9 @@ def main():
     if len(sys.argv) != 2:
         raise ValueError("expected one fixture mode")
     mode = sys.argv[1]
-    links = native_json("link", "show")
+    # Native iproute2 often omits linkinfo.info_kind without -d. The
+    # ownership classifier requires the actual dummy kind, not a guess.
+    links = native_json("-d", "link", "show")
     routes = native_json("-4", "route", "show", "table", str(TABLE))
     rules = native_json("-4", "rule", "show")
     lookups = {}
