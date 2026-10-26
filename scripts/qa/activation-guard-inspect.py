@@ -156,9 +156,10 @@ def main():
     links = native_json("-d", "link", "show")
     # Querying an ABSENT numeric FIB table exits 2 on Debian 13. Never
     # interpret a failed native command as an empty table. Query every table
-    # successfully, then filter by its exact numeric identity instead.
-    routes = routes_from_all(native_json("-4", "route", "show", "table", "all"))
-    rules = native_json("-4", "rule", "show")
+    # successfully and force numeric IDs (-N) to avoid local rt_tables aliases,
+    # then filter by the exact reserved table identity.
+    routes = routes_from_all(native_json("-N", "-4", "route", "show", "table", "all"))
+    rules = native_json("-N", "-4", "rule", "show")
     lookups = {}
     if mode in ("applied", "recovered"):
         for label, ip in (("selected", "8.8.8.8"), ("foreign", "9.9.9.9"),
