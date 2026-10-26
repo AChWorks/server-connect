@@ -296,6 +296,18 @@ func trialRulePresence(rows []map[string]json.RawMessage, rule PlannedRule) (boo
 			return false, Fault("trial_observation_uncertain", "native rule priority unsupported")
 		}
 		if priority != rule.Priority {
+			// A product-tagged selector unexpectedly found at a different
+			// priority is ambiguous residue, not proof of complete rollback.
+			if trialProtocolMatches(row["protocol"]) {
+				table, tableErr := selectiveTable(row["table"], false)
+				destination, hasDestination, destErr := selectiveRuleDestination(row, false)
+				if tableErr != nil || destErr != nil {
+					return false, Fault("trial_observation_uncertain", "unexpected protocol-tagged rule is unsupported")
+				}
+				if table == rule.Table && hasDestination && destination.String() == rule.Destination {
+					return false, Fault("trial_resource_conflict", "tagged trial selector exists at foreign priority")
+				}
+			}
 			continue
 		}
 		count++

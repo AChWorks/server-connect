@@ -88,11 +88,15 @@ op=$(stage)
 "$ip" -4 rule del pref 30000 to 9.9.9.0/24 table 20000 protocol 188
 "$ip" -4 rule add pref 30000 to 9.9.9.0/24 table 20000 protocol 189
 before=$(/usr/bin/sha256sum /var/lib/server-connect/route-activation-journal.json | cut -d' ' -f1)
+injected_us=$(/usr/bin/python3 -c 'import time;print(time.clock_gettime_ns(time.CLOCK_MONOTONIC)//1000)')
 foreign_observed=no
 for n in $(seq 1 28);do
  if [ "$(systemctl show "$service" -p Result --value)" = exit-code ] &&
   [ "$(systemctl show "$service" -p ExecMainStatus --value)" != 0 ];then
-  foreign_observed=yes;break
+  actual_us=$(systemctl show "$service" -p ExecMainStartTimestampMonotonic --value)
+  case "$actual_us" in ''|*[!0-9]*) ;; *)
+   if [ "$actual_us" -gt "$injected_us" ];then foreign_observed=yes;break;fi ;;
+  esac
  fi
  sleep 1
 done

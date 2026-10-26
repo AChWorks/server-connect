@@ -125,6 +125,7 @@ func TestGuardedRuleTrialNativeIdentityRefusesForeignAndReplay(t *testing.T) {
 		"foreign_table":           strings.Replace(native, `"table":20000`, `"table":20001`, 1),
 		"unexpected_fwmark":       strings.Replace(native, `"protocol":188`, `"protocol":188,"fwmark":"0x1"`, 1),
 		"wrong_destination":       strings.Replace(native, `8.8.8.0/24`, `8.8.9.0/24`, 1),
+		"moved_tagged_priority":   strings.Replace(native, `"priority":30000`, `"priority":30003`, 1),
 		"same_priority_duplicate": strings.Replace(native, `{"priority":32766`, `{"priority":30000,"dst":"8.8.8.0/24","table":20000,"protocol":188},{"priority":32766`, 1),
 	} {
 		t.Run(name, func(t *testing.T) {
