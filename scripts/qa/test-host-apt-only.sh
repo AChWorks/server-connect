@@ -362,10 +362,15 @@ if result.returncode == 0 or not pidfile.exists():
 pid = int(pidfile.read_text())
 for attempt in range(20):
     statfile = Path(f"/proc/{pid}/stat")
-    if not statfile.exists():
+    # PID1 may reap the killed descendant between stat/existence checks and
+    # the read itself. A missing /proc entry is a SUCCESSFUL termination,
+    # never an unexpected Python traceback that fails otherwise healthy CI.
+    try:
+        status = statfile.read_text()
+    except FileNotFoundError:
         break
     # A zombie is not executing. PID1 may reap it asynchronously.
-    state = statfile.read_text().rsplit(") ", 1)[1].split()[0]
+    state = status.rsplit(") ", 1)[1].split()[0]
     if state == "Z":
         break
     time.sleep(0.1)

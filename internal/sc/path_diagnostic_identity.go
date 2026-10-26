@@ -7,7 +7,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"net/url"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -71,8 +70,12 @@ func parseDiagnosticServiceInstance(output []byte) (diagnosticServiceInstance, e
 func queryDiagnosticServiceInstance() (diagnosticServiceInstance, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 	defer cancel()
-	result, err := exec.CommandContext(ctx, "/usr/bin/systemctl", "show", DefaultUnit,
-		"--property=ActiveState", "--property=MainPID", "--property=InvocationID").Output()
+	cmd, err := trustedSystemctlCommand(ctx, "show", DefaultUnit,
+		"--property=ActiveState", "--property=MainPID", "--property=InvocationID")
+	if err != nil {
+		return diagnosticServiceInstance{}, Fault("proxy_unavailable", "trusted systemd service controller unavailable")
+	}
+	result, err := cmd.Output()
 	if err != nil {
 		return diagnosticServiceInstance{}, errors.New("service instance cannot be inspected")
 	}
