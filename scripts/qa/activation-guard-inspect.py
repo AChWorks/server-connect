@@ -19,12 +19,25 @@ def valid_integer(value, expected):
     return type(value) is int and value == expected
 
 
+def in_qa_table(row):
+    # Native iproute2 table-all reports numeric IDs for nonstandard tables;
+    # tolerate the canonical decimal spelling but not aliases or coercion.
+    table = row.get("table")
+    return valid_integer(table, TABLE) or (type(table) is str and table == str(TABLE))
+
+
+def routes_from_all(rows):
+    if type(rows) is not list or any(type(row) is not dict for row in rows):
+        raise ValueError("native all-table route inventory is incomplete")
+    return [row for row in rows if in_qa_table(row)]
+
+
 def validate_rule(row, resource):
     name, alias, cidr, priority = resource
     network, bits = cidr.split("/")
     if not valid_integer(row.get("priority"), priority):
         return False
-    if not valid_integer(row.get("table"), TABLE):
+    if not in_qa_table(row):
         return False
     if row.get("dst") == network:
         if not valid_integer(row.get("dstlen"), int(bits)):
@@ -50,7 +63,7 @@ def validate_rule(row, resource):
 def validate_route(row, resource):
     name, alias, cidr, priority = resource
     return (row.get("dst") == cidr and row.get("dev") == name and
-            ("table" not in row or valid_integer(row["table"], TABLE)) and
+            in_qa_table(row) and
             not any(key in row for key in ("gateway", "via", "nhid", "multipath",
                                                "encap", "nexthops", "onlink")) and
             row.get("type", "unicast") == "unicast")
@@ -94,7 +107,7 @@ def validate(mode, links, routes, rules, lookups):
                            {FOREIGN[3]} if mode == "recovered" else set())
     actual_priorities = set()
     for row in rules:
-        if row.get("table") == TABLE:
+        if in_qa_table(row):
             priority = row.get("priority")
             if type(priority) is not int or priority in actual_priorities:
                 raise ValueError("duplicate or malformed RPDB rule in reserved table")
@@ -141,7 +154,10 @@ def main():
     # Native iproute2 often omits linkinfo.info_kind without -d. The
     # ownership classifier requires the actual dummy kind, not a guess.
     links = native_json("-d", "link", "show")
-    routes = native_json("-4", "route", "show", "table", str(TABLE))
+    # Querying an ABSENT numeric FIB table exits 2 on Debian 13. Never
+    # interpret a failed native command as an empty table. Query every table
+    # successfully, then filter by its exact numeric identity instead.
+    routes = routes_from_all(native_json("-4", "route", "show", "table", "all"))
     rules = native_json("-4", "rule", "show")
     lookups = {}
     if mode in ("applied", "recovered"):

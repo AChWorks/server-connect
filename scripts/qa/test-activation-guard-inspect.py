@@ -91,6 +91,19 @@ class IsolatedActivationGuardClassifier(unittest.TestCase):
         with self.assertRaises(ValueError):
             mod.validate("applied", *parts)
 
+    def test_native_all_table_discovery_not_false_empty(self):
+        row = {"dst": "8.8.8.0/24", "dev": mod.OWNED[0], "table": mod.TABLE}
+        self.assertEqual(mod.routes_from_all([{"dst": "default", "dev": "lo"}, row]), [row])
+        self.assertEqual(mod.routes_from_all([{"table": "local", "dst": "127.0.0.1"}]), [])
+        self.assertEqual(mod.routes_from_all([{**row, "table": str(mod.TABLE)}]),
+                         [{**row, "table": str(mod.TABLE)}])
+        with self.assertRaises(ValueError):
+            mod.routes_from_all([row, None])
+        with self.assertRaises(ValueError):
+            mod.validate("applied", *([fixture("applied")[0],
+                                       [dict(row, table=254), fixture("applied")[1][1]],
+                                       fixture("applied")[2], fixture("applied")[3]]))
+
     def test_untrusted_shapes_and_preflight_refuse(self):
         with self.assertRaises(ValueError):
             mod.validate("unknown", *fixture("clean"))
