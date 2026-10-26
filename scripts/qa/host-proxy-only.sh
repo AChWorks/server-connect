@@ -88,8 +88,8 @@ if mode in ("positive", "child-down"):
     except subprocess.TimeoutExpired:
         sys.exit(14)
     if mode == "child-down":
-        if child.returncode == 0:
-            sys.exit("Python-spawned wget silently reached Direct")
+        if child.returncode == 0 or b"SC_QA_WEB_OK" in child.stdout:
+            sys.exit("Python-spawned wget reached the independent Direct origin")
         print("SC_QA_PYTHON_WGET_CHILD_PROXY_DOWN")
         sys.exit(0)
     if child.returncode != 0 or child.stdout.strip() != b"SC_QA_WEB_OK":
@@ -106,8 +106,18 @@ selected_git() {
 }
 
 selected_apps_positive() {
-  test "$(selected_wget)" = SC_QA_WEB_OK
-  test "$(selected_python_parent positive)" = SC_QA_PYTHON_SUBPROCESS_SELECTED
+  wget_positive=$(selected_wget) || {
+    echo 'Selected wget failed despite active upstream' >&2; return 1
+  }
+  [ "$wget_positive" = SC_QA_WEB_OK ] || {
+    echo 'Selected wget did not return the independent origin marker' >&2; return 1
+  }
+  python_positive=$(selected_python_parent positive) || {
+    echo 'Selected Python urllib and spawned wget failed despite active upstream' >&2; return 1
+  }
+  [ "$python_positive" = SC_QA_PYTHON_SUBPROCESS_SELECTED ] || {
+    echo 'Selected Python parent did not confirm both consumers' >&2; return 1
+  }
   expected=$(/usr/bin/git --git-dir=/root/qa-web/sc-qa-git.git rev-parse HEAD)
   actual=$(selected_git)
   test "$(printf '%s\n' "$actual" | cut -f1)" = "$expected"
@@ -118,9 +128,13 @@ selected_apps_positive() {
 selected_apps_negative() {
   # A client silently using Direct while the VLESS upstream is down would
   # succeed against the guest-local origin; such a false pass is forbidden.
-  if selected_wget >/dev/null 2>&1; then
+  if wget_negative=$(selected_wget 2>/dev/null); then
     echo 'Wget silently reached Direct after selected VLESS failure' >&2; return 1
   fi
+  case "$wget_negative" in
+    *SC_QA_WEB_OK*)
+      echo 'Wget leaked Direct origin data despite reporting an error' >&2; return 1 ;;
+  esac
   # The urllib request and spawned wget MUST be invoked separately while
   # the upstream is down. Running the normal positive sequence alone would
   # exit on urllib failure before ever reaching its child.
@@ -130,14 +144,19 @@ selected_apps_negative() {
   if [ "$python_negative" != SC_QA_PYTHON_URLLIB_PROXY_DOWN ]; then
     echo 'Python urllib silently reached Direct after VLESS failure' >&2; return 1
   fi
+  echo 'INSTALLED_SELECTED_PYTHON_URLLIB_FAIL_CLOSED=PASS'
   child_negative=$(selected_python_parent child-down) || {
     echo 'Python-spawned wget outage probe did not complete' >&2; return 1
   }
   if [ "$child_negative" != SC_QA_PYTHON_WGET_CHILD_PROXY_DOWN ]; then
     echo 'Python-spawned wget silently reached Direct after VLESS failure' >&2; return 1
   fi
-  if selected_git >/dev/null 2>&1; then
+  echo 'INSTALLED_SELECTED_PYTHON_WGET_CHILD_FAIL_CLOSED=PASS'
+  if git_negative=$(selected_git 2>/dev/null); then
     echo 'Git silently reached Direct after selected VLESS failure' >&2; return 1
+  fi
+  if [ -n "$git_negative" ]; then
+    echo 'Git emitted origin refs despite selected VLESS failure' >&2; return 1
   fi
   echo 'INSTALLED_SELECTED_NONCURL_FAIL_CLOSED=PASS'
 }
