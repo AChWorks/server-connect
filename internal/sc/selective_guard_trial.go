@@ -243,9 +243,10 @@ func trialIsolatedNetwork() error {
 	return nil
 }
 
-// A transient runtime unit or mask can override the installed static unit
-// while systemctl show still reports cached LoadState=loaded and
-// UnitFileState=static. Never trust that cache as a usable watchdog.
+// A competing runtime unit or mask can exist while systemctl reports a
+// loaded/static installed /etc unit (which has HIGHER precedence than /run).
+// Never trust that name collision as a clean, uniquely owned guard. A
+// runtime mask alone is NOT evidence that the /etc unit stopped executing.
 func trialNoRuntimeUnitOverride(runtimeDir, name string) error {
 	_, err := os.Lstat(filepath.Join(runtimeDir, name))
 	if err == nil {
@@ -296,9 +297,8 @@ func trialGuardScheduled() error {
 			return Fault("guard_unavailable", "independent recovery unit identity mismatch")
 		}
 		// The installed oneshot has no [Install] section and must stay
-		// static. A runtime mask can leave a cached loaded FragmentPath;
-		// checking only LoadState/FragmentPath can falsely attest the
-		// watchdog while a pending kernel rule is no longer supervised.
+		// static. Runtime overrides are checked separately because /etc
+		// has higher precedence and show may still report loaded/static.
 		if name == trialRecoveryUnit && fields["UnitFileState"] != "static" {
 			return Fault("guard_unavailable", "independent recovery service no longer static and available")
 		}

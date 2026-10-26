@@ -183,8 +183,9 @@ func TestGuardedRuleTrialQACrashBoundaryAdmission(t *testing.T) {
 	}
 }
 
-// Systemd can cache loaded/static after a runtime mask has replaced the unit.
-// The actual runtime filesystem is a separate observation boundary.
+// /etc has higher systemd precedence than /run, so a suspicious runtime
+// mask can coexist with an apparently healthy loaded/static /etc unit.
+// The runtime filesystem is a separate observation boundary.
 func TestGuardedRuleTrialRuntimeMaskRefusesCachedUnitState(t *testing.T) {
 	dir := t.TempDir()
 	for _, name := range []string{trialRecoveryUnit, trialRecoveryTimer} {

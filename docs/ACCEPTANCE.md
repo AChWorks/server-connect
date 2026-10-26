@@ -62,11 +62,14 @@ Each checks exact pending/recovered revision, native rule absence or presence,
 private journal digest, and actual independently invoked recovery after a
 crash. Stopping the timer or masking the recovery service while pending must
 not produce a false `guard_scheduled` or `trial_recovered` receipt,
-including when `systemctl show` still reports cached `loaded/static` for
-an actual `/run/systemd/system` mask. The negative guest exercise separately
-reloads systemd before asserting the masked watchdog cannot run at all;
-merely writing a mask symlink does not prove its old cached unit stopped
-executing. After an
+including when `systemctl show` reports `loaded/static` because `/etc`
+service units take precedence over a competing `/run/systemd/system` mask.
+This is an override-conflict refusal, **not** proof that the runtime mask
+disabled the unit. The distinct negative guest exercise then replaces only
+the installed guest-owned `/etc` unit with an effective mask, verifies
+`LoadState=masked`, retains the exact previous unit bytes and digest,
+checks the pending journal/real rule after deadline, and restores the unit
+before independently rearming recovery. After an
 externally impaired service is restored, the overdue experiment must recover
 without deleting foreign rules. A deliberately reintroduced protocol-tagged
 rule after successful recovery must fail live status reinspection until the

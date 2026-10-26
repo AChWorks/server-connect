@@ -236,8 +236,8 @@ legacy `--qa-kill-after-rule` and phase-scoped `--qa-kill-at`
 interruption points (`before-journal`, `after-journal`, `after-add` during
 apply; `after-delete`, `before-recovered-journal` during recovery) are
 **disposable-guest-only QA**. A pending recovery with a stopped/masked
-systemd timer/service must report `guard_unavailable`, not a positive
-`scheduled` receipt; a recovered journal is re-observed against native kernel
+systemd timer/service (or a competing runtime unit override) must report
+`guard_unavailable`, not a positive `scheduled` receipt; a recovered journal is re-observed against native kernel
 rules before another recovered receipt is returned. A disabled or masked
 timer still requires external repair; no permanent guard-liveness or routed
 VPN safety is implied.

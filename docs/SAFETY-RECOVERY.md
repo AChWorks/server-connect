@@ -32,7 +32,10 @@ an externally disabled or masked watchdog: its overdue operation can recover
 when the independent service becomes available again, or through controlled
 operator recovery after expiry. Runtime unit masks/overrides in
 `/run/systemd/system` are rejected by direct filesystem inspection: `systemctl`
-may still report cached `loaded/static` for a masked service. A persistent
+may still report `loaded/static` because an installed `/etc` unit takes
+precedence over a lower-priority runtime mask. A runtime mask alone cannot
+prove that executor stopped; the guest acceptance separately masks the
+actual installed service while preserving/restoring its exact bytes. A persistent
 unmonitored rule is therefore
 an **unresolved unsafe/uncertain condition**, not success. These checks do not
 make a protocol tag an authenticated ownership credential or replace Runtime

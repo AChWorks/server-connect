@@ -250,53 +250,71 @@ wait_recovered
 "$SC" --json activation-trial-clear --operation-id "$op" --revision 3 >/dev/null
 echo PRODUCT_GUARD_TRIAL_PRE_RECOVERED_JOURNAL_SIGKILL=PASS
 
-# A real masked recovery service may prevent timer invocations. The pending
-# record MUST NOT change to recovered while service is unavailable, nor may
-# manual predeadline recovery claim the watchdog exists. Restoring the unit
-# permits the independent timer to complete the overdue recovery.
+# Two distinct degraded-watchdog cases: an unexpected lower-precedence
+# runtime override, and an EFFECTIVE mask of the actual installed unit.
+# Systemd's /etc unit wins over /run, so a --runtime mask of an /etc unit
+# is NOT evidence the executor was disabled. The product must still distrust
+# the competing runtime declaration even when systemctl reports loaded/static.
 op=$(stage)
-"$SC" --json selective-trial-apply --operation-id "$op" --revision 1 --deadline-seconds 9 >/dev/null
+"$SC" --json selective-trial-apply --operation-id "$op" --revision 1 --deadline-seconds 22 >/dev/null
 pending_sha=$(/usr/bin/sha256sum /var/lib/server-connect/route-activation-journal.json | cut -d' ' -f1)
-# Freeze new timer invocations before masking the exact guest-owned unit.
-systemctl stop "$timer"
+systemctl is-active --quiet "$timer"
 systemctl mask --runtime "$service"
-# Mask existence is independently verified. Debian 13 systemd may return
-# cached LoadState=loaded,UnitFileState=static despite this real runtime
-# mask; the product must inspect the override path itself, not trust cache.
 [ "$(readlink "/run/systemd/system/$service")" = /dev/null ]
 load_state=$(systemctl show "$service" -p LoadState --value)
 file_state=$(systemctl show "$service" -p UnitFileState --value)
-printf 'PRODUCT_GUARD_TRIAL_MASKED_UNIT_OBSERVATION=LoadState:%s,UnitFileState:%s\n' "$load_state" "$file_state"
-# First prove that the product refuses the *cached* systemd positive
-# state while the real runtime mask is already on disk.
-if "$SC" --json activation-trial-recover >/run/sc-qa-masked-service.log 2>&1;then
- echo 'Masked watchdog was incorrectly reported as scheduled' >&2;exit 1
+printf 'PRODUCT_GUARD_TRIAL_RUNTIME_OVERRIDE_OBSERVATION=LoadState:%s,UnitFileState:%s\n' "$load_state" "$file_state"
+if "$SC" --json activation-trial-recover >/run/sc-qa-runtime-override.log 2>&1;then
+ echo 'Competing runtime override incorrectly reported a scheduled guard' >&2;exit 1
 fi
 /usr/bin/python3 - <<'PYMASK'
 import json
-with open('/run/sc-qa-masked-service.log',encoding='utf-8') as f: r=json.load(f)
+with open('/run/sc-qa-runtime-override.log',encoding='utf-8') as f: r=json.load(f)
 assert not r['ok'] and r['error']['code']=='guard_unavailable',r
 PYMASK
-rm -f /run/sc-qa-masked-service.log
-echo PRODUCT_GUARD_TRIAL_CACHED_MASK_FALSE_GUARD_REFUSED=PASS
-# A mask file alone does not necessarily stop a *cached* loaded unit from
-# being invoked by systemd. Reload while the timer is stopped so the next
-# probe actually tests an UNAVAILABLE executor, not one still executable.
+rm -f /run/sc-qa-runtime-override.log
+[ "$(phase)" = trial_pending ]
+[ "$pending_sha" = "$(/usr/bin/sha256sum /var/lib/server-connect/route-activation-journal.json | cut -d' ' -f1)" ]
+systemctl unmask --runtime "$service"
+[ ! -L "/run/systemd/system/$service" ]
+echo PRODUCT_GUARD_TRIAL_RUNTIME_OVERRIDE_FALSE_GUARD_REFUSED=PASS
+
+# An effective /etc mask requires moving the existing /etc unit out of the
+# way. This privileged sabotage is permitted ONLY inside this disposable,
+# no-network Docker guest; preserve exact bytes/metadata before mutation.
+systemctl stop "$timer"
+service_path="/etc/systemd/system/$service"
+service_backup=/run/sc-qa-owned-service-before-mask
+[ -f "$service_path" ] && [ ! -L "$service_path" ] && [ ! -e "$service_backup" ]
+unit_sha=$(/usr/bin/sha256sum "$service_path" | cut -d' ' -f1)
+cp -p "$service_path" "$service_backup"
+[ "$unit_sha" = "$(/usr/bin/sha256sum "$service_backup" | cut -d' ' -f1)" ]
+rm "$service_path"
+ln -s /dev/null "$service_path"
+[ "$(readlink "$service_path")" = /dev/null ]
 systemctl daemon-reload
 [ "$(systemctl show "$service" -p LoadState --value)" = masked ]
-# A masked target can prevent the timer itself from starting. That is a
-# degraded-watchdog observation, NOT grounds for declaring recovery.
+# Start the timer under an actually unavailable executor. It may fail to
+# schedule; neither outcome is a recovered journal nor allowed to hide the
+# still-present real kernel rule.
 if systemctl start "$timer";then
  systemctl is-active --quiet "$timer"
 else
  [ "$(systemctl show "$timer" -p ActiveState --value)" = inactive ]
 fi
-sleep 11
+sleep 24
 [ "$(phase)" = trial_pending ]
 [ "$pending_sha" = "$(/usr/bin/sha256sum /var/lib/server-connect/route-activation-journal.json | cut -d' ' -f1)" ]
 "$ip" -4 rule show | grep -F '9.9.9.0/24' >/dev/null
+# Restore exactly the previously installed, digest-pinned product unit. Do
+# not treat timer running as proof of recovery; native rule and journal must
+# reconcile after the unit has been restored and independently rearmed.
 systemctl stop "$timer"
-systemctl unmask --runtime "$service"
+[ "$(readlink "$service_path")" = /dev/null ]
+rm "$service_path"
+cp -p "$service_backup" "$service_path"
+[ "$unit_sha" = "$(/usr/bin/sha256sum "$service_path" | cut -d' ' -f1)" ]
+rm "$service_backup"
 systemctl daemon-reload
 [ "$(systemctl show "$service" -p LoadState --value)" = loaded ]
 systemctl reset-failed "$service" || true
@@ -304,7 +322,7 @@ systemctl restart "$timer"
 wait_recovered
 "$SC" --json activation-trial-clear --operation-id "$op" --revision 3 >/dev/null
 no_trial_rule
-echo PRODUCT_GUARD_TRIAL_MASKED_WATCHDOG_NO_FALSE_RECOVERY=PASS
+echo PRODUCT_GUARD_TRIAL_EFFECTIVE_MASK_NO_FALSE_RECOVERY=PASS
 
 # After a completed recovery, a new external rule at the exact selector
 # cannot be silently accepted as an unchanged previously recovered kernel.
