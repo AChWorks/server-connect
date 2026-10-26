@@ -25,7 +25,7 @@ import (
 // traffic. No non-disposable host may invoke this development operation.
 const (
 	trialIntentType    = "guarded_rule_trial_v2"
-	trialProtocol      = "188"
+	trialProtocol      = "247"
 	trialRecoveryUnit  = "server-connect-activation-recover.service"
 	trialRecoveryTimer = "server-connect-activation-recover.timer"
 	trialGuardUnitDir  = "/etc/systemd/system/"
@@ -285,7 +285,10 @@ func sha256Hex(data []byte) string { sum := sha256.Sum256(data); return hex.Enco
 // observed anew; a different rule at the same priority is foreign, never ours.
 func trialProtocolMatches(raw json.RawMessage) bool {
 	value, ok := selectiveInt(raw)
-	return ok && value == 188
+	// A named iproute2 protocol alias is NOT an independently verified
+	// numeric ownership tag. The supported isolated Debian 13 fixture uses
+	// a number absent from its default rt_protos mapping; refuse aliases.
+	return ok && strconv.Itoa(value) == trialProtocol
 }
 
 func trialRulePresence(rows []map[string]json.RawMessage, rule PlannedRule) (bool, error) {
@@ -352,6 +355,12 @@ func trialRunIP(args ...string) error {
 // successful trial is NOT a working tunnel, safe production activation, or
 // evidence of live foreign transport.
 func (m *Manager) BeginGuardedRuleTrial(operationID string, revision uint64, ttlSeconds int, killAfter bool) (TrialReceipt, error) {
+	// The fixed independent systemd unit has exactly one private state root.
+	// A custom --state-dir would arm a watchdog that can never find this
+	// transaction, leaving a real kernel rule unowned after controller death.
+	if m.Dir != DefaultDir {
+		return TrialReceipt{}, Fault("trial_unsupported", "guarded trial requires the installed default private state directory")
+	}
 	if !journalHex32.MatchString(operationID) || revision != 1 || ttlSeconds < 4 || ttlSeconds > 600 {
 		return TrialReceipt{}, Fault("invalid_arguments", "exact staged revision and trial deadline (4-600s) required")
 	}
@@ -456,6 +465,9 @@ func (m *Manager) BeginGuardedRuleTrial(operationID string, revision uint64, ttl
 // living initiating shell. The v2 record must survive a process crash. A
 // changed boot ID triggers recovery immediately, not a new 600s allowance.
 func (m *Manager) RecoverGuardedRuleTrial() (TrialReceipt, error) {
+	if m.Dir != DefaultDir {
+		return TrialReceipt{}, Fault("trial_unsupported", "guard recovery requires the installed default private state directory")
+	}
 	var receipt TrialReceipt
 	err := m.withActivationJournalLock(syscall.Fsync, func(store *activationJournalDir) error {
 		record, id, err := loadTrialLocked(store)
@@ -538,6 +550,9 @@ func (m *Manager) RecoverGuardedRuleTrial() (TrialReceipt, error) {
 }
 
 func (m *Manager) InspectGuardedRuleTrial() (TrialReceipt, error) {
+	if m.Dir != DefaultDir {
+		return TrialReceipt{}, Fault("trial_unsupported", "guard trial inspection requires the installed default private state directory")
+	}
 	var receipt TrialReceipt
 	err := m.withActivationJournalLock(syscall.Fsync, func(store *activationJournalDir) error {
 		record, _, err := loadTrialLocked(store)
@@ -553,6 +568,9 @@ func (m *Manager) InspectGuardedRuleTrial() (TrialReceipt, error) {
 // An exact recovered receipt may be removed after observing an empty owned
 // priority. It cannot be used to abandon pending or conflicting resources.
 func (m *Manager) ClearRecoveredRuleTrial(operationID string, revision uint64) error {
+	if m.Dir != DefaultDir {
+		return Fault("trial_unsupported", "guard trial clearance requires the installed default private state directory")
+	}
 	return m.withActivationJournalLock(syscall.Fsync, func(store *activationJournalDir) error {
 		record, id, err := loadTrialLocked(store)
 		if err != nil {

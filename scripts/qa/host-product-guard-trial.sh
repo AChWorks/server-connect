@@ -117,8 +117,8 @@ printf '%s\n' 'PRODUCT_GUARD_TRIAL_SIGKILL_TIMEOUT=PASS'
 op=$(stage)
 "$SC" selective-trial-apply --operation-id "$op" --revision 1 --deadline-seconds 16 >/dev/null
 [ "$(phase)" = trial_pending ]
-"$ip" -4 rule del pref 30000 to 9.9.9.0/24 table 20000 protocol 188
-"$ip" -4 rule add pref 30000 to 9.9.9.0/24 table 20000 protocol 189
+"$ip" -4 rule del pref 30000 to 9.9.9.0/24 table 20000 protocol 247
+"$ip" -4 rule add pref 30000 to 9.9.9.0/24 table 20000 protocol 248
 before=$(/usr/bin/sha256sum /var/lib/server-connect/route-activation-journal.json | cut -d' ' -f1)
 injected_us=$(/usr/bin/python3 -c 'import time;print(time.clock_gettime_ns(time.CLOCK_MONOTONIC)//1000)')
 foreign_observed=no
@@ -138,7 +138,7 @@ done
 "$ip" -4 rule show | grep -F '9.9.9.0/24' >/dev/null
 # Remove the deliberately injected fixture, then perform genuine product
 # reconciliation after expiry. Neither recovery nor cleanup adopts foreign.
-"$ip" -4 rule del pref 30000 to 9.9.9.0/24 table 20000 protocol 189
+"$ip" -4 rule del pref 30000 to 9.9.9.0/24 table 20000 protocol 248
 "$SC" --json activation-trial-recover >/dev/null
 [ "$(phase)" = trial_recovered ]
 "$SC" --json activation-trial-clear --operation-id "$op" --revision 3 >/dev/null
@@ -146,4 +146,10 @@ no_trial_rule
 systemctl disable --now "$timer"
 [ "$(systemctl is-enabled "$timer")" = disabled ]
 [ "$(systemctl show "$timer" -p ActiveState --value)" = inactive ]
+# Reset only the exact owned failed recovery unit after its cause-specific
+# refusal, private journal and recovered kernel baseline were all proved.
+[ "$(systemctl show "$service" -p Result --value)" = exit-code ]
+[ "$(systemctl show "$service" -p ExecMainStatus --value)" = 41 ]
+systemctl reset-failed "$service"
+[ "$(systemctl show "$service" -p ActiveState --value)" = inactive ]
 printf '%s\n' 'PRODUCT_GUARD_TRIAL_FOREIGN_RULE_REFUSAL=PASS'

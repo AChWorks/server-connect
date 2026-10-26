@@ -110,7 +110,7 @@ func TestGuardedRuleTrialNativeIdentityRefusesForeignAndReplay(t *testing.T) {
 		}
 		return result
 	}
-	native := `[{"priority":0,"src":"all","table":"local"},{"priority":30000,"dst":"8.8.8.0/24","src":"all","table":20000,"protocol":188},{"priority":32766,"src":"all","table":"main"}]`
+	native := `[{"priority":0,"src":"all","table":"local"},{"priority":30000,"dst":"8.8.8.0/24","src":"all","table":20000,"protocol":247},{"priority":32766,"src":"all","table":"main"}]`
 	present, err := trialRulePresence(rows(native), rule)
 	if err != nil || !present {
 		t.Fatalf("realistic native owned priority refused: present=%v err=%v", present, err)
@@ -120,18 +120,37 @@ func TestGuardedRuleTrialNativeIdentityRefusesForeignAndReplay(t *testing.T) {
 		t.Fatal("unrelated kernel policy mistaken for owned priority")
 	}
 	for name, mutated := range map[string]string{
-		"wrong_protocol":          strings.Replace(native, `"protocol":188`, `"protocol":191`, 1),
-		"missing_protocol":        strings.Replace(native, `,"protocol":188`, ``, 1),
+		"wrong_protocol":          strings.Replace(native, `"protocol":247`, `"protocol":249`, 1),
+		"alias_not_authenticated": strings.Replace(native, `"protocol":247`, `"protocol":"ospf"`, 1),
+		"missing_protocol":        strings.Replace(native, `,"protocol":247`, ``, 1),
 		"foreign_table":           strings.Replace(native, `"table":20000`, `"table":20001`, 1),
-		"unexpected_fwmark":       strings.Replace(native, `"protocol":188`, `"protocol":188,"fwmark":"0x1"`, 1),
+		"unexpected_fwmark":       strings.Replace(native, `"protocol":247`, `"protocol":247,"fwmark":"0x1"`, 1),
 		"wrong_destination":       strings.Replace(native, `8.8.8.0/24`, `8.8.9.0/24`, 1),
 		"moved_tagged_priority":   strings.Replace(native, `"priority":30000`, `"priority":30003`, 1),
-		"same_priority_duplicate": strings.Replace(native, `{"priority":32766`, `{"priority":30000,"dst":"8.8.8.0/24","table":20000,"protocol":188},{"priority":32766`, 1),
+		"same_priority_duplicate": strings.Replace(native, `{"priority":32766`, `{"priority":30000,"dst":"8.8.8.0/24","table":20000,"protocol":247},{"priority":32766`, 1),
 	} {
 		t.Run(name, func(t *testing.T) {
 			if owned, err := trialRulePresence(rows(mutated), rule); err == nil || owned {
 				t.Fatalf("foreign rule accepted/deleted: %v, %v", owned, err)
 			}
 		})
+	}
+}
+
+// The fixed independent systemd unit always reads DefaultDir; accepting
+// custom state at trial start would create an irrecoverable rule after crash.
+func TestGuardedRuleTrialRejectsUnwatchedCustomState(t *testing.T) {
+	m := New(privateJournalTempDir(t), "", 0)
+	if _, err := m.BeginGuardedRuleTrial(strings.Repeat("a", 32), 1, 8, false); ErrorCode(err) != "trial_unsupported" {
+		t.Fatalf("custom state trial could strand an RPDB rule: %v", err)
+	}
+	if _, err := m.RecoverGuardedRuleTrial(); ErrorCode(err) != "trial_unsupported" {
+		t.Fatalf("unwatched recovery dir accepted: %v", err)
+	}
+	if _, err := m.InspectGuardedRuleTrial(); ErrorCode(err) != "trial_unsupported" {
+		t.Fatalf("unwatched inspection dir accepted: %v", err)
+	}
+	if err := m.ClearRecoveredRuleTrial(strings.Repeat("a", 32), 3); ErrorCode(err) != "trial_unsupported" {
+		t.Fatalf("unwatched clear dir accepted: %v", err)
 	}
 }
