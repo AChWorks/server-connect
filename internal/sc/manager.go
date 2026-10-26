@@ -484,26 +484,22 @@ func (m *Manager) statusWithService(observe func() (string, error), verifyOwners
 	})
 	return status, err
 }
-func (m *Manager) password() (string, error) {
-	path := filepath.Join(m.Dir, "proxy-auth")
-	b, e := readRegular(path)
-	if os.IsNotExist(e) {
-		s, e := randomHex(24)
-		if e != nil {
-			return "", e
-		}
-		if e = put(path, []byte(s)); e != nil {
-			return "", e
-		}
-		return s, nil
+
+// New credentials are staged in memory until all service observations pass.
+// A failed or contradictory status must not mutate auth or runtime state.
+func (m *Manager) stagedPassword() (password string, needsSave bool, err error) {
+	b, err := readRegular(filepath.Join(m.Dir, "proxy-auth"))
+	if os.IsNotExist(err) {
+		secret, err := randomHex(24)
+		return secret, true, err
 	}
-	if e != nil {
-		return "", e
+	if err != nil {
+		return "", false, err
 	}
 	if len(b) != 48 {
-		return "", errors.New("invalid local proxy authentication state")
+		return "", false, errors.New("invalid local proxy authentication state")
 	}
-	return string(b), nil
+	return string(b), false, nil
 }
 
 // checkLocalAuth proves that the selected local listener speaks SOCKS5 and
@@ -645,80 +641,117 @@ func (m *Manager) ReconcileDirectUnderInstaller() error {
 	return nil
 }
 
+// Connect refuses any unverified service state before touching private
+// credentials/runtime. Raw service diagnostics are never reflected to users.
+func checkedConnectActivity(observe func() (string, error)) (string, error) {
+	state, err := observe()
+	if err != nil {
+		if ErrorCode(err) == "service_binary_untrusted" {
+			return "unknown", Fault("service_binary_untrusted", "native systemd controller is missing or untrusted")
+		}
+		return "unknown", Fault("service_state_unavailable", "native systemd service activity cannot be verified before activation")
+	}
+	switch state {
+	case "active", "inactive", "failed":
+		return state, nil
+	default:
+		return "unknown", Fault("service_state_unavailable", "native systemd returned an unsupported service activity state")
+	}
+}
+
 func (m *Manager) Connect() error {
 	if err := m.verifyUnitOwnership(); err != nil {
 		return err
 	}
-	if e := EnsureCore(m.Core); e != nil {
-		return e
+	if err := EnsureCore(m.Core); err != nil {
+		return err
 	}
-	return m.withLock(func() error {
-		s, e := m.load()
-		if e != nil {
-			return e
-		}
-		if s.Selected == "" {
-			return errors.New("select a profile before connecting")
-		}
-		p, e := m.profile(s.Selected)
-		if e != nil {
-			return e
-		}
-		if s.Desired == "proxy" {
-			status, _ := m.unitActive()
-			if status == "active" {
-				b, e := readRegular(filepath.Join(m.Dir, "proxy-auth"))
-				if e != nil {
-					return e
-				}
-				return m.waitReady(s.Port, string(b))
-			}
-		}
-		pass, e := m.password()
-		if e != nil {
-			return e
-		}
-		cfg, e := CoreConfig(p, s.Port, pass)
-		if e != nil {
-			return e
-		}
-		if e = CheckConfig(m.Core, m.Dir, cfg); e != nil {
-			return e
-		}
-		if status, _ := m.unitActive(); status == "active" && s.Desired != "proxy" {
-			return errors.New("unowned or unexpected active service; refusing to overwrite")
-		}
-		target := filepath.Join(m.Dir, "runtime.json")
-		// Do not overwrite an active runtime or another operator's temporary file.
-		if e = put(target, cfg); e != nil {
-			return e
-		}
-		startErr := m.systemctl("enable", "--now")
-		if startErr == nil {
-			startErr = m.waitReady(s.Port, pass)
-		}
-		if startErr != nil {
-			stopErr := m.systemctl("stop")
-			disableErr := m.systemctl("disable")
-			if stopErr != nil || disableErr != nil {
-				return fmt.Errorf("proxy activation failed and cleanup is incomplete: %w", startErr)
-			}
-			if e = os.Remove(target); e != nil && !os.IsNotExist(e) {
-				return fmt.Errorf("proxy activation failed; runtime cleanup error: %w", e)
-			}
-			s.Desired = "direct"
-			if e = m.save(s); e != nil {
-				return fmt.Errorf("proxy activation failed; state cleanup error: %w", e)
-			}
-			return startErr
-		}
-		s.Desired = "proxy"
-		if e = m.save(s); e != nil {
-			return fmt.Errorf("service activated but state persistence failed; disconnect required: %w", e)
-		}
-		return nil
-	})
+	return m.withLock(func() error { return m.connectLocked(m.unitActive) })
 }
+
+// connectLocked holds the existing exclusive Manager lock. Only its
+// read-only service observer is injectable for isolated regression tests.
+func (m *Manager) connectLocked(observe func() (string, error)) error {
+	s, err := m.load()
+	if err != nil {
+		return err
+	}
+	if s.Selected == "" {
+		return errors.New("select a profile before connecting")
+	}
+	p, err := m.profile(s.Selected)
+	if err != nil {
+		return err
+	}
+	activity, err := checkedConnectActivity(observe)
+	if err != nil {
+		return err
+	}
+	if activity == "active" {
+		if s.Desired != "proxy" {
+			return Fault("service_conflict", "unexpected active service; refusing to overwrite its runtime")
+		}
+		b, err := readRegular(filepath.Join(m.Dir, "proxy-auth"))
+		if err != nil {
+			return err
+		}
+		return m.waitReady(s.Port, string(b))
+	}
+	pass, needsSave, err := m.stagedPassword()
+	if err != nil {
+		return err
+	}
+	cfg, err := CoreConfig(p, s.Port, pass)
+	if err != nil {
+		return err
+	}
+	if err = CheckConfig(m.Core, m.Dir, cfg); err != nil {
+		return err
+	}
+	// Validation can take seconds; observe again before either durable secret
+	// or runtime write. A service appearing now is never safe to overwrite.
+	activity, err = checkedConnectActivity(observe)
+	if err != nil {
+		return err
+	}
+	if activity == "active" {
+		return Fault("service_conflict", "service became active during validation; refusing runtime overwrite")
+	}
+	if needsSave {
+		if err = put(filepath.Join(m.Dir, "proxy-auth"), []byte(pass)); err != nil {
+			return err
+		}
+	}
+	target := filepath.Join(m.Dir, "runtime.json")
+	if err = put(target, cfg); err != nil {
+		return err
+	}
+	startErr := m.systemctl("enable", "--now")
+	if startErr == nil {
+		startErr = m.waitReady(s.Port, pass)
+	}
+	if startErr != nil {
+		stopErr := m.systemctl("stop")
+		disableErr := m.systemctl("disable")
+		if stopErr != nil || disableErr != nil {
+			return fmt.Errorf("proxy activation failed and cleanup is incomplete: %w", startErr)
+		}
+		if err = os.Remove(target); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("proxy activation failed; runtime cleanup error: %w", err)
+		}
+		s.Desired = "direct"
+		if err = m.save(s); err != nil {
+			return fmt.Errorf("proxy activation failed; state cleanup error: %w", err)
+		}
+		return startErr
+	}
+	s.Desired = "proxy"
+	if err = m.save(s); err != nil {
+		return fmt.Errorf("service activated but state persistence failed; disconnect required: %w", err)
+	}
+	return nil
+}
+
 func (m *Manager) Disconnect() error {
 	return m.withLock(func() error {
 		// Stop first: never claim Direct if our proxy process is still active.

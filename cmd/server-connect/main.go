@@ -65,6 +65,30 @@ func output(j bool, value any, err error) int {
 	return 0
 }
 
+// Status may fail after safely loading desired state. Keep that bounded
+// diagnostic visible for operators without changing unrelated CLI errors.
+// An unavailable state load has no trustworthy partial report to display.
+func outputStatus(j bool, report sc.Status, err error) int {
+	if err != nil && report.Desired == "" {
+		return output(j, nil, err)
+	}
+	if j || err == nil {
+		return output(j, report, err)
+	}
+	if output(false, report, nil) != 0 {
+		return 1
+	}
+	fmt.Fprintf(os.Stderr, "Error [%s]: %s\n", sc.ErrorCode(err), err)
+	return 1
+}
+
+// The status command uses a read-only getter so both human and JSON result
+// paths can be tested independently of a live host's systemd bus.
+func runStatus(j bool, read func() (sc.Status, error)) int {
+	status, err := read()
+	return outputStatus(j, status, err)
+}
+
 // Host drift is an explicit operator diagnostic: on an observed failure,
 // retain component-level evidence in the interactive and text CLI, without
 // changing the shared error semantics of unrelated commands.
@@ -151,8 +175,7 @@ func run(j bool, m *sc.Manager, args []string) int {
 	case "version":
 		return output(j, map[string]string{"manager": managerVersion, "sing_box": sc.CoreVersion}, nil)
 	case "status":
-		s, e := m.Status()
-		return output(j, s, e)
+		return runStatus(j, m.Status)
 	case "activation-journal-status":
 		if len(args) != 0 {
 			return output(j, nil, sc.Fault("invalid_arguments", "activation-journal-status accepts no command options"))

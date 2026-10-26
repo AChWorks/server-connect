@@ -18,8 +18,8 @@ func TestSystemctlCommandIgnoresPATHShadow(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("systemd target is Linux")
 	}
-	if _, err := os.Stat("/usr/bin/systemctl"); err != nil {
-		t.Skip("native systemctl unavailable")
+	if err := trustedSystemctlExecutable(); err != nil {
+		t.Fatalf("required native systemctl missing or unsafe: %v", err)
 	}
 	dir := t.TempDir()
 	witness := filepath.Join(dir, "executed")
@@ -121,7 +121,7 @@ func TestSystemctlCommandPinsNativeAndSanitizesEnvironment(t *testing.T) {
 		t.Skip("native systemd target is Linux")
 	}
 	if err := trustedSystemctlExecutable(); err != nil {
-		t.Skipf("trusted native systemctl unavailable: %v", err)
+		t.Fatalf("required native systemctl missing or unsafe: %v", err)
 	}
 	t.Setenv("PATH", t.TempDir())
 	t.Setenv("LD_PRELOAD", "/tmp/foreign-shared-object")
