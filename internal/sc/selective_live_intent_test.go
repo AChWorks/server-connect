@@ -82,11 +82,48 @@ func TestSelectiveLiveIntentRejectsDriftAndKeepsJournal(t *testing.T) {
 			host.IPv4Routes = json.RawMessage(`[{"dst":"default","dev":"eth0","metric":789},{"dst":"192.0.2.0/24","dev":"eth0"}]`)
 			return host, nil
 		}, "route_plan_changed", 1},
-		{"foreign-link", func(int) (HostPreflight, error) {
+		{"foreign-link-unsupported", func(int) (HostPreflight, error) {
 			host := fixtureSelectiveHost()
 			host.Links = json.RawMessage(`[{"ifname":"lo"},{"ifname":"scplan0"}]`)
 			return host, nil
-		}, "route_plan_changed", 1},
+		}, "route_plan_uncertain", 1},
+		{"malformed-links", func(int) (HostPreflight, error) {
+			host := fixtureSelectiveHost()
+			host.Links = json.RawMessage(`{"kernel_private_secret":"not-an-array"}`)
+			return host, nil
+		}, "route_plan_uncertain", 1},
+		{"unsupported-link-alias", func(int) (HostPreflight, error) {
+			host := fixtureSelectiveHost()
+			host.Links = json.RawMessage(`[{"ifname":"lo","altnames":"kernel_private_secret"}]`)
+			return host, nil
+		}, "route_plan_uncertain", 1},
+		{"malformed-ipv4-routes", func(int) (HostPreflight, error) {
+			host := fixtureSelectiveHost()
+			host.IPv4Routes = json.RawMessage(`{"kernel_private_secret":"not-an-array"}`)
+			return host, nil
+		}, "route_plan_uncertain", 1},
+		{"unsupported-route-table-alias", func(int) (HostPreflight, error) {
+			host := fixtureSelectiveHost()
+			host.IPv4Routes = json.RawMessage(`[{"dst":"default","dev":"eth0","table":"kernel_private_secret"}]`)
+			return host, nil
+		}, "route_plan_uncertain", 1},
+		{"malformed-ipv4-rules", func(int) (HostPreflight, error) {
+			host := fixtureSelectiveHost()
+			host.IPv4Rules = json.RawMessage(`{"kernel_private_secret":"not-an-array"}`)
+			return host, nil
+		}, "route_plan_uncertain", 1},
+		{"unsupported-protected-lookup", func(int) (HostPreflight, error) {
+			host := fixtureSelectiveHost()
+			host.Endpoint.KernelRoute = json.RawMessage(`[{"dst":"kernel_private_secret"}]`)
+			return host, nil
+		}, "route_plan_uncertain", 1},
+		{"second-inspection-malformed-rules", func(n int) (HostPreflight, error) {
+			host := fixtureSelectiveHost()
+			if n == 2 {
+				host.IPv6Rules = json.RawMessage(`{"kernel_private_secret":"not-an-array"}`)
+			}
+			return host, nil
+		}, "route_plan_uncertain", 2},
 		{"second-inspection-drift", func(n int) (HostPreflight, error) {
 			host := fixtureSelectiveHost()
 			if n == 2 {
@@ -114,7 +151,11 @@ func TestSelectiveLiveIntentRejectsDriftAndKeepsJournal(t *testing.T) {
 					return tt.probe(calls)
 				})
 			if ErrorCode(err) != tt.want || calls != tt.calls ||
-				receipt.OperationID != "" || (err != nil && strings.Contains(err.Error(), "private-target-secret")) {
+				receipt != (SelectiveIntentLiveCheck{}) ||
+				(err != nil && (strings.Contains(err.Error(), "private-target-secret") ||
+					strings.Contains(err.Error(), "kernel_private_secret") ||
+					strings.Contains(err.Error(), fixtureSelectiveRequest().EndpointIP) ||
+					strings.Contains(err.Error(), fixtureSelectiveRequest().ManagementPeerIP))) {
 				t.Fatalf("failure was accepted/leaked: %+v, calls=%d err=%v", receipt, calls, err)
 			}
 			assertLiveJournalUnchanged(t, m, before)

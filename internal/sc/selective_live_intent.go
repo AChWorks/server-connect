@@ -96,7 +96,10 @@ func (m *Manager) verifySelectiveIntentLiveWithInspector(operationID string, rev
 			}
 			plan, planErr := buildSelectivePlan(intent, host)
 			if planErr != nil {
-				return Fault("route_plan_changed", "live host state cannot reproduce the staged selective intent")
+				// An unparseable, unsupported or conflicting kernel observation
+				// is not a successfully comparable plan. Never convert the
+				// planner's uncertainty to confirmed drift or leak raw evidence.
+				return Fault("route_plan_uncertain", "live host observation cannot establish a comparable selective plan")
 			}
 			if plan.PlanSHA256 != record.PlanSHA256 ||
 				plan.ObservationSHA256 != record.ObservationSHA256 ||
