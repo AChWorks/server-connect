@@ -105,6 +105,13 @@ jobs:
           bash -n scripts/qa/test-host-qa-assertions.sh
           bash -n scripts/qa/test-host-coexistence.sh
           bash -n scripts/qa/test-installed-host.sh
+          bash -n scripts/qa/test-activation-boot-qa.sh
+          python3 - <<'PYQA'
+          import ast
+          from pathlib import Path
+          ast.parse(Path('scripts/qa/activation-boot-guard.py').read_text())
+          PYQA
+          PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/qa/test-activation-boot-guard.py
           bash -n scripts/qa/test-host-apt-only.sh
           bash scripts/qa/test-host-apt-only.sh
           bash scripts/qa/test-host-qa-assertions.sh

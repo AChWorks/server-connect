@@ -1,6 +1,6 @@
 # Safe activation, health, and recovery contract
 
-- **Status:** normative requirements for the still-unimplemented production Activation Guard and Runtime Health Guard. Isolated QA-only activation rollback feasibility tests exist, but do **not** demonstrate product guard integration, reboot/power-loss recovery or physical acceptance.
+- **Status:** normative requirements for the still-unimplemented production Activation Guard and Runtime Health Guard. Isolated QA-only in-boot rollback and disconnected Docker-restart pending-intent tests exist. The latter checks durable private fixture state and fresh boot-service no-op/conflict behavior after its kernel namespace resets. Neither demonstrates product guard integration, physical reboot/power-loss recovery or field acceptance.
 - **Source of product intent:** [PROJECT-SPEC.md](PROJECT-SPEC.md). This document details the behaviors necessary to implement those requirements.
 
 ## 1. Operational principle

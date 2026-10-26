@@ -90,6 +90,7 @@ jobs:
           # C compiler required by the journal race detector.
           DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends iproute2 gcc libc6-dev
           test -x /usr/bin/ip
+          PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/qa/test-activation-boot-guard.py
           # Run selected-kernel RPDB acceptance AFTER native iproute2 is installed.
           # Restricted runners may SKIP unshare; missing iproute2 is not acceptable here.
           go test ./internal/sc -run '^(TestPreflight|TestUnderlay|TestHostDrift|TestSelectivePolicyKernelRoutingInPrivateNamespace)' -count=1 -v

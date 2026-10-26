@@ -40,6 +40,14 @@ PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/qa/test-wp-proxy-prepend.py
 # ambiguous kernel identities before the privileged disconnected guest runs.
 sh -n scripts/qa/host-activation-guard.sh
 PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/qa/test-activation-guard-inspect.py
+# Separate reboot-scheduling QA remains a disposable-container proof only.
+bash -n scripts/qa/test-activation-boot-qa.sh
+PYTHONDONTWRITEBYTECODE=1 python3 -B - <<'PYBOOTA'
+import ast
+from pathlib import Path
+ast.parse(Path('scripts/qa/activation-boot-guard.py').read_text())
+PYBOOTA
+PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/qa/test-activation-boot-guard.py
 # This distinct ephemeral systemd guest begins without Python/curl, acquires
 # them through signed native Debian APT, installs the SAME QA archive through
 # the actual online bootstrap, then disconnects to prove offline uninstall.
@@ -576,4 +584,9 @@ if docker exec "$container" /bin/sh /root/qa-host-coexistence.sh probe \
 fi
 echo 'ISOLATED_SSH_STOPPED=PASS'
 echo 'LIMITATION: QA bundle is digest-matched but NOT a publisher-authenticated public release'
+# A separate disconnected guest exercises a persistent /var/lib QA journal
+# and independently enabled boot service across two real Docker restarts.
+# Docker restart is NOT physical host reboot and resets its network namespace;
+# the positive path is a deliberate no-op observation, not route rollback.
+bash scripts/qa/test-activation-boot-qa.sh "$image" "$container"
 echo 'LIMITATION: guest-loopback SSH/HTTP checks do not prove external SSH/aaPanel, foreign VPN reachability, reboot or field safety'
