@@ -333,7 +333,10 @@ op=$(stage)
 [ "$(phase)" = trial_pending ]
 pending_sha=$(/usr/bin/sha256sum /var/lib/server-connect/route-activation-journal.json | cut -d' ' -f1)
 installed_bin=/opt/server-connect/current/bin/server-connect
-binary_backup=/run/sc-qa-recovery-executor-backup
+# Keep the executable fixture on the trusted installed executable mount.
+# /run may be noexec under container/systemd hardening and cannot be used as
+# evidence that a copied manager program is runnable.
+binary_backup=/opt/server-connect/current/bin/server-connect.qa-recovery-backup
 [ -f "$installed_bin" ] && [ ! -L "$installed_bin" ] && [ ! -e "$binary_backup" ]
 binary_sha=$(/usr/bin/sha256sum "$installed_bin" | cut -d' ' -f1)
 cp -p "$installed_bin" "$binary_backup"
@@ -347,8 +350,13 @@ fi
 [ "$(systemctl show "$service" -p Result --value)" = exit-code ]
 [ "$(systemctl show "$service" -p ExecMainStatus --value)" = 203 ]
 systemctl is-active --quiet "$timer"
-if "$binary_backup" --json activation-trial-recover >/run/sc-qa-executor-failed.json 2>&1;then
+if "$binary_backup" --json activation-trial-recover >/run/sc-qa-executor-failed.json 2>/run/sc-qa-executor-failed.stderr;then
  echo 'Failed recovery executor incorrectly reported a scheduled guard' >&2;exit 1
+fi
+if [ ! -s /run/sc-qa-executor-failed.json ];then
+ echo 'Installed-binary diagnostic produced no JSON' >&2
+ sed -n '1,8p' /run/sc-qa-executor-failed.stderr >&2
+ exit 1
 fi
 /usr/bin/python3 - <<'PYEXECFAIL'
 import json
@@ -356,7 +364,7 @@ with open('/run/sc-qa-executor-failed.json',encoding='utf-8') as f: r=json.load(
 assert not r['ok'] and r['error']['code']=='guard_unavailable',r
 assert 'executor failed' in r['error']['message'],r
 PYEXECFAIL
-rm -f /run/sc-qa-executor-failed.json /run/sc-qa-executor-start.log
+rm -f /run/sc-qa-executor-failed.json /run/sc-qa-executor-failed.stderr /run/sc-qa-executor-start.log
 [ "$pending_sha" = "$(/usr/bin/sha256sum /var/lib/server-connect/route-activation-journal.json | cut -d' ' -f1)" ]
 "$ip" -4 rule show | grep -F '9.9.9.0/24' >/dev/null
 # Keep executable absent beyond expiry. An active timer with a failed
