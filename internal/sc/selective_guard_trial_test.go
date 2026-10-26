@@ -3,6 +3,8 @@ package sc
 import (
 	"bytes"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -178,5 +180,35 @@ func TestGuardedRuleTrialQACrashBoundaryAdmission(t *testing.T) {
 	}
 	if ErrorCode(trialValidateQACrashPoint("other", "after-add")) != "invalid_arguments" {
 		t.Fatal("unknown QA phase unexpectedly accepted")
+	}
+}
+
+// Systemd can cache loaded/static after a runtime mask has replaced the unit.
+// The actual runtime filesystem is a separate observation boundary.
+func TestGuardedRuleTrialRuntimeMaskRefusesCachedUnitState(t *testing.T) {
+	dir := t.TempDir()
+	for _, name := range []string{trialRecoveryUnit, trialRecoveryTimer} {
+		if err := trialNoRuntimeUnitOverride(dir, name); err != nil {
+			t.Fatalf("absent override refused for %s: %v", name, err)
+		}
+		path := filepath.Join(dir, name)
+		if err := os.Symlink("/dev/null", path); err != nil {
+			t.Fatal(err)
+		}
+		if err := trialNoRuntimeUnitOverride(dir, name); ErrorCode(err) != "guard_unavailable" {
+			t.Fatalf("runtime mask accepted: %s, %v", name, err)
+		}
+		if err := os.Remove(path); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte("foreign runtime override"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if err := trialNoRuntimeUnitOverride(dir, name); ErrorCode(err) != "guard_unavailable" {
+			t.Fatalf("runtime override accepted: %s, %v", name, err)
+		}
+		if err := os.Remove(path); err != nil {
+			t.Fatal(err)
+		}
 	}
 }

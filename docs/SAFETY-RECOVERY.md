@@ -30,7 +30,10 @@ misleading recovered response. When the timer/service becomes unavailable
 rather than asserting `guard_scheduled`. This does not automatically restart
 an externally disabled or masked watchdog: its overdue operation can recover
 when the independent service becomes available again, or through controlled
-operator recovery after expiry. A persistent unmonitored rule is therefore
+operator recovery after expiry. Runtime unit masks/overrides in
+`/run/systemd/system` are rejected by direct filesystem inspection: `systemctl`
+may still report cached `loaded/static` for a masked service. A persistent
+unmonitored rule is therefore
 an **unresolved unsafe/uncertain condition**, not success. These checks do not
 make a protocol tag an authenticated ownership credential or replace Runtime
 Health Guard #3.

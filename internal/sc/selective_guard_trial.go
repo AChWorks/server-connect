@@ -24,11 +24,12 @@ import (
 // interruption and reboot reconciliation without starting a VPN or diverting
 // traffic. No non-disposable host may invoke this development operation.
 const (
-	trialIntentType    = "guarded_rule_trial_v2"
-	trialProtocol      = "247"
-	trialRecoveryUnit  = "server-connect-activation-recover.service"
-	trialRecoveryTimer = "server-connect-activation-recover.timer"
-	trialGuardUnitDir  = "/etc/systemd/system/"
+	trialIntentType     = "guarded_rule_trial_v2"
+	trialProtocol       = "247"
+	trialRecoveryUnit   = "server-connect-activation-recover.service"
+	trialRecoveryTimer  = "server-connect-activation-recover.timer"
+	trialGuardUnitDir   = "/etc/systemd/system/"
+	trialRuntimeUnitDir = "/run/systemd/system/"
 )
 
 var trialBootIDPattern = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
@@ -242,10 +243,27 @@ func trialIsolatedNetwork() error {
 	return nil
 }
 
+// A transient runtime unit or mask can override the installed static unit
+// while systemctl show still reports cached LoadState=loaded and
+// UnitFileState=static. Never trust that cache as a usable watchdog.
+func trialNoRuntimeUnitOverride(runtimeDir, name string) error {
+	_, err := os.Lstat(filepath.Join(runtimeDir, name))
+	if err == nil {
+		return Fault("guard_unavailable", "runtime recovery unit override or mask present")
+	}
+	if !errors.Is(err, os.ErrNotExist) {
+		return Fault("guard_unavailable", "cannot verify runtime recovery unit ownership")
+	}
+	return nil
+}
+
 // This verifies both installed unit provenance and the live independent timer
 // rather than trusting a cached service result or a PATH-selected systemctl.
 func trialGuardScheduled() error {
 	for _, name := range []string{trialRecoveryUnit, trialRecoveryTimer} {
+		if err := trialNoRuntimeUnitOverride(trialRuntimeUnitDir, name); err != nil {
+			return err
+		}
 		unitPath := trialGuardUnitDir + name
 		body, err := readTrustedRootFile(unitPath)
 		if err != nil || len(body) == 0 {

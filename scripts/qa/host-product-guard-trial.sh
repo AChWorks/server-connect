@@ -260,16 +260,13 @@ pending_sha=$(/usr/bin/sha256sum /var/lib/server-connect/route-activation-journa
 # Freeze new timer invocations before masking the exact guest-owned unit.
 systemctl stop "$timer"
 systemctl mask --runtime "$service"
-# Mask existence is an independently verified fact. The effective unit may
-# remain cached as loaded until daemon-reload; product must refuse either
-# effective masked state (LoadState or UnitFileState) without guessing.
+# Mask existence is independently verified. Debian 13 systemd may return
+# cached LoadState=loaded,UnitFileState=static despite this real runtime
+# mask; the product must inspect the override path itself, not trust cache.
 [ "$(readlink "/run/systemd/system/$service")" = /dev/null ]
 load_state=$(systemctl show "$service" -p LoadState --value)
 file_state=$(systemctl show "$service" -p UnitFileState --value)
 printf 'PRODUCT_GUARD_TRIAL_MASKED_UNIT_OBSERVATION=LoadState:%s,UnitFileState:%s\n' "$load_state" "$file_state"
-case "$load_state/$file_state" in masked/*|*/masked-runtime|*/masked) ;; *)
- echo 'Mask exists but systemd has not reflected disabled recovery service' >&2;exit 1 ;;
-esac
 # A masked target can prevent the timer itself from starting. That is a
 # degraded-watchdog observation, NOT grounds for declaring recovery.
 if systemctl start "$timer";then

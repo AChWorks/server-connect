@@ -61,7 +61,9 @@ post-delete SIGKILL and post-native-absence/pre-recovered-journal SIGKILL.
 Each checks exact pending/recovered revision, native rule absence or presence,
 private journal digest, and actual independently invoked recovery after a
 crash. Stopping the timer or masking the recovery service while pending must
-not produce a false `guard_scheduled` or `trial_recovered` receipt. After an
+not produce a false `guard_scheduled` or `trial_recovered` receipt,
+including when `systemctl show` still reports cached `loaded/static` for
+an actual `/run/systemd/system` mask. After an
 externally impaired service is restored, the overdue experiment must recover
 without deleting foreign rules. A deliberately reintroduced protocol-tagged
 rule after successful recovery must fail live status reinspection until the
