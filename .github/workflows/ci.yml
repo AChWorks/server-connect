@@ -271,6 +271,67 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Reject a damaged native Debian base before APT
+        run: |
+          set -euo pipefail
+          digest=0000000000000000000000000000000000000000000000000000000000000000
+          archive=https://127.0.0.1:19/qa-no-listener
+          apt_held=/usr/bin/apt-get.sc-native-qa-held
+          apt_marker=/tmp/sc-native-qa-apt-attempted
+          test ! -e "$apt_held"
+          test ! -e "$apt_marker"
+          test -x /usr/bin/apt-get
+          ! command -v python3
+          ! command -v curl
+          # This fixture modifies ONLY the disposable Debian job container.
+          # Any unintended APT attempt hits the inert witness instead of
+          # changing OS packages, and makes the negative assertion fail.
+          restore_native_tools() {
+            for tool in mktemp rm wc cut; do
+              if test -e "/usr/bin/${tool}.sc-native-qa-held"; then
+                /usr/bin/mv -f "/usr/bin/${tool}.sc-native-qa-held" "/usr/bin/$tool"
+              fi
+            done
+            if test -e "$apt_held"; then
+              /usr/bin/mv -f "$apt_held" /usr/bin/apt-get
+            fi
+          }
+          trap restore_native_tools EXIT
+          /usr/bin/mv /usr/bin/apt-get "$apt_held"
+          cat > /usr/bin/apt-get <<'SHAPT'
+          #!/bin/sh
+          : > /tmp/sc-native-qa-apt-attempted
+          exit 96
+          SHAPT
+          chmod 0755 /usr/bin/apt-get
+          for tool in mktemp rm wc cut; do
+            held="/usr/bin/$tool.sc-native-qa-held"
+            test ! -e "$held"
+            /usr/bin/mv "/usr/bin/$tool" "$held"
+            if /usr/bin/env -i HOME=/root PATH=/usr/sbin:/usr/bin:/sbin:/bin LC_ALL=C \
+              /bin/sh scripts/bootstrap-online.sh --archive-url "$archive" --sha256 "$digest" \
+              > "/tmp/sc-native-qa-$tool.log" 2>&1; then
+              echo "Damaged native Debian base unexpectedly accepted: $tool" >&2; exit 1
+            fi
+            grep -F "Missing native Debian bootstrap utility: /usr/bin/$tool" \
+              "/tmp/sc-native-qa-$tool.log"
+            if test -e "$apt_marker"; then
+              echo "APT invoked despite missing native utility: $tool" >&2; exit 1
+            fi
+            test ! -e /usr/local/bin/server-connect
+            test ! -e /var/lib/server-connect
+            test ! -e /etc/systemd/system/server-connect.service
+            test -z "$(find /root -maxdepth 1 -name '.server-connect-bootstrap.*' -print)"
+            /usr/bin/mv "$held" "/usr/bin/$tool"
+          done
+          restore_native_tools
+          trap - EXIT
+          test -x /usr/bin/apt-get
+          for tool in mktemp rm wc cut; do test -x "/usr/bin/$tool"; done
+          ! command -v python3
+          ! command -v curl
+          echo 'DEBIAN13_DAMAGED_NATIVE_BASE_PRE_APT=PASS (zero APT attempts)'
+
       - name: Missing prerequisites are no-op for verify-only but acquired for real online install
         run: |
           set -euo pipefail

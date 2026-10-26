@@ -51,15 +51,17 @@ if [ "$verify_only" != yes ] && [ "$user_id" -ne 0 ]; then
  echo 'Run the online installation command as root; non-root --verify-only is supported.' >&2
  exit 1
 fi
-# Essential native coreutils are part of the supported Debian 13 base.
-# Never reinstall/repair an unexpectedly damaged essential package
-# automatically in the privileged acquisition path.
-command -v sha256sum >/dev/null 2>&1 &&
-command -v stat >/dev/null 2>&1 &&
-command -v timeout >/dev/null 2>&1 || {
- echo 'Supported Debian 13 base must provide native sha256sum, stat and timeout' >&2
- exit 1
-}
+# The supported Debian 13 base must provide every native helper used by
+# this bootstrap, including staging, measurement and EXIT-trap cleanup tools.
+# Fail before APT on an incomplete base; never auto-repair essential packages.
+# Require native /usr/bin executables (not a custom PATH wrapper).
+for native_tool in id sed sha256sum stat timeout mktemp rm wc cut; do
+ if [ ! -x "/usr/bin/$native_tool" ] ||
+    [ "$(command -v "$native_tool")" != "/usr/bin/$native_tool" ]; then
+  echo "Missing native Debian bootstrap utility: /usr/bin/$native_tool" >&2
+  exit 1
+ fi
+done
 set --
 command -v curl >/dev/null 2>&1 || set -- "$@" curl
 command -v python3 >/dev/null 2>&1 || set -- "$@" python3
