@@ -481,6 +481,31 @@ for guard_stage in link route rule; do
   verify_host_services "isolated-activation-guard-$guard_stage"
   echo "ISOLATED_ACTIVATION_GUARD_STAGE_${guard_stage}=PASS"
 done
+# Negative native Linux cases: independent foreign address and foreign route
+# in another table are attached AFTER controller SIGKILL. The separate
+# systemd service MUST refuse link deletion, retain that resource, and fail;
+# only subsequent explicit disposable test cleanup removes the injection.
+for conflict_kind in address other-table-route; do
+  docker exec "$container" /bin/sh /root/qa-activation-guard.sh arm
+  if crash_output=$(docker exec "$container" /bin/sh /root/qa-activation-guard.sh crash-controller link 2>&1); then
+    echo "Negative-test controller unexpectedly survived SIGKILL ($conflict_kind)" >&2
+    exit 1
+  else
+    killed_exit=$?
+    printf '%s\n' "$crash_output"
+    [[ $killed_exit == 137 && $crash_output == *"ISOLATED_ACTIVATION_CONTROLLER_BOUNDARY=link"* ]] || {
+      echo "Negative-test controller SIGKILL witness missing ($conflict_kind)" >&2
+      exit 1
+    }
+  fi
+  docker exec "$container" /bin/sh /root/qa-activation-guard.sh inject-conflict "$conflict_kind"
+  docker exec "$container" /bin/sh /root/qa-activation-guard.sh await-refusal "$conflict_kind"
+  docker exec "$container" /bin/sh /root/qa-activation-guard.sh cleanup-refusal "$conflict_kind"
+  docker exec "$container" /bin/sh /root/qa-activation-guard.sh cleanup
+  assert_network_unchanged "isolated-guard-foreign-$conflict_kind" "$offline_before"
+  verify_host_services "isolated-guard-foreign-$conflict_kind"
+  echo "ISOLATED_ACTIVATION_GUARD_FOREIGN_${conflict_kind}=PASS"
+done
 echo 'ISOLATED_ACTIVATION_GUARD_FEASIBILITY=PASS (not product guard/reboot proof)'
 
 echo '=== Isolated LOOPBACK acquisition followed by the SAME real installer ==='

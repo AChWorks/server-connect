@@ -84,7 +84,8 @@ crash_controller() {
   # Its resources occupy the SAME table but must survive the watchdog.
   "$ip" link add scqaf0 type dummy
   "$ip" link set dev scqaf0 alias sc-qa-guard-foreign-v1
-  "$ip" -4 addr add 10.211.1.2/24 dev scqaf0
+  "$ip" link set dev scqaf0 address 02:53:43:00:00:02
+  "$ip" link set dev scqaf0 addrgenmode none
   "$ip" link set dev scqaf0 up
   "$ip" -4 route add 9.9.9.0/24 dev scqaf0 table 20120
   "$ip" -4 rule add pref 30801 to 9.9.9.0/24 table 20120
@@ -93,7 +94,8 @@ crash_controller() {
   # Stage 1: link exists, but own route/rule are absent.
   "$ip" link add scqao0 type dummy
   "$ip" link set dev scqao0 alias sc-qa-guard-owned-v1
-  "$ip" -4 addr add 10.210.1.2/24 dev scqao0
+  "$ip" link set dev scqao0 address 02:53:43:00:00:01
+  "$ip" link set dev scqao0 addrgenmode none
   "$ip" link set dev scqao0 up
   verify_kernel partial_link
   if test "$stage" = link; then kill_controller; fi
@@ -173,6 +175,91 @@ await_recovery() {
   echo "ISOLATED_ACTIVATION_GUARD_FOREIGN_POLICY_PRESERVED=PASS (stage=$stage)"
 }
 
+# Explicit negative fixture: a separate test actor modifies the link after
+# the controller is SIGKILLed, but before the independent timer expires.
+# The watchdog must fail closed and leave the foreign resource observable.
+inject_conflict() {
+  require_state
+  test "$#" -eq 1
+  verify_kernel partial_link
+  case "$1" in
+    address)
+      "$ip" -4 addr add 192.0.2.77/32 dev scqao0
+      ;;
+    other-table-route)
+      "$ip" -4 route add 203.0.113.0/24 dev scqao0 table 20121
+      ;;
+    *) return 2 ;;
+  esac
+  if verify_kernel classify >/dev/null 2>&1; then
+    echo 'Unexpected foreign dependency was authorized for deletion' >&2
+    return 1
+  fi
+  echo "ISOLATED_ACTIVATION_GUARD_CONFLICT_INJECTED=$1"
+}
+
+assert_conflict_present() {
+  case "$1" in
+    address)
+      "$ip" -4 -j addr show dev scqao0 | /usr/bin/python3 -c '
+import json,sys
+rows=json.load(sys.stdin)
+assert any(item.get("local")=="192.0.2.77" and item.get("prefixlen")==32
+           for row in rows for item in row.get("addr_info", []))'
+      ;;
+    other-table-route)
+      "$ip" -4 -j route show table 20121 | /usr/bin/python3 -c '
+import json,sys
+rows=json.load(sys.stdin)
+assert len(rows)==1 and rows[0].get("dst")=="203.0.113.0/24" and rows[0].get("dev")=="scqao0"'
+      ;;
+    *) return 2 ;;
+  esac
+  "$ip" link show dev scqao0 >/dev/null
+}
+
+await_refusal() {
+  require_state
+  test "$#" -eq 1
+  case "$1" in address|other-table-route) ;; *) return 2 ;; esac
+  attempt=0
+  while test "$attempt" -lt 20; do
+    if test "$(systemctl show "$service" -p Result --value)" = exit-code; then break; fi
+    sleep 1
+    attempt=$((attempt + 1))
+  done
+  # This is evidence of independent timer execution, NOT a crash test
+  # merely manually invoking the guard to manufacture a refusal.
+  test "$(systemctl show "$service" -p Result --value)" = exit-code
+  test "$(systemctl show "$service" -p ExecMainStatus --value)" = 1
+  test ! -e "$state/rollback-proof"
+  assert_conflict_present "$1"
+  if verify_kernel classify >/dev/null 2>&1; then
+    echo 'Foreign dependency was accepted after failed watchdog' >&2
+    return 1
+  fi
+  echo "ISOLATED_ACTIVATION_GUARD_FOREIGN_DEPENDENCY_REFUSED=PASS (kind=$1)"
+}
+
+cleanup_refusal() {
+  require_state
+  test "$#" -eq 1
+  test "$(systemctl show "$service" -p Result --value)" = exit-code
+  assert_conflict_present "$1"
+  # Only the test harness, after proving the guard REFUSED destruction,
+  # removes its own precisely created negative-test resource. Do not do this
+  # in the rollback service; unknown foreign objects always block it.
+  case "$1" in
+    address) "$ip" -4 addr del 192.0.2.77/32 dev scqao0 ;;
+    other-table-route) "$ip" -4 route del 203.0.113.0/24 dev scqao0 table 20121 ;;
+    *) return 2 ;;
+  esac
+  verify_kernel partial_link
+  "$ip" link del dev scqao0
+  verify_kernel recovered
+  echo "ISOLATED_ACTIVATION_GUARD_FOREIGN_TEST_RESOURCE_CLEAN=PASS (kind=$1)"
+}
+
 cleanup() {
   require_state
   verify_kernel recovered
@@ -197,6 +284,9 @@ case "${1-}" in
   crash-controller) test "$#" -eq 2; crash_controller "$2" ;;
   rollback) test "$#" -eq 1; rollback ;;
   await-recovery) test "$#" -eq 2; await_recovery "$2" ;;
+  inject-conflict) test "$#" -eq 2; inject_conflict "$2" ;;
+  await-refusal) test "$#" -eq 2; await_refusal "$2" ;;
+  cleanup-refusal) test "$#" -eq 2; cleanup_refusal "$2" ;;
   cleanup) test "$#" -eq 1; cleanup ;;
-  *) echo 'Usage: host-activation-guard.sh arm|crash-controller link|route|rule|rollback|await-recovery link|route|rule|cleanup' >&2; exit 2 ;;
+  *) echo 'Usage: host-activation-guard.sh arm|crash-controller link|route|rule|rollback|await-recovery link|route|rule|inject-conflict address|other-table-route|await-refusal address|other-table-route|cleanup-refusal address|other-table-route|cleanup' >&2; exit 2 ;;
 esac
