@@ -1,0 +1,12 @@
+[Unit]
+Description=Server Connect guarded-rule trial deadline and reboot monitor
+Documentation=https://github.com/AChWorks/server-connect
+
+[Timer]
+OnBootSec=8s
+OnUnitInactiveSec=5s
+AccuracySec=1s
+Unit=server-connect-activation-recover.service
+
+[Install]
+WantedBy=timers.target

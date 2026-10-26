@@ -39,6 +39,7 @@ PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/qa/test-wp-proxy-prepend.py
 # The guard feasibility probe must be strictly guest-local and must reject
 # ambiguous kernel identities before the privileged disconnected guest runs.
 sh -n scripts/qa/host-activation-guard.sh
+sh -n scripts/qa/host-product-guard-trial.sh
 PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/qa/test-activation-guard-inspect.py
 # Separate reboot-scheduling QA remains a disposable-container proof only.
 bash -n scripts/qa/test-activation-boot-qa.sh
@@ -272,6 +273,8 @@ verify_direct_install() {
     test "$(systemctl show server-connect.service -p LoadState --value)" = loaded
     test "$(systemctl show server-connect.service -p ActiveState --value)" = inactive
     test "$(systemctl is-enabled server-connect.service)" = disabled
+    test "$(systemctl is-enabled server-connect-activation-recover.timer)" = disabled
+    test "$(systemctl show server-connect-activation-recover.service -p LoadState --value)" = loaded
     /usr/local/bin/server-connect version --json
   '
 }
@@ -282,6 +285,8 @@ verify_clean_uninstall() {
     test ! -e /opt/server-connect
     test ! -e /usr/local/bin/server-connect
     test ! -e /etc/systemd/system/server-connect.service
+    test ! -e /etc/systemd/system/server-connect-activation-recover.service
+    test ! -e /etc/systemd/system/server-connect-activation-recover.timer
     test "$(stat -c %a /var/lib/server-connect)" = 700
     test "$(stat -c %a /var/lib/server-connect/profiles)" = 700
     test "$(cat /var/lib/server-connect/profiles/qa-retained)" = SC_QA_RETAIN_PROFILE_BYTES
@@ -341,6 +346,12 @@ run_offline reinstall --offline
 verify_direct_install
 assert_network_unchanged reinstall "$offline_before"
 verify_host_services reinstall
+# Product code + installed inactive-by-default independent recovery units.
+# The actual RPDB rule is added ONLY in the verified disconnected guest.
+docker cp "$root/scripts/qa/host-product-guard-trial.sh" "$container:/root/qa-product-guard-trial.sh"
+docker exec "$container" /bin/sh /root/qa-product-guard-trial.sh
+assert_network_unchanged product-guard-recovered "$offline_before"
+verify_host_services product-guard-recovered
 echo '=== Installed real VLESS Proxy Only and owned offline update ==='
 docker cp "$root/scripts/qa/host-proxy-only.sh" "$container:/root/qa-proxy-only.sh"
 docker cp "$root/scripts/qa/host-apt-only.sh" "$container:/root/qa-apt-only.sh"

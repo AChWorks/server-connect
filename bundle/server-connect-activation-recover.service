@@ -1,0 +1,20 @@
+[Unit]
+Description=Server Connect independent guarded-rule trial recovery
+Documentation=https://github.com/AChWorks/server-connect
+After=local-fs.target
+
+[Service]
+Type=oneshot
+ExecStart=/opt/server-connect/current/bin/server-connect activation-trial-recover
+TimeoutStartSec=30s
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/var/lib/server-connect
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+CapabilityBoundingSet=CAP_NET_ADMIN
+AmbientCapabilities=CAP_NET_ADMIN
+UMask=0077

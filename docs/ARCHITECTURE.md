@@ -3,6 +3,16 @@
 - **Status:** authoritative design contract; a Proxy Only development candidate has source and isolated installed-host CI evidence. Host-wide guarded routing, production guards and physical field acceptance remain unimplemented or unproven; this is not a released build.
 - **Product requirements:** [PROJECT-SPEC.md](PROJECT-SPEC.md) — canonical.
 
+The development-only product-integrated guard now has inactive-by-default
+systemd timer/service units and a v2, exact-operation rule-only journal. Its
+sole executable mutation is a tagged IPv4 RPDB rule to an otherwise unused,
+empty table within a strictly disconnected Docker systemd guest; the
+independent service can remove only that observed rule after deadline/crash.
+It does not activate a TUN, host egress route or VPN; production routed
+modes remain unavailable pending the full independent activation and runtime
+guards and acceptance. The ordinary Proxy Only installation adds no active
+background guard timer or new kernel networking effects.
+
 ## 1. Shape
 
 A single-host, offline-first CLI/terminal manager with a small control plane and **upstream sing-box** as the initial optional data plane. Avoid a universal daemon, a second VPN engine, a mandatory UI server or new Foundation.

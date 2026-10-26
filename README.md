@@ -210,6 +210,37 @@ command is a development diagnostic and is not a routed-mode release.
 
 ### Inspect the internal activation intent journal (Issue #2 development)
 
+### Installed independent guard foundation (experimental only)
+
+The local development installer now deploys **two root-owned, checksum-verified**
+`server-connect-activation-recover.service` / `.timer` units, **disabled and
+inactive by default**. This adds no routing policy, no new background timer
+and no production Activation Guard to Proxy Only. An active or ambiguous guard
+or a retained guarded-trial journal prevents update/uninstall, rather than
+removing the recovery executable for an outstanding operation. On ordinary
+uninstall, both product-owned units and their digest records are removed.
+
+A separate **disposable Docker systemd guest only** can exercise the actual
+installed Manager's `selective-trial-apply --operation-id HEX32 --revision 1
+--deadline-seconds 8` after an exact v1 staging receipt and explicitly
+`systemctl enable --now server-connect-activation-recover.timer`. Its strict
+loopback-only namespace/privilege gate rejects ordinary hosts. It fsyncs a v2
+operation journal **before creating any kernel effect**, then adds **one IPv4
+RPDB rule pointing at an empty table** with a fixed experimental protocol tag.
+The watchdog independently inspects that exact native rule and removes it on
+expiry after a killed controller or on a new boot identity. Foreign rules at
+the selected priority fail closed and preserve the pending journal. The
+operator can inspect `activation-trial-status` and, after verified rule-only
+recovery, clear the exact revision 3 via `activation-trial-clear`. The
+`--qa-kill-after-rule` option is exclusively for isolated acceptance testing.
+
+**This is not Selective or Broad VPN activation**: it does not create a tunnel
+interface, install a route, prove actual path egress, verify SSH, authorize a
+production network change, or satisfy the Runtime Health Guard. A successful
+trial shows only exact *rule* recovery in the isolated guest. It must never be
+used on a real hosting server. The real guarded route/application transaction
+and physical reboot/field evidence remain acceptance gaps under Issue #2.
+
 `server-connect --json activation-journal-status` (interactive menu **16**)
 reports only the phase (`absent`, `prepared` or `uncertain`),
 operation identity, revision, creation timestamp and resource **count**
