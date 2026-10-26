@@ -23,9 +23,14 @@ def fixture(mode):
         for name, alias, cidr, priority in resources:
             links.append({"ifname": name, "ifalias": alias,
                           "linkinfo": {"info_kind": "dummy"}})
-            routes.append({"dst": cidr, "dev": name, "table": mod.TABLE})
-            rules.append({"priority": priority, "table": mod.TABLE,
-                          "dst": cidr.split('/')[0], "dstlen": int(cidr.split('/')[1])})
+            # Literal normalized native Debian 13 `ip -j -N` fixture
+            # captured from a disposable user+network namespace, not a
+            # hand-waved minimal synthetic subset.
+            routes.append({"dst": cidr, "dev": name, "table": str(mod.TABLE),
+                           "scope": "253", "flags": []})
+            rules.append({"priority": priority, "table": str(mod.TABLE),
+                          "src": "all", "dst": cidr.split('/')[0],
+                          "dstlen": int(cidr.split('/')[1])})
         lookups = {"selected": [{"dev": mod.OWNED[0] if mode == "applied" else "lo"}],
                    "foreign": [{"dev": mod.FOREIGN[0]}],
                    "direct": [{"dev": "lo"}]}
@@ -57,6 +62,42 @@ class IsolatedActivationGuardClassifier(unittest.TestCase):
                 sections[section][idx][key] = value
                 with self.assertRaises(ValueError):
                     mod.validate(mode, *sections)
+
+    def test_required_r1_changed_native_metadata_must_fail_before_rollback(self):
+        # Required finding R1: matching device/destination/table/priority
+        # MUST NOT authorize destructive rollback of an adopted foreign rule
+        # or route with additional/different kernel identity fields.
+        mutations = (
+            ("rule_protocol", 2, 0, "protocol", "55"),
+            ("rule_src", 2, 0, "src", "192.0.2.0"),
+            ("rule_srclen", 2, 0, "srclen", 24),
+            ("rule_uid_start", 2, 0, "uid_start", 1000),
+            ("rule_uid_end", 2, 0, "uid_end", 3000),
+            ("rule_realms", 2, 0, "realms", "1234"),
+            ("rule_unrecognized_attr", 2, 0, "extension_selector", "foreign"),
+            ("route_protocol", 1, 0, "protocol", "188"),
+            ("route_scope", 1, 0, "scope", "254"),
+            ("route_metric", 1, 0, "metric", 100),
+            ("route_prefsrc", 1, 0, "prefsrc", "10.210.1.2"),
+            ("route_flags", 1, 0, "flags", ["onlink"]),
+            ("route_unrecognized_attr", 1, 0, "extension_route", "foreign"),
+        )
+        for case, section, index, key, value in mutations:
+            for owner in (0, 1):
+                with self.subTest(case=case, owner=owner):
+                    sections = list(copy.deepcopy(fixture("applied")))
+                    sections[section][index + owner][key] = value
+                    with self.assertRaises(ValueError):
+                        mod.validate("applied", *sections)
+
+    def test_required_r1_exact_native_json_is_accepted(self):
+        for mode in ("applied", "recovered"):
+            with self.subTest(mode=mode):
+                links, routes, rules, lookups = fixture(mode)
+                self.assertTrue(all(rule.get("src") == "all" for rule in rules))
+                self.assertTrue(all(route.get("scope") == "253" for route in routes))
+                self.assertTrue(all(route.get("flags") == [] for route in routes))
+                mod.validate(mode, links, routes, rules, lookups)
 
     def test_unowned_extra_route_or_missing_live_lookup_rejected(self):
         for mode in ("applied", "recovered"):

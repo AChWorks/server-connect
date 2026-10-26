@@ -32,41 +32,44 @@ def routes_from_all(rows):
     return [row for row in rows if in_qa_table(row)]
 
 
+# These are the *entire* supported kernel JSON identities of our two fixed
+# QA-only objects as observed from native Debian 13 `ip -j -N` inside a
+# disposable Linux user+network namespace. Never use a partial denylist:
+# a same-key route or RPDB rule with changed metadata belongs to UNKNOWN,
+# and the independent systemd rollback MUST refuse to delete it.
+RULE_KEYS_NATIVE = frozenset({"priority", "table", "src", "dst", "dstlen"})
+RULE_KEYS_CIDR = frozenset({"priority", "table", "src", "dst"})
+ROUTE_KEYS_NATIVE = frozenset({"dst", "dev", "table", "scope", "flags"})
+
+
 def validate_rule(row, resource):
     name, alias, cidr, priority = resource
     network, bits = cidr.split("/")
-    if not valid_integer(row.get("priority"), priority):
+    if (frozenset(row) not in (RULE_KEYS_NATIVE, RULE_KEYS_CIDR) or
+            not valid_integer(row.get("priority"), priority) or
+            not in_qa_table(row) or
+            row.get("src") != "all"):
         return False
-    if not in_qa_table(row):
-        return False
-    if row.get("dst") == network:
-        if not valid_integer(row.get("dstlen"), int(bits)):
-            return False
-    elif row.get("dst") == cidr:
-        if "dstlen" in row and not valid_integer(row["dstlen"], int(bits)):
-            return False
-    else:
-        return False
-    # An inverted, marked or otherwise conditional rule is not this fixture.
-    disallowed = {"not", "invert", "goto", "l3mdev", "fwmark", "fwmask",
-                  "iif", "oif", "uidrange", "tos", "ipproto", "sport", "dport",
-                  "suppress_prefixlength", "suppress_ifgroup", "nat"}
-    if disallowed.intersection(row):
-        return False
-    if row.get("action", "to_tbl") not in ("to_tbl", "lookup"):
-        return False
-    if row.get("type", "unicast") != "unicast":
-        return False
-    return True
+    # iproute2 Debian 13 emits dst and dstlen as separate JSON keys.
+    # Only the exact CIDR-string variant is also accepted; extensions and
+    # missing/null prefix lengths cannot be mistaken for a full identity.
+    if frozenset(row) == RULE_KEYS_NATIVE:
+        return (row["dst"] == network and
+                valid_integer(row["dstlen"], int(bits)))
+    return row["dst"] == cidr
 
 
 def validate_route(row, resource):
     name, alias, cidr, priority = resource
-    return (row.get("dst") == cidr and row.get("dev") == name and
-            in_qa_table(row) and
-            not any(key in row for key in ("gateway", "via", "nhid", "multipath",
-                                               "encap", "nexthops", "onlink")) and
-            row.get("type", "unicast") == "unicast")
+    # Native `-N` reports the non-gateway link scope as numeric string 253,
+    # and the empty fixed-route flags as []. No protocol, metric, prefsrc,
+    # realm, type, priority, extra selector or other metadata is permitted.
+    # Deletion of a foreign same-key route with even one such extension
+    # would otherwise violate the QA experiment's ownership claim.
+    return (frozenset(row) == ROUTE_KEYS_NATIVE and
+            row["dst"] == cidr and row["dev"] == name and
+            in_qa_table(row) and row["scope"] == "253" and
+            type(row["flags"]) is list and row["flags"] == [])
 
 
 def validate_link(row, resource):
