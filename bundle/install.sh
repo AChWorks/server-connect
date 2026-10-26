@@ -263,6 +263,9 @@ require_guard_inactive()
 # one assignment. A malformed or absent hash must not be interpreted as a
 # valid named release or proceed into service changes.
 release_name="0.1.0-dev-$(sha256sum "$SOURCE_DIR/bin/server-connect" "$SOURCE_DIR/bin/sing-box" | cut -d' ' -f1 | sha256sum | cut -c 1-16)"
+# Narrow diagnostic for the disposable installed-host QA failure; no credentials
+# or private state are shown. Remove after cause-specific CI reproduction.
+printf 'SC_GUARD_INSTALL_DIAG_release_name_bound=%s\n' "${release_name+yes}" >&2
 release_suffix=${release_name#0.1.0-dev-}
 case "$release_suffix" in ''|*[!0123456789abcdef]*) die 'candidate binary release digest is invalid' ;; esac
 [ "${#release_suffix}" -eq 16 ] || die 'candidate binary release digest length is invalid'
