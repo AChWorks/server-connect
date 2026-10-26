@@ -258,6 +258,41 @@ func trialNoRuntimeUnitOverride(runtimeDir, name string) error {
 	return nil
 }
 
+// Availability is a present-tense observation, not a promise that a future
+// service start will succeed. In particular a timer can remain active after
+// its oneshot executor failed or exhausted its start-rate limit. Do not
+// report a positive scheduled guard from that degraded combination.
+func trialGuardUnitReady(name string, fields map[string]string) error {
+	if fields["Result"] != "success" {
+		if name == trialRecoveryUnit {
+			switch fields["Result"] {
+			case "start-limit-hit":
+				return Fault("guard_unavailable", "independent recovery executor start-rate limited")
+			case "exit-code", "signal", "core-dump", "timeout":
+				return Fault("guard_unavailable", "independent recovery executor failed")
+			default:
+				return Fault("guard_unavailable", "independent recovery executor result untrusted")
+			}
+		}
+		return Fault("guard_unavailable", "independent recovery timer failed or unavailable")
+	}
+	if name == trialRecoveryUnit {
+		if fields["UnitFileState"] != "static" {
+			return Fault("guard_unavailable", "independent recovery service no longer static and available")
+		}
+		// A trusted installed oneshot may be inactive or presently activating.
+		// A failed, missing or unexpected service state cannot be an armed guard.
+		if fields["ActiveState"] != "inactive" && fields["ActiveState"] != "activating" {
+			return Fault("guard_unavailable", "independent recovery executor not runnable")
+		}
+		return nil
+	}
+	if name == trialRecoveryTimer && (fields["ActiveState"] != "active" || fields["UnitFileState"] != "enabled" || fields["Unit"] != trialRecoveryUnit) {
+		return Fault("guard_unavailable", "independent recovery timer not enabled and running")
+	}
+	return nil
+}
+
 // This verifies both installed unit provenance and the live independent timer
 // rather than trusting a cached service result or a PATH-selected systemctl.
 func trialGuardScheduled() error {
@@ -275,7 +310,7 @@ func trialGuardScheduled() error {
 			return Fault("guard_unavailable", "installed recovery unit digest conflict")
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		cmd, err := trustedSystemctlCommand(ctx, "show", name, "-p", "LoadState", "-p", "FragmentPath", "-p", "DropInPaths", "-p", "Transient", "-p", "ActiveState", "-p", "UnitFileState", "-p", "Unit")
+		cmd, err := trustedSystemctlCommand(ctx, "show", name, "-p", "LoadState", "-p", "FragmentPath", "-p", "DropInPaths", "-p", "Transient", "-p", "ActiveState", "-p", "UnitFileState", "-p", "Unit", "-p", "Result")
 		if err != nil {
 			cancel()
 			return err
@@ -296,14 +331,8 @@ func trialGuardScheduled() error {
 			fields["DropInPaths"] != "" || fields["Transient"] != "no" {
 			return Fault("guard_unavailable", "independent recovery unit identity mismatch")
 		}
-		// The installed oneshot has no [Install] section and must stay
-		// static. Runtime overrides are checked separately because /etc
-		// has higher precedence and show may still report loaded/static.
-		if name == trialRecoveryUnit && fields["UnitFileState"] != "static" {
-			return Fault("guard_unavailable", "independent recovery service no longer static and available")
-		}
-		if name == trialRecoveryTimer && (fields["ActiveState"] != "active" || fields["UnitFileState"] != "enabled" || fields["Unit"] != trialRecoveryUnit) {
-			return Fault("guard_unavailable", "independent recovery timer not enabled and running")
+		if err := trialGuardUnitReady(name, fields); err != nil {
+			return err
 		}
 	}
 	return nil
