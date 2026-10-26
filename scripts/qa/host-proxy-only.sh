@@ -63,18 +63,41 @@ selected_wget() {
 }
 
 selected_python_parent() {
+  # Separate outage cases are essential: a failed urllib fetch must not
+  # short-circuit the independently required wget child-process assertion.
   "$manager" exec -- /usr/bin/python3 -I -B -c '
-import subprocess, sys, urllib.request
-url = sys.argv[1]
-with urllib.request.urlopen(url, timeout=6) as response:
-    if response.status != 200 or response.read().strip() != b"SC_QA_WEB_OK":
-        sys.exit(12)
-child = subprocess.run(["/usr/bin/wget", "-q", "-T", "6", "-t", "1", "-O", "-", url],
-                       capture_output=True, timeout=9, check=True)
-if child.stdout.strip() != b"SC_QA_WEB_OK":
-    sys.exit(13)
+import subprocess, sys, urllib.error, urllib.request
+mode, url = sys.argv[1:]
+if mode in ("positive", "urllib-down"):
+    try:
+        with urllib.request.urlopen(url, timeout=6) as response:
+            if response.status != 200 or response.read().strip() != b"SC_QA_WEB_OK":
+                sys.exit(12)
+    except urllib.error.URLError:
+        if mode != "urllib-down":
+            raise
+        print("SC_QA_PYTHON_URLLIB_PROXY_DOWN")
+        sys.exit(0)
+    if mode == "urllib-down":
+        sys.exit("Python urllib silently reached Direct")
+if mode in ("positive", "child-down"):
+    try:
+        child = subprocess.run(
+            ["/usr/bin/wget", "-q", "-T", "6", "-t", "1", "-O", "-", url],
+            capture_output=True, timeout=9, check=False)
+    except subprocess.TimeoutExpired:
+        sys.exit(14)
+    if mode == "child-down":
+        if child.returncode == 0:
+            sys.exit("Python-spawned wget silently reached Direct")
+        print("SC_QA_PYTHON_WGET_CHILD_PROXY_DOWN")
+        sys.exit(0)
+    if child.returncode != 0 or child.stdout.strip() != b"SC_QA_WEB_OK":
+        sys.exit(13)
+if mode != "positive":
+    sys.exit(2)
 print("SC_QA_PYTHON_SUBPROCESS_SELECTED")
-' "$target"
+' "$1" "$target"
 }
 
 selected_git() {
@@ -84,7 +107,7 @@ selected_git() {
 
 selected_apps_positive() {
   test "$(selected_wget)" = SC_QA_WEB_OK
-  test "$(selected_python_parent)" = SC_QA_PYTHON_SUBPROCESS_SELECTED
+  test "$(selected_python_parent positive)" = SC_QA_PYTHON_SUBPROCESS_SELECTED
   expected=$(/usr/bin/git --git-dir=/root/qa-web/sc-qa-git.git rev-parse HEAD)
   actual=$(selected_git)
   test "$(printf '%s\n' "$actual" | cut -f1)" = "$expected"
@@ -98,8 +121,20 @@ selected_apps_negative() {
   if selected_wget >/dev/null 2>&1; then
     echo 'Wget silently reached Direct after selected VLESS failure' >&2; return 1
   fi
-  if selected_python_parent >/dev/null 2>&1; then
-    echo 'Python or nested wget silently reached Direct after VLESS failure' >&2; return 1
+  # The urllib request and spawned wget MUST be invoked separately while
+  # the upstream is down. Running the normal positive sequence alone would
+  # exit on urllib failure before ever reaching its child.
+  python_negative=$(selected_python_parent urllib-down) || {
+    echo 'Python urllib outage probe failed without a classified proxy failure' >&2; return 1
+  }
+  if [ "$python_negative" != SC_QA_PYTHON_URLLIB_PROXY_DOWN ]; then
+    echo 'Python urllib silently reached Direct after VLESS failure' >&2; return 1
+  fi
+  child_negative=$(selected_python_parent child-down) || {
+    echo 'Python-spawned wget outage probe did not complete' >&2; return 1
+  }
+  if [ "$child_negative" != SC_QA_PYTHON_WGET_CHILD_PROXY_DOWN ]; then
+    echo 'Python-spawned wget silently reached Direct after VLESS failure' >&2; return 1
   fi
   if selected_git >/dev/null 2>&1; then
     echo 'Git silently reached Direct after selected VLESS failure' >&2; return 1
