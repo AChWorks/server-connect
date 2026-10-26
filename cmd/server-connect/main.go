@@ -301,7 +301,14 @@ func run(j bool, m *sc.Manager, args []string) int {
 		}
 		if name == "activation-trial-recover" {
 			receipt, err := m.RecoverGuardedRuleTrial()
-			return output(j, receipt, err)
+			status := output(j, receipt, err)
+			if sc.ErrorCode(err) == "trial_resource_conflict" {
+				// Native systemd ExecMainStatus=41 identifies exact foreign
+				// kernel-object refusal. Other errors remain ordinary nonzero;
+				// no generic service failure can prove the conflict fixture.
+				return 41
+			}
+			return status
 		}
 		receipt, err := m.InspectGuardedRuleTrial()
 		return output(j, receipt, err)

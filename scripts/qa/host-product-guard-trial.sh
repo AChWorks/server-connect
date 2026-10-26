@@ -37,13 +37,26 @@ no_trial_rule() {
  "$ip" -4 rule show | grep -v -e '^0:' -e '^32766:' -e '^32767:' | grep . && return 1
  return 0
 }
+dump_guard_diagnostic() {
+ echo 'PRODUCT_GUARD_TRIAL_RECOVERY_DIAGNOSTIC (bounded native/systemd evidence):' >&2
+ systemctl show "$timer" -p ActiveState -p Unit -p LastTriggerUSecMonotonic -p NextElapseUSecMonotonic >&2 || true
+ systemctl show "$service" -p ActiveState -p Result -p ExecMainCode -p ExecMainStatus -p ExecMainStartTimestampMonotonic -p InvocationID >&2 || true
+ journalctl -u "$service" --no-pager -n 15 -o cat >&2 || true
+ "$SC" --json activation-trial-status >&2 || true
+ "$ip" -j -4 rule show >&2 || true
+}
 wait_recovered() {
  ok=no
  for n in $(seq 1 30);do
   if [ "$(phase)" = trial_recovered ];then ok=yes;break;fi
+  # A genuine failed recovery is already diagnostic evidence; repeating the
+  # same trial with its unchanged kernel state cannot repair the issue.
+  if [ "$(systemctl show "$service" -p Result --value)" = exit-code ];then
+   dump_guard_diagnostic;exit 1
+  fi
   sleep 1
  done
- [ "$ok" = yes ]
+ if [ "$ok" != yes ];then dump_guard_diagnostic;exit 1;fi
  [ "$(systemctl show "$service" -p Result --value)" = success ]
  [ "$(systemctl show "$service" -p ExecMainStatus --value)" = 0 ]
  no_trial_rule
@@ -53,20 +66,32 @@ wait_recovered() {
 # transition or any real native RPDB mutation. Proxy service remains Direct.
 systemctl enable --now "$timer"
 systemctl is-active --quiet "$timer"
+echo PRODUCT_GUARD_TRIAL_TIMER_PREARM=PASS
 [ "$(systemctl show "$timer" -p Unit --value)" = "$service" ]
 
 op=$(stage)
+echo PRODUCT_GUARD_TRIAL_STAGED_INTENT=PASS
 if "$SC" --json selective-trial-apply --operation-id 00000000000000000000000000000000 \
- --revision 1 --deadline-seconds 8 >/dev/null 2>&1;then
+ --revision 1 --deadline-seconds 8 >/run/sc-qa-wrong-id.log 2>&1;then
  echo 'Wrong trial operation unexpectedly accepted' >&2;exit 1
 fi
+/usr/bin/python3 - <<'PYWRONG'
+import json
+with open('/run/sc-qa-wrong-id.log',encoding='utf-8') as handle:
+    result=json.load(handle)
+assert not result['ok'] and result['error']['code']=='activation_journal_conflict'
+PYWRONG
+rm -f /run/sc-qa-wrong-id.log
 # Start a deliberately killed author process after the exact owned rule is
 # added; independent systemd must recover it without this shell intervening.
-if "$SC" selective-trial-apply --operation-id "$op" --revision 1 \
- --deadline-seconds 8 --qa-kill-after-rule >/dev/null 2>&1;then
- echo 'Controller SIGKILL fixture returned success' >&2;exit 1
-fi
+trial_exit=0
+"$SC" selective-trial-apply --operation-id "$op" --revision 1 \
+ --deadline-seconds 8 --qa-kill-after-rule >/dev/null 2>&1 || trial_exit=$?
+[ "$trial_exit" -eq 137 ] || {
+ echo 'Controller did not terminate by SIGKILL after the real rule add' >&2;exit 1;
+}
 [ "$(phase)" = trial_pending ]
+echo PRODUCT_GUARD_TRIAL_PENDING_AFTER_SIGKILL=PASS
 "$ip" -4 rule show | grep -F '9.9.9.0/24' >/dev/null
 if /bin/sh /root/server-connect/install.sh --uninstall \
  >/run/sc-qa-trial-uninstall.log 2>&1;then
@@ -79,6 +104,7 @@ fi
 rm -f /run/sc-qa-trial-uninstall.log
 [ -f /etc/systemd/system/server-connect-activation-recover.service ]
 wait_recovered
+echo PRODUCT_GUARD_TRIAL_INDEPENDENT_RECOVERY=PASS
 if "$SC" --json activation-trial-clear --operation-id "$op" --revision 2 >/dev/null 2>&1;then
  echo 'Stale recovered revision cleared journal' >&2;exit 1
 fi
@@ -98,7 +124,7 @@ injected_us=$(/usr/bin/python3 -c 'import time;print(time.clock_gettime_ns(time.
 foreign_observed=no
 for n in $(seq 1 28);do
  if [ "$(systemctl show "$service" -p Result --value)" = exit-code ] &&
-  [ "$(systemctl show "$service" -p ExecMainStatus --value)" != 0 ];then
+  [ "$(systemctl show "$service" -p ExecMainStatus --value)" = 41 ];then
   actual_us=$(systemctl show "$service" -p ExecMainStartTimestampMonotonic --value)
   case "$actual_us" in ''|*[!0-9]*) ;; *)
    if [ "$actual_us" -gt "$injected_us" ];then foreign_observed=yes;break;fi ;;

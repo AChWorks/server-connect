@@ -67,8 +67,8 @@ after one real protocol-tagged rule is added, and observe **fresh** independent
 systemd timeout recovery. It must establish the exact before/after native
 rule inventory and continued loopback SSH/HTTP operation. A second negative
 run must replace the rule with an independently created foreign protocol at
-the same priority, observe a fresh watchdog failure without deletion or
-journal modification, remove only the injected fixture, and recover/clear
+the same priority, observe a fresh, **cause-specific systemd exit 41** watchdog refusal
+without deletion or journal modification, remove only the injected fixture, and recover/clear
 the original operation. Stale IDs, pending uninstall, malformed journals,
 invalid rule metadata and wrong revision must be refused. Broad source tests
 must exercise schema, duplicate-member, foreign-rule and nonproduction
