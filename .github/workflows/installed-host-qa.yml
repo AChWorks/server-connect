@@ -111,6 +111,7 @@ jobs:
           from pathlib import Path
           ast.parse(Path('scripts/qa/activation-boot-guard.py').read_text())
           PYQA
+          PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/qa/test-activation-boot-guard.py
           bash -n scripts/qa/test-host-apt-only.sh
           bash scripts/qa/test-host-apt-only.sh
           bash scripts/qa/test-host-qa-assertions.sh

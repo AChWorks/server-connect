@@ -18,6 +18,17 @@ ROOT = Path("/var/lib/sc-qa-boot-recovery")
 JOURNAL = ROOT / "intent.json"
 VERSION = "sc_qa_boot_v1"
 HEX32 = re.compile(r"[0-9a-f]{32}\Z")
+# Deliberately distinct from generic errors (24), so an unrelated failed
+# service can never satisfy a foreign-resource acceptance assertion.
+FOREIGN_CONFLICT_EXIT = {"FOREIGN_LINK": 41, "FOREIGN_ROUTE": 42, "FOREIGN_RULE": 43}
+
+
+class ForeignResourceConflict(ValueError):
+    def __init__(self, kind, detail):
+        if kind not in FOREIGN_CONFLICT_EXIT:
+            raise ValueError("unsupported QA-only conflict kind")
+        self.kind = kind
+        super().__init__(detail)
 
 
 def require_private_directory(create=False):
@@ -105,18 +116,18 @@ def require_empty_guest_owned_scope():
     links = ip_rows("link", "show")
     names = [row.get("ifname") for row in links]
     if len(names) != 1 or names[0] != "lo":
-        raise ValueError("foreign or staged link present after container restart")
+        raise ForeignResourceConflict("FOREIGN_LINK", "foreign or staged link present after container restart")
     for family in ("-4", "-6"):
         for row in ip_rows(family, "route", "show", "table", "all"):
             table = row.get("table", "main")
             if str(table) == "20120":
-                raise ValueError("foreign or staged route present after restart")
+                raise ForeignResourceConflict("FOREIGN_ROUTE", "foreign or staged route present after restart")
         for row in ip_rows(family, "rule", "show"):
             priority = row.get("priority")
             if isinstance(priority, bool) or not isinstance(priority, int):
                 raise ValueError("unsupported native guest RPDB priority")
             if 30000 <= priority <= 30999 or str(row.get("table")) == "20120":
-                raise ValueError("foreign or staged RPDB rule after restart")
+                raise ForeignResourceConflict("FOREIGN_RULE", "foreign or staged RPDB rule after restart")
 
 
 def main():
@@ -168,9 +179,21 @@ def main():
         raise ValueError("unknown QA-only boot action")
 
 
-if __name__ == "__main__":
+def run():
     try:
         main()
+        return 0
+    except ForeignResourceConflict as exc:
+        # The exact systemd oneshot exit status encodes the verified native
+        # conflict. Both exit status and this diagnostic are assertion inputs.
+        print(f"QA_BOOT_REFUSAL_CODE={exc.kind}: {exc}", file=sys.stderr)
+        return FOREIGN_CONFLICT_EXIT[exc.kind]
     except (OSError, ValueError, subprocess.CalledProcessError, subprocess.TimeoutExpired, json.JSONDecodeError) as exc:
-        print(f"QA_BOOT_FAIL_CLOSED: {type(exc).__name__}: {exc}", file=sys.stderr)
-        sys.exit(24)
+        # Invalid invocation/journal and failed or timed-out native inspection
+        # remain fail-closed but are NOT evidence of a foreign-resource conflict.
+        print(f"QA_BOOT_FAIL_CLOSED_OTHER: {type(exc).__name__}: {exc}", file=sys.stderr)
+        return 24
+
+
+if __name__ == "__main__":
+    sys.exit(run())
