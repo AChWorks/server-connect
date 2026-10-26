@@ -319,8 +319,10 @@ rollback_candidate() {
    path=/etc/systemd/system/$name
    digest=$PREFIX/$name.sha256
    if [ -n "$guard_backup" ] && [ -f "$guard_backup/$name" ];then
-    install -m 0644 "$guard_backup/$name" "$path" || failed=yes
-    install -m 0644 "$guard_backup/$name.sha256" "$digest" || failed=yes
+    install -m 0644 "$guard_backup/$name" "$path" ||
+     { say "RECOVERY_REQUIRED: prior recovery $kind unit restoration failed";failed=yes; }
+    install -m 0644 "$guard_backup/$name.sha256" "$digest" ||
+     { say "RECOVERY_REQUIRED: prior recovery $kind digest restoration failed";failed=yes; }
    else
     rm -f -- "$path" "$digest" || failed=yes
    fi

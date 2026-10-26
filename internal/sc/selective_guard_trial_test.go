@@ -115,6 +115,12 @@ func TestGuardedRuleTrialNativeIdentityRefusesForeignAndReplay(t *testing.T) {
 	if err != nil || !present {
 		t.Fatalf("realistic native owned priority refused: present=%v err=%v", present, err)
 	}
+	// ip -N -j renders even built-in and custom identities as JSON strings.
+	numeric := strings.Replace(strings.Replace(native, `"protocol":247`, `"protocol":"247"`, 1),
+		`"table":20000`, `"table":"20000"`, 1)
+	if present, err := trialRulePresence(rows(numeric), rule); err != nil || !present {
+		t.Fatalf("numeric native identity refused: present=%v err=%v", present, err)
+	}
 	missing, err := trialRulePresence(rows(`[{"priority":0,"src":"all","table":"local"}]`), rule)
 	if err != nil || missing {
 		t.Fatal("unrelated kernel policy mistaken for owned priority")

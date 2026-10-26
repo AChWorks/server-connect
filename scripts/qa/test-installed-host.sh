@@ -44,6 +44,7 @@ bash scripts/qa/test-installer-rollback-backups.sh
 PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/qa/test-activation-guard-inspect.py
 # Separate reboot-scheduling QA remains a disposable-container proof only.
 bash -n scripts/qa/test-activation-boot-qa.sh
+bash -n scripts/qa/test-real-rollback-failure.sh
 PYTHONDONTWRITEBYTECODE=1 python3 -B - <<'PYBOOTA'
 import ast
 from pathlib import Path
@@ -445,6 +446,15 @@ docker exec "$container" /bin/sh /root/qa-wp-fpm.sh upstream-failure after-rollb
 assert_network_unchanged update-rollback "$offline_before"
 verify_host_services update-rollback
 echo 'INSTALLED_FAILED_UPDATE_ROLLBACK=PASS (active previous service restored)'
+
+# REQUIRED-02: the separate acceptance injects a genuine filesystem
+# restoration failure into the original installer's rollback_candidate().
+# It verifies retained prior-unit hashes and performs controlled guest repair.
+bash scripts/qa/test-real-rollback-failure.sh \
+ "$container" "$bad_release" "$updated_link" "$scratch"
+docker exec "$container" /bin/sh /root/qa-proxy-only.sh positive
+assert_network_unchanged update-real-restore-fault "$offline_before"
+verify_host_services update-real-restore-fault
 
 docker exec "$container" /bin/sh /root/qa-proxy-only.sh disconnect
 docker exec "$container" /bin/sh /root/qa-apt-only.sh negative disconnected

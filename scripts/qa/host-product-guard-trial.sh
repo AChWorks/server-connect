@@ -112,6 +112,55 @@ fi
 no_trial_rule
 printf '%s\n' 'PRODUCT_GUARD_TRIAL_SIGKILL_TIMEOUT=PASS'
 
+# iproute2 renders configurable rt_protos/rt_tables aliases by default.
+# A system administrator's naming choices must NOT strand an owned rule:
+# the real installed watchdog must observe numeric kernel identities via -N.
+# All alias edits stay inside the disconnected disposable guest.
+alias_backup=/run/sc-qa-iproute2-alias-backup
+mkdir -m 0700 "$alias_backup"
+mkdir -p /etc/iproute2
+for kind in rt_protos rt_tables;do
+ if [ -e "/etc/iproute2/$kind" ] || [ -L "/etc/iproute2/$kind" ];then
+  [ -f "/etc/iproute2/$kind" ] && [ ! -L "/etc/iproute2/$kind" ]
+  cp -p "/etc/iproute2/$kind" "$alias_backup/$kind"
+ else
+  : > "$alias_backup/$kind.absent"
+ fi
+done
+printf '247 scqa_guard_protocol\n' >> /etc/iproute2/rt_protos
+printf '20000 scqa_guard_table\n' >> /etc/iproute2/rt_tables
+op=$(stage)
+alias_exit=0
+"$SC" selective-trial-apply --operation-id "$op" --revision 1 \
+ --deadline-seconds 8 --qa-kill-after-rule >/dev/null 2>&1 || alias_exit=$?
+[ "$alias_exit" -eq 137 ] && [ "$(phase)" = trial_pending ]
+"$ip" -j -4 rule show | /usr/bin/python3 -c '
+import json,sys
+items=[r for r in json.load(sys.stdin) if r.get("priority")==30000]
+assert len(items)==1,items
+assert items[0].get("protocol")=="scqa_guard_protocol",items
+assert items[0].get("table")=="scqa_guard_table",items'
+"$ip" -N -j -4 rule show | /usr/bin/python3 -c '
+import json,sys
+items=[r for r in json.load(sys.stdin) if r.get("priority")==30000]
+assert len(items)==1,items
+assert str(items[0].get("protocol"))=="247",items
+assert str(items[0].get("table"))=="20000",items'
+wait_recovered
+[ "$(phase)" = trial_recovered ]
+"$SC" --json activation-trial-clear --operation-id "$op" --revision 3 >/dev/null
+no_trial_rule
+for kind in rt_protos rt_tables;do
+ if [ -f "$alias_backup/$kind.absent" ];then
+  rm -f "/etc/iproute2/$kind"
+ else
+  cp -p "$alias_backup/$kind" "/etc/iproute2/$kind"
+ fi
+done
+rm -f "$alias_backup"/*
+rmdir "$alias_backup"
+printf '%s\n' 'PRODUCT_GUARD_TRIAL_NUMERIC_ALIAS_RECOVERY=PASS (custom protocol/table names, actual timer and SIGKILL)'
+
 # Negative ownership challenge: another actor replaces the exact priority
 # with a foreign native rule. Watchdog must refuse removal and retain journal.
 op=$(stage)

@@ -46,4 +46,4 @@ CHILD
   ;;
  esac
 done
-printf '%s\n' 'INSTALLER_INCOMPLETE_ROLLBACK_BACKUPS_RETAINED=PASS'
+printf '%s\n' 'INSTALLER_EXIT_HOOK_BACKUP_RETENTION=PASS (mocked rollback path only)'

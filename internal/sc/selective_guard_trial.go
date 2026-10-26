@@ -190,7 +190,12 @@ func trialDisposableContext() error {
 }
 
 func trialNativeRules() ([]map[string]json.RawMessage, error) {
-	raw, err := nativeIPJSON("-j", "-4", "rule", "show")
+	// -N asks native iproute2 to render numeric protocol AND routing-table
+	// identities even when local rt_protos/rt_tables assign arbitrary names.
+	// Without it, a product-created rule could become unrecognizable to the
+	// independent watchdog after an administrator changes presentation aliases.
+	// A host without working numeric observation fails closed before apply.
+	raw, err := nativeIPJSON("-N", "-j", "-4", "rule", "show")
 	if err != nil {
 		return nil, Fault("trial_observation_uncertain", "native IPv4 rules unavailable")
 	}
@@ -285,9 +290,8 @@ func sha256Hex(data []byte) string { sum := sha256.Sum256(data); return hex.Enco
 // observed anew; a different rule at the same priority is foreign, never ours.
 func trialProtocolMatches(raw json.RawMessage) bool {
 	value, ok := selectiveInt(raw)
-	// A named iproute2 protocol alias is NOT an independently verified
-	// numeric ownership tag. The supported isolated Debian 13 fixture uses
-	// a number absent from its default rt_protos mapping; refuse aliases.
+	// Never infer ownership from a configurable presentation alias. The
+	// observation caller must have requested -N from native iproute2.
 	return ok && strconv.Itoa(value) == trialProtocol
 }
 
