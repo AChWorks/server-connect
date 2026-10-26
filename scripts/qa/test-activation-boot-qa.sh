@@ -66,7 +66,7 @@ wait_systemd() {
   for attempt in $(seq 1 30); do
     [[ $(docker inspect --format '{{.HostConfig.NetworkMode}}' "$guest") == none ]]
     if docker exec "$guest" /bin/sh -c \
-      'test -d /run/systemd/system && test "$(ps -p 1 -o comm=)" = systemd' >/dev/null 2>&1; then
+      'test -d /run/systemd/system && test "$(ps -p 1 -o comm=)" = systemd && systemctl show sc-qa-activation-boot.service -p LoadState --value >/dev/null' >/dev/null 2>&1; then
       return 0
     fi
     [[ $(docker inspect --format '{{.State.Running}}' "$guest") == true ]] || return 1
@@ -113,9 +113,27 @@ post_started=$(docker inspect --format '{{.State.StartedAt}}' "$guest")
   echo 'No independently observed Docker restart for positive boot QA' >&2
   exit 1
 }
-[[ $(docker exec "$guest" systemctl show sc-qa-activation-boot.service -p Result --value) == success ]]
-[[ $(docker exec "$guest" systemctl show sc-qa-activation-boot.service -p ExecMainStatus --value) == 0 ]]
-first_result=$(docker exec "$guest" /usr/bin/python3 -I -B /root/qa-activation-boot.py show)
+# Systemd bus readiness is NOT proof that an enabled oneshot has executed.
+# Wait for the new boot's independently executed service to durably finish;
+# a cached default Result=success before ExecMain is not sufficient.
+positive_ready=no
+for attempt in $(seq 1 30); do
+  first_result=$(docker exec "$guest" /usr/bin/python3 -I -B /root/qa-activation-boot.py show)
+  if [[ $first_result == *'"phase": "recovered_noop_qa"'* ]] &&
+     [[ $(docker exec "$guest" systemctl show sc-qa-activation-boot.service -p Result --value) == success ]] &&
+     [[ $(docker exec "$guest" systemctl show sc-qa-activation-boot.service -p ExecMainStatus --value) == 0 ]]; then
+    positive_start=$(docker exec "$guest" systemctl show sc-qa-activation-boot.service -p ExecMainStartTimestampMonotonic --value)
+    if [[ $positive_start =~ ^[1-9][0-9]*$ ]]; then
+      positive_ready=yes
+      break
+    fi
+  fi
+  sleep 1
+done
+[[ $positive_ready == yes ]] || {
+  echo 'Newly booted QA recovery service did not durably acknowledge exact no-op' >&2
+  exit 1
+}
 first_invocation=$(printf '%s' "$first_result" | python3 -c \
   'import json,sys,re; x=json.load(sys.stdin); assert x["operation_id"]=="11111111111111111111111111111111" and x["phase"]=="recovered_noop_qa"; v=x["invocation"]; assert re.fullmatch("[0-9a-f]{32}",v); print(v)')
 [[ -n $first_invocation ]]
@@ -156,9 +174,27 @@ post_started=$(docker inspect --format '{{.State.StartedAt}}' "$guest")
   echo 'No independently observed Docker restart for negative boot QA' >&2
   exit 1
 }
-[[ $(docker exec "$guest" systemctl show sc-qa-foreign-boot.service -p Result --value) == success ]]
-[[ $(docker exec "$guest" systemctl show sc-qa-activation-boot.service -p Result --value) == exit-code ]]
-[[ $(docker exec "$guest" systemctl show sc-qa-activation-boot.service -p ExecMainStatus --value) == 24 ]]
+# A previous service's retained status is never enough. This is a fresh
+# container boot, and both independent unit invocations must have started.
+negative_ready=no
+for attempt in $(seq 1 30); do
+  if [[ $(docker exec "$guest" systemctl show sc-qa-foreign-boot.service -p Result --value) == success ]] &&
+     [[ $(docker exec "$guest" systemctl show sc-qa-activation-boot.service -p Result --value) == exit-code ]] &&
+     [[ $(docker exec "$guest" systemctl show sc-qa-activation-boot.service -p ExecMainStatus --value) == 24 ]]; then
+    foreign_start=$(docker exec "$guest" systemctl show sc-qa-foreign-boot.service -p ExecMainStartTimestampMonotonic --value)
+    recovery_start=$(docker exec "$guest" systemctl show sc-qa-activation-boot.service -p ExecMainStartTimestampMonotonic --value)
+    if [[ $foreign_start =~ ^[1-9][0-9]*$ && $recovery_start =~ ^[1-9][0-9]*$ ]] &&
+       (( recovery_start > foreign_start )); then
+      negative_ready=yes
+      break
+    fi
+  fi
+  sleep 1
+done
+[[ $negative_ready == yes ]] || {
+  echo 'Fresh boot QA did not establish ordered foreign injection followed by refused recovery' >&2
+  exit 1
+}
 docker exec "$guest" /usr/bin/ip link show dev scqafx0 >/dev/null
 docker exec "$guest" /usr/bin/ip -4 route show table 20120 | grep -F '8.8.8.0/24 dev scqafx0' >/dev/null
 after_sha=$(docker exec "$guest" sha256sum /var/lib/sc-qa-boot-recovery/intent.json | cut -d' ' -f1)
