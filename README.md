@@ -232,7 +232,15 @@ expiry after a killed controller or on a new boot identity. Foreign rules at
 the selected priority fail closed and preserve the pending journal. The
 operator can inspect `activation-trial-status` and, after verified rule-only
 recovery, clear the exact revision 3 via `activation-trial-clear`. The
-`--qa-kill-after-rule` option is exclusively for isolated acceptance testing.
+legacy `--qa-kill-after-rule` and phase-scoped `--qa-kill-at`
+interruption points (`before-journal`, `after-journal`, `after-add` during
+apply; `after-delete`, `before-recovered-journal` during recovery) are
+**disposable-guest-only QA**. A pending recovery with a stopped/masked
+systemd timer/service must report `guard_unavailable`, not a positive
+`scheduled` receipt; a recovered journal is re-observed against native kernel
+rules before another recovered receipt is returned. A disabled or masked
+timer still requires external repair; no permanent guard-liveness or routed
+VPN safety is implied.
 
 **This is not Selective or Broad VPN activation**: it does not create a tunnel
 interface, install a route, prove actual path egress, verify SSH, authorize a

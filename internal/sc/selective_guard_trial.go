@@ -286,6 +286,60 @@ func trialGuardScheduled() error {
 
 func sha256Hex(data []byte) string { sum := sha256.Sum256(data); return hex.EncodeToString(sum[:]) }
 
+// These explicit SIGKILL boundaries are available ONLY in the loopback-only,
+// disconnected disposable systemd guest. Invalid phase/point combinations are
+// rejected before writing the private journal or changing kernel state.
+func trialValidateQACrashPoint(phase, point string) error {
+	if point == "" {
+		return nil
+	}
+	switch phase {
+	case "apply":
+		if point == "before-journal" || point == "after-journal" || point == "after-add" {
+			return nil
+		}
+	case "recover":
+		if point == "after-delete" || point == "before-recovered-journal" {
+			return nil
+		}
+	}
+	return Fault("invalid_arguments", "unsupported rule-trial QA crash boundary")
+}
+
+func trialQAKillAt(actual, requested string) error {
+	if actual != requested {
+		return nil
+	}
+	if err := syscall.Kill(os.Getpid(), syscall.SIGKILL); err != nil {
+		return Fault("trial_kernel_error", "disposable QA process interruption failed")
+	}
+	return nil
+}
+
+// A persisted trial_recovered phase is not permanent evidence that a kernel
+// object stayed absent. Native reinspection refuses stale recovered receipts.
+func trialVerifyRecoveredNative(record trialJournal) error {
+	if err := trialDisposableContext(); err != nil {
+		return err
+	}
+	rule, err := trialSingleRule(record)
+	if err != nil {
+		return err
+	}
+	rows, err := trialNativeRules()
+	if err != nil {
+		return err
+	}
+	present, err := trialRulePresence(rows, rule)
+	if err != nil {
+		return err
+	}
+	if present {
+		return Fault("trial_recovery_uncertain", "guarded rule exists after recorded recovery")
+	}
+	return nil
+}
+
 // A recovery conflict cannot clear the journal. Absent/owned counts are
 // observed anew; a different rule at the same priority is foreign, never ours.
 func trialProtocolMatches(raw json.RawMessage) bool {
@@ -358,12 +412,15 @@ func trialRunIP(args ...string) error {
 // route-less RPDB rule to an otherwise unused table, then MUST expire. A
 // successful trial is NOT a working tunnel, safe production activation, or
 // evidence of live foreign transport.
-func (m *Manager) BeginGuardedRuleTrial(operationID string, revision uint64, ttlSeconds int, killAfter bool) (TrialReceipt, error) {
+func (m *Manager) BeginGuardedRuleTrial(operationID string, revision uint64, ttlSeconds int, qaCrashPoint string) (TrialReceipt, error) {
 	// The fixed independent systemd unit has exactly one private state root.
 	// A custom --state-dir would arm a watchdog that can never find this
 	// transaction, leaving a real kernel rule unowned after controller death.
 	if m.Dir != DefaultDir {
 		return TrialReceipt{}, Fault("trial_unsupported", "guarded trial requires the installed default private state directory")
+	}
+	if err := trialValidateQACrashPoint("apply", qaCrashPoint); err != nil {
+		return TrialReceipt{}, err
 	}
 	if !journalHex32.MatchString(operationID) || revision != 1 || ttlSeconds < 4 || ttlSeconds > 600 {
 		return TrialReceipt{}, Fault("invalid_arguments", "exact staged revision and trial deadline (4-600s) required")
@@ -444,7 +501,13 @@ func (m *Manager) BeginGuardedRuleTrial(operationID string, revision uint64, ttl
 		if err := trialGuardScheduled(); err != nil {
 			return err
 		}
+		if err := trialQAKillAt("before-journal", qaCrashPoint); err != nil {
+			return err
+		}
 		if err := writeTrialLocked(store, trial, &id); err != nil {
+			return err
+		}
+		if err := trialQAKillAt("after-journal", qaCrashPoint); err != nil {
 			return err
 		}
 		// Durable pending record and independently active timer PRECEDE the one
@@ -454,8 +517,8 @@ func (m *Manager) BeginGuardedRuleTrial(operationID string, revision uint64, ttl
 			"table", strconv.Itoa(rule.Table), "protocol", trialProtocol); err != nil {
 			return err
 		}
-		if killAfter {
-			_ = syscall.Kill(os.Getpid(), syscall.SIGKILL)
+		if err := trialQAKillAt("after-add", qaCrashPoint); err != nil {
+			return err
 		}
 		return nil
 	})
@@ -468,9 +531,12 @@ func (m *Manager) BeginGuardedRuleTrial(operationID string, revision uint64, ttl
 // Called from a standalone systemd oneshot: no dependency on sing-box or a
 // living initiating shell. The v2 record must survive a process crash. A
 // changed boot ID triggers recovery immediately, not a new 600s allowance.
-func (m *Manager) RecoverGuardedRuleTrial() (TrialReceipt, error) {
+func (m *Manager) RecoverGuardedRuleTrial(qaCrashPoint string) (TrialReceipt, error) {
 	if m.Dir != DefaultDir {
 		return TrialReceipt{}, Fault("trial_unsupported", "guard recovery requires the installed default private state directory")
+	}
+	if err := trialValidateQACrashPoint("recover", qaCrashPoint); err != nil {
+		return TrialReceipt{}, err
 	}
 	var receipt TrialReceipt
 	err := m.withActivationJournalLock(syscall.Fsync, func(store *activationJournalDir) error {
@@ -491,6 +557,9 @@ func (m *Manager) RecoverGuardedRuleTrial() (TrialReceipt, error) {
 			return err
 		}
 		if record.Phase == "trial_recovered" {
+			if err := trialVerifyRecoveredNative(record); err != nil {
+				return err
+			}
 			receipt = trialReceipt(record, false, true)
 			return nil
 		}
@@ -506,6 +575,12 @@ func (m *Manager) RecoverGuardedRuleTrial() (TrialReceipt, error) {
 			return err
 		}
 		if boot == record.BootID && uptime < record.DeadlineUptimeSec {
+			// The timer may have been stopped/masked since application. A
+			// pending return must NEVER claim a scheduled guard from journal
+			// intent alone, even when the rule is still within its deadline.
+			if err := trialGuardScheduled(); err != nil {
+				return err
+			}
 			receipt = trialReceipt(record, true, false)
 			return nil
 		}
@@ -528,6 +603,9 @@ func (m *Manager) RecoverGuardedRuleTrial() (TrialReceipt, error) {
 				"table", strconv.Itoa(rule.Table), "protocol", trialProtocol); err != nil {
 				return err
 			}
+			if err := trialQAKillAt("after-delete", qaCrashPoint); err != nil {
+				return err
+			}
 		}
 		after, err := trialNativeRules()
 		if err != nil {
@@ -539,6 +617,9 @@ func (m *Manager) RecoverGuardedRuleTrial() (TrialReceipt, error) {
 		}
 		if remains {
 			return Fault("trial_recovery_uncertain", "guarded rule persists after recovery")
+		}
+		if err := trialQAKillAt("before-recovered-journal", qaCrashPoint); err != nil {
+			return err
 		}
 		record.Phase, record.Revision = "trial_recovered", 3
 		if err := writeTrialLocked(store, record, &id); err != nil {
@@ -562,6 +643,11 @@ func (m *Manager) InspectGuardedRuleTrial() (TrialReceipt, error) {
 		record, _, err := loadTrialLocked(store)
 		if err != nil {
 			return err
+		}
+		if record.Phase == "trial_recovered" {
+			if err := trialVerifyRecoveredNative(record); err != nil {
+				return err
+			}
 		}
 		receipt = trialReceipt(record, false, record.Phase == "trial_recovered")
 		return nil
