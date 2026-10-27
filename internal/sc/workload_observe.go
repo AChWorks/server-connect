@@ -36,6 +36,7 @@ type WorkloadObservation struct {
 	Ancestors           []WorkloadProcessIdentity `json:"ancestors"`
 	SharesParentCgroup  bool                      `json:"shares_parent_cgroup"`
 	Limitations         []string                  `json:"limitations"`
+	Sockets             *WorkloadSocketEvidence   `json:"sockets,omitempty"`
 }
 
 const workloadProcMaxBytes = 16 << 10
