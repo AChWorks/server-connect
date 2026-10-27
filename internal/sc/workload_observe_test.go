@@ -212,16 +212,67 @@ func TestWorkloadObserveAncestryDepthBoundary(t *testing.T) {
 }
 
 func TestWorkloadObserveRejectsOversizedProcfsRecords(t *testing.T) {
+	// The synthetic records MUST remain parser-valid even when oversized.
+	// Otherwise malformed input could be rejected after the read-size guard
+	// is accidentally removed, yielding a misleading green regression.
 	for _, field := range []string{"stat", "cgroup"} {
 		t.Run(field, func(t *testing.T) {
-			root := t.TempDir()
-			writeWorkloadFixture(t, root, 201, 0, 30, "/system.slice/panel.service")
-			path := filepath.Join(root, "201", field)
-			if err := os.WriteFile(path, []byte(strings.Repeat("x", workloadProcMaxBytes+1)), 0600); err != nil {
-				t.Fatal(err)
+			for _, size := range []int{workloadProcMaxBytes - 1, workloadProcMaxBytes, workloadProcMaxBytes + 1} {
+				t.Run(strconv.Itoa(size), func(t *testing.T) {
+					root := t.TempDir()
+					writeWorkloadFixture(t, root, 201, 0, 30, "/system.slice/panel.service")
+					path := filepath.Join(root, "201", field)
+
+					var record []byte
+					switch field {
+					case "stat":
+						// Stat parser accepts trailing whitespace after its valid
+						// required fields; its numeric PID/start ticks remain valid.
+						prefix := strings.TrimSuffix(string(workloadStatFixture(201, 0, 30, "qa worker")), "\n")
+						record = []byte(prefix + strings.Repeat(" ", size-len(prefix)-1) + "\n")
+						ppid, start, err := parseWorkloadStat(record, 201)
+						if err != nil || ppid != 0 || start != 30 {
+							t.Fatalf("stat fixture rejected by parser independently of reader limit: ppid=%d start=%d err=%v", ppid, start, err)
+						}
+					case "cgroup":
+						// Short canonical components create a unified v2 path
+						// which remains syntactically valid across the boundary.
+						const prefix = "0::/"
+						remaining := size - len(prefix) - 1 // final newline
+						components := (remaining - 1) / 2
+						record = []byte(prefix + strings.Repeat("a/", components) + strings.Repeat("b", remaining-2*components) + "\n")
+						if _, err := parseWorkloadCgroup(record); err != nil {
+							t.Fatalf("cgroup fixture rejected by parser independently of reader limit: %v", err)
+						}
+					}
+					if len(record) != size {
+						t.Fatalf("fixture length %d, want %d", len(record), size)
+					}
+					if err := os.WriteFile(path, record, 0600); err != nil {
+						t.Fatal(err)
+					}
+
+					got, err := readWorkloadProcFile(path)
+					if size > workloadProcMaxBytes {
+						// This direct assertion MUST turn red if size enforcement
+						// disappears, because the parser above accepts the bytes.
+						requireUnavailableWorkload(t, err)
+						if got != nil {
+							t.Fatal("oversized record unexpectedly returned bytes")
+						}
+						_, err = observeWorkloadAt(root, 201)
+						requireUnavailableWorkload(t, err)
+						return
+					}
+					if err != nil || string(got) != string(record) {
+						t.Fatalf("valid within-limit record refused or modified: %v", err)
+					}
+					report, err := observeWorkloadAt(root, 201)
+					if err != nil || report.Process.PID != 201 || report.ActivationReady || report.AttributionVerified || report.TrafficPathVerified {
+						t.Fatalf("valid within-limit observation failed or claimed routing authorization: %+v %v", report, err)
+					}
+				})
 			}
-			_, err := observeWorkloadAt(root, 201)
-			requireUnavailableWorkload(t, err)
 		})
 	}
 }
