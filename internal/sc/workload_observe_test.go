@@ -121,3 +121,119 @@ func TestWorkloadObserveLiveOwnProcessOrUnsupportedHost(t *testing.T) {
 		t.Fatalf("live PID produced false job or traffic evidence: %+v", report)
 	}
 }
+
+// These are actual fail-closed observation regressions, not merely checks that
+// the source contains a guard. No live kernel process, cgroup or routing state
+// is created or modified: every case uses a private synthetic procfs tree.
+func requireUnavailableWorkload(t *testing.T, err error) {
+	t.Helper()
+	if ErrorCode(err) != "workload_observation_unavailable" {
+		t.Fatalf("expected classified unavailable (no fabricated worker), got %v", err)
+	}
+}
+
+func TestWorkloadObserveRejectsObservedReparentingWithSameGeneration(t *testing.T) {
+	root := t.TempDir()
+	writeWorkloadFixture(t, root, 1, 0, 10, "/")
+	writeWorkloadFixture(t, root, 200, 1, 20, "/system.slice/panel.service")
+	writeWorkloadFixture(t, root, 201, 200, 30, "/system.slice/panel.service")
+	observed, err := observeWorkloadAt(root, 201)
+	if err != nil || len(observed.Ancestors) != 2 {
+		t.Fatalf("expected fixture baseline: %+v, %v", observed, err)
+	}
+	original := append([]WorkloadProcessIdentity{observed.Process}, observed.Ancestors...)
+
+	// A child may be reparented while retaining the same PID and birth ticks.
+	// The ancestry recheck must compare parent PID, not just process generation.
+	writeWorkloadFixture(t, root, 201, 1, 30, "/system.slice/panel.service")
+	requireUnavailableWorkload(t, recheckWorkloadAncestryAt(root, original))
+}
+
+func TestWorkloadObserveRejectsMissingParentAndCyclicAncestry(t *testing.T) {
+	t.Run("missing_parent", func(t *testing.T) {
+		root := t.TempDir()
+		writeWorkloadFixture(t, root, 201, 200, 30, "/system.slice/panel.service")
+		_, err := observeWorkloadAt(root, 201)
+		requireUnavailableWorkload(t, err)
+	})
+	t.Run("parent_disappeared_after_snapshot", func(t *testing.T) {
+		root := t.TempDir()
+		writeWorkloadFixture(t, root, 1, 0, 10, "/")
+		writeWorkloadFixture(t, root, 200, 1, 20, "/system.slice/panel.service")
+		writeWorkloadFixture(t, root, 201, 200, 30, "/system.slice/panel.service")
+		report, err := observeWorkloadAt(root, 201)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Remove(filepath.Join(root, "200", "stat")); err != nil {
+			t.Fatal(err)
+		}
+		requireUnavailableWorkload(t, recheckWorkloadAncestryAt(root, append([]WorkloadProcessIdentity{report.Process}, report.Ancestors...)))
+	})
+	t.Run("cycle", func(t *testing.T) {
+		root := t.TempDir()
+		writeWorkloadFixture(t, root, 201, 200, 30, "/system.slice/panel.service")
+		writeWorkloadFixture(t, root, 200, 201, 20, "/system.slice/panel.service")
+		_, err := observeWorkloadAt(root, 201)
+		requireUnavailableWorkload(t, err)
+	})
+	t.Run("self_parent", func(t *testing.T) {
+		root := t.TempDir()
+		writeWorkloadFixture(t, root, 201, 201, 30, "/system.slice/panel.service")
+		_, err := observeWorkloadAt(root, 201)
+		requireUnavailableWorkload(t, err)
+	})
+}
+
+func TestWorkloadObserveAncestryDepthBoundary(t *testing.T) {
+	root := t.TempDir()
+	const firstPID = 1000
+	// Exactly the maximum bounded chain length is acceptable. A process
+	// beyond the visible root may have parent 0 without granting proof of
+	// complete ancestry or source-job ownership.
+	for i := 0; i < workloadAncestryMaxDepth; i++ {
+		parent := firstPID + i + 1
+		if i == workloadAncestryMaxDepth-1 {
+			parent = 0
+		}
+		writeWorkloadFixture(t, root, firstPID+i, parent, uint64(100+i), "/system.slice/panel.service")
+	}
+	report, err := observeWorkloadAt(root, firstPID)
+	if err != nil || len(report.Ancestors) != workloadAncestryMaxDepth-1 || report.AttributionVerified || report.DescendantsCovered || report.ActivationReady {
+		t.Fatalf("failed exact-capacity namespace-boundary observation: %+v, %v", report, err)
+	}
+
+	// The same chain now contains one extra process: this must fail closed
+	// rather than truncate the ancestry and claim that observation succeeded.
+	writeWorkloadFixture(t, root, firstPID+workloadAncestryMaxDepth-1, firstPID+workloadAncestryMaxDepth, 100+workloadAncestryMaxDepth-1, "/system.slice/panel.service")
+	writeWorkloadFixture(t, root, firstPID+workloadAncestryMaxDepth, 0, 100+workloadAncestryMaxDepth, "/system.slice/panel.service")
+	_, err = observeWorkloadAt(root, firstPID)
+	requireUnavailableWorkload(t, err)
+}
+
+func TestWorkloadObserveRejectsOversizedProcfsRecords(t *testing.T) {
+	for _, field := range []string{"stat", "cgroup"} {
+		t.Run(field, func(t *testing.T) {
+			root := t.TempDir()
+			writeWorkloadFixture(t, root, 201, 0, 30, "/system.slice/panel.service")
+			path := filepath.Join(root, "201", field)
+			if err := os.WriteFile(path, []byte(strings.Repeat("x", workloadProcMaxBytes+1)), 0600); err != nil {
+				t.Fatal(err)
+			}
+			_, err := observeWorkloadAt(root, 201)
+			requireUnavailableWorkload(t, err)
+		})
+	}
+}
+
+func TestWorkloadObserveNamespaceHiddenParentNeverClaimsJobIdentity(t *testing.T) {
+	root := t.TempDir()
+	writeWorkloadFixture(t, root, 201, 0, 30, "/system.slice/panel.service")
+	report, err := observeWorkloadAt(root, 201)
+	if err != nil || len(report.Ancestors) != 0 {
+		t.Fatalf("unrepresented namespace parent was misclassified: %+v, %v", report, err)
+	}
+	if !report.ReadOnly || report.SnapshotAtomic || report.AttributionVerified || report.DescendantsCovered || report.TrafficPathVerified || report.ActivationReady || report.SharesParentCgroup {
+		t.Fatalf("missing parent gave false workload ownership or path proof: %+v", report)
+	}
+}
