@@ -31,12 +31,14 @@ func trialRouteCommand(route PlannedRoute, verb string) []string {
 		"proto", trialProtocol, "scope", "link"}
 }
 
-// Inspect the WHOLE trial table, not just its intended destination. Another
-// route in this previously empty table invalidates exclusive ownership; no
-// broad flush, replace or adoption is permitted. -N is required for numeric
-// protocol/table/scope representations, including user-defined aliases.
+// Inspect ALL native IPv4 routes, then filter strictly to the selected
+// table. Querying an empty, not-yet-created table by its number can fail with
+// "FIB table does not exist" rather than proving absence. An all-table read
+// is a successful, independently checkable kernel observation in that state.
+// Numeric -N output avoids local rt_tables/rt_protos aliases; unknown table
+// identities anywhere in the full inventory fail closed.
 func trialNativeRoutePresence(route PlannedRoute) (bool, error) {
-	raw, err := nativeIPJSON("-N", "-j", "-4", "route", "show", "table", strconv.Itoa(route.Table))
+	raw, err := nativeIPJSON("-N", "-j", "-4", "route", "show", "table", "all")
 	if err != nil {
 		return false, Fault("trial_observation_uncertain", "native laboratory route inventory unavailable")
 	}
@@ -44,7 +46,27 @@ func trialNativeRoutePresence(route PlannedRoute) (bool, error) {
 	if err != nil {
 		return false, Fault("trial_observation_uncertain", "native laboratory route inventory unsupported")
 	}
-	return trialRoutePresence(rows, route)
+	selected, err := trialRoutesInTable(rows, route.Table)
+	if err != nil {
+		return false, err
+	}
+	return trialRoutePresence(selected, route)
+}
+
+// No table field is the native main table; never infer the absent chosen
+// table from a *failed* filtered query or silently discard unknown routes.
+func trialRoutesInTable(rows []map[string]json.RawMessage, target int) ([]map[string]json.RawMessage, error) {
+	selected := make([]map[string]json.RawMessage, 0, 1)
+	for _, row := range rows {
+		table, err := selectiveTable(row["table"], true)
+		if err != nil {
+			return nil, Fault("trial_observation_uncertain", "native route table identity unsupported")
+		}
+		if table == target {
+			selected = append(selected, row)
+		}
+	}
+	return selected, nil
 }
 
 func trialRoutePresence(rows []map[string]json.RawMessage, route PlannedRoute) (bool, error) {

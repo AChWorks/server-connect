@@ -464,16 +464,25 @@ echo PRODUCT_GUARD_TRIAL_STALE_RECOVERED_KERNEL_REFUSAL=PASS
 # durably journals an actual IPv4 lo route + matching RPDB rule. The loopback
 # route is intentionally unable to carry VPN traffic; Docker --network none
 # and the product's root/systemd/loopback admission gate remain mandatory.
+# A direct "show table 20000" can fail for an empty, unallocated Linux
+# FIB table. A successful full inventory + strict table filter is required;
+# never accept a failed ip pipeline's empty JSON stdout as absence proof.
+trial_route_inventory() { "$ip" -N -j -4 route show table all; }
 no_trial_route() {
- "$ip" -N -j -4 route show table 20000 | /usr/bin/python3 -c '
-import json,sys
-assert json.load(sys.stdin)==[],"trial route table not empty"'
-}
-assert_trial_route() {
- "$ip" -N -j -4 route show table 20000 | /usr/bin/python3 -c '
+ routes=$(trial_route_inventory) || return 1
+ printf '%s\n' "$routes" | /usr/bin/python3 -c '
 import json,sys
 rows=json.load(sys.stdin)
-assert len(rows)==1 and rows[0]["dst"]=="9.9.9.0/24" and rows[0]["dev"]=="lo",rows'
+selected=[r for r in rows if str(r.get("table","254"))=="20000"]
+assert selected==[],"trial route table not empty"'
+}
+assert_trial_route() {
+ routes=$(trial_route_inventory) || return 1
+ printf '%s\n' "$routes" | /usr/bin/python3 -c '
+import json,sys
+rows=json.load(sys.stdin)
+selected=[r for r in rows if str(r.get("table","254"))=="20000"]
+assert len(selected)==1 and selected[0]["dst"]=="9.9.9.0/24" and selected[0]["dev"]=="lo",selected'
 }
 no_trial_route
 op=$(stage)
@@ -548,7 +557,7 @@ op=$(stage)
 "$ip" -4 route del 9.9.9.0/24 dev lo table 20000 proto 247 scope link
 "$ip" -4 route add 9.9.9.0/24 dev lo table 20000 proto 248 scope link
 foreign_sha=$(/usr/bin/sha256sum /var/lib/server-connect/route-activation-journal.json | cut -d' ' -f1)
-foreign_native=$("$ip" -N -j -4 route show table 20000)
+foreign_native=$(trial_route_inventory)
 sleep 9
 if "$SC" --json activation-trial-recover >/run/sc-qa-foreign-route-v3.json 2>&1;then
  echo 'v3 recovery adopted a foreign native route' >&2;exit 1
@@ -561,7 +570,7 @@ PYROUTEFOREIGN
 rm -f /run/sc-qa-foreign-route-v3.json
 [ "$(phase)" = trial_pending ]
 [ "$foreign_sha" = "$(/usr/bin/sha256sum /var/lib/server-connect/route-activation-journal.json | cut -d' ' -f1)" ]
-[ "$foreign_native" = "$("$ip" -N -j -4 route show table 20000)" ]
+[ "$foreign_native" = "$(trial_route_inventory)" ]
 "$ip" -4 rule show | grep -F '9.9.9.0/24' >/dev/null
 "$ip" -4 route del 9.9.9.0/24 dev lo table 20000 proto 248 scope link
 "$SC" --json activation-trial-recover >/dev/null
@@ -610,7 +619,7 @@ wait_recovered
 no_trial_route
 "$ip" -4 route add 9.9.9.0/24 dev lo table 20000 proto 247 scope link
 stale_sha=$(/usr/bin/sha256sum /var/lib/server-connect/route-activation-journal.json | cut -d' ' -f1)
-stale_route=$("$ip" -N -j -4 route show table 20000)
+stale_route=$(trial_route_inventory)
 for mode in status recover clear;do
  case "$mode" in
  status) set -- activation-trial-status; expected=trial_recovery_uncertain ;;
@@ -626,7 +635,7 @@ with open('/run/sc-qa-route-stale.json',encoding='utf-8') as f:r=json.load(f)
 assert not r['ok'] and r['error']['code']==sys.argv[1],r
 PYSTALEROUTE
  [ "$stale_sha" = "$(/usr/bin/sha256sum /var/lib/server-connect/route-activation-journal.json | cut -d' ' -f1)" ]
- [ "$stale_route" = "$("$ip" -N -j -4 route show table 20000)" ]
+ [ "$stale_route" = "$(trial_route_inventory)" ]
 done
 rm -f /run/sc-qa-route-stale.json
 "$ip" -4 route del 9.9.9.0/24 dev lo table 20000 proto 247 scope link

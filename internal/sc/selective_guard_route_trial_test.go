@@ -85,6 +85,13 @@ func TestGuardedRouteTrialNativeIdentityAndForeignTableRules(t *testing.T) {
 		return rows
 	}
 	real := `[{"dst":"8.8.8.0/24","dev":"lo","table":"20000","protocol":"247","scope":"253","flags":[]}]`
+	allTables := rows(`[{"dst":"127.0.0.0/8","dev":"lo","table":"local"}, {"dst":"0.0.0.0/0","dev":"lo","table":"main"}]`)
+	if selected, err := trialRoutesInTable(allTables, route.Table); err != nil || len(selected) != 0 {
+		t.Fatalf("empty selected table not proved by valid all-table observation: %d,%v", len(selected), err)
+	}
+	if selected, err := trialRoutesInTable(rows(`[{"dst":"8.8.8.0/24","table":"foo"}]`), route.Table); err == nil || selected != nil {
+		t.Fatal("unknown table alias falsely proved selected table absence")
+	}
 	if present, err := trialRoutePresence(rows(real), route); err != nil || !present {
 		t.Fatalf("exact route refused: %v,%v", present, err)
 	}
