@@ -602,6 +602,113 @@ no_trial_route
 "$SC" --json activation-trial-clear --operation-id "$op" --revision 3 >/dev/null
 printf '%s\n' 'PRODUCT_GUARD_ROUTE_V3_AFTER_ROUTE_DELETE_SIGKILL_RECOVERY=PASS'
 
+# Four additional v3 failure-path cases. Native ip failures are induced by an
+# explicitly invalid, NON-MUTATING native ip command in the same installed
+# product error handler; journal-write failure is injected before attempting
+# the recovered revision. These do NOT emulate netlink EIO, disk/fsync loss,
+# or a production-host failure. All fault controls require the guest gate.
+assert_v3_qa_fault() {
+ expected=$1
+ /usr/bin/python3 - "$expected" <<'PYV3FAULT'
+import json,sys
+with open('/run/sc-qa-v3-fault.json',encoding='utf-8') as f:r=json.load(f)
+assert not r['ok'] and r['error']['code']==sys.argv[1],r
+PYV3FAULT
+ rm -f /run/sc-qa-v3-fault.json
+}
+# Invalid QA injection must be refused BEFORE the journal and kernel change;
+# v2 rule-only trials must not inherit the v3 error-injection capability.
+op=$(stage)
+prepared_sha=$(/usr/bin/sha256sum /var/lib/server-connect/route-activation-journal.json | cut -d' ' -f1)
+if "$SC" --json selective-trial-apply --operation-id "$op" --revision 1 \
+ --deadline-seconds 8 --qa-fail-at route-add >/run/sc-qa-v3-fault.json 2>&1;then
+ echo 'v2 incorrectly accepted v3 fault injection' >&2;exit 1
+fi
+assert_v3_qa_fault invalid_arguments
+[ "$prepared_sha" = "$(/usr/bin/sha256sum /var/lib/server-connect/route-activation-journal.json | cut -d' ' -f1)" ]
+no_trial_rule
+no_trial_route
+"$SC" --json selective-abandon-intent --operation-id "$op" --revision 1 >/dev/null
+op=$(stage)
+prepared_sha=$(/usr/bin/sha256sum /var/lib/server-connect/route-activation-journal.json | cut -d' ' -f1)
+if "$SC" --json selective-route-trial-apply --operation-id "$op" --revision 1 \
+ --deadline-seconds 8 --qa-fail-at route-delete >/run/sc-qa-v3-fault.json 2>&1;then
+ echo 'v3 route apply incorrectly accepted recovery-only fault injection' >&2;exit 1
+fi
+assert_v3_qa_fault invalid_arguments
+[ "$prepared_sha" = "$(/usr/bin/sha256sum /var/lib/server-connect/route-activation-journal.json | cut -d' ' -f1)" ]
+no_trial_rule
+no_trial_route
+"$SC" --json selective-abandon-intent --operation-id "$op" --revision 1 >/dev/null
+echo PRODUCT_GUARD_ROUTE_V3_QA_INVALID_FAULT_REFUSAL=PASS
+
+for injected in route-add rule-add;do
+ op=$(stage)
+ if "$SC" --json selective-route-trial-apply --operation-id "$op" --revision 1 \
+  --deadline-seconds 8 --qa-fail-at "$injected" >/run/sc-qa-v3-fault.json 2>&1;then
+  echo "v3 $injected QA native error unexpectedly succeeded" >&2;exit 1
+ fi
+ assert_v3_qa_fault trial_kernel_error
+ pending_sha=$(/usr/bin/sha256sum /var/lib/server-connect/route-activation-journal.json | cut -d' ' -f1)
+ [ "$(phase)" = trial_pending ]
+ [ "$pending_sha" = "$(/usr/bin/sha256sum /var/lib/server-connect/route-activation-journal.json | cut -d' ' -f1)" ]
+ no_trial_rule
+ if [ "$injected" = route-add ];then no_trial_route;else assert_trial_route;fi
+ wait_recovered
+ no_trial_route
+ "$SC" --json activation-trial-clear --operation-id "$op" --revision 3 >/dev/null
+ no_trial_rule
+ if [ "$injected" = route-add ];then
+  echo PRODUCT_GUARD_ROUTE_V3_QA_ROUTE_ADD_COMMAND_FAILURE=PASS
+ else
+  echo PRODUCT_GUARD_ROUTE_V3_QA_RULE_ADD_COMMAND_FAILURE=PASS
+ fi
+done
+
+# Manual recovery after expiry with the independent timer intentionally
+# stopped lets QA examine the exact partial delta before later rearming.
+op=$(stage)
+"$SC" --json selective-route-trial-apply --operation-id "$op" --revision 1 --deadline-seconds 6 >/dev/null
+systemctl stop "$timer"
+sleep 8
+pending_sha=$(/usr/bin/sha256sum /var/lib/server-connect/route-activation-journal.json | cut -d' ' -f1)
+if "$SC" --json activation-trial-recover --qa-fail-at route-delete >/run/sc-qa-v3-fault.json 2>&1;then
+ echo 'v3 route-delete QA native error unexpectedly succeeded' >&2;exit 1
+fi
+assert_v3_qa_fault trial_kernel_error
+[ "$(phase)" = trial_pending ]
+[ "$pending_sha" = "$(/usr/bin/sha256sum /var/lib/server-connect/route-activation-journal.json | cut -d' ' -f1)" ]
+no_trial_rule
+assert_trial_route
+systemctl start "$timer"
+wait_recovered
+no_trial_route
+"$SC" --json activation-trial-clear --operation-id "$op" --revision 3 >/dev/null
+no_trial_rule
+echo PRODUCT_GUARD_ROUTE_V3_QA_ROUTE_DELETE_COMMAND_FAILURE=PASS
+
+# Simulate inability to persist the recovered revision after BOTH kernel
+# resources were removed; the journal remains pending and must be retried.
+op=$(stage)
+"$SC" --json selective-route-trial-apply --operation-id "$op" --revision 1 --deadline-seconds 6 >/dev/null
+systemctl stop "$timer"
+sleep 8
+pending_sha=$(/usr/bin/sha256sum /var/lib/server-connect/route-activation-journal.json | cut -d' ' -f1)
+if "$SC" --json activation-trial-recover --qa-fail-at recovered-journal-write >/run/sc-qa-v3-fault.json 2>&1;then
+ echo 'v3 recovered-journal QA persistence fault unexpectedly succeeded' >&2;exit 1
+fi
+assert_v3_qa_fault activation_journal_unavailable
+[ "$(phase)" = trial_pending ]
+[ "$pending_sha" = "$(/usr/bin/sha256sum /var/lib/server-connect/route-activation-journal.json | cut -d' ' -f1)" ]
+no_trial_rule
+no_trial_route
+systemctl start "$timer"
+wait_recovered
+no_trial_route
+"$SC" --json activation-trial-clear --operation-id "$op" --revision 3 >/dev/null
+no_trial_rule
+echo PRODUCT_GUARD_ROUTE_V3_QA_RECOVERED_JOURNAL_WRITE_FAILURE=PASS
+
 # Replace the owned route with a foreign protocol at the exact table/CIDR.
 # A fresh scheduled systemd oneshot must report exact conflict exit 41, not
 # merely a manual CLI refusal or a stale failure from an earlier fixture.

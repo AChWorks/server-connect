@@ -3,6 +3,7 @@ package sc
 import (
 	"bytes"
 	"encoding/json"
+	"os"
 	"strings"
 	"testing"
 )
@@ -128,5 +129,51 @@ func TestGuardedRouteTrialNativeIdentityAndForeignTableRules(t *testing.T) {
 	withForeign := strings.Replace(normal, `{"priority":32766`, `{"priority":30200,"dst":"8.8.8.0/24","table":"20000","protocol":"249"},{"priority":32766`, 1)
 	if ErrorCode(trialNoForeignTableRules(rows(withForeign), rule)) != "trial_resource_conflict" {
 		t.Fatal("foreign rule referencing our table accepted")
+	}
+}
+
+// QA error injection is an opt-in guest-only control, not a production
+// alternate executable or a public tunnel activation path.
+func TestGuardedRouteTrialV3QAFaultAdmission(t *testing.T) {
+	for _, tc := range []struct {
+		phase, point string
+		allowed      bool
+	}{
+		{"route-apply", "", true},
+		{"route-apply", "route-add", true},
+		{"route-apply", "rule-add", true},
+		{"recover", "route-delete", true},
+		{"recover", "recovered-journal-write", true},
+		{"apply", "route-add", false},
+		{"apply", "rule-add", false},
+		{"recover", "route-add", false},
+		{"recover", "rule-add", false},
+		{"route-apply", "route-delete", false},
+		{"recover", "missing", false},
+	} {
+		err := trialValidateQAFaultPoint(tc.phase, tc.point)
+		if tc.allowed && err != nil {
+			t.Errorf("refused %s/%s: %v", tc.phase, tc.point, err)
+		}
+		if !tc.allowed && ErrorCode(err) != "invalid_arguments" {
+			t.Errorf("accepted %s/%s: %v", tc.phase, tc.point, err)
+		}
+	}
+	if err := trialQAFailRecoveredJournal(""); err != nil {
+		t.Fatal(err)
+	}
+	if code := ErrorCode(trialQAFailRecoveredJournal("recovered-journal-write")); code != "activation_journal_unavailable" {
+		t.Fatalf("simulated persistence error code %s", code)
+	}
+}
+
+func TestGuardedRouteTrialQANativeCommandError(t *testing.T) {
+	if _, err := os.Stat(nativeIPPath); err != nil {
+		t.Skip("native iproute2 unavailable")
+	}
+	// Even when the caller supplies a would-be route mutation, the named QA
+	// boundary executes ONLY a deliberately invalid, non-mutating ip command.
+	if code := ErrorCode(trialRunIPWithQAFault("route-add", "route-add", "-4", "route", "add", "9.9.9.0/24", "dev", "lo")); code != "trial_kernel_error" {
+		t.Fatalf("QA native command failure incorrectly accepted: %s", code)
 	}
 }

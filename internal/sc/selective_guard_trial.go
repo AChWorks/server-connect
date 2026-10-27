@@ -388,6 +388,47 @@ func trialValidateQACrashPoint(phase, point string) error {
 	return Fault("invalid_arguments", "unsupported rule-trial QA crash boundary")
 }
 
+// These error-path probes are restricted to the same strict disposable
+// systemd Docker guest as the v3 trial. They exercise the real native-ip
+// command failure handler (with a deliberately invalid, non-mutating command)
+// and the recovered-journal persistence error branch. They do NOT simulate
+// Linux netlink EIO or a physical disk/fsync failure.
+func trialValidateQAFaultPoint(phase, point string) error {
+	if point == "" {
+		return nil
+	}
+	switch phase {
+	case "route-apply":
+		if point == "route-add" || point == "rule-add" {
+			return nil
+		}
+	case "recover":
+		if point == "route-delete" || point == "recovered-journal-write" {
+			return nil
+		}
+	}
+	return Fault("invalid_arguments", "unsupported v3 disposable QA failure boundary")
+}
+
+func trialRunIPWithQAFault(actual, requested string, args ...string) error {
+	if requested != "" && actual == requested {
+		// Intentionally invalid native iproute2 command: no network mutation.
+		// An unexpected success is still an error, never a successful trial.
+		if err := trialRunIP("sc-qa-nonexistent-subcommand"); err != nil {
+			return err
+		}
+		return Fault("trial_kernel_error", "disposable QA native failure injection unexpectedly succeeded")
+	}
+	return trialRunIP(args...)
+}
+
+func trialQAFailRecoveredJournal(requested string) error {
+	if requested == "recovered-journal-write" {
+		return journalFSUnavailable("disposable QA injected recovered-journal persistence failure")
+	}
+	return nil
+}
+
 func trialQAKillAt(actual, requested string) error {
 	if actual != requested {
 		return nil
@@ -508,16 +549,16 @@ func trialRunIP(args ...string) error {
 // successful trial is NOT a working tunnel, safe production activation, or
 // evidence of live foreign transport.
 func (m *Manager) BeginGuardedRuleTrial(operationID string, revision uint64, ttlSeconds int, qaCrashPoint string) (TrialReceipt, error) {
-	return m.beginGuardedTrial(operationID, revision, ttlSeconds, qaCrashPoint, false)
+	return m.beginGuardedTrial(operationID, revision, ttlSeconds, qaCrashPoint, "", false)
 }
 
 // The v3 lab path inserts a real native IPv4 route via lo into the isolated
 // table BEFORE the matching rule. It still cannot transport any VPN traffic.
-func (m *Manager) BeginGuardedRouteTrial(operationID string, revision uint64, ttlSeconds int, qaCrashPoint string) (TrialReceipt, error) {
-	return m.beginGuardedTrial(operationID, revision, ttlSeconds, qaCrashPoint, true)
+func (m *Manager) BeginGuardedRouteTrial(operationID string, revision uint64, ttlSeconds int, qaCrashPoint, qaFaultPoint string) (TrialReceipt, error) {
+	return m.beginGuardedTrial(operationID, revision, ttlSeconds, qaCrashPoint, qaFaultPoint, true)
 }
 
-func (m *Manager) beginGuardedTrial(operationID string, revision uint64, ttlSeconds int, qaCrashPoint string, withRoute bool) (TrialReceipt, error) {
+func (m *Manager) beginGuardedTrial(operationID string, revision uint64, ttlSeconds int, qaCrashPoint, qaFaultPoint string, withRoute bool) (TrialReceipt, error) {
 	// The fixed independent systemd unit has exactly one private state root.
 	// A custom --state-dir would arm a watchdog that can never find this
 	// transaction, leaving a real kernel rule unowned after controller death.
@@ -530,6 +571,12 @@ func (m *Manager) beginGuardedTrial(operationID string, revision uint64, ttlSeco
 	}
 	if err := trialValidateQACrashPoint(phase, qaCrashPoint); err != nil {
 		return TrialReceipt{}, err
+	}
+	if err := trialValidateQAFaultPoint(phase, qaFaultPoint); err != nil {
+		return TrialReceipt{}, err
+	}
+	if qaCrashPoint != "" && qaFaultPoint != "" {
+		return TrialReceipt{}, Fault("invalid_arguments", "only one disposable QA intervention is allowed")
 	}
 	if !journalHex32.MatchString(operationID) || revision != 1 || ttlSeconds < 4 || ttlSeconds > 600 {
 		return TrialReceipt{}, Fault("invalid_arguments", "exact staged revision and trial deadline (4-600s) required")
@@ -643,14 +690,14 @@ func (m *Manager) beginGuardedTrial(operationID string, revision uint64, ttlSeco
 		// kernel effect. Crash before or after add is recoverable by inspection.
 		receipt = trialReceipt(trial, true, false)
 		if withRoute {
-			if err := trialRunIP(trialRouteCommand(route, "add")...); err != nil {
+			if err := trialRunIPWithQAFault("route-add", qaFaultPoint, trialRouteCommand(route, "add")...); err != nil {
 				return err
 			}
 			if err := trialQAKillAt("after-route", qaCrashPoint); err != nil {
 				return err
 			}
 		}
-		if err := trialRunIP("-4", "rule", "add", "pref", strconv.Itoa(rule.Priority), "to", rule.Destination,
+		if err := trialRunIPWithQAFault("rule-add", qaFaultPoint, "-4", "rule", "add", "pref", strconv.Itoa(rule.Priority), "to", rule.Destination,
 			"table", strconv.Itoa(rule.Table), "protocol", trialProtocol); err != nil {
 			return err
 		}
@@ -668,12 +715,25 @@ func (m *Manager) beginGuardedTrial(operationID string, revision uint64, ttlSeco
 // Called from a standalone systemd oneshot: no dependency on sing-box or a
 // living initiating shell. The v2 record must survive a process crash. A
 // changed boot ID triggers recovery immediately, not a new 600s allowance.
-func (m *Manager) RecoverGuardedRuleTrial(qaCrashPoint string) (TrialReceipt, error) {
+func (m *Manager) RecoverGuardedRuleTrial(qaCrashPoint, qaFaultPoint string) (TrialReceipt, error) {
 	if m.Dir != DefaultDir {
 		return TrialReceipt{}, Fault("trial_unsupported", "guard recovery requires the installed default private state directory")
 	}
 	if err := trialValidateQACrashPoint("recover", qaCrashPoint); err != nil {
 		return TrialReceipt{}, err
+	}
+	if err := trialValidateQAFaultPoint("recover", qaFaultPoint); err != nil {
+		return TrialReceipt{}, err
+	}
+	if qaCrashPoint != "" && qaFaultPoint != "" {
+		return TrialReceipt{}, Fault("invalid_arguments", "only one disposable QA intervention is allowed")
+	}
+	if qaFaultPoint != "" {
+		// Reject an explicitly requested QA intervention even if no journal exists;
+		// an absent/non-guest state must never yield a simulated-success receipt.
+		if err := trialDisposableContext(); err != nil {
+			return TrialReceipt{}, err
+		}
 	}
 	var receipt TrialReceipt
 	err := m.withActivationJournalLock(syscall.Fsync, func(store *activationJournalDir) error {
@@ -692,6 +752,9 @@ func (m *Manager) RecoverGuardedRuleTrial(qaCrashPoint string) (TrialReceipt, er
 				return nil
 			}
 			return err
+		}
+		if qaFaultPoint != "" && (record.Version != 3 || record.Phase != "trial_pending") {
+			return Fault("invalid_arguments", "v3 QA failure requires pending route trial")
 		}
 		if qaCrashPoint == "after-route-delete" && record.Version != 3 {
 			return Fault("invalid_arguments", "route-delete crash point requires the v3 route trial")
@@ -773,7 +836,7 @@ func (m *Manager) RecoverGuardedRuleTrial(qaCrashPoint string) (TrialReceipt, er
 			return Fault("trial_recovery_uncertain", "guarded rule persists after recovery")
 		}
 		if record.Version == 3 {
-			if err := trialRecoverRoute(record, qaCrashPoint); err != nil {
+			if err := trialRecoverRoute(record, qaCrashPoint, qaFaultPoint); err != nil {
 				return err
 			}
 		}
@@ -781,6 +844,9 @@ func (m *Manager) RecoverGuardedRuleTrial(qaCrashPoint string) (TrialReceipt, er
 			return err
 		}
 		record.Phase, record.Revision = "trial_recovered", 3
+		if err := trialQAFailRecoveredJournal(qaFaultPoint); err != nil {
+			return err
+		}
 		if err := writeTrialLocked(store, record, &id); err != nil {
 			return err
 		}

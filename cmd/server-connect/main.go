@@ -296,20 +296,22 @@ func run(j bool, m *sc.Manager, args []string) int {
 		}
 		return output(j, check, nil)
 	case "activation-trial-recover", "activation-trial-status":
-		qaPoint := ""
+		qaPoint, qaFaultPoint := "", ""
 		if name == "activation-trial-recover" {
 			opts := flag.NewFlagSet(name, flag.ContinueOnError)
 			opts.SetOutput(io.Discard)
 			point := opts.String("qa-kill-at", "", "disposable-only recovery interruption point")
+			fault := opts.String("qa-fail-at", "", "disposable-only v3 recovery error-path injection")
 			if e := opts.Parse(args); e != nil || len(opts.Args()) != 0 {
 				return output(j, nil, sc.Fault("invalid_arguments", "invalid rule-trial recovery options"))
 			}
 			qaPoint = *point
+			qaFaultPoint = *fault
 		} else if len(args) != 0 {
 			return output(j, nil, sc.Fault("invalid_arguments", "rule-trial status accepts no options"))
 		}
 		if name == "activation-trial-recover" {
-			receipt, err := m.RecoverGuardedRuleTrial(qaPoint)
+			receipt, err := m.RecoverGuardedRuleTrial(qaPoint, qaFaultPoint)
 			status := output(j, receipt, err)
 			if sc.ErrorCode(err) == "trial_resource_conflict" {
 				// Native systemd ExecMainStatus=41 identifies exact foreign
@@ -329,17 +331,18 @@ func run(j bool, m *sc.Manager, args []string) int {
 		deadline := opts.Int("deadline-seconds", 600, "disposable rule trial deadline in seconds")
 		interrupt := opts.Bool("qa-kill-after-rule", false, "legacy disposable-only SIGKILL after rule add")
 		qaPoint := opts.String("qa-kill-at", "", "disposable-only apply interruption point")
+		qaFaultPoint := opts.String("qa-fail-at", "", "disposable-only v3 native error-path injection")
 		if e := opts.Parse(args); e != nil || len(opts.Args()) != 0 {
 			return output(j, nil, sc.Fault("invalid_arguments", "invalid rule trial options"))
 		}
-		if *interrupt && *qaPoint != "" {
-			return output(j, nil, sc.Fault("invalid_arguments", "only one QA interruption point is allowed"))
+		if (*interrupt && *qaPoint != "") || (*qaFaultPoint != "" && (*qaPoint != "" || *interrupt)) {
+			return output(j, nil, sc.Fault("invalid_arguments", "only one disposable QA intervention is allowed"))
 		}
 		if *interrupt && name == "selective-route-trial-apply" {
 			return output(j, nil, sc.Fault("invalid_arguments", "legacy rule-only interruption option is unavailable for route trials"))
 		}
 		if name == "activation-trial-clear" {
-			if *deadline != 600 || *interrupt || *qaPoint != "" || *revision != 3 {
+			if *deadline != 600 || *interrupt || *qaPoint != "" || *qaFaultPoint != "" || *revision != 3 {
 				return output(j, nil, sc.Fault("invalid_arguments", "clear requires exact recovered revision 3"))
 			}
 			err := m.ClearRecoveredRuleTrial(*id, *revision)
@@ -348,8 +351,11 @@ func run(j bool, m *sc.Manager, args []string) int {
 		if *interrupt {
 			*qaPoint = "after-add"
 		}
+		if name == "selective-trial-apply" && *qaFaultPoint != "" {
+			return output(j, nil, sc.Fault("invalid_arguments", "QA native fault injection requires v3 route trial"))
+		}
 		if name == "selective-route-trial-apply" {
-			receipt, err := m.BeginGuardedRouteTrial(*id, *revision, *deadline, *qaPoint)
+			receipt, err := m.BeginGuardedRouteTrial(*id, *revision, *deadline, *qaPoint, *qaFaultPoint)
 			return output(j, receipt, err)
 		}
 		receipt, err := m.BeginGuardedRuleTrial(*id, *revision, *deadline, *qaPoint)
