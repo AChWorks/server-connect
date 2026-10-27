@@ -50,6 +50,41 @@ The installed-host Debian 13 Docker `--network none` guest exercises an **experi
 
 This is a **feasibility proof of independent in-boot timeout + process-death rollback semantics**, not an installed product route-activation feature or evidence of actual external VPN transport, authenticated fresh SSH/console confirmation, durable activation journal, every mutation-stage crash, persistent reboot/power-loss recovery, real conflicting network owners, or a running Runtime Health Guard. It **must not** set `activation_ready=true`, expose Selective/Broad activation to operators or close guarded-routing Issue #2. Mandatory actual activation, reboot and health-guard acceptance in the matrix below remain NOT_RUN until separately implemented and tested on authorized disposable hosts.
 
+### Product-integrated route-bearing v3 laboratory acceptance
+
+The installed Debian 13 disconnected Docker/systemd guest also exercises a
+separately versioned **v3 route + RPDB rule** transaction through the actual
+installed Manager and prearmed independent recovery timer. Unlike the v2
+rule-only experiment, this creates one genuine IPv4 kernel table route via
+**existing `lo`**, followed by its matching policy rule. This is a
+route-bearing rollback **only in a loopback-only disposable namespace**;
+there is still no TUN or real VPN transport. Installed-host evidence must
+prove after-route and after-rule controller SIGKILL, a mid-rollback SIGKILL
+between rule and route deletion, a crash after the route deletion but before
+a recovered-journal write, exact pending journal preservation, independent
+timer reconciliation, route/rule absence and exact recovered revision
+clearance. Separately introduce a foreign native route identity and
+an additional foreign RPDB consumer of the selected table, and require
+classified refusal and unchanged pending journal/foreign state before
+separate test fixture repair. Each v3 foreign-route/foreign-policy consumer
+fixture additionally requires a fresh independent systemd recovery service
+start after the injected conflict, `ExecMainStatus=41`, and unchanged
+native journal/kernel evidence. After controlled fixture repair and exact
+journal clearance, only the known guest-owned failed unit state may be
+reset before subsequent trials; an unknown executor result must fail. A
+stale recovered v3 journal with a newly reintroduced exact-selector route
+must be refused by status, recovery and clear until the foreign test fixture
+is separately removed. A tagged matching
+route moved to a different table must likewise refuse a recovered receipt,
+without deleting the route in that foreign table. The route table must be empty again after every
+successful recovery, and unrelated SSH/HTTP/Direct guest paths must remain
+preserved. Code-only unit tests or a green check label are insufficient;
+original exact-candidate installed-host logs and actual assertion sources
+must be inspected. Native protocol tagging is not cryptographic identity,
+Docker restart is not physical reboot, and these tests cannot justify
+production Selective/Broad Tunnel, aaPanel job selection or Runtime Health
+Guard #3 acceptance.
+
 ### Product-integrated RPDB trial interruption and unavailable-watchdog evidence
 
 The installed disconnected Debian 13 systemd Docker acceptance also tests

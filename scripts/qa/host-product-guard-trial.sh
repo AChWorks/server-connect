@@ -1,5 +1,6 @@
 #!/bin/sh
-# Installed Server Connect binary, private v2 journal, and native IPv4 RPDB.
+# Installed Server Connect binary, private v2/v3 experimental journals,
+# and native IPv4 RPDB/loopback route (disconnected disposable guest only).
 # Executable ONLY in disconnected disposable Debian13 systemd Docker guest.
 set -eu
 umask 077
@@ -459,6 +460,276 @@ echo PRODUCT_GUARD_TRIAL_STALE_RECOVERED_ALL_PUBLIC_OPERATIONS_REFUSED=PASS
 systemctl reset-failed "$service"
 no_trial_rule
 echo PRODUCT_GUARD_TRIAL_STALE_RECOVERED_KERNEL_REFUSAL=PASS
+
+# v3: the *installed product*, not the standalone QA-only fixture, now
+# durably journals an actual IPv4 lo route + matching RPDB rule. The loopback
+# route is intentionally unable to carry VPN traffic; Docker --network none
+# and the product's root/systemd/loopback admission gate remain mandatory.
+# A direct "show table 20000" can fail for an empty, unallocated Linux
+# FIB table. A successful full inventory + strict table filter is required;
+# never accept a failed ip pipeline's empty JSON stdout as absence proof.
+trial_route_inventory() { "$ip" -N -j -4 route show table all; }
+no_trial_route() {
+ routes=$(trial_route_inventory) || return 1
+ printf '%s\n' "$routes" | /usr/bin/python3 -c '
+import json,sys
+rows=json.load(sys.stdin)
+selected=[r for r in rows if str(r.get("table","254"))=="20000"]
+assert selected==[],"trial route table not empty"'
+}
+assert_trial_route() {
+ routes=$(trial_route_inventory) || return 1
+ printf '%s\n' "$routes" | /usr/bin/python3 -c '
+import json,sys
+rows=json.load(sys.stdin)
+selected=[r for r in rows if str(r.get("table","254"))=="20000"]
+assert len(selected)==1 and selected[0]["dst"]=="9.9.9.0/24" and selected[0]["dev"]=="lo",selected'
+}
+# A deliberate foreign kernel conflict may leave the *real* oneshot in a
+# failed state while its independent timer stays active. A later trial must
+# not silently rearm against a failed executor. Assert fresh cause-specific
+# systemd failure for each v3 fixture, then clear only the known guest-owned
+# failure AFTER exact journal clearance and kernel baseline restoration.
+trial_injection_mark_us() {
+ /usr/bin/python3 -c 'import time;print(time.clock_gettime_ns(time.CLOCK_MONOTONIC)//1000)'
+}
+await_v3_systemd_foreign_refusal() {
+ injection_complete_us=$1
+ [ "$(systemctl show "$timer" -p Unit --value)" = "$service" ]
+ observed=no
+ for n in $(seq 1 28);do
+  if [ "$(systemctl show "$service" -p Result --value)" = exit-code ] &&
+   [ "$(systemctl show "$service" -p ExecMainStatus --value)" = 41 ];then
+   started_us=$(systemctl show "$service" -p ExecMainStartTimestampMonotonic --value)
+   case "$started_us" in ''|*[!0-9]*) ;; *)
+    if [ "$started_us" -gt "$injection_complete_us" ];then observed=yes;break;fi ;;
+   esac
+  fi
+  sleep 1
+ done
+ if [ "$observed" != yes ];then
+  echo 'No fresh cause-specific independent systemd v3 refusal' >&2
+  dump_guard_diagnostic
+  exit 1
+ fi
+ systemctl is-active --quiet "$timer"
+ printf 'PRODUCT_GUARD_ROUTE_V3_FRESH_SYSTEMD_CONFLICT=PASS injection_complete_us=%s service_start_us=%s status=41\n' \
+  "$injection_complete_us" "$started_us"
+}
+reset_v3_qa_executor_after_clear() {
+ [ ! -e /var/lib/server-connect/route-activation-journal.json ]
+ no_trial_rule
+ no_trial_route
+ state=$(systemctl show "$service" -p Result --value)
+ case "$state" in
+  success) ;;
+  exit-code)
+   [ "$(systemctl show "$service" -p ExecMainStatus --value)" = 41 ] || {
+    dump_guard_diagnostic;exit 1;
+   }
+   systemctl reset-failed "$service"
+   ;;
+  *) dump_guard_diagnostic;exit 1 ;;
+ esac
+ [ "$(systemctl show "$service" -p Result --value)" = success ] || {
+  dump_guard_diagnostic;exit 1;
+ }
+ systemctl is-active --quiet "$timer"
+}
+
+no_trial_route
+op=$(stage)
+route_exit=0
+"$SC" selective-route-trial-apply --operation-id "$op" --revision 1  --deadline-seconds 7 --qa-kill-at after-route >/dev/null 2>&1 || route_exit=$?
+[ "$route_exit" -eq 137 ] && [ "$(phase)" = trial_pending ]
+assert_trial_route
+no_trial_rule
+wait_recovered
+no_trial_route
+"$SC" --json activation-trial-clear --operation-id "$op" --revision 3 >/dev/null
+no_trial_route
+printf '%s\n' 'PRODUCT_GUARD_ROUTE_V3_AFTER_ROUTE_SIGKILL_RECOVERY=PASS'
+
+op=$(stage)
+rule_exit=0
+"$SC" selective-route-trial-apply --operation-id "$op" --revision 1  --deadline-seconds 7 --qa-kill-at after-add >/dev/null 2>&1 || rule_exit=$?
+[ "$rule_exit" -eq 137 ] && [ "$(phase)" = trial_pending ]
+assert_trial_route
+"$ip" -4 rule show | grep -F '9.9.9.0/24' >/dev/null
+wait_recovered
+no_trial_route
+"$SC" --json activation-trial-clear --operation-id "$op" --revision 3 >/dev/null
+no_trial_route
+printf '%s\n' 'PRODUCT_GUARD_ROUTE_V3_AFTER_RULE_SIGKILL_RECOVERY=PASS'
+
+# Kill the *independent recovery* in the middle of its two deletions:
+# after the rule disappears but while the route still exists. A new timer
+# invocation must reconcile precisely that partial state without broad flush.
+op=$(stage)
+"$SC" --json selective-route-trial-apply --operation-id "$op" --revision 1 --deadline-seconds 6 >/dev/null
+systemctl stop "$timer"
+sleep 8
+pending_sha=$(/usr/bin/sha256sum /var/lib/server-connect/route-activation-journal.json | cut -d' ' -f1)
+partial_exit=0
+"$SC" activation-trial-recover --qa-kill-at after-delete >/dev/null 2>&1 || partial_exit=$?
+[ "$partial_exit" -eq 137 ] && [ "$(phase)" = trial_pending ]
+[ "$pending_sha" = "$(/usr/bin/sha256sum /var/lib/server-connect/route-activation-journal.json | cut -d' ' -f1)" ]
+no_trial_rule
+assert_trial_route
+systemctl start "$timer"
+wait_recovered
+no_trial_route
+"$SC" --json activation-trial-clear --operation-id "$op" --revision 3 >/dev/null
+printf '%s\n' 'PRODUCT_GUARD_ROUTE_V3_MID_ROLLBACK_SIGKILL_RECOVERY=PASS'
+
+# Crash after the second deletion but BEFORE the durable recovered journal
+# exists. The real timer must persist the recovered receipt on the next tick
+# without inventing a new kernel rule or route.
+op=$(stage)
+"$SC" --json selective-route-trial-apply --operation-id "$op" --revision 1 --deadline-seconds 6 >/dev/null
+systemctl stop "$timer"
+sleep 8
+pending_sha=$(/usr/bin/sha256sum /var/lib/server-connect/route-activation-journal.json | cut -d' ' -f1)
+last_exit=0
+"$SC" activation-trial-recover --qa-kill-at after-route-delete >/dev/null 2>&1 || last_exit=$?
+[ "$last_exit" -eq 137 ] && [ "$(phase)" = trial_pending ]
+[ "$pending_sha" = "$(/usr/bin/sha256sum /var/lib/server-connect/route-activation-journal.json | cut -d' ' -f1)" ]
+no_trial_rule
+no_trial_route
+systemctl start "$timer"
+wait_recovered
+no_trial_route
+"$SC" --json activation-trial-clear --operation-id "$op" --revision 3 >/dev/null
+printf '%s\n' 'PRODUCT_GUARD_ROUTE_V3_AFTER_ROUTE_DELETE_SIGKILL_RECOVERY=PASS'
+
+# Replace the owned route with a foreign protocol at the exact table/CIDR.
+# A fresh scheduled systemd oneshot must report exact conflict exit 41, not
+# merely a manual CLI refusal or a stale failure from an earlier fixture.
+op=$(stage)
+"$SC" --json selective-route-trial-apply --operation-id "$op" --revision 1 --deadline-seconds 7 >/dev/null
+"$ip" -4 route del 9.9.9.0/24 dev lo table 20000 proto 247 scope link
+"$ip" -4 route add 9.9.9.0/24 dev lo table 20000 proto 248 scope link
+# Mark only AFTER the completed successful foreign native injection.
+foreign_injected_us=$(trial_injection_mark_us)
+foreign_sha=$(/usr/bin/sha256sum /var/lib/server-connect/route-activation-journal.json | cut -d' ' -f1)
+foreign_native=$(trial_route_inventory)
+await_v3_systemd_foreign_refusal "$foreign_injected_us"
+[ "$foreign_sha" = "$(/usr/bin/sha256sum /var/lib/server-connect/route-activation-journal.json | cut -d' ' -f1)" ]
+[ "$foreign_native" = "$(trial_route_inventory)" ]
+if "$SC" --json activation-trial-recover >/run/sc-qa-foreign-route-v3.json 2>&1;then
+ echo 'v3 recovery adopted a foreign native route' >&2;exit 1
+fi
+/usr/bin/python3 - <<'PYROUTEFOREIGN'
+import json
+with open('/run/sc-qa-foreign-route-v3.json',encoding='utf-8') as f:r=json.load(f)
+assert not r['ok'] and r['error']['code']=='trial_resource_conflict',r
+PYROUTEFOREIGN
+rm -f /run/sc-qa-foreign-route-v3.json
+[ "$(phase)" = trial_pending ]
+[ "$foreign_sha" = "$(/usr/bin/sha256sum /var/lib/server-connect/route-activation-journal.json | cut -d' ' -f1)" ]
+[ "$foreign_native" = "$(trial_route_inventory)" ]
+"$ip" -4 rule show | grep -F '9.9.9.0/24' >/dev/null
+"$ip" -4 route del 9.9.9.0/24 dev lo table 20000 proto 248 scope link
+"$SC" --json activation-trial-recover >/dev/null
+[ "$(phase)" = trial_recovered ]
+"$SC" --json activation-trial-clear --operation-id "$op" --revision 3 >/dev/null
+reset_v3_qa_executor_after_clear
+printf '%s\n' 'PRODUCT_GUARD_ROUTE_V3_FOREIGN_ROUTE_REFUSAL=PASS'
+
+# A second unrelated RPDB rule referencing the chosen table is likewise an
+# independent owner. No kernel deletion may occur until the guest fixture
+# removes that rule and invokes the product's independent recovery path.
+op=$(stage)
+"$SC" --json selective-route-trial-apply --operation-id "$op" --revision 1 --deadline-seconds 7 >/dev/null
+"$ip" -4 rule add pref 30200 to 9.9.9.0/24 table 20000 protocol 249
+# Mark only AFTER the completed successful foreign native injection.
+foreign_injected_us=$(trial_injection_mark_us)
+foreign_sha=$(/usr/bin/sha256sum /var/lib/server-connect/route-activation-journal.json | cut -d' ' -f1)
+foreign_native=$("$ip" -N -j -4 rule show)
+await_v3_systemd_foreign_refusal "$foreign_injected_us"
+[ "$foreign_sha" = "$(/usr/bin/sha256sum /var/lib/server-connect/route-activation-journal.json | cut -d' ' -f1)" ]
+[ "$foreign_native" = "$("$ip" -N -j -4 rule show)" ]
+if "$SC" --json activation-trial-recover >/run/sc-qa-foreign-table-rule.json 2>&1;then
+ echo 'v3 recovery removed a route consumed by a foreign rule' >&2;exit 1
+fi
+/usr/bin/python3 - <<'PYFOREIGNTABLE'
+import json
+with open('/run/sc-qa-foreign-table-rule.json',encoding='utf-8') as f:r=json.load(f)
+assert not r['ok'] and r['error']['code']=='trial_resource_conflict',r
+PYFOREIGNTABLE
+rm -f /run/sc-qa-foreign-table-rule.json
+[ "$(phase)" = trial_pending ]
+[ "$foreign_sha" = "$(/usr/bin/sha256sum /var/lib/server-connect/route-activation-journal.json | cut -d' ' -f1)" ]
+[ "$foreign_native" = "$("$ip" -N -j -4 rule show)" ]
+assert_trial_route
+"$ip" -4 rule del pref 30200 to 9.9.9.0/24 table 20000 protocol 249
+"$SC" --json activation-trial-recover >/dev/null
+[ "$(phase)" = trial_recovered ]
+"$SC" --json activation-trial-clear --operation-id "$op" --revision 3 >/dev/null
+reset_v3_qa_executor_after_clear
+printf '%s\n' 'PRODUCT_GUARD_ROUTE_V3_FOREIGN_TABLE_RULE_REFUSAL=PASS'
+
+# A recovered journal is NOT everlasting proof that an externally introduced
+# route did not reappear. Status/recover/clear must each refuse this same
+# exact matching but untrusted route without changing the journal or kernel.
+op=$(stage)
+"$SC" --json selective-route-trial-apply --operation-id "$op" --revision 1 --deadline-seconds 5 >/dev/null
+wait_recovered
+no_trial_route
+"$ip" -4 route add 9.9.9.0/24 dev lo table 20000 proto 247 scope link
+stale_sha=$(/usr/bin/sha256sum /var/lib/server-connect/route-activation-journal.json | cut -d' ' -f1)
+stale_route=$(trial_route_inventory)
+for mode in status recover clear;do
+ case "$mode" in
+ status) set -- activation-trial-status; expected=trial_recovery_uncertain ;;
+ recover) set -- activation-trial-recover; expected=trial_recovery_uncertain ;;
+ clear) set -- activation-trial-clear --operation-id "$op" --revision 3; expected=trial_resource_conflict ;;
+ esac
+ if "$SC" --json "$@" >/run/sc-qa-route-stale.json 2>&1;then
+  echo "Stale recovered v3 route accepted by $mode" >&2;exit 1
+ fi
+ /usr/bin/python3 - "$expected" <<'PYSTALEROUTE'
+import json,sys
+with open('/run/sc-qa-route-stale.json',encoding='utf-8') as f:r=json.load(f)
+assert not r['ok'] and r['error']['code']==sys.argv[1],r
+PYSTALEROUTE
+ [ "$stale_sha" = "$(/usr/bin/sha256sum /var/lib/server-connect/route-activation-journal.json | cut -d' ' -f1)" ]
+ [ "$stale_route" = "$(trial_route_inventory)" ]
+done
+rm -f /run/sc-qa-route-stale.json
+"$ip" -4 route del 9.9.9.0/24 dev lo table 20000 proto 247 scope link
+"$SC" --json activation-trial-clear --operation-id "$op" --revision 3 >/dev/null
+no_trial_route
+no_trial_rule
+printf '%s\n' 'PRODUCT_GUARD_ROUTE_V3_STALE_RECOVERED_ROUTE_REFUSAL=PASS'
+
+# A protocol-tagged route moved to a DIFFERENT table is foreign ownership
+# evidence, not proof that the original experiment fully reconciled. Even
+# while the recorded target table is empty, refuse a recovered receipt.
+op=$(stage)
+"$SC" --json selective-route-trial-apply --operation-id "$op" --revision 1 --deadline-seconds 5 >/dev/null
+wait_recovered
+no_trial_route
+"$ip" -4 route add 9.9.9.0/24 dev lo table 20001 proto 247 scope link
+moved_sha=$(/usr/bin/sha256sum /var/lib/server-connect/route-activation-journal.json | cut -d' ' -f1)
+moved_native=$(trial_route_inventory)
+if "$SC" --json activation-trial-status >/run/sc-qa-v3-moved-route.json 2>&1;then
+ echo 'Moved tagged route silently accepted as recovered' >&2;exit 1
+fi
+/usr/bin/python3 - <<'PYMOVEDROUTE'
+import json
+with open('/run/sc-qa-v3-moved-route.json',encoding='utf-8') as f:r=json.load(f)
+assert not r['ok'] and r['error']['code']=='trial_resource_conflict',r
+PYMOVEDROUTE
+rm -f /run/sc-qa-v3-moved-route.json
+[ "$moved_sha" = "$(/usr/bin/sha256sum /var/lib/server-connect/route-activation-journal.json | cut -d' ' -f1)" ]
+[ "$moved_native" = "$(trial_route_inventory)" ]
+no_trial_route
+"$ip" -4 route del 9.9.9.0/24 dev lo table 20001 proto 247 scope link
+"$SC" --json activation-trial-clear --operation-id "$op" --revision 3 >/dev/null
+no_trial_route
+no_trial_rule
+printf '%s\n' 'PRODUCT_GUARD_ROUTE_V3_MOVED_TAGGED_ROUTE_REFUSAL=PASS'
 
 # Negative ownership challenge: another actor replaces the exact priority
 # with a foreign native rule. Watchdog must refuse removal and retain journal.

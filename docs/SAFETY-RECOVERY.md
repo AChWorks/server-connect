@@ -3,6 +3,36 @@
 - **Status:** normative requirements for the still-unimplemented production Activation Guard and Runtime Health Guard. Isolated QA-only in-boot rollback and disconnected Docker-restart pending-intent tests exist. The latter checks durable private fixture state and fresh boot-service no-op/conflict behavior after its kernel namespace resets. Neither demonstrates product guard integration, physical reboot/power-loss recovery or field acceptance.
 - **Source of product intent:** [PROJECT-SPEC.md](PROJECT-SPEC.md). This document details the behaviors necessary to implement those requirements.
 
+## Experimental guarded loopback-route transaction v3 (not production ready)
+
+A separately versioned, **disposable-only** laboratory transaction can now
+apply both one real IPv4 route through the existing loopback device (`lo`) and
+one matching RPDB rule to its otherwise empty selected table. This still
+cannot reach a VPN, and **never** creates a TUN, new interface, default route,
+firewall rule, DNS change, or a production egress policy. Its v3 private journal
+retains the validated original v1 Selective route/rule intent, has an exact
+operation identity and monotonic deadline, and is fsync-persisted **before**
+the route and rule are created. The independent installed systemd recovery
+service can recover v2 rule-only and v3 route+rule journals without a living
+initiator. A crash may leave no objects, only a route, or both objects; it
+must reconcile each state by fresh native numeric kernel observation.
+
+The standalone recovery deletes the RPDB rule first and the loopback route
+second, reobserving actual absence before marking a v3 journal recovered.
+Foreign route identity, extra routes in the selected table, relocated
+protocol-tagged matching routes in other tables, or unrelated RPDB consumers
+of that table cause refusal **before** deletion, retaining
+pending evidence and foreign kernel state. Status and clear also reobserve
+both resources for an already recovered v3 journal. The existing manager
+lock excludes another product operation, **not** arbitrary privileged writers;
+protocol tag 247 is not authenticated ownership and a TOCTOU race remains.
+The code requires root inside a systemd-PID1 Docker environment with only
+`lo`; the ordinary installer keeps the timer disabled by default. Even a
+successful v3 recovery **does not prove** production Activation Guard, route
+traffic via VPN, host management/ingress continuity, physical reboot/power
+failure, independent Runtime Health Guard (#3), or future watchdog liveness.
+These all remain open acceptance requirements.
+
 ## Experimental product-integrated rule-only guard (not production ready)
 
 The development candidate now installs a root-owned independent recovery

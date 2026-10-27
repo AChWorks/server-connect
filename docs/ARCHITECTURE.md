@@ -3,15 +3,29 @@
 - **Status:** authoritative design contract; a Proxy Only development candidate has source and isolated installed-host CI evidence. Host-wide guarded routing, production guards and physical field acceptance remain unimplemented or unproven; this is not a released build.
 - **Product requirements:** [PROJECT-SPEC.md](PROJECT-SPEC.md) — canonical.
 
-The development-only product-integrated guard now has inactive-by-default
-systemd timer/service units and a v2, exact-operation rule-only journal. Its
-sole executable mutation is a tagged IPv4 RPDB rule to an otherwise unused,
-empty table within a strictly disconnected Docker systemd guest; the
-independent service can remove only that observed rule after deadline/crash.
-It does not activate a TUN, host egress route or VPN; production routed
-modes remain unavailable pending the full independent activation and runtime
-guards and acceptance. The ordinary Proxy Only installation adds no active
-background guard timer or new kernel networking effects.
+The development-only product-integrated recovery foundation installs
+checksum-verified systemd service/timer units, **disabled and inactive by
+default**, and supports two strictly versioned, exact-operation experiments
+inside a **disconnected, disposable Docker/systemd guest only**:
+
+- **v2 rule-only:** the private v2 journal precedes one tagged IPv4 RPDB rule
+  pointing to an otherwise empty, unused routing table; no route is added.
+- **v3 loopback route + rule:** a separate v3 journal precedes one real IPv4
+  route through the guest's existing `lo` interface into the selected table,
+  followed by its matching destination-specific RPDB rule. No new link or
+  tunnel is created. After the deadline or controller crash, recovery removes
+  only the classified rule **before** the classified loopback route and
+  confirms both are absent before marking the operation recovered.
+
+Both experiments share the descriptor-pinned, fsync-backed private journal
+and the same independently prearmed installed systemd recovery service/timer.
+The service must reobserve native kernel identity and refuse foreign or
+ambiguous resources, retaining the pending journal instead of flushing or
+adopting another owner's objects. Neither experiment activates a TUN, a real
+VPN path, production route policy or Runtime Health Guard. Production routed
+modes remain unavailable pending complete Activation/Runtime Guards and
+physical field acceptance. The ordinary Proxy Only installation does **not**
+enable this timer or add these experimental kernel resources.
 
 ## 1. Shape
 
