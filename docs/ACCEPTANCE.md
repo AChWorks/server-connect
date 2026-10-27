@@ -128,6 +128,12 @@ read-only FD-inode join against the PID network namespace's TCP/UDP IPv4/IPv6
 tables. Test with a live **open loopback TCP socket** (not only synthetic rows),
 valid empty-FD observations, native IPv6 header variants, foreign namespace
 socket entries and missing/malformed/oversized/duplicate table or FD records.
+For any supported procfs TCP/UDP row, absence of a complete native
+terminating newline or the native ref field after inode, as well as invalid
+row serial identifiers, must fail closed without partial evidence. Deterministic
+mid-observation tests must reject changed network namespace, socket FD sets,
+PID generation and cgroup membership. Real loopback UDP over IPv4 and, when
+supported, IPv6 should be observed with the ownership/activation flags false.
 The Linux installed-host CLI must expose real per-PID FD evidence without
 creating traffic, modifying host routes or claiming ownership/path readiness.
 Socket FDs may be inherited/shared, snapshots are non-atomic, and unmatched

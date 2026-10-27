@@ -144,6 +144,11 @@ func parseWorkloadSocketEndpoint(raw string, ipv6 bool) (string, error) {
 }
 
 func parseWorkloadSocketTable(data []byte, protocol string, held map[uint64]bool) ([]WorkloadSocket, error) {
+	// Native procfs rows (including the header) end in a newline. A final
+	// parseable prefix without its row terminator is still a truncated read.
+	if len(data) == 0 || data[len(data)-1] != '\n' {
+		return nil, workloadObservationUnavailable()
+	}
 	lines := bytes.Split(data, []byte{'\n'})
 	if len(lines) == 0 {
 		return nil, workloadObservationUnavailable()
@@ -165,7 +170,18 @@ func parseWorkloadSocketTable(data []byte, protocol string, held map[uint64]bool
 			return nil, workloadObservationUnavailable()
 		}
 		fields := strings.Fields(string(line))
-		if len(fields) < 10 || !strings.HasSuffix(fields[0], ":") {
+		// Native TCP/UDP rows contain a ref field after the inode. A row
+		// ending exactly at inode, even with a newline, is incomplete.
+		if len(fields) < 11 || !strings.HasSuffix(fields[0], ":") {
+			return nil, workloadObservationUnavailable()
+		}
+		// Every native table row has a decimal sl index. A merely colon-
+		// suffixed identifier is not sufficient evidence of a kernel row.
+		index := strings.TrimSuffix(fields[0], ":")
+		if index == "" {
+			return nil, workloadObservationUnavailable()
+		}
+		if _, err := strconv.ParseUint(index, 10, 32); err != nil {
 			return nil, workloadObservationUnavailable()
 		}
 		inode, err := strconv.ParseUint(fields[9], 10, 64)
@@ -216,6 +232,13 @@ func readWorkloadSocketTable(root string, pid int, protocol string, held map[uin
 }
 
 func observeWorkloadWithSocketsAt(root string, pid int) (WorkloadObservation, error) {
+	return observeWorkloadWithSocketsAtAfterTables(root, pid, nil)
+}
+
+// afterTables is a same-package deterministic test seam for simulated procfs
+// changes between table collection and the final identity rechecks. The
+// installed CLI always supplies nil; no operator callback can be injected.
+func observeWorkloadWithSocketsAtAfterTables(root string, pid int, afterTables func()) (WorkloadObservation, error) {
 	report, err := observeWorkloadAt(root, pid)
 	if err != nil {
 		return WorkloadObservation{}, err
@@ -242,6 +265,9 @@ func observeWorkloadWithSocketsAt(root string, pid int) (WorkloadObservation, er
 			seen[socket.Inode] = true
 			all = append(all, socket)
 		}
+	}
+	if afterTables != nil {
+		afterTables()
 	}
 	// The process, its network namespace and set of open socket inodes must
 	// still be visible with the same observed identity. These reads remain

@@ -206,6 +206,155 @@ func TestWorkloadSocketsRejectsAmbiguousTableAndFD(t *testing.T) {
 	}
 }
 
+// A parseable final prefix is still an incomplete procfs record if the
+// terminating newline was not observed. The parser must not return partial
+// successful socket evidence after a malformed tail or serial identifier.
+func TestWorkloadSocketRejectsTruncatedOrNonNativeRows(t *testing.T) {
+	held := map[uint64]bool{12345: true}
+	legitimate := socketRow(12345, "0100007F:EA60", "0200007F:0050", "01")
+	for _, tc := range []struct {
+		name string
+		data string
+	}{
+		{"truncated_matching_last_row", workloadSocketTestHeader + strings.TrimSuffix(legitimate, "\n")},
+		{"truncated_foreign_last_row", workloadSocketTestHeader + legitimate +
+			strings.TrimSuffix(socketRow(98765, "0300007F:EA60", "0400007F:0050", "01"), "\n")},
+		{"truncated_header", strings.TrimSuffix(workloadSocketTestHeader, "\n")},
+		{"truncated_matching_with_newline", workloadSocketTestHeader + strings.TrimSuffix(legitimate, " 1\n") + "\n"},
+		{"truncated_foreign_with_newline", workloadSocketTestHeader + legitimate +
+			strings.TrimSuffix(socketRow(98765, "0300007F:EA60", "0400007F:0050", "01"), " 1\n") + "\n"},
+		{"malformed_serial_matching", workloadSocketTestHeader + strings.Replace(legitimate, "0:", "bad:", 1)},
+		{"malformed_serial_foreign", workloadSocketTestHeader + legitimate +
+			strings.Replace(socketRow(98765, "0300007F:EA60", "0400007F:0050", "01"), "0:", "-1:", 1)},
+		{"missing_serial", workloadSocketTestHeader + strings.Replace(legitimate, "0:", ":", 1)},
+		{"serial_overflow", workloadSocketTestHeader + strings.Replace(legitimate, "0:", "4294967296:", 1)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := parseWorkloadSocketTable([]byte(tc.data), "tcp4", held)
+			if ErrorCode(err) != "workload_observation_unavailable" || len(got) != 0 {
+				t.Fatalf("accepted incomplete/unnative procfs row: %+v, %v", got, err)
+			}
+			root := newWorkloadSocketFixture(t)
+			addWorkloadSocketFD(t, root, 3, 12345)
+			if err := os.WriteFile(filepath.Join(root, "201", "net", "tcp"), []byte(tc.data), 0600); err != nil {
+				t.Fatal(err)
+			}
+			report, err := observeWorkloadWithSocketsAt(root, 201)
+			if ErrorCode(err) != "workload_observation_unavailable" || report.Sockets != nil {
+				t.Fatalf("integrated observer returned partial socket evidence: %+v, %v", report, err)
+			}
+		})
+	}
+	valid, err := parseWorkloadSocketTable([]byte(workloadSocketTestHeader+legitimate), "tcp4", held)
+	if err != nil || len(valid) != 1 || valid[0].Inode != 12345 {
+		t.Fatalf("strict parsing rejected complete kernel-shaped record: %+v, %v", valid, err)
+	}
+}
+
+// Mutate the private procfs fixture at the exact moment after all namespace
+// socket table reads and before the observer's identity rechecks. This tests
+// the integrated fail-closed behavior without scheduling/racing real kernel
+// tasks or touching host sockets, routes or network state.
+func TestWorkloadSocketsRejectsMidObservationDrift(t *testing.T) {
+	for _, scenario := range []string{
+		"namespace_moved", "namespace_missing",
+		"socket_fd_replaced", "socket_fd_disappeared", "socket_fd_added",
+		"pid_generation_reused", "cgroup_membership_moved",
+	} {
+		t.Run(scenario, func(t *testing.T) {
+			root := newWorkloadSocketFixture(t)
+			addWorkloadSocketFD(t, root, 3, 12345)
+			setWorkloadNetTable(t, root, "tcp", socketRow(12345, "0100007F:EA60", "0200007F:0050", "01"))
+			pidDir := filepath.Join(root, "201")
+			report, err := observeWorkloadWithSocketsAtAfterTables(root, 201, func() {
+				switch scenario {
+				case "namespace_moved", "namespace_missing":
+					link := filepath.Join(pidDir, "ns", "net")
+					if err := os.Remove(link); err != nil {
+						t.Fatal(err)
+					}
+					if scenario == "namespace_moved" {
+						if err := os.Symlink("net:[4026531994]", link); err != nil {
+							t.Fatal(err)
+						}
+					}
+				case "socket_fd_replaced", "socket_fd_disappeared":
+					link := filepath.Join(pidDir, "fd", "3")
+					if err := os.Remove(link); err != nil {
+						t.Fatal(err)
+					}
+					if scenario == "socket_fd_replaced" {
+						if err := os.Symlink("socket:[23456]", link); err != nil {
+							t.Fatal(err)
+						}
+					}
+				case "socket_fd_added":
+					addWorkloadSocketFD(t, root, 4, 98765)
+				case "pid_generation_reused":
+					writeWorkloadFixture(t, root, 201, 0, 31, "/system.slice/panel.service")
+				case "cgroup_membership_moved":
+					writeWorkloadFixture(t, root, 201, 0, 30, "/system.slice/other.service")
+				}
+			})
+			if ErrorCode(err) != "workload_observation_unavailable" || report.Sockets != nil {
+				t.Fatalf("accepted changed procfs identity after scan (%s): %+v, %v", scenario, report, err)
+			}
+		})
+	}
+	// Positive control: the exact same instrumented code path accepts a
+	// stable fixture, including the rechecks, when no mutation is injected.
+	root := newWorkloadSocketFixture(t)
+	addWorkloadSocketFD(t, root, 3, 12345)
+	setWorkloadNetTable(t, root, "tcp", socketRow(12345, "0100007F:EA60", "0200007F:0050", "01"))
+	report, err := observeWorkloadWithSocketsAtAfterTables(root, 201, func() {})
+	if err != nil || report.Sockets == nil || len(report.Sockets.ObservedTCPUDPSocket) != 1 ||
+		report.Sockets.JobOwnerVerified || report.Sockets.TrafficPathVerified {
+		t.Fatalf("stable same-path positive control: %+v %v", report, err)
+	}
+}
+
+func TestWorkloadSocketsRealLoopbackUDPSockets(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("Linux procfs only")
+	}
+	cgroup, err := os.ReadFile("/proc/self/cgroup")
+	if err != nil || !strings.HasPrefix(string(cgroup), "0::/") {
+		t.Skip("unified cgroup v2 unavailable")
+	}
+	for _, tc := range []struct{ network, bind, protocol string }{
+		{"udp4", "127.0.0.1:0", "udp4"},
+		{"udp6", "[::1]:0", "udp6"},
+	} {
+		t.Run(tc.network, func(t *testing.T) {
+			conn, err := net.ListenPacket(tc.network, tc.bind)
+			if err != nil {
+				if tc.network == "udp6" {
+					t.Skipf("optional IPv6 loopback unavailable on host: %v", err)
+				}
+				t.Fatal(err)
+			}
+			defer conn.Close()
+			report, err := ObserveWorkloadProcessSockets(os.Getpid())
+			if err != nil {
+				t.Fatalf("real procfs UDP socket observation: %v", err)
+			}
+			if report.Sockets == nil || report.Sockets.JobOwnerVerified ||
+				report.Sockets.TrafficPathVerified || report.ActivationReady {
+				t.Fatalf("UDP observation manufactured ownership or route: %+v", report)
+			}
+			found := false
+			for _, socket := range report.Sockets.ObservedTCPUDPSocket {
+				if socket.Protocol == tc.protocol && socket.Local == conn.LocalAddr().String() {
+					found = true
+				}
+			}
+			if !found {
+				t.Fatalf("%s live held UDP socket missing: %+v", tc.network, report.Sockets)
+			}
+		})
+	}
+}
+
 func TestWorkloadSocketsRealLoopbackTCPFD(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("Linux procfs only")
