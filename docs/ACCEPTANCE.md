@@ -108,6 +108,21 @@ Docker restart is not physical reboot, and these tests cannot justify
 production Selective/Broad Tunnel, aaPanel job selection or Runtime Health
 Guard #3 acceptance.
 
+### Read-only workload ancestry observation (Issue #2 supporting diagnostic)
+
+The development CLI `workload-observe --pid N` inspects only existing process
+stat start ticks, parent PID and unified cgroup-v2 membership, with a bounded
+first pass followed by a complete second pass to reject observed generation,
+parent or cgroup drift. It must reject malformed/ambiguous procfs, unsupported
+hierarchies, inaccessible processes and invalid PIDs, without printing process
+arguments, environments, secrets or executable paths. Real self-process and
+fixture ancestor/reuse/cgroup-migration tests must establish fail-closed
+behavior. Successful output must **always** say read-only, non-atomic, no
+verified aaPanel job owner, no descendant coverage, no traffic-path proof and
+no readiness to route. No procfs result fulfills the separate acceptance
+requirement for an actual aaPanel App Store job and its subprocesses or
+permits a guarded route to be activated.
+
 ### Product-integrated RPDB trial interruption and unavailable-watchdog evidence
 
 The installed disconnected Debian 13 systemd Docker acceptance also tests

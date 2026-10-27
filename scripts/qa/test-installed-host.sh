@@ -340,6 +340,56 @@ run_offline first-install --offline
 verify_direct_install
 assert_network_unchanged first-install "$offline_before"
 verify_host_services first-install
+# Observe the REAL installed Manager and current guest shell process. The
+# entire command is observational; no aaPanel Job/source routing is asserted.
+docker exec "$container" /bin/sh -c '
+ set -eu
+ pid=$$
+ /usr/local/bin/server-connect --json workload-observe --pid "$pid" >/run/sc-workload-observe.json
+ /usr/bin/python3 - "$pid" <<"PYWORKLOAD"
+import json,sys
+with open("/run/sc-workload-observe.json",encoding="utf-8") as f: r=json.load(f)
+assert r["ok"] and r["data"]["mode"]=="observation_only",r
+v=r["data"]
+assert v["read_only"] and not any(v[k] for k in (
+ "snapshot_atomic","attribution_verified","descendants_covered",
+ "traffic_path_verified","activation_ready")),v
+assert v["process"]["pid"]==int(sys.argv[1]) and v["process"]["start_time_ticks"]>0,v
+assert v["process"]["cgroup_v2_path"].startswith("/"),v
+PYWORKLOAD
+ rm -f /run/sc-workload-observe.json
+ # A separate real descendant proves the reported parent/starttime link;
+ # this harmless sleep is always terminated by the guest-scoped cleanup.
+ /bin/sleep 20 &
+ child=$!
+ trap "kill $child 2>/dev/null || :; wait $child 2>/dev/null || :" EXIT
+ /usr/local/bin/server-connect --json workload-observe --pid "$child" >/run/sc-workload-child.json
+ /usr/bin/python3 - "$child" "$pid" <<"PYWORKLOADCHILD"
+import json,sys
+with open("/run/sc-workload-child.json",encoding="utf-8") as f:r=json.load(f)
+assert r["ok"],r
+v=r["data"]
+assert v["process"]["pid"]==int(sys.argv[1]) and v["process"]["parent_pid"]==int(sys.argv[2]),v
+assert v["ancestors"] and v["ancestors"][0]["pid"]==int(sys.argv[2]),v
+assert v["shares_parent_cgroup"] and not v["attribution_verified"],v
+PYWORKLOADCHILD
+ rm -f /run/sc-workload-child.json
+ kill "$child"
+ wait "$child" 2>/dev/null || :
+ trap - EXIT
+ if /usr/local/bin/server-connect --json workload-observe --pid 1 >/run/sc-workload-invalid.json;then
+  echo "workload-observe accepted init PID" >&2;exit 1
+ fi
+ /usr/bin/python3 - <<"PYWORKLOADINVALID"
+import json
+with open("/run/sc-workload-invalid.json",encoding="utf-8") as f:r=json.load(f)
+assert not r["ok"] and r["error"]["code"]=="invalid_arguments",r
+PYWORKLOADINVALID
+ rm -f /run/sc-workload-invalid.json
+'
+assert_network_unchanged workload-observe "$offline_before"
+verify_host_services workload-observe
+echo 'INSTALLED_WORKLOAD_PROCFS_OBSERVATION_ONLY=PASS (real PID, parent and unified cgroup v2)'
 docker exec "$container" /bin/sh -c '
   printf "SC_QA_RETAIN_PROFILE_BYTES\n" > /var/lib/server-connect/profiles/qa-retained
   chmod 0600 /var/lib/server-connect/profiles/qa-retained

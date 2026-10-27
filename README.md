@@ -39,6 +39,40 @@ The online bootstrap candidate at `scripts/bootstrap-online.sh` requires an expl
 
 On a Linux host with trusted native `/usr/bin/ip`, `server-connect --json host-preflight --endpoint 198.51.100.10 --management-peer 203.0.113.42` records actual IPv4/IPv6 routes, rules, links and kernel route lookups for **literal IPs**. Broadcast, multicast, unspecified, IPv4-mapped IPv6 and link-local addresses without a usable interface scope are rejected before native inspection; private IPv4, IPv6 ULA and loopback literals remain supported. It does not resolve DNS, touch state, enable a tunnel, change kernel networking or prove those peers are reachable. Both peer arguments are optional; supplying them is useful for future underlay and management-path planning. The report deliberately says `activation_ready: false` and `snapshot_atomic: false`: it is **not** an ownership journal, firewall inspection, activation authorization or replacement for the independent guards and SSH/reboot/field acceptance specified in Issue #2. This is a dependent development feature, not a released installation instruction.
 
+### Observe a candidate background workload without selecting it (Issue #2 development)
+
+When investigating which **Linux process** a particular aaPanel App Store
+installation actually starts, the development CLI can inspect an explicitly
+supplied, already-running PID and its current parent chain on unified-cgroup-v2
+Linux hosts:
+
+~~~sh
+server-connect --json workload-observe --pid 12345
+~~~
+
+Replace `12345` with a PID observed on **your own test host**. The command
+reads only `/proc/PID/stat` and `/proc/PID/cgroup` for that PID and its
+ancestors. It does **not** read command-line arguments, environment variables,
+process memory, sockets or credentials. Returned PID/start-time-tick and cgroup
+observations help diagnose recycled PIDs, reparenting and shared service
+cgroups, but the snapshots are not atomic; a PID-namespace boundary may
+hide parent processes. The process can exit or be replaced
+immediately afterward. The raw cgroup path can reveal local service names;
+keep diagnostic output private rather than pasting it into public issues. A
+child with the **same cgroup as a panel daemon** is
+not an independently identifiable install job; a PID and cgroup path alone
+never authorize job selection or intercept future children. An inaccessible,
+vanished, ambiguous or unsupported cgroup yields a classified failure, not a
+fabricated identification.
+
+The command always returns `read_only: true`, `snapshot_atomic: false`,
+`attribution_verified: false`, `descendants_covered: false`,
+`traffic_path_verified: false` and `activation_ready: false`. It never creates
+a routing rule, cgroup, firewall change or VPN; there is **no transparent
+background-job routing** in this feature. Representative aaPanel worker
+attribution, subprocess/socket/IPv4/IPv6/DNS proof and independently guarded
+selected outbound are still open Issue #2 acceptance work.
+
 ### Advisory selective route planning (Issue #2 development)
 
 The development command below previews **only explicitly selected public CIDR destinations** against the live native Linux route, rule and link inventory. Both endpoint and current management/SSH peer must be literal IPs. The TUN name must be unused; it does not create an interface. For example, using **documentation-only placeholder peers** (replace them before a meaningful operator preview):

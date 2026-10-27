@@ -182,6 +182,15 @@ func run(j bool, m *sc.Manager, args []string) int {
 		return output(j, map[string]string{"manager": managerVersion, "sing_box": sc.CoreVersion}, nil)
 	case "status":
 		return runStatus(j, m.Status)
+	case "workload-observe":
+		opts := flag.NewFlagSet(name, flag.ContinueOnError)
+		opts.SetOutput(io.Discard)
+		pid := opts.Int("pid", 0, "explicit Linux process ID to observe")
+		if e := opts.Parse(args); e != nil || len(opts.Args()) != 0 || *pid <= 1 {
+			return output(j, nil, sc.Fault("invalid_arguments", "workload-observe requires --pid N (N > 1)"))
+		}
+		report, err := sc.ObserveWorkloadProcess(*pid)
+		return output(j, report, err)
 	case "activation-journal-status":
 		if len(args) != 0 {
 			return output(j, nil, sc.Fault("invalid_arguments", "activation-journal-status accepts no command options"))
@@ -510,6 +519,7 @@ Commands:
   apt -- apt-get update        Strict opt-in APT via trusted native binary
   host-preflight [--endpoint IP] [--management-peer IP]
                               Observe kernel routes/rules; no activation
+  workload-observe --pid N       Read-only process ancestry/cgroup snapshot; no job/egress authorization
   selective-plan --endpoint IP --management-peer IP --tunnel-if NAME
                  --destination CIDR [--destination CIDR...]
                               Advisory selective routing preview; never applies
@@ -542,6 +552,9 @@ an anonymous private APT config to a verified native APT child, with no
 run an explicit strict update first. Neither mode routes unrelated host
 traffic globally. Path diagnostics never fall back to Direct, do not echo
 targets in results, and do not establish tunnel health or start recovery.
+Workload observation is a non-atomic procfs snapshot. A PID/starttime and
+cgroup path are not independently authenticated aaPanel job ownership,
+descendant coverage, or selected network egress; no routing is activated.
 Host preflight is observational: a route lookup does not
 prove connectivity, safety, routing ownership or readiness to activate TUN.
 Host drift compares separate, non-atomic network observations without changing
