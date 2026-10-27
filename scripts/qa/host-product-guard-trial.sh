@@ -1,5 +1,6 @@
 #!/bin/sh
-# Installed Server Connect binary, private v2 journal, and native IPv4 RPDB.
+# Installed Server Connect binary, private v2/v3 experimental journals,
+# and native IPv4 RPDB/loopback route (disconnected disposable guest only).
 # Executable ONLY in disconnected disposable Debian13 systemd Docker guest.
 set -eu
 umask 077
@@ -550,8 +551,9 @@ no_trial_route
 printf '%s\n' 'PRODUCT_GUARD_ROUTE_V3_AFTER_ROUTE_DELETE_SIGKILL_RECOVERY=PASS'
 
 # Replace the owned route with a foreign protocol at the exact table/CIDR.
-# Native systemd recovery must return the same classified exit 41 and keep
-# both the pending journal and the foreign route for controlled guest repair.
+# Manual product recovery after expiry must refuse the foreign resource and
+# retain both pending journal and route. Fresh native systemd invocation/41
+# evidence is a separately tracked optional regression, not claimed here.
 op=$(stage)
 "$SC" --json selective-route-trial-apply --operation-id "$op" --revision 1 --deadline-seconds 7 >/dev/null
 "$ip" -4 route del 9.9.9.0/24 dev lo table 20000 proto 247 scope link

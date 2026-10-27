@@ -265,10 +265,13 @@ systemd guest. Do not run these developer commands on hosting servers.
 **This is not Selective or Broad VPN activation**: v2 does not create a tunnel
 or route; v3 creates only a disposable loopback route and matching rule. Neither
 proves actual VPN path egress, physical SSH protection, authorizes a production
-network change, or satisfies the Runtime Health Guard. A successful
-trial shows only exact *rule* recovery in the isolated guest. It must never be
-used on a real hosting server. The real guarded route/application transaction
-and physical reboot/field evidence remain acceptance gaps under Issue #2.
+network change, or satisfies the Runtime Health Guard. A successful **v2**
+trial demonstrates exact native **rule** recovery in the isolated guest; a
+successful **v3** trial demonstrates exact native **rule and loopback route**
+recovery, with distinct experimental receipts. Neither demonstrates a usable
+VPN or real-host fail-safe routing. Neither may be used on a real hosting
+server. The production guarded route/application transaction and physical
+reboot/field evidence remain acceptance gaps under Issue #2.
 
 `server-connect --json activation-journal-status` (interactive menu **16**)
 reports only the phase (`absent`, `prepared` or `uncertain`),

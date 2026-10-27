@@ -517,10 +517,10 @@ Commands:
                               DISPOSABLE DOCKER-ONLY rule-only trial; never VPN activation
   selective-route-trial-apply --operation-id HEX32 --revision 1 [--deadline-seconds 600]
                               DISPOSABLE DOCKER-ONLY lo route + RPDB rule trial; never VPN activation
-  activation-trial-status     Inspect only the guarded rule trial state
-  activation-trial-recover    Independent systemd trial timeout/reboot recovery
+  activation-trial-status     Inspect v2 rule-only or v3 loopback route+rule trial
+  activation-trial-recover    Independent systemd timeout/reboot trial recovery (v2/v3)
   activation-trial-clear --operation-id HEX32 --revision 3
-                              Clear exact recovered rule-trial journal
+                              Clear exact recovered v2/v3 experimental trial journal
   host-drift --baseline FILE Compare a prior private preflight JSON with now
                               Nonzero on drift; never authorizes activation
   underlay-tcp --endpoint IP --port N [--hostname NAME]
