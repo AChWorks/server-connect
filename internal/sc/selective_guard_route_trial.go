@@ -134,7 +134,7 @@ func trialNoForeignTableRules(rows []map[string]json.RawMessage, trialRule Plann
 // Called only after the trial RPDB rule was safely removed and reobserved
 // absent. A crash between the two deletions is reconciled on the next timer
 // tick; an unrecognized or foreign route must remain untouched with journal.
-func trialRecoverRoute(record trialJournal, qaPoint string) error {
+func trialRecoverRoute(record trialJournal, qaPoint, qaFaultPoint string) error {
 	route, err := trialSingleRoute(record)
 	if err != nil {
 		return err
@@ -144,7 +144,7 @@ func trialRecoverRoute(record trialJournal, qaPoint string) error {
 		return err
 	}
 	if present {
-		if err := trialRunIP(trialRouteCommand(route, "del")...); err != nil {
+		if err := trialRunIPWithQAFault("route-delete", qaFaultPoint, trialRouteCommand(route, "del")...); err != nil {
 			return err
 		}
 		if err := trialQAKillAt("after-route-delete", qaPoint); err != nil {

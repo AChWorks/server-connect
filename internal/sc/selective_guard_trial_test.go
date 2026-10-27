@@ -152,7 +152,7 @@ func TestGuardedRuleTrialRejectsUnwatchedCustomState(t *testing.T) {
 	if _, err := m.BeginGuardedRuleTrial(strings.Repeat("a", 32), 1, 8, ""); ErrorCode(err) != "trial_unsupported" {
 		t.Fatalf("custom state trial could strand an RPDB rule: %v", err)
 	}
-	if _, err := m.RecoverGuardedRuleTrial(""); ErrorCode(err) != "trial_unsupported" {
+	if _, err := m.RecoverGuardedRuleTrial("", ""); ErrorCode(err) != "trial_unsupported" {
 		t.Fatalf("unwatched recovery dir accepted: %v", err)
 	}
 	if _, err := m.InspectGuardedRuleTrial(); ErrorCode(err) != "trial_unsupported" {
