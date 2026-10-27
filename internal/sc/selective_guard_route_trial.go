@@ -46,7 +46,7 @@ func trialNativeRoutePresence(route PlannedRoute) (bool, error) {
 	if err != nil {
 		return false, Fault("trial_observation_uncertain", "native laboratory route inventory unsupported")
 	}
-	selected, err := trialRoutesInTable(rows, route.Table)
+	selected, err := trialRoutesInTable(rows, route)
 	if err != nil {
 		return false, err
 	}
@@ -55,15 +55,20 @@ func trialNativeRoutePresence(route PlannedRoute) (bool, error) {
 
 // No table field is the native main table; never infer the absent chosen
 // table from a *failed* filtered query or silently discard unknown routes.
-func trialRoutesInTable(rows []map[string]json.RawMessage, target int) ([]map[string]json.RawMessage, error) {
+func trialRoutesInTable(rows []map[string]json.RawMessage, route PlannedRoute) ([]map[string]json.RawMessage, error) {
 	selected := make([]map[string]json.RawMessage, 0, 1)
 	for _, row := range rows {
 		table, err := selectiveTable(row["table"], true)
 		if err != nil {
 			return nil, Fault("trial_observation_uncertain", "native route table identity unsupported")
 		}
-		if table == target {
+		if table == route.Table {
 			selected = append(selected, row)
+		} else if trialProtocolMatches(row["protocol"]) && selectiveText(row["dst"]) == route.Destination {
+			// The same protocol-tagged destination reappearing in a foreign
+			// table may be a moved former trial route. Refuse a misleading
+			// recovered receipt; never adopt or delete the foreign object.
+			return nil, Fault("trial_resource_conflict", "tagged trial route exists in foreign table")
 		}
 	}
 	return selected, nil

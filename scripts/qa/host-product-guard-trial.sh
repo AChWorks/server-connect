@@ -644,6 +644,34 @@ no_trial_route
 no_trial_rule
 printf '%s\n' 'PRODUCT_GUARD_ROUTE_V3_STALE_RECOVERED_ROUTE_REFUSAL=PASS'
 
+# A protocol-tagged route moved to a DIFFERENT table is foreign ownership
+# evidence, not proof that the original experiment fully reconciled. Even
+# while the recorded target table is empty, refuse a recovered receipt.
+op=$(stage)
+"$SC" --json selective-route-trial-apply --operation-id "$op" --revision 1 --deadline-seconds 5 >/dev/null
+wait_recovered
+no_trial_route
+"$ip" -4 route add 9.9.9.0/24 dev lo table 20001 proto 247 scope link
+moved_sha=$(/usr/bin/sha256sum /var/lib/server-connect/route-activation-journal.json | cut -d' ' -f1)
+moved_native=$(trial_route_inventory)
+if "$SC" --json activation-trial-status >/run/sc-qa-v3-moved-route.json 2>&1;then
+ echo 'Moved tagged route silently accepted as recovered' >&2;exit 1
+fi
+/usr/bin/python3 - <<'PYMOVEDROUTE'
+import json
+with open('/run/sc-qa-v3-moved-route.json',encoding='utf-8') as f:r=json.load(f)
+assert not r['ok'] and r['error']['code']=='trial_resource_conflict',r
+PYMOVEDROUTE
+rm -f /run/sc-qa-v3-moved-route.json
+[ "$moved_sha" = "$(/usr/bin/sha256sum /var/lib/server-connect/route-activation-journal.json | cut -d' ' -f1)" ]
+[ "$moved_native" = "$(trial_route_inventory)" ]
+no_trial_route
+"$ip" -4 route del 9.9.9.0/24 dev lo table 20001 proto 247 scope link
+"$SC" --json activation-trial-clear --operation-id "$op" --revision 3 >/dev/null
+no_trial_route
+no_trial_rule
+printf '%s\n' 'PRODUCT_GUARD_ROUTE_V3_MOVED_TAGGED_ROUTE_REFUSAL=PASS'
+
 # Negative ownership challenge: another actor replaces the exact priority
 # with a foreign native rule. Watchdog must refuse removal and retain journal.
 op=$(stage)

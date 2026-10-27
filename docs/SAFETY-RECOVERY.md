@@ -19,8 +19,9 @@ must reconcile each state by fresh native numeric kernel observation.
 
 The standalone recovery deletes the RPDB rule first and the loopback route
 second, reobserving actual absence before marking a v3 journal recovered.
-Foreign route identity, extra routes in the selected table, or unrelated
-RPDB consumers of that table cause refusal **before** deletion, retaining
+Foreign route identity, extra routes in the selected table, relocated
+protocol-tagged matching routes in other tables, or unrelated RPDB consumers
+of that table cause refusal **before** deletion, retaining
 pending evidence and foreign kernel state. Status and clear also reobserve
 both resources for an already recovered v3 journal. The existing manager
 lock excludes another product operation, **not** arbitrary privileged writers;

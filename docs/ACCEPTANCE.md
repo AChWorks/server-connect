@@ -68,7 +68,9 @@ an additional foreign RPDB consumer of the selected table, and require
 classified refusal and unchanged pending journal/foreign state before
 separate test fixture repair. A stale recovered v3 journal with a newly
 reintroduced exact-selector route must be refused by status, recovery and
-clear until the foreign test fixture is separately removed. The route table must be empty again after every
+clear until the foreign test fixture is separately removed. A tagged matching
+route moved to a different table must likewise refuse a recovered receipt,
+without deleting the route in that foreign table. The route table must be empty again after every
 successful recovery, and unrelated SSH/HTTP/Direct guest paths must remain
 preserved. Code-only unit tests or a green check label are insufficient;
 original exact-candidate installed-host logs and actual assertion sources
