@@ -130,7 +130,12 @@ valid empty-FD observations, native IPv6 header variants, foreign namespace
 socket entries and missing/malformed/oversized/duplicate table or FD records.
 For any supported procfs TCP/UDP row, absence of a complete native
 terminating newline or the native ref field after inode, as well as invalid
-row serial identifiers, must fail closed without partial evidence. Deterministic
+row serial identifiers, must fail closed without partial evidence. The ref
+field itself must contain a bounded ASCII unsigned decimal socket count
+(including native zero) without a sign, prefix or zero padding; validate it
+for BOTH held and unrelated namespace-table rows BEFORE inode filtering.
+Malformed or overflowing ref content must fail closed with no socket data,
+not merely pass the minimum recognized field count. Deterministic
 mid-observation tests must reject changed network namespace, socket FD sets,
 PID generation and cgroup membership. Real loopback UDP over IPv4 and, when
 supported, IPv6 should be observed with the ownership/activation flags false.

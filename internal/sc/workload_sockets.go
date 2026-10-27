@@ -188,6 +188,23 @@ func parseWorkloadSocketTable(data []byte, protocol string, held map[uint64]bool
 		if err != nil {
 			return nil, workloadObservationUnavailable()
 		}
+		// Kernel socket refcount is a bounded unsigned decimal value. Reject
+		// signs, prefixes, non-ASCII digits, nonnative zero padding and
+		// overflow. Zero is legitimate for some socket states. Validate
+		// EVERY row, including another process's inode, before filtering:
+		// a malformed namespace table cannot yield partial successful data.
+		refText := fields[10]
+		if len(refText) == 0 || (len(refText) > 1 && refText[0] == '0') {
+			return nil, workloadObservationUnavailable()
+		}
+		for i := 0; i < len(refText); i++ {
+			if refText[i] < '0' || refText[i] > '9' {
+				return nil, workloadObservationUnavailable()
+			}
+		}
+		if _, err := strconv.ParseUint(refText, 10, 32); err != nil {
+			return nil, workloadObservationUnavailable()
+		}
 		if !held[inode] {
 			continue
 		}

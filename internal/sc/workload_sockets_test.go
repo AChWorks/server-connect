@@ -251,6 +251,141 @@ func TestWorkloadSocketRejectsTruncatedOrNonNativeRows(t *testing.T) {
 	}
 }
 
+// Ref is a native decimal socket reference count for EVERY namespace-table
+// row, not only sockets held by the sampled PID. A broken unrelated row
+// invalidates the complete non-atomic snapshot instead of returning the
+// earlier matched socket as partial success.
+func TestWorkloadSocketRefIntegrityFailClosed(t *testing.T) {
+	protocols := []struct {
+		name, protocol, table, local, remote, state string
+	}{
+		{"tcp4", "tcp4", "tcp", "0100007F:EA60", "0200007F:0050", "01"},
+		{"tcp6", "tcp6", "tcp6", "00000000000000000000000001000000:EA60",
+			"00000000000000000000000001000000:0050", "01"},
+		{"udp4", "udp4", "udp", "0100007F:EA60", "00000000:0000", "07"},
+		{"udp6", "udp6", "udp6", "00000000000000000000000001000000:EA60",
+			"00000000000000000000000000000000:0000", "07"},
+	}
+	invalidRefs := []struct{ name, ref string }{
+		{"alpha", "not-a-number"},
+		{"negative", "-1"},
+		{"positive_prefix", "+1"},
+		{"overflow_uint32", "4294967296"},
+		{"overflow_uint64", "18446744073709551616"},
+		{"hexadecimal", "0x2"},
+		{"fractional", "1.5"},
+		{"unicode_digits", "١"},
+		{"leading_zero", "01"},
+	}
+	for _, protocol := range protocols {
+		t.Run(protocol.name, func(t *testing.T) {
+			valid := socketRow(12345, protocol.local, protocol.remote, protocol.state)
+			for _, invalid := range invalidRefs {
+				for _, foreign := range []bool{false, true} {
+					scope := "held"
+					inode := uint64(12345)
+					if foreign {
+						scope, inode = "foreign", 98765
+					}
+					t.Run(scope+"_"+invalid.name, func(t *testing.T) {
+						bad := socketRow(inode, protocol.local, protocol.remote, protocol.state)
+						if !strings.HasSuffix(bad, " 1\n") {
+							t.Fatalf("fixture must end in native ref count: %q", bad)
+						}
+						bad = strings.TrimSuffix(bad, " 1\n") + " " + invalid.ref + "\n"
+						rows := bad
+						if foreign {
+							rows = valid + bad // a good held socket precedes the bad unrelated row
+						}
+						header := workloadSocketTestHeader
+						if protocol.name == "tcp6" {
+							header = strings.ReplaceAll(header, "rem_address", "remote_address")
+						}
+						held := map[uint64]bool{12345: true}
+						sockets, err := parseWorkloadSocketTable([]byte(header+rows), protocol.protocol, held)
+						if ErrorCode(err) != "workload_observation_unavailable" || len(sockets) != 0 {
+							t.Fatalf("parser accepted invalid %s ref %q: %+v, %v", scope, invalid.ref, sockets, err)
+						}
+						root := newWorkloadSocketFixture(t)
+						addWorkloadSocketFD(t, root, 3, 12345)
+						if err := os.WriteFile(filepath.Join(root, "201", "net", protocol.table),
+							[]byte(header+rows), 0600); err != nil {
+							t.Fatal(err)
+						}
+						report, err := observeWorkloadWithSocketsAt(root, 201)
+						if ErrorCode(err) != "workload_observation_unavailable" || report.Sockets != nil {
+							t.Fatalf("observer returned partial data for invalid %s ref %q: %+v, %v",
+								scope, invalid.ref, report, err)
+						}
+					})
+				}
+			}
+		})
+	}
+}
+
+// Use representative post-ref data from the corresponding native kernel
+// formats. Suffixes vary with protocol, state and kernel version, so only
+// the documented required prefix is validated by the product parser.
+func TestWorkloadSocketNativeShapedPositiveRows(t *testing.T) {
+	for _, tc := range []struct {
+		name, protocol, local, remote, state, suffix string
+	}{
+		{"tcp4", "tcp4", "0100007F:EA60", "0200007F:0050", "01",
+			" 0000000000000000 100 0 0 10 0"},
+		{"tcp6", "tcp6", "00000000000000000000000001000000:EA60",
+			"00000000000000000000000001000000:0050", "01",
+			" 0000000000000000 100 0 0 10 0"},
+		{"udp4", "udp4", "0100007F:EA60", "00000000:0000", "07",
+			" 0000000000000000 0"},
+		{"udp6", "udp6", "00000000000000000000000001000000:EA60",
+			"00000000000000000000000000000000:0000", "07",
+			" 0000000000000000 0"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			row := strings.TrimSuffix(socketRow(12345, tc.local, tc.remote, tc.state), "\n") + tc.suffix + "\n"
+			header := workloadSocketTestHeader
+			if strings.HasPrefix(tc.protocol, "udp") {
+				header = strings.TrimSuffix(header, "\n") + " ref pointer drops\n"
+			}
+			if strings.HasSuffix(tc.protocol, "6") {
+				header = strings.ReplaceAll(header, "rem_address", "remote_address")
+			}
+			sockets, err := parseWorkloadSocketTable([]byte(header+row), tc.protocol, map[uint64]bool{12345: true})
+			if err != nil || len(sockets) != 1 || sockets[0].Inode != 12345 || sockets[0].Protocol != tc.protocol {
+				t.Fatalf("native-shaped %s row rejected: %+v, %v", tc.protocol, sockets, err)
+			}
+		})
+	}
+}
+
+// Native TCP TIME_WAIT rows may have ref=0 even though that socket FD is
+// not held by this PID. Such rows must not invalidate a valid observation.
+func TestWorkloadSocketZeroRefForeignRowAllowed(t *testing.T) {
+	good := socketRow(12345, "0100007F:EA60", "0200007F:0050", "01")
+	foreign := socketRow(98765, "0300007F:EA61", "0400007F:0050", "06")
+	if !strings.HasSuffix(foreign, " 1\n") {
+		t.Fatalf("unexpected test fixture: %q", foreign)
+	}
+	foreign = strings.TrimSuffix(foreign, " 1\n") + " 0\n"
+	rows := workloadSocketTestHeader + good + foreign
+	sockets, err := parseWorkloadSocketTable([]byte(rows), "tcp4", map[uint64]bool{12345: true})
+	if err != nil || len(sockets) != 1 || sockets[0].Inode != 12345 {
+		t.Fatalf("zero ref count in foreign TIME_WAIT row rejected: %+v, %v", sockets, err)
+	}
+	root := newWorkloadSocketFixture(t)
+	addWorkloadSocketFD(t, root, 3, 12345)
+	if err := os.WriteFile(filepath.Join(root, "201", "net", "tcp"), []byte(rows), 0600); err != nil {
+		t.Fatal(err)
+	}
+	report, err := observeWorkloadWithSocketsAt(root, 201)
+	if err != nil || report.Sockets == nil ||
+		len(report.Sockets.ObservedTCPUDPSocket) != 1 ||
+		report.Sockets.JobOwnerVerified || report.Sockets.TrafficPathVerified {
+		t.Fatalf("observer rejected native zero or inferred ownership: %+v, %v", report, err)
+	}
+}
+
 // Mutate the private procfs fixture at the exact moment after all namespace
 // socket table reads and before the observer's identity rechecks. This tests
 // the integrated fail-closed behavior without scheduling/racing real kernel
@@ -363,50 +498,60 @@ func TestWorkloadSocketsRealLoopbackTCPFD(t *testing.T) {
 	if err != nil || !strings.HasPrefix(string(cgroup), "0::/") {
 		t.Skip("unified cgroup v2 unavailable")
 	}
-	ln, err := net.Listen("tcp4", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer ln.Close()
-	serverConn := make(chan net.Conn, 1)
-	serverErr := make(chan error, 1)
-	go func() {
-		accepted, err := ln.Accept()
-		if err != nil {
-			serverErr <- err
-			return
-		}
-		serverConn <- accepted
-	}()
-	client, err := net.Dial("tcp4", ln.Addr().String())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer client.Close()
-	var accepted net.Conn
-	select {
-	case accepted = <-serverConn:
-	case err = <-serverErr:
-		t.Fatal(err)
-	}
-	defer accepted.Close()
+	for _, tc := range []struct{ network, address string }{
+		{"tcp4", "127.0.0.1:0"},
+		{"tcp6", "[::1]:0"},
+	} {
+		t.Run(tc.network, func(t *testing.T) {
+			ln, err := net.Listen(tc.network, tc.address)
+			if err != nil {
+				if tc.network == "tcp6" {
+					t.Skipf("optional IPv6 loopback unavailable on host: %v", err)
+				}
+				t.Fatal(err)
+			}
+			defer ln.Close()
+			serverConn := make(chan net.Conn, 1)
+			serverErr := make(chan error, 1)
+			go func() {
+				accepted, err := ln.Accept()
+				if err != nil {
+					serverErr <- err
+					return
+				}
+				serverConn <- accepted
+			}()
+			client, err := net.Dial(tc.network, ln.Addr().String())
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer client.Close()
+			var accepted net.Conn
+			select {
+			case accepted = <-serverConn:
+			case err = <-serverErr:
+				t.Fatal(err)
+			}
+			defer accepted.Close()
 
-	report, err := ObserveWorkloadProcessSockets(os.Getpid())
-	if err != nil {
-		t.Fatalf("real FD-bound loopback observation unavailable: %v", err)
-	}
-	if report.Sockets == nil || report.AttributionVerified || report.TrafficPathVerified ||
-		report.ActivationReady || report.Sockets.JobOwnerVerified ||
-		report.Sockets.TrafficPathVerified || report.Sockets.DescendantsCovered {
-		t.Fatalf("real socket inferred routing or job ownership: %+v", report)
-	}
-	found := false
-	for _, socket := range report.Sockets.ObservedTCPUDPSocket {
-		if socket.Protocol == "tcp4" && socket.Remote == ln.Addr().String() && socket.State == "01" {
-			found = true
-		}
-	}
-	if !found {
-		t.Fatalf("real live open TCP socket was not found in PID FD/net join: %+v", report.Sockets)
+			report, err := ObserveWorkloadProcessSockets(os.Getpid())
+			if err != nil {
+				t.Fatalf("real FD-bound loopback observation unavailable: %v", err)
+			}
+			if report.Sockets == nil || report.AttributionVerified || report.TrafficPathVerified ||
+				report.ActivationReady || report.Sockets.JobOwnerVerified ||
+				report.Sockets.TrafficPathVerified || report.Sockets.DescendantsCovered {
+				t.Fatalf("real socket inferred routing or job ownership: %+v", report)
+			}
+			found := false
+			for _, socket := range report.Sockets.ObservedTCPUDPSocket {
+				if socket.Protocol == tc.network && socket.Remote == ln.Addr().String() && socket.State == "01" {
+					found = true
+				}
+			}
+			if !found {
+				t.Fatalf("%s live open TCP socket not found in PID FD/net join: %+v", tc.network, report.Sockets)
+			}
+		})
 	}
 }
