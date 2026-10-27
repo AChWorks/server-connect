@@ -213,3 +213,42 @@ func TestGuardedRuleTrialRuntimeMaskRefusesCachedUnitState(t *testing.T) {
 		}
 	}
 }
+
+// Independent unit result/state observations must not claim that an active
+// timer makes a failed or throttled recovery executor available. Real
+// systemd/kernel verification is performed by the installed-host QA.
+func TestGuardedRuleTrialExecutorFailureClassification(t *testing.T) {
+	service := map[string]string{"Result": "success", "UnitFileState": "static", "ActiveState": "inactive"}
+	timer := map[string]string{"Result": "success", "UnitFileState": "enabled", "ActiveState": "active", "Unit": trialRecoveryUnit}
+	for _, fixture := range []struct {
+		name   string
+		unit   string
+		fields map[string]string
+		want   string
+		accept bool
+	}{
+		{"normal_service", trialRecoveryUnit, service, "", true},
+		{"normal_timer", trialRecoveryTimer, timer, "", true},
+		{"self_invocation", trialRecoveryUnit, map[string]string{"Result": "success", "UnitFileState": "static", "ActiveState": "activating"}, "", true},
+		{"failed_exec", trialRecoveryUnit, map[string]string{"Result": "exit-code", "UnitFileState": "static", "ActiveState": "failed"}, "executor failed", false},
+		{"throttled", trialRecoveryUnit, map[string]string{"Result": "start-limit-hit", "UnitFileState": "static", "ActiveState": "failed"}, "start-rate limited", false},
+		{"signal", trialRecoveryUnit, map[string]string{"Result": "signal", "UnitFileState": "static", "ActiveState": "failed"}, "executor failed", false},
+		{"untrusted_result", trialRecoveryUnit, map[string]string{"Result": "", "UnitFileState": "static", "ActiveState": "inactive"}, "result untrusted", false},
+		{"failed_state", trialRecoveryUnit, map[string]string{"Result": "success", "UnitFileState": "static", "ActiveState": "failed"}, "not runnable", false},
+		{"disabled_timer", trialRecoveryTimer, map[string]string{"Result": "success", "UnitFileState": "enabled", "ActiveState": "inactive", "Unit": trialRecoveryUnit}, "not enabled", false},
+		{"failed_timer", trialRecoveryTimer, map[string]string{"Result": "resources", "UnitFileState": "enabled", "ActiveState": "active", "Unit": trialRecoveryUnit}, "timer failed", false},
+	} {
+		t.Run(fixture.name, func(t *testing.T) {
+			err := trialGuardUnitReady(fixture.unit, fixture.fields)
+			if fixture.accept {
+				if err != nil {
+					t.Fatalf("trusted state rejected: %v", err)
+				}
+				return
+			}
+			if ErrorCode(err) != "guard_unavailable" || !strings.Contains(err.Error(), fixture.want) {
+				t.Fatalf("degraded state misclassified: %v", err)
+			}
+		})
+	}
+}

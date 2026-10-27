@@ -324,21 +324,134 @@ wait_recovered
 no_trial_rule
 echo PRODUCT_GUARD_TRIAL_EFFECTIVE_MASK_NO_FALSE_RECOVERY=PASS
 
+# The timer can remain active after its ExecStart binary becomes unavailable.
+# Exercise the REAL installed oneshot, not a mocked systemctl Result value.
+# Only the disposable, disconnected guest-owned binary is temporarily moved;
+# its root-owned metadata and checksum must be restored before proceeding.
+op=$(stage)
+"$SC" --json selective-trial-apply --operation-id "$op" --revision 1 --deadline-seconds 25 >/dev/null
+[ "$(phase)" = trial_pending ]
+pending_sha=$(/usr/bin/sha256sum /var/lib/server-connect/route-activation-journal.json | cut -d' ' -f1)
+installed_bin=/opt/server-connect/current/bin/server-connect
+# Keep the executable fixture on the trusted installed executable mount.
+# /run may be noexec under container/systemd hardening and cannot be used as
+# evidence that a copied manager program is runnable.
+binary_backup=/opt/server-connect/current/bin/server-connect.qa-recovery-backup
+[ -f "$installed_bin" ] && [ ! -L "$installed_bin" ] && [ ! -e "$binary_backup" ]
+binary_sha=$(/usr/bin/sha256sum "$installed_bin" | cut -d' ' -f1)
+cp -p "$installed_bin" "$binary_backup"
+[ "$binary_sha" = "$(/usr/bin/sha256sum "$binary_backup" | cut -d' ' -f1)" ]
+rm "$installed_bin"
+[ ! -e "$installed_bin" ]
+# A genuine ExecStart failure must not disable the timer itself.
+if systemctl start "$service" >/run/sc-qa-executor-start.log 2>&1;then
+ echo 'Missing installed recovery executable unexpectedly started' >&2;exit 1
+fi
+[ "$(systemctl show "$service" -p Result --value)" = exit-code ]
+[ "$(systemctl show "$service" -p ExecMainStatus --value)" = 203 ]
+systemctl is-active --quiet "$timer"
+if "$binary_backup" --json activation-trial-recover >/run/sc-qa-executor-failed.json 2>/run/sc-qa-executor-failed.stderr;then
+ echo 'Failed recovery executor incorrectly reported a scheduled guard' >&2;exit 1
+fi
+if [ ! -s /run/sc-qa-executor-failed.json ];then
+ echo 'Installed-binary diagnostic produced no JSON' >&2
+ sed -n '1,8p' /run/sc-qa-executor-failed.stderr >&2
+ exit 1
+fi
+/usr/bin/python3 - <<'PYEXECFAIL'
+import json
+with open('/run/sc-qa-executor-failed.json',encoding='utf-8') as f: r=json.load(f)
+assert not r['ok'] and r['error']['code']=='guard_unavailable',r
+assert 'executor failed' in r['error']['message'],r
+PYEXECFAIL
+rm -f /run/sc-qa-executor-failed.json /run/sc-qa-executor-failed.stderr /run/sc-qa-executor-start.log
+[ "$pending_sha" = "$(/usr/bin/sha256sum /var/lib/server-connect/route-activation-journal.json | cut -d' ' -f1)" ]
+"$ip" -4 rule show | grep -F '9.9.9.0/24' >/dev/null
+# Keep executable absent beyond expiry. An active timer with a failed
+# executor must leave the pending journal and real native rule intact.
+sleep 28
+[ "$pending_sha" = "$(/usr/bin/sha256sum /var/lib/server-connect/route-activation-journal.json | cut -d' ' -f1)" ]
+"$ip" -4 rule show | grep -F '9.9.9.0/24' >/dev/null
+cp -p "$binary_backup" "$installed_bin"
+[ "$binary_sha" = "$(/usr/bin/sha256sum "$installed_bin" | cut -d' ' -f1)" ]
+rm "$binary_backup"
+systemctl reset-failed "$service"
+systemctl restart "$timer"
+wait_recovered
+"$SC" --json activation-trial-clear --operation-id "$op" --revision 3 >/dev/null
+no_trial_rule
+echo PRODUCT_GUARD_TRIAL_EXECUTOR_MISSING_ACTIVE_TIMER_FAIL_CLOSED=PASS
+
+# A repeatedly started recovery oneshot may be systemd start-rate limited
+# while the independent timer remains active. Use only this installed unit
+# and require actual Result=start-limit-hit, not injected output or fakes.
+op=$(stage)
+"$SC" --json selective-trial-apply --operation-id "$op" --revision 1 --deadline-seconds 24 >/dev/null
+pending_sha=$(/usr/bin/sha256sum /var/lib/server-connect/route-activation-journal.json | cut -d' ' -f1)
+burst=$(systemctl show "$service" -p StartLimitBurst --value)
+case "$burst" in ''|*[!0-9]*|0) echo "Unsupported systemd recovery start-rate limit: $burst" >&2;exit 1 ;; esac
+[ "$burst" -le 20 ]
+limited=no
+for n in $(seq 1 30);do
+ systemctl start "$service" >/dev/null 2>&1 || :
+ if [ "$(systemctl show "$service" -p Result --value)" = start-limit-hit ];then limited=yes;break;fi
+done
+[ "$limited" = yes ] || { dump_guard_diagnostic;echo 'No genuine start-limit-hit observed' >&2;exit 1; }
+systemctl is-active --quiet "$timer"
+if "$SC" --json activation-trial-recover >/run/sc-qa-start-limited.json 2>&1;then
+ echo 'Start-limited recovery executor incorrectly reported a scheduled guard' >&2;exit 1
+fi
+/usr/bin/python3 - <<'PYLIMIT'
+import json
+with open('/run/sc-qa-start-limited.json',encoding='utf-8') as f: r=json.load(f)
+assert not r['ok'] and r['error']['code']=='guard_unavailable',r
+assert 'start-rate limited' in r['error']['message'],r
+PYLIMIT
+rm -f /run/sc-qa-start-limited.json
+[ "$(phase)" = trial_pending ]
+[ "$pending_sha" = "$(/usr/bin/sha256sum /var/lib/server-connect/route-activation-journal.json | cut -d' ' -f1)" ]
+"$ip" -4 rule show | grep -F '9.9.9.0/24' >/dev/null
+# Stop only this guest-owned timer, then repair the known failed executor
+# state; the independently restarted timer must reconcile the expired rule.
+systemctl stop "$timer"
+sleep 26
+[ "$(phase)" = trial_pending ]
+[ "$pending_sha" = "$(/usr/bin/sha256sum /var/lib/server-connect/route-activation-journal.json | cut -d' ' -f1)" ]
+systemctl reset-failed "$service"
+systemctl restart "$timer"
+wait_recovered
+"$SC" --json activation-trial-clear --operation-id "$op" --revision 3 >/dev/null
+no_trial_rule
+echo PRODUCT_GUARD_TRIAL_START_LIMIT_ACTIVE_TIMER_FAIL_CLOSED=PASS
+
 # After a completed recovery, a new external rule at the exact selector
 # cannot be silently accepted as an unchanged previously recovered kernel.
 op=$(stage)
 "$SC" --json selective-trial-apply --operation-id "$op" --revision 1 --deadline-seconds 4 >/dev/null
 wait_recovered
 "$ip" -4 rule add pref 30000 to 9.9.9.0/24 table 20000 protocol 247
-if "$SC" --json activation-trial-status >/run/sc-qa-reintroduced-rule.log 2>&1;then
- echo 'Stale recovered journal incorrectly proved current kernel absence' >&2;exit 1
-fi
-/usr/bin/python3 - <<'PYREINTRO'
-import json
-with open('/run/sc-qa-reintroduced-rule.log',encoding='utf-8') as f: r=json.load(f)
-assert not r['ok'] and r['error']['code']=='trial_recovery_uncertain',r
-PYREINTRO
-rm -f /run/sc-qa-reintroduced-rule.log
+stale_sha=$(/usr/bin/sha256sum /var/lib/server-connect/route-activation-journal.json | cut -d' ' -f1)
+stale_native=$("$ip" -N -j -4 rule show)
+# Each of the three public APIs must independently refuse the SAME stale
+# recovered journal, without any change to its bytes or the foreign rule.
+assert_stale_refusal() {
+ name=$1; expected=$2; shift 2
+ if "$SC" --json "$@" >/run/sc-qa-stale-public.json 2>&1;then
+  echo "Stale recovered kernel rule accepted by $name" >&2;exit 1
+ fi
+ /usr/bin/python3 - "$expected" <<'PYSTALE'
+import json,sys
+with open('/run/sc-qa-stale-public.json',encoding='utf-8') as f: r=json.load(f)
+assert not r['ok'] and r['error']['code']==sys.argv[1],r
+PYSTALE
+ rm -f /run/sc-qa-stale-public.json
+ [ "$stale_sha" = "$(/usr/bin/sha256sum /var/lib/server-connect/route-activation-journal.json | cut -d' ' -f1)" ]
+ [ "$stale_native" = "$("$ip" -N -j -4 rule show)" ]
+}
+assert_stale_refusal status trial_recovery_uncertain activation-trial-status
+assert_stale_refusal recover trial_recovery_uncertain activation-trial-recover
+assert_stale_refusal clear trial_resource_conflict activation-trial-clear --operation-id "$op" --revision 3
+echo PRODUCT_GUARD_TRIAL_STALE_RECOVERED_ALL_PUBLIC_OPERATIONS_REFUSED=PASS
 # This *lab-owned injected fixture* is removed by the test, not by product
 # recovery: protocol 247 alone cannot authenticate a foreign writer.
 "$ip" -4 rule del pref 30000 to 9.9.9.0/24 table 20000 protocol 247

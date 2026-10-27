@@ -72,8 +72,18 @@ checks the pending journal/real rule after deadline, and restores the unit
 before independently rearming recovery. After an
 externally impaired service is restored, the overdue experiment must recover
 without deleting foreign rules. A deliberately reintroduced protocol-tagged
-rule after successful recovery must fail live status reinspection until the
-separate lab fixture removes it. Only an **exact-candidate completed CI job
+rule after successful recovery must fail **all three public operations**:
+`activation-trial-status`, `activation-trial-recover` and
+`activation-trial-clear`. Each refusal must preserve the exact journal digest
+and the same native rule inventory before separate guest fixture cleanup.
+Additionally the guest must break only the installed recovery executable,
+observe a real failed systemd oneshot with timer still active, preserve the
+pending journal and native rule after expiry, then restore the exact executable
+and require independently scheduled recovery. It must also induce a real
+systemd `start-limit-hit`, reject false scheduled claims before deadline, and
+prove recovery after clearing that degraded state. Neither test implies
+future executor liveness or automatic repair of a permanently failed guard.
+Only an **exact-candidate completed CI job
 and original guest logs** establish PASS for these scenarios. Local Go and
 shell tests alone do not prove Linux kernel/systemd recovery; none of this
 proves independent liveness repair for routed operation, physical reboot,

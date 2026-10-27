@@ -35,9 +35,18 @@ operator recovery after expiry. Runtime unit masks/overrides in
 may still report `loaded/static` because an installed `/etc` unit takes
 precedence over a lower-priority runtime mask. A runtime mask alone cannot
 prove that executor stopped; the guest acceptance separately masks the
-actual installed service while preserving/restoring its exact bytes. A persistent
-unmonitored rule is therefore
-an **unresolved unsafe/uncertain condition**, not success. These checks do not
+actual installed service while preserving/restoring its exact bytes.
+The current installed trial additionally inspects native systemd `Result`
+and `ActiveState` for its service and timer. A failed or start-rate-limited
+oneshot executor cannot produce a positive `guard_scheduled` response even
+when the timer remains active; classification uses `guard_unavailable` with a
+bounded executor-failed versus start-rate-limited diagnostic. The disposable
+guest must prove real executor failure, intact pending journal and kernel
+rule after expiry, and independent recovery after exact executable repair.
+An active timer still cannot guarantee its **future** executor availability:
+no autonomous repair exists if the executable stays missing. A persistent
+unmonitored rule is therefore an **unresolved unsafe/uncertain condition**,
+not success. These checks do not
 make a protocol tag an authenticated ownership credential or replace Runtime
 Health Guard #3.
 
