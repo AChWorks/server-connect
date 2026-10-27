@@ -186,10 +186,17 @@ func run(j bool, m *sc.Manager, args []string) int {
 		opts := flag.NewFlagSet(name, flag.ContinueOnError)
 		opts.SetOutput(io.Discard)
 		pid := opts.Int("pid", 0, "explicit Linux process ID to observe")
+		sockets := opts.Bool("sockets", false, "opt in to per-PID TCP/UDP socket FD evidence (not traffic ownership)")
 		if e := opts.Parse(args); e != nil || len(opts.Args()) != 0 || *pid <= 1 {
 			return output(j, nil, sc.Fault("invalid_arguments", "workload-observe requires --pid N (N > 1)"))
 		}
-		report, err := sc.ObserveWorkloadProcess(*pid)
+		var report sc.WorkloadObservation
+		var err error
+		if *sockets {
+			report, err = sc.ObserveWorkloadProcessSockets(*pid)
+		} else {
+			report, err = sc.ObserveWorkloadProcess(*pid)
+		}
 		if err != nil {
 			return output(j, nil, err) // no invented process identity on failure
 		}
@@ -522,7 +529,9 @@ Commands:
   apt -- apt-get update        Strict opt-in APT via trusted native binary
   host-preflight [--endpoint IP] [--management-peer IP]
                               Observe kernel routes/rules; no activation
-  workload-observe --pid N       Read-only process ancestry/cgroup snapshot; no job/egress authorization
+  workload-observe --pid N [--sockets]
+                              Read-only ancestry/cgroup, optional per-PID socket FD evidence;
+                              NOT job attribution, descendant coverage or routing authorization
   selective-plan --endpoint IP --management-peer IP --tunnel-if NAME
                  --destination CIDR [--destination CIDR...]
                               Advisory selective routing preview; never applies

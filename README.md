@@ -50,10 +50,9 @@ Linux hosts:
 server-connect --json workload-observe --pid 12345
 ~~~
 
-Replace `12345` with a PID observed on **your own test host**. The command
-reads only `/proc/PID/stat` and `/proc/PID/cgroup` for that PID and its
-ancestors. It does **not** read command-line arguments, environment variables,
-process memory, sockets or credentials. Returned PID/start-time-tick and cgroup
+Replace `12345` with a PID observed on **your own test host**. By default, the command reads only `/proc/PID/stat` and `/proc/PID/cgroup`
+for the PID and its ancestors. It does **not** read command-line arguments,
+environment variables, process memory, sockets or credentials. Returned PID/start-time-tick and cgroup
 observations help diagnose recycled PIDs, reparenting and shared service
 cgroups, but the snapshots are not atomic; a PID-namespace boundary may
 hide parent processes. The process can exit or be replaced
@@ -65,13 +64,30 @@ never authorize job selection or intercept future children. An inaccessible,
 vanished, ambiguous or unsupported cgroup yields a classified failure, not a
 fabricated identification.
 
+For a deeper **explicitly opted-in** snapshot of the same already-running
+process, use `server-connect --json workload-observe --pid 12345 --sockets`.
+This additionally inspects open `socket:[inode]` file-descriptor links and
+TCP/UDP IPv4/IPv6 tables in that PID's network namespace, then reports only
+entries whose inodes match its currently held sockets (protocol, numeric
+local/remote address, kernel state). It rechecks the namespace, socket-FD inode
+set and process ancestry before returning; inaccessible or changed observations
+fail closed. Unmatched FDs are counted as unclassified (e.g., Unix/netlink),
+not silently treated as TCP/UDP. The command does not initiate a network probe.
+
+**These are not authenticated job or flow records.** Socket FDs can be shared,
+inherited or reused; observations are non-atomic and do not cover future child
+processes, DNS resolution, actual egress interfaces, selected VPN paths or
+successful packet delivery. Numeric socket endpoints and cgroup names are
+sensitive operational diagnostics; retain them in private administrator output.
+No background aaPanel App Store task is claimed to be routable from this data.
+
 The command always returns `read_only: true`, `snapshot_atomic: false`,
 `attribution_verified: false`, `descendants_covered: false`,
 `traffic_path_verified: false` and `activation_ready: false`. It never creates
 a routing rule, cgroup, firewall change or VPN; there is **no transparent
-background-job routing** in this feature. Representative aaPanel worker
-attribution, subprocess/socket/IPv4/IPv6/DNS proof and independently guarded
-selected outbound are still open Issue #2 acceptance work.
+background-job routing** in this feature. Authenticated aaPanel job ownership, descendant/socket attribution,
+selected IPv4/IPv6/DNS packet-path proof and independently guarded outbound
+routing remain open Issue #2 acceptance work.
 
 ### Advisory selective route planning (Issue #2 development)
 

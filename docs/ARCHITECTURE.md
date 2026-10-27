@@ -79,12 +79,16 @@ The application selector must remain an explicit **workload attribution** layer 
 
 The development-only `workload-observe --pid N` diagnostic reads procfs stat
 birth ticks, parent PID and unified cgroup-v2 membership twice to reject
-observed reuse/reparenting/migration. It is a **non-atomic read-only snapshot**,
-not an authenticated job selector, a descendant tracker, a socket-path proof,
-or an authorization to modify any route. Any ambiguous or vanished process
-must produce a non-success; cgroup sharing with the panel does not identify
-an individual installation. Later kernel/process attribution must be proven
-separately on a representative aaPanel background job.
+observed reuse/reparenting/migration. The explicitly opted-in `--sockets`
+mode additionally correlates numeric TCP/UDP socket entries in that PID's
+network namespace with actual socket inode references held in its FD table.
+It rechecks network namespace, FD inode set and ancestry after the scan,
+refuses unavailable/ambiguous inputs and never follows unrelated FD targets.
+These **non-atomic read-only observations** are not authenticated job selection,
+continuous descendant tracking, exclusive socket/source ownership, DNS/packet
+path proof or permission to change routing. A shared socket/cgroup and a GUI
+click cannot identify an individual aaPanel installation. True source and
+selected egress must be independently verified on a representative real job.
 
 A high-risk implementation must bind an explicit operator-selected job/service or approved destination set to a narrowly owned policy, ensure the remote VPN endpoint itself remains underlay-reachable, prove live selected egress, and preserve unrelated panel UI/control plane, SSH, hosted HTTP(S) replies, Docker/STL/other manager resources and domestic routes. Unknown workers and unsupported protocols must fail closed. Which Linux source attribution mechanism is used (e.g., validated systemd unit/cgroup, verified dedicated process group or a suitable future kernel primitive) depends on supported-host proof; do **not** silently classify every root-owned process as the chosen app. An aaPanel app-install click is not itself a policy identity. No service-scoped or host-wide routing is active until Issue #2's real recovery guard, Issue #3's ongoing health supervisor and the physical acceptance gates are complete.
 

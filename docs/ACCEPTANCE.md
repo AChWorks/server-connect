@@ -123,6 +123,17 @@ no readiness to route. No procfs result fulfills the separate acceptance
 requirement for an actual aaPanel App Store job and its subprocesses or
 permits a guarded route to be activated.
 
+Optional `workload-observe --pid N --sockets` adds an explicitly requested,
+read-only FD-inode join against the PID network namespace's TCP/UDP IPv4/IPv6
+tables. Test with a live **open loopback TCP socket** (not only synthetic rows),
+valid empty-FD observations, native IPv6 header variants, foreign namespace
+socket entries and missing/malformed/oversized/duplicate table or FD records.
+The Linux installed-host CLI must expose real per-PID FD evidence without
+creating traffic, modifying host routes or claiming ownership/path readiness.
+Socket FDs may be inherited/shared, snapshots are non-atomic, and unmatched
+sockets are not coverage; a real aaPanel task, its subprocesses and a genuinely
+selected egress require separate physical/representative acceptance.
+
 ### Product-integrated RPDB trial interruption and unavailable-watchdog evidence
 
 The installed disconnected Debian 13 systemd Docker acceptance also tests

@@ -358,6 +358,56 @@ assert v["process"]["pid"]==int(sys.argv[1]) and v["process"]["start_time_ticks"
 assert v["process"]["cgroup_v2_path"].startswith("/"),v
 PYWORKLOAD
  rm -f /run/sc-workload-observe.json
+ # Genuine live TCP FD evidence from a separate guest-local background worker.
+ # Its held loopback socket is observable without selecting an aaPanel job
+ # or changing service/router state. The worker and temporary files are
+ # removed even if the assertion fails.
+ /usr/bin/python3 -u - << "PYSOCKETWORKER" >/run/sc-qa-socket-worker.log 2>&1 &
+import os,socket,time
+listener=socket.socket(socket.AF_INET,socket.SOCK_STREAM)
+listener.bind(("127.0.0.1",0))
+listener.listen(1)
+client=socket.socket(socket.AF_INET,socket.SOCK_STREAM)
+client.connect(listener.getsockname())
+peer,_=listener.accept()
+with open("/run/sc-qa-socket-ready","w",encoding="utf-8") as f:
+    f.write(str(os.getpid())+" "+str(listener.getsockname()[1])+"\n")
+time.sleep(60)
+PYSOCKETWORKER
+ socket_worker=$!
+ trap "kill $socket_worker 2>/dev/null || :;wait $socket_worker 2>/dev/null || :;rm -f /run/sc-qa-socket-worker.log /run/sc-qa-socket-ready /run/sc-workload-sockets.json" EXIT
+ ready=0
+ i=0
+ while test "$i" -lt 30; do
+   if test -f /run/sc-qa-socket-ready; then ready=1;break;fi
+   i=$((i+1))
+   sleep 0.1
+ done
+ test "$ready" -eq 1 || { echo "socket fixture worker never became ready" >&2;exit 1; }
+ read worker_pid listen_port </run/sc-qa-socket-ready
+ test "$worker_pid" = "$socket_worker"
+ /usr/local/bin/server-connect --json workload-observe --pid "$socket_worker" --sockets >/run/sc-workload-sockets.json
+ /usr/bin/python3 - "$socket_worker" "$listen_port" << "PYSOCKEVIDENCE"
+import json,sys
+with open("/run/sc-workload-sockets.json",encoding="utf-8") as f:r=json.load(f)
+assert r["ok"],r
+v=r["data"]
+s=v["sockets"]
+assert v["process"]["pid"]==int(sys.argv[1]) and v["read_only"],v
+assert s["read_only"] and not any(s[k] for k in (
+ "snapshot_atomic","job_owner_verified","descendants_covered",
+ "traffic_path_verified","activation_ready")),s
+assert not any(v[k] for k in (
+ "attribution_verified","descendants_covered","traffic_path_verified",
+ "activation_ready")),v
+assert s["network_namespace"].startswith("net:[") and s["socket_inode_count"]>0,s
+assert any(item["protocol"]=="tcp4" and item["remote"]=="127.0.0.1:"+sys.argv[2]
+ and item["state"]=="01" for item in s["observed_tcp_udp_sockets"]),s
+PYSOCKEVIDENCE
+ kill "$socket_worker"
+ wait "$socket_worker" 2>/dev/null || :
+ rm -f /run/sc-qa-socket-worker.log /run/sc-qa-socket-ready /run/sc-workload-sockets.json
+ trap - EXIT
  # A separate real descendant proves the reported parent/starttime link;
  # this harmless sleep is always terminated by the guest-scoped cleanup.
  /bin/sleep 20 &
@@ -390,6 +440,7 @@ PYWORKLOADINVALID
 assert_network_unchanged workload-observe "$offline_before"
 verify_host_services workload-observe
 echo 'INSTALLED_WORKLOAD_PROCFS_OBSERVATION_ONLY=PASS (real PID, parent and unified cgroup v2)'
+echo 'INSTALLED_WORKLOAD_SOCKET_FD_EVIDENCE=PASS (real loopback background worker; no ownership or routing proof)'
 docker exec "$container" /bin/sh -c '
   printf "SC_QA_RETAIN_PROFILE_BYTES\n" > /var/lib/server-connect/profiles/qa-retained
   chmod 0600 /var/lib/server-connect/profiles/qa-retained
