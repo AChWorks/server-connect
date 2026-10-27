@@ -44,6 +44,13 @@ func TestWorkloadObserveCLIRejectsUntrustedOrMissingPID(t *testing.T) {
 	}
 }
 
+func TestWorkloadObserveCLIMissingProcessDoesNotInventData(t *testing.T) {
+	code, body := workloadRunJSON(t, "--pid", "2147483647")
+	if code == 0 || string(body["ok"]) != "false" || len(body["data"]) != 0 || !strings.Contains(string(body["error"]), "workload_observation_unavailable") {
+		t.Fatalf("missing process manufactured an observation: code=%d payload=%v", code, body)
+	}
+}
+
 func TestWorkloadObserveCLIHonestLiveSnapshot(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("Linux procfs")

@@ -190,7 +190,10 @@ func run(j bool, m *sc.Manager, args []string) int {
 			return output(j, nil, sc.Fault("invalid_arguments", "workload-observe requires --pid N (N > 1)"))
 		}
 		report, err := sc.ObserveWorkloadProcess(*pid)
-		return output(j, report, err)
+		if err != nil {
+			return output(j, nil, err) // no invented process identity on failure
+		}
+		return output(j, report, nil)
 	case "activation-journal-status":
 		if len(args) != 0 {
 			return output(j, nil, sc.Fault("invalid_arguments", "activation-journal-status accepts no command options"))
