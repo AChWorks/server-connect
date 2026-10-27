@@ -177,3 +177,44 @@ func TestGuardedRouteTrialQANativeCommandError(t *testing.T) {
 		t.Fatalf("QA native command failure incorrectly accepted: %s", code)
 	}
 }
+
+// Exercise the same single state-admission rule used by all recovery loader
+// branches, including both early no-op branches in a normal systemd tick.
+func TestGuardedRouteTrialV3RecoveryFaultJournalAdmission(t *testing.T) {
+	pendingV2 := stagedTrialRecord(t)
+	pendingV3 := pendingV2
+	pendingV3.Version, pendingV3.IntentType, pendingV3.RouteDevice = 3, trialRouteIntentType, "lo"
+	recoveredV3 := pendingV3
+	recoveredV3.Revision, recoveredV3.Phase = 3, "trial_recovered"
+	preparedV1 := pendingV2
+	preparedV1.Version, preparedV1.Revision, preparedV1.Phase = 1, 1, "prepared"
+	cases := []struct {
+		name    string
+		record  *trialJournal
+		allowed bool
+	}{
+		{"absent", nil, false},
+		{"prepared_v1", &preparedV1, false},
+		{"pending_v2", &pendingV2, false},
+		{"recovered_v3", &recoveredV3, false},
+		{"pending_v3", &pendingV3, true},
+	}
+	for _, point := range []string{"route-delete", "recovered-journal-write"} {
+		t.Run(point, func(t *testing.T) {
+			for _, tc := range cases {
+				t.Run(tc.name, func(t *testing.T) {
+					err := trialRequirePendingV3ForQAFault(point, tc.record)
+					if tc.allowed && err != nil {
+						t.Fatalf("valid v3 recovery fault refused: %v", err)
+					}
+					if !tc.allowed && ErrorCode(err) != "invalid_arguments" {
+						t.Fatalf("non-v3 recovery fault produced success or wrong classification: %v", err)
+					}
+					if err := trialRequirePendingV3ForQAFault("", tc.record); err != nil {
+						t.Fatalf("normal recovery no-flag admission changed: %v", err)
+					}
+				})
+			}
+		})
+	}
+}

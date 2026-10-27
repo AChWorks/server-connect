@@ -38,6 +38,54 @@ no_trial_rule() {
  "$ip" -4 rule show | grep -v -e '^0:' -e '^32766:' -e '^32767:' | grep . && return 1
  return 0
 }
+# Both allowed recovery fault points must reject every journal state except
+# pending v3. Check the *installed Manager* and the real kernel inventories,
+# not only a pure Go state predicate. No test changes foreign host resources.
+assert_v3_recovery_fault_rejected() {
+ case_name=$1
+ journal=/var/lib/server-connect/route-activation-journal.json
+ before_sha=absent
+ if [ -e "$journal" ];then
+  before_sha=$(/usr/bin/sha256sum "$journal" | cut -d' ' -f1)
+ fi
+ before_rules=$("$ip" -N -j -4 rule show)
+ before_routes=$("$ip" -N -j -4 route show table all)
+ for fault in route-delete recovered-journal-write;do
+  if "$SC" --json activation-trial-recover --qa-fail-at "$fault" \
+   >/run/sc-qa-invalid-recovery-fault.json 2>&1;then
+   echo "v3 recovery fault $fault incorrectly succeeded for $case_name" >&2;exit 1
+  fi
+  /usr/bin/python3 - "$fault" <<'PYQAFAULTREFUSED'
+import json,sys
+with open('/run/sc-qa-invalid-recovery-fault.json',encoding='utf-8') as f:
+    result=json.load(f)
+assert result['ok'] is False and result['error']['code']=='invalid_arguments',(sys.argv[1],result)
+PYQAFAULTREFUSED
+  current_sha=absent
+  if [ -e "$journal" ];then
+   current_sha=$(/usr/bin/sha256sum "$journal" | cut -d' ' -f1)
+  fi
+  [ "$current_sha" = "$before_sha" ] || {
+   echo 'Invalid recovery fault changed the private journal' >&2;exit 1;
+  }
+  [ "$("$ip" -N -j -4 rule show)" = "$before_rules" ] || {
+   echo 'Invalid recovery fault changed native RPDB rules' >&2;exit 1;
+  }
+  [ "$("$ip" -N -j -4 route show table all)" = "$before_routes" ] || {
+   echo 'Invalid recovery fault changed native routes' >&2;exit 1;
+  }
+ done
+ rm -f /run/sc-qa-invalid-recovery-fault.json
+ printf 'PRODUCT_GUARD_ROUTE_V3_QA_RECOVERY_FAULT_%s_REFUSAL=PASS\n' "$case_name"
+}
+assert_no_fault_recovery_phase() {
+ expected=$1
+ "$SC" --json activation-trial-recover | /usr/bin/python3 -c '
+import json,sys
+result=json.load(sys.stdin)
+assert result["ok"] and result["data"]["experiment_only"] and result["data"]["phase"]==sys.argv[1],result' "$expected"
+}
+
 dump_guard_diagnostic() {
  echo 'PRODUCT_GUARD_TRIAL_RECOVERY_DIAGNOSTIC (bounded native/systemd evidence):' >&2
  systemctl show "$timer" -p ActiveState -p Unit -p LastTriggerUSecMonotonic -p NextElapseUSecMonotonic >&2 || true
@@ -70,8 +118,13 @@ systemctl is-active --quiet "$timer"
 echo PRODUCT_GUARD_TRIAL_TIMER_PREARM=PASS
 [ "$(systemctl show "$timer" -p Unit --value)" = "$service" ]
 
+[ ! -e /var/lib/server-connect/route-activation-journal.json ]
+assert_v3_recovery_fault_rejected ABSENT
+assert_no_fault_recovery_phase absent
 op=$(stage)
 echo PRODUCT_GUARD_TRIAL_STAGED_INTENT=PASS
+assert_v3_recovery_fault_rejected UNARMED_V1
+assert_no_fault_recovery_phase unarmed_prepared
 if "$SC" --json selective-trial-apply --operation-id 00000000000000000000000000000000 \
  --revision 1 --deadline-seconds 8 >/run/sc-qa-wrong-id.log 2>&1;then
  echo 'Wrong trial operation unexpectedly accepted' >&2;exit 1
@@ -208,6 +261,8 @@ op=$(stage)
 [ "$(phase)" = trial_pending ]
 systemctl stop "$timer"
 [ "$(systemctl show "$timer" -p ActiveState --value)" = inactive ]
+assert_v3_recovery_fault_rejected PENDING_V2
+[ "$(phase)" = trial_pending ]
 pending_sha=$(/usr/bin/sha256sum /var/lib/server-connect/route-activation-journal.json | cut -d' ' -f1)
 if "$SC" --json activation-trial-recover >/run/sc-qa-timer-stopped.log 2>&1;then
  echo 'Stopped timer was incorrectly reported as scheduled' >&2;exit 1
@@ -546,6 +601,8 @@ assert_trial_route
 no_trial_rule
 wait_recovered
 no_trial_route
+assert_v3_recovery_fault_rejected RECOVERED_V3
+assert_no_fault_recovery_phase trial_recovered
 "$SC" --json activation-trial-clear --operation-id "$op" --revision 3 >/dev/null
 no_trial_route
 printf '%s\n' 'PRODUCT_GUARD_ROUTE_V3_AFTER_ROUTE_SIGKILL_RECOVERY=PASS'

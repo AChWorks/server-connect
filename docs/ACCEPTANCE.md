@@ -92,7 +92,14 @@ journal refusal is NOT an actual filesystem fsync/disk failure. These cases
 require original exact-head installed-host evidence before claiming PASS,
 and cannot substitute for future physical recovery or destructive storage
 fault testing. The QA controls are rejected outside strict disposable guest
-admission and do not enable production tunnel modes.
+admission and do not enable production tunnel modes. An explicitly selected
+v3 **recovery** failure point requires a valid *pending v3* journal: an absent
+journal, a valid unarmed v1 PREPARED journal, a pending v2 rule-only journal,
+or an already recovered v3 journal must each return `invalid_arguments`
+without changing journal bytes or native kernel routes/rules. For both
+recovery fault-point values the installed-host fixture must verify these
+negative states, while the ordinary no-flag recovery service still reports
+`absent`, `unarmed_prepared`, or verified `trial_recovered` as applicable.
 
 Code-only unit tests or a green check label are insufficient;
 original exact-candidate installed-host logs and actual assertion sources

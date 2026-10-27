@@ -429,6 +429,16 @@ func trialQAFailRecoveredJournal(requested string) error {
 	return nil
 }
 
+// A requested v3-only fault must never be acknowledged as a successful
+// recovery no-op for an absent, unarmed v1, v2, or already recovered journal.
+// The independent watchdog passes no QA fault and retains those semantics.
+func trialRequirePendingV3ForQAFault(qaFaultPoint string, record *trialJournal) error {
+	if qaFaultPoint != "" && (record == nil || record.Version != 3 || record.Phase != "trial_pending") {
+		return Fault("invalid_arguments", "v3 QA failure requires pending route trial")
+	}
+	return nil
+}
+
 func trialQAKillAt(actual, requested string) error {
 	if actual != requested {
 		return nil
@@ -739,6 +749,9 @@ func (m *Manager) RecoverGuardedRuleTrial(qaCrashPoint, qaFaultPoint string) (Tr
 	err := m.withActivationJournalLock(syscall.Fsync, func(store *activationJournalDir) error {
 		record, id, err := loadTrialLocked(store)
 		if errors.Is(err, os.ErrNotExist) {
+			if err := trialRequirePendingV3ForQAFault(qaFaultPoint, nil); err != nil {
+				return err
+			}
 			receipt = TrialReceipt{Phase: "absent", ExperimentOnly: true}
 			return nil
 		}
@@ -748,13 +761,16 @@ func (m *Manager) RecoverGuardedRuleTrial(qaCrashPoint, qaFaultPoint string) (Tr
 			// state is never silently accepted as safe.
 			legacy, _, legacyErr := loadActivationJournalLocked(store)
 			if legacyErr == nil && legacy.Version == 1 && legacy.Phase == "prepared" {
+				if err := trialRequirePendingV3ForQAFault(qaFaultPoint, nil); err != nil {
+					return err
+				}
 				receipt = TrialReceipt{Phase: "unarmed_prepared", ExperimentOnly: true}
 				return nil
 			}
 			return err
 		}
-		if qaFaultPoint != "" && (record.Version != 3 || record.Phase != "trial_pending") {
-			return Fault("invalid_arguments", "v3 QA failure requires pending route trial")
+		if err := trialRequirePendingV3ForQAFault(qaFaultPoint, &record); err != nil {
+			return err
 		}
 		if qaCrashPoint == "after-route-delete" && record.Version != 3 {
 			return Fault("invalid_arguments", "route-delete crash point requires the v3 route trial")
