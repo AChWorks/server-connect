@@ -494,7 +494,7 @@ trial_injection_mark_us() {
  /usr/bin/python3 -c 'import time;print(time.clock_gettime_ns(time.CLOCK_MONOTONIC)//1000)'
 }
 await_v3_systemd_foreign_refusal() {
- before_us=$1
+ injection_complete_us=$1
  [ "$(systemctl show "$timer" -p Unit --value)" = "$service" ]
  observed=no
  for n in $(seq 1 28);do
@@ -502,7 +502,7 @@ await_v3_systemd_foreign_refusal() {
    [ "$(systemctl show "$service" -p ExecMainStatus --value)" = 41 ];then
    started_us=$(systemctl show "$service" -p ExecMainStartTimestampMonotonic --value)
    case "$started_us" in ''|*[!0-9]*) ;; *)
-    if [ "$started_us" -gt "$before_us" ];then observed=yes;break;fi ;;
+    if [ "$started_us" -gt "$injection_complete_us" ];then observed=yes;break;fi ;;
    esac
   fi
   sleep 1
@@ -513,6 +513,8 @@ await_v3_systemd_foreign_refusal() {
   exit 1
  fi
  systemctl is-active --quiet "$timer"
+ printf 'PRODUCT_GUARD_ROUTE_V3_FRESH_SYSTEMD_CONFLICT=PASS injection_complete_us=%s service_start_us=%s status=41\n' \
+  "$injection_complete_us" "$started_us"
 }
 reset_v3_qa_executor_after_clear() {
  [ ! -e /var/lib/server-connect/route-activation-journal.json ]
@@ -605,9 +607,10 @@ printf '%s\n' 'PRODUCT_GUARD_ROUTE_V3_AFTER_ROUTE_DELETE_SIGKILL_RECOVERY=PASS'
 # merely a manual CLI refusal or a stale failure from an earlier fixture.
 op=$(stage)
 "$SC" --json selective-route-trial-apply --operation-id "$op" --revision 1 --deadline-seconds 7 >/dev/null
-foreign_injected_us=$(trial_injection_mark_us)
 "$ip" -4 route del 9.9.9.0/24 dev lo table 20000 proto 247 scope link
 "$ip" -4 route add 9.9.9.0/24 dev lo table 20000 proto 248 scope link
+# Mark only AFTER the completed successful foreign native injection.
+foreign_injected_us=$(trial_injection_mark_us)
 foreign_sha=$(/usr/bin/sha256sum /var/lib/server-connect/route-activation-journal.json | cut -d' ' -f1)
 foreign_native=$(trial_route_inventory)
 await_v3_systemd_foreign_refusal "$foreign_injected_us"
@@ -638,8 +641,9 @@ printf '%s\n' 'PRODUCT_GUARD_ROUTE_V3_FOREIGN_ROUTE_REFUSAL=PASS'
 # removes that rule and invokes the product's independent recovery path.
 op=$(stage)
 "$SC" --json selective-route-trial-apply --operation-id "$op" --revision 1 --deadline-seconds 7 >/dev/null
-foreign_injected_us=$(trial_injection_mark_us)
 "$ip" -4 rule add pref 30200 to 9.9.9.0/24 table 20000 protocol 249
+# Mark only AFTER the completed successful foreign native injection.
+foreign_injected_us=$(trial_injection_mark_us)
 foreign_sha=$(/usr/bin/sha256sum /var/lib/server-connect/route-activation-journal.json | cut -d' ' -f1)
 foreign_native=$("$ip" -N -j -4 rule show)
 await_v3_systemd_foreign_refusal "$foreign_injected_us"
