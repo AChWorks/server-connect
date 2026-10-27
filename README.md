@@ -244,9 +244,28 @@ rules by all public recovery/status/clear operations. An unavailable executor
 still requires external repair; no guarantee of future guard liveness or
 routed VPN safety is implied.
 
-**This is not Selective or Broad VPN activation**: it does not create a tunnel
-interface, install a route, prove actual path egress, verify SSH, authorize a
-production network change, or satisfy the Runtime Health Guard. A successful
+An additional **v3 disposable-only route-bearing trial** now exercises the
+same independent recovery timer and private journal with **one real numeric
+IPv4 route via existing loopback `lo` plus its matching RPDB rule**. The
+specific command is
+`selective-route-trial-apply --operation-id HEX32 --revision 1
+--deadline-seconds 8` after the same exact v1 stage operation. The v3 journal
+has a distinct version and type so old v2 rule-only journals retain their
+original semantics. The route is placed in the isolated table before the
+rule, and rollback removes the rule before the route. Both resources are
+reobserved natively; unknown routes or foreign policy consumers block
+recovery without deleting them. All public trial inspection, recovery, clear
+and installer-protection paths recognize v3, but never set production
+activation or `recovery_verified` claims. CLI QA interruption points include
+`after-route` and recovery `after-route-delete`, in addition to the earlier
+rule-only points. The v3 route is deliberately **not TUN** and does not carry
+any working VPN packets; it runs only in a disconnected loopback-only Docker
+systemd guest. Do not run these developer commands on hosting servers.
+
+**This is not Selective or Broad VPN activation**: v2 does not create a tunnel
+or route; v3 creates only a disposable loopback route and matching rule. Neither
+proves actual VPN path egress, physical SSH protection, authorizes a production
+network change, or satisfies the Runtime Health Guard. A successful
 trial shows only exact *rule* recovery in the isolated guest. It must never be
 used on a real hosting server. The real guarded route/application transaction
 and physical reboot/field evidence remain acceptance gaps under Issue #2.

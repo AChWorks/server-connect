@@ -321,7 +321,7 @@ func run(j bool, m *sc.Manager, args []string) int {
 		}
 		receipt, err := m.InspectGuardedRuleTrial()
 		return output(j, receipt, err)
-	case "selective-trial-apply", "activation-trial-clear":
+	case "selective-trial-apply", "selective-route-trial-apply", "activation-trial-clear":
 		opts := flag.NewFlagSet(name, flag.ContinueOnError)
 		opts.SetOutput(io.Discard)
 		id := opts.String("operation-id", "", "exact staged or recovered operation ID")
@@ -335,6 +335,9 @@ func run(j bool, m *sc.Manager, args []string) int {
 		if *interrupt && *qaPoint != "" {
 			return output(j, nil, sc.Fault("invalid_arguments", "only one QA interruption point is allowed"))
 		}
+		if *interrupt && name == "selective-route-trial-apply" {
+			return output(j, nil, sc.Fault("invalid_arguments", "legacy rule-only interruption option is unavailable for route trials"))
+		}
 		if name == "activation-trial-clear" {
 			if *deadline != 600 || *interrupt || *qaPoint != "" || *revision != 3 {
 				return output(j, nil, sc.Fault("invalid_arguments", "clear requires exact recovered revision 3"))
@@ -344,6 +347,10 @@ func run(j bool, m *sc.Manager, args []string) int {
 		}
 		if *interrupt {
 			*qaPoint = "after-add"
+		}
+		if name == "selective-route-trial-apply" {
+			receipt, err := m.BeginGuardedRouteTrial(*id, *revision, *deadline, *qaPoint)
+			return output(j, receipt, err)
 		}
 		receipt, err := m.BeginGuardedRuleTrial(*id, *revision, *deadline, *qaPoint)
 		return output(j, receipt, err)
@@ -508,6 +515,8 @@ Commands:
                               Remove only exact untouched PREPARED intent
   selective-trial-apply --operation-id HEX32 --revision 1 [--deadline-seconds 600]
                               DISPOSABLE DOCKER-ONLY rule-only trial; never VPN activation
+  selective-route-trial-apply --operation-id HEX32 --revision 1 [--deadline-seconds 600]
+                              DISPOSABLE DOCKER-ONLY lo route + RPDB rule trial; never VPN activation
   activation-trial-status     Inspect only the guarded rule trial state
   activation-trial-recover    Independent systemd trial timeout/reboot recovery
   activation-trial-clear --operation-id HEX32 --revision 3

@@ -24,12 +24,13 @@ import (
 // interruption and reboot reconciliation without starting a VPN or diverting
 // traffic. No non-disposable host may invoke this development operation.
 const (
-	trialIntentType     = "guarded_rule_trial_v2"
-	trialProtocol       = "247"
-	trialRecoveryUnit   = "server-connect-activation-recover.service"
-	trialRecoveryTimer  = "server-connect-activation-recover.timer"
-	trialGuardUnitDir   = "/etc/systemd/system/"
-	trialRuntimeUnitDir = "/run/systemd/system/"
+	trialIntentType      = "guarded_rule_trial_v2"
+	trialRouteIntentType = "guarded_loopback_route_trial_v3"
+	trialProtocol        = "247"
+	trialRecoveryUnit    = "server-connect-activation-recover.service"
+	trialRecoveryTimer   = "server-connect-activation-recover.timer"
+	trialGuardUnitDir    = "/etc/systemd/system/"
+	trialRuntimeUnitDir  = "/run/systemd/system/"
 )
 
 var trialBootIDPattern = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
@@ -41,37 +42,55 @@ var trialJournalFields = map[string]bool{
 	"boot_id": true, "deadline_uptime_sec": true,
 }
 
+// Each journal version requires EXACTLY its own member set. The v2 parser
+// must continue accepting existing route-less receipts without a new field;
+// v3 must explicitly persist its real disposable route device.
+var trialRouteJournalFields = func() map[string]bool {
+	fields := make(map[string]bool, len(trialJournalFields)+1)
+	for key, required := range trialJournalFields {
+		fields[key] = required
+	}
+	fields["trial_route_device"] = true
+	return fields
+}()
+
 type trialJournal struct {
 	activationJournal
 	BootID            string `json:"boot_id"`
 	DeadlineUptimeSec int64  `json:"deadline_uptime_sec"`
+	RouteDevice       string `json:"trial_route_device,omitempty"`
 }
 
 type TrialReceipt struct {
-	OperationID        string `json:"operation_id"`
-	Revision           uint64 `json:"revision"`
-	Phase              string `json:"phase"`
-	ExperimentOnly     bool   `json:"experiment_only"`
-	GuardScheduled     bool   `json:"guard_scheduled"`
-	ActivationReady    bool   `json:"activation_ready"`
-	VPNVerified        bool   `json:"vpn_verified"`
-	RecoveryVerified   bool   `json:"recovery_verified"`
-	TrialRuleRecovered bool   `json:"trial_rule_recovered"`
+	OperationID         string `json:"operation_id"`
+	Revision            uint64 `json:"revision"`
+	Phase               string `json:"phase"`
+	ExperimentOnly      bool   `json:"experiment_only"`
+	GuardScheduled      bool   `json:"guard_scheduled"`
+	ActivationReady     bool   `json:"activation_ready"`
+	VPNVerified         bool   `json:"vpn_verified"`
+	RecoveryVerified    bool   `json:"recovery_verified"`
+	TrialRuleRecovered  bool   `json:"trial_rule_recovered"`
+	TrialRouteRecovered bool   `json:"trial_route_recovered,omitempty"`
 }
 
 func trialReceipt(record trialJournal, scheduled, recovered bool) TrialReceipt {
 	return TrialReceipt{OperationID: record.OperationID, Revision: record.Revision, Phase: record.Phase,
-		ExperimentOnly: true, GuardScheduled: scheduled, TrialRuleRecovered: recovered}
+		ExperimentOnly: true, GuardScheduled: scheduled, TrialRuleRecovered: recovered,
+		TrialRouteRecovered: recovered && record.Version == 3}
 }
 
 // The v1 record is retained in full, including before=absence and exact plan
-// bindings. v2 only permits one IPv4 rule, an otherwise empty selected table,
-// and no route/interface mutation. Unknown/corrupt fields fail closed.
+// bindings. v2 remains rule-only, always pointing at an empty table. v3 is a
+// separately identified, disposable-only loopback route+rule transaction;
+// it never creates a tunnel, interface, outbound VPN or production policy.
 func validateTrialJournal(record trialJournal) error {
-	if record.Version != 2 || (record.Phase != "trial_pending" && record.Phase != "trial_recovered") ||
+	modeValid := (record.Version == 2 && record.IntentType == trialIntentType && record.RouteDevice == "") ||
+		(record.Version == 3 && record.IntentType == trialRouteIntentType && record.RouteDevice == "lo")
+	if !modeValid || (record.Phase != "trial_pending" && record.Phase != "trial_recovered") ||
 		(record.Phase == "trial_pending" && record.Revision != 2) ||
 		(record.Phase == "trial_recovered" && record.Revision != 3) ||
-		record.IntentType != trialIntentType || !trialBootIDPattern.MatchString(record.BootID) ||
+		!trialBootIDPattern.MatchString(record.BootID) ||
 		record.DeadlineUptimeSec <= 0 || len(record.Changes) != 2 || record.Selective == nil ||
 		record.Changes[0].Kind != "route" || record.Changes[1].Kind != "rule" {
 		return activationJournalError("unsupported guarded-rule trial record or phase")
@@ -102,12 +121,20 @@ func decodeTrialJournal(raw []byte) (trialJournal, error) {
 	if err := rejectAmbiguousJournalJSON(raw); err != nil {
 		return record, err
 	}
-	if err := requireExactJournalKeys(raw, trialJournalFields); err != nil {
-		return record, err
-	}
 	var root map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &root); err != nil {
 		return record, activationJournalError("guard trial root invalid")
+	}
+	var version int
+	if err := json.Unmarshal(root["version"], &version); err != nil {
+		return record, activationJournalError("guard trial version missing or unsupported")
+	}
+	fields := trialJournalFields
+	if version == 3 {
+		fields = trialRouteJournalFields
+	}
+	if err := requireExactJournalKeys(raw, fields); err != nil {
+		return record, err
 	}
 	if err := requireExactJournalKeys(root["selective"], selectiveJournalBindingFields); err != nil {
 		return record, err
@@ -348,12 +375,13 @@ func trialValidateQACrashPoint(phase, point string) error {
 		return nil
 	}
 	switch phase {
-	case "apply":
-		if point == "before-journal" || point == "after-journal" || point == "after-add" {
+	case "apply", "route-apply":
+		if point == "before-journal" || point == "after-journal" || point == "after-add" ||
+			(phase == "route-apply" && point == "after-route") {
 			return nil
 		}
 	case "recover":
-		if point == "after-delete" || point == "before-recovered-journal" {
+		if point == "after-delete" || point == "before-recovered-journal" || point == "after-route-delete" {
 			return nil
 		}
 	}
@@ -390,6 +418,19 @@ func trialVerifyRecoveredNative(record trialJournal) error {
 	}
 	if present {
 		return Fault("trial_recovery_uncertain", "guarded rule exists after recorded recovery")
+	}
+	if record.Version == 3 {
+		route, err := trialSingleRoute(record)
+		if err != nil {
+			return err
+		}
+		present, err := trialNativeRoutePresence(route)
+		if err != nil {
+			return err
+		}
+		if present {
+			return Fault("trial_recovery_uncertain", "route exists after recorded recovery")
+		}
 	}
 	return nil
 }
@@ -457,7 +498,7 @@ func trialRunIP(args ...string) error {
 	command.Env = []string{"PATH=/usr/bin:/bin", "LC_ALL=C", "LANG=C"}
 	command.WaitDelay = 250 * time.Millisecond
 	if err := command.Run(); err != nil {
-		return Fault("trial_kernel_error", "bounded native RPDB mutation failed")
+		return Fault("trial_kernel_error", "bounded native experimental route or rule mutation failed")
 	}
 	return nil
 }
@@ -467,13 +508,27 @@ func trialRunIP(args ...string) error {
 // successful trial is NOT a working tunnel, safe production activation, or
 // evidence of live foreign transport.
 func (m *Manager) BeginGuardedRuleTrial(operationID string, revision uint64, ttlSeconds int, qaCrashPoint string) (TrialReceipt, error) {
+	return m.beginGuardedTrial(operationID, revision, ttlSeconds, qaCrashPoint, false)
+}
+
+// The v3 lab path inserts a real native IPv4 route via lo into the isolated
+// table BEFORE the matching rule. It still cannot transport any VPN traffic.
+func (m *Manager) BeginGuardedRouteTrial(operationID string, revision uint64, ttlSeconds int, qaCrashPoint string) (TrialReceipt, error) {
+	return m.beginGuardedTrial(operationID, revision, ttlSeconds, qaCrashPoint, true)
+}
+
+func (m *Manager) beginGuardedTrial(operationID string, revision uint64, ttlSeconds int, qaCrashPoint string, withRoute bool) (TrialReceipt, error) {
 	// The fixed independent systemd unit has exactly one private state root.
 	// A custom --state-dir would arm a watchdog that can never find this
 	// transaction, leaving a real kernel rule unowned after controller death.
 	if m.Dir != DefaultDir {
 		return TrialReceipt{}, Fault("trial_unsupported", "guarded trial requires the installed default private state directory")
 	}
-	if err := trialValidateQACrashPoint("apply", qaCrashPoint); err != nil {
+	phase := "apply"
+	if withRoute {
+		phase = "route-apply"
+	}
+	if err := trialValidateQACrashPoint(phase, qaCrashPoint); err != nil {
 		return TrialReceipt{}, err
 	}
 	if !journalHex32.MatchString(operationID) || revision != 1 || ttlSeconds < 4 || ttlSeconds > 600 {
@@ -513,6 +568,9 @@ func (m *Manager) BeginGuardedRuleTrial(operationID string, revision uint64, ttl
 		}
 		trial := trialJournal{activationJournal: record, BootID: boot, DeadlineUptimeSec: uptime + int64(ttlSeconds)}
 		trial.Version, trial.Revision, trial.Phase, trial.IntentType = 2, 2, "trial_pending", trialIntentType
+		if withRoute {
+			trial.Version, trial.IntentType, trial.RouteDevice = 3, trialRouteIntentType, "lo"
+		}
 		if err := validateTrialJournal(trial); err != nil {
 			return err
 		}
@@ -552,6 +610,23 @@ func (m *Manager) BeginGuardedRuleTrial(operationID string, revision uint64, ttl
 		if present {
 			return Fault("trial_resource_conflict", "rule already exists before guarded trial")
 		}
+		var route PlannedRoute
+		if withRoute {
+			route, err = trialSingleRoute(trial)
+			if err != nil {
+				return err
+			}
+			routePresent, err := trialNativeRoutePresence(route)
+			if err != nil {
+				return err
+			}
+			if routePresent {
+				return Fault("trial_resource_conflict", "route exists before guarded trial")
+			}
+			if err := trialNoForeignTableRules(rows, rule); err != nil {
+				return err
+			}
+		}
 		if err := trialGuardScheduled(); err != nil {
 			return err
 		}
@@ -567,6 +642,14 @@ func (m *Manager) BeginGuardedRuleTrial(operationID string, revision uint64, ttl
 		// Durable pending record and independently active timer PRECEDE the one
 		// kernel effect. Crash before or after add is recoverable by inspection.
 		receipt = trialReceipt(trial, true, false)
+		if withRoute {
+			if err := trialRunIP(trialRouteCommand(route, "add")...); err != nil {
+				return err
+			}
+			if err := trialQAKillAt("after-route", qaCrashPoint); err != nil {
+				return err
+			}
+		}
 		if err := trialRunIP("-4", "rule", "add", "pref", strconv.Itoa(rule.Priority), "to", rule.Destination,
 			"table", strconv.Itoa(rule.Table), "protocol", trialProtocol); err != nil {
 			return err
@@ -610,6 +693,9 @@ func (m *Manager) RecoverGuardedRuleTrial(qaCrashPoint string) (TrialReceipt, er
 			}
 			return err
 		}
+		if qaCrashPoint == "after-route-delete" && record.Version != 3 {
+			return Fault("invalid_arguments", "route-delete crash point requires the v3 route trial")
+		}
 		if record.Phase == "trial_recovered" {
 			if err := trialVerifyRecoveredNative(record); err != nil {
 				return err
@@ -650,6 +736,20 @@ func (m *Manager) RecoverGuardedRuleTrial(qaCrashPoint string) (TrialReceipt, er
 		if err != nil {
 			return err
 		}
+		if record.Version == 3 {
+			// Refuse foreign route/table consumers BEFORE deleting even the
+			// owned rule. Otherwise the two-object rollback could half-succeed.
+			route, err := trialSingleRoute(record)
+			if err != nil {
+				return err
+			}
+			if _, err := trialNativeRoutePresence(route); err != nil {
+				return err
+			}
+			if err := trialNoForeignTableRules(rows, rule); err != nil {
+				return err
+			}
+		}
 		if present {
 			// This narrowly identifies our exact protocol/table/destination/priority
 			// rather than deleting any rule at the occupied priority.
@@ -671,6 +771,11 @@ func (m *Manager) RecoverGuardedRuleTrial(qaCrashPoint string) (TrialReceipt, er
 		}
 		if remains {
 			return Fault("trial_recovery_uncertain", "guarded rule persists after recovery")
+		}
+		if record.Version == 3 {
+			if err := trialRecoverRoute(record, qaCrashPoint); err != nil {
+				return err
+			}
 		}
 		if err := trialQAKillAt("before-recovered-journal", qaCrashPoint); err != nil {
 			return err
@@ -741,6 +846,19 @@ func (m *Manager) ClearRecoveredRuleTrial(operationID string, revision uint64) e
 		}
 		if present {
 			return Fault("trial_resource_conflict", "cannot clear journal while trial rule exists")
+		}
+		if record.Version == 3 {
+			route, err := trialSingleRoute(record)
+			if err != nil {
+				return err
+			}
+			present, err := trialNativeRoutePresence(route)
+			if err != nil {
+				return err
+			}
+			if present {
+				return Fault("trial_resource_conflict", "cannot clear journal while route exists")
+			}
 		}
 		return store.removeJournal(id)
 	})
