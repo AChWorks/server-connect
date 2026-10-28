@@ -459,11 +459,13 @@ assert_network_unchanged reinstall "$offline_before"
 verify_host_services reinstall
 # A REAL Linux TUN+VLESS path is exercised only in the disconnected
 # disposable guest; the installed product still has no public TUN Apply.
+echo 'REAL_TUN_LAB_STAGE=build-guest-generator'
 GOPROXY=off GOTOOLCHAIN=local CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
   go build -trimpath -o "$scratch/tun-config-qa" ./scripts/qa/tun_config_generator.go
 test -x "$scratch/tun-config-qa"
 docker cp "$scratch/tun-config-qa" "$container:/root/qa-tun-config-qa"
 docker cp "$root/scripts/qa/host-tun-path.sh" "$container:/root/qa-host-tun-path.sh"
+echo 'REAL_TUN_LAB_STAGE=execute-guest-path'
 docker exec "$container" /bin/sh /root/qa-host-tun-path.sh
 assert_network_unchanged real-tun-candidate-cleanup "$offline_before"
 verify_host_services real-tun-candidate-cleanup

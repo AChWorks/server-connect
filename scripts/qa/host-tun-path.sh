@@ -17,6 +17,7 @@ origin_pid=
 edge_added=no
 peer_added=no
 default_added=no
+tun_device_created=no
 nft_before=
 
 require_guest() {
@@ -26,7 +27,19 @@ require_guest() {
   test -f /root/qa-host-assertions.sh
   test -x /root/qa-tun-config-qa
   test -x "$core"
-  test -c /dev/net/tun
+  if [ ! -c /dev/net/tun ]; then
+    if [ -e /dev/net/tun ] || [ -L /dev/net/tun ]; then
+      echo 'REAL_TUN_LAB_PREFLIGHT=FAIL (conflicting TUN device path)' >&2
+      return 1
+    fi
+    mkdir -p /dev/net
+    mknod /dev/net/tun c 10 200
+    tun_device_created=yes
+  fi
+  if [ ! -c /dev/net/tun ]; then
+    echo 'REAL_TUN_LAB_PREFLIGHT=FAIL (no kernel TUN character device)' >&2
+    return 1
+  fi
   test "$(ip -4 route show default)" = "default dev lo scope link metric 4242"
   test -z "$(ip -6 route show default)"
   test ! -e /sys/class/net/"$edge"
@@ -54,6 +67,9 @@ cleanup() {
   fi
   if [ "$peer_added" = yes ]; then
     ip netns del "$peer" 2>/dev/null || rc=1
+  fi
+  if [ "$tun_device_created" = yes ]; then
+    rm -f /dev/net/tun || rc=1
   fi
   rm -f "$client_cfg" "$server_cfg" /run/sc-qa-tun-origin.log \
     /run/sc-qa-tun-server.log /run/sc-qa-tun-client.log
@@ -91,11 +107,16 @@ expect_source() {
   test "$response" = "SOURCE=$source"
 }
 
-require_guest
-nft_before=$(nft -j list ruleset)
 trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
+echo 'REAL_TUN_LAB_STAGE=guest-preflight'
+if ! require_guest; then
+  echo 'REAL_TUN_LAB_PREFLIGHT=FAIL' >&2
+  exit 1
+fi
+echo 'REAL_TUN_LAB_PREFLIGHT=PASS'
+nft_before=$(nft -j list ruleset)
 
 # All addresses and processes exist only INSIDE the disconnected container.
 ip netns add "$peer"
