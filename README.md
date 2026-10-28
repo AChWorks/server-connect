@@ -24,7 +24,7 @@ The planned distribution offers **official online**, **operator-hosted HTTPS mir
 
 The existing source includes a Go CLI, secure profile storage, real pinned sing-box **Proxy Only** development tests, a shared offline installer and a developer online bootstrap. **Production Smart Routing, independent runtime recovery, real foreign-path acceptance and Cloudflare Tunnel integration are not implemented/released.** Current installed-host QA is primarily Debian 13/amd64 in disposable Linux guests, not a public support promise.
 
-For source checks, run `go test ./...`. Actual CLI flags and development diagnostics are maintained in [the CLI help/source](cmd/server-connect/main.go); the reproducible isolated test procedures live in [the QA scripts](scripts/qa/) and CI. Older process-census, unarmed selective-intent and loopback-rule trial commands are **developer diagnostics, not production routing**. Never run privileged disposable-only QA experiments on a customer server.
+For source checks, run `go test ./...`. Actual CLI flags and development diagnostics are maintained in [the CLI help/source](cmd/server-connect/main.go); the reproducible isolated test procedures live in [the QA scripts](scripts/qa/) and CI. Older unarmed selective-intent and loopback-rule trial commands are **developer diagnostics, not production routing**. Never run privileged disposable-only QA experiments on a customer server.
 
 ## Documentation
 

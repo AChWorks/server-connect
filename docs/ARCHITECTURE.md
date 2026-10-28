@@ -58,4 +58,4 @@ The connector must not change aaPanel/Nginx virtual hosts, intercept another tun
 
 Target only **tested** Linux OS/kernel/architecture/sing-box combinations with systemd and the required TUN/network capabilities. Acquire immutable verified bytes via official online, operator-hosted HTTPS mirror, or manual offline upload; all invoke one shared installer. Keep host-specific package, signature and installation rules in [OFFLINE-DISTRIBUTION.md](OFFLINE-DISTRIBUTION.md).
 
-Operational safety details live in [SAFETY-RECOVERY.md](SAFETY-RECOVERY.md); real scenario coverage and known limits in [ACCEPTANCE.md](ACCEPTANCE.md). Existing development-only procfs observations, unarmed selective plans and loopback RPDB trials remain code/test diagnostics, **not** release-blocking implementations of Smart Routing.
+Operational safety details live in [SAFETY-RECOVERY.md](SAFETY-RECOVERY.md); real scenario coverage and known limits in [ACCEPTANCE.md](ACCEPTANCE.md). Existing development-only unarmed selective plans and loopback RPDB trials remain code/test diagnostics, **not** release-blocking implementations of Smart Routing.

@@ -124,6 +124,18 @@ func TestUnknownCommandNeverEchoesPastedBearerURI(t *testing.T) {
 	}
 }
 
+// Retired per-process diagnostics must not silently return as routing controls.
+func TestRetiredWorkloadObserveIsNotAnActiveCommand(t *testing.T) {
+	store := filepath.Join(t.TempDir(), "state")
+	manager := sc.New(store, "", 0)
+	if code := run(true, manager, []string{"workload-observe", "--pid", "2", "--descendants", "--sockets"}); code == 0 {
+		t.Fatal("retired process-based diagnostic unexpectedly accepted")
+	}
+	if _, err := os.Stat(store); !os.IsNotExist(err) {
+		t.Fatal("unsupported per-process command touched product state")
+	}
+}
+
 func TestDiagnosePathCLIHonorsErrorsAndRedactsTargets(t *testing.T) {
 	healthy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
