@@ -368,6 +368,40 @@ echo 'REAL_TUN_LAB_STAGE=execute-guest-path'
 docker exec "$container" /bin/sh /root/qa-host-tun-path.sh
 assert_network_unchanged real-tun-candidate-cleanup "$offline_before"
 verify_host_services real-tun-candidate-cleanup
+# The negative variants must refuse the terminal hosting PASS even though
+# the ordinary Direct hosting reply still succeeds after the actual TUN exits.
+# Use the same isolated sing-box fixture; each invocation checks full cleanup.
+for fault in before-hosting after-hosting; do
+  negative_log="$scratch/real-tun-$fault-negative.log"
+  if docker exec -e "SC_QA_TUN_OUTAGE_FAULT=$fault" \
+      "$container" /bin/sh /root/qa-host-tun-path.sh >"$negative_log" 2>&1; then
+    echo "TUN-loss fault unexpectedly succeeded ($fault)" >&2
+    cat "$negative_log" >&2
+    exit 1
+  else
+    negative_rc=$?
+  fi
+  [[ $negative_rc == 1 ]] || {
+    echo "TUN-loss fault did not exit at the expected rejected assertion ($fault; rc=$negative_rc)" >&2
+    cat "$negative_log" >&2
+    exit 1
+  }
+  expected_guard=$([[ $fault == before-hosting ]] && echo pre-hosting || echo post-hosting)
+  grep -Fx 'REAL_TUN_NEGATIVE_DIRECT_HOSTING=PASS (native reply works without TUN)' "$negative_log" || {
+    cat "$negative_log" >&2; exit 1;
+  }
+  grep -Fx "REAL_TUN_FOREIGN_HOSTING_OUTAGE_GUARD=REJECTED ($expected_guard)" "$negative_log" || {
+    cat "$negative_log" >&2; exit 1;
+  }
+  if grep -Fq 'REAL_TUN_FOREIGN_HOSTING_OUTAGE=PASS' "$negative_log"; then
+    echo "False positive hosting-outage PASS after TUN loss ($fault)" >&2
+    cat "$negative_log" >&2
+    exit 1
+  fi
+  assert_network_unchanged "real-tun-$fault-rejected-cleanup" "$offline_before"
+  verify_host_services "real-tun-$fault-rejected-cleanup"
+  echo "REAL_TUN_HOSTING_FALSE_PASS_REJECTED=PASS (fault=$fault)"
+done
 docker exec "$container" /bin/rm -f /root/qa-tun-config-qa /root/qa-host-tun-path.sh
 # Product code + installed inactive-by-default independent recovery units.
 # The actual RPDB rule is added ONLY in the verified disconnected guest.

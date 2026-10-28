@@ -126,6 +126,19 @@ print(counters[0])
 direct_witness_packets() { peer_counter_packets direct_packets; }
 hosting_reply_packets() { peer_counter_packets hosting_reply_packets; }
 
+# The fault is injected only by the disposable installed-host regression.
+# Wait for the real sing-box process to exit so its TUN policy is removed.
+stop_tun_client_for_qa_fault() {
+  test -n "$client_pid"
+  kill "$client_pid"
+  wait "$client_pid" 2>/dev/null || :
+  client_pid=
+  test ! -e /sys/class/net/sctunqa0 || {
+    echo 'QA fault failed to remove the TUN interface' >&2
+    return 1
+  }
+}
+
 assert_tun_policy_active() {
   [ -n "$client_pid" ] && kill -0 "$client_pid" 2>/dev/null || return 1
   test -e /sys/class/net/sctunqa0 || return 1
@@ -300,10 +313,12 @@ if [ "$ready" != yes ]; then
   exit 1
 fi
 echo "REAL_TUN_SELECTED_TCP_PATH=PASS (domestic Direct vs foreign VLESS; no HTTP proxy)"
+assert_tun_policy_active || { echo 'FAIL: TUN not active before active hosting probe' >&2; exit 1; }
 expect_foreign_hosted_reply
 hosting_active=$(hosting_reply_packets)
 test "$hosting_active" -gt "$hosting_baseline" || { echo 'FAIL: hosting replies did not reach foreign visitor while TUN active' >&2; exit 1; }
-echo 'REAL_TUN_FOREIGN_HOSTING_ACTIVE=PASS (independently observed foreign-visitor reply path)'
+assert_tun_policy_active || { echo 'FAIL: TUN lost during active hosting probe' >&2; exit 1; }
+echo "REAL_TUN_FOREIGN_HOSTING_ACTIVE=PASS (reply packets $hosting_baseline -> $hosting_active; TUN still active)"
 
 # A completely separate proxy-unaware process must follow TUN too.
 wget_result=$(env -i HOME=/root PATH=/usr/bin:/bin:/sbin:/usr/sbin \
@@ -345,7 +360,27 @@ echo 'REAL_TUN_POLICY_DURING_OUTAGE=PASS (live client, TUN route, installed nfta
 echo 'REAL_TUN_NO_DIRECT_PACKETS_ON_UPSTREAM_LOSS=PASS (positive-controlled independent peer witness)'
 expect_source 5.22.0.10 10.254.72.1
 echo "REAL_TUN_UPSTREAM_LOSS=PASS (VPN path failed closed, domestic/underlay Direct preserved)"
+# The isolated regression deliberately removes the real TUN after the
+# preceding outage assertions, showing that a native Direct hosting reply
+# alone must NEVER count as "hosting survived with active TUN".
+case "${SC_QA_TUN_OUTAGE_FAULT-}" in
+  '') ;;
+  before-hosting)
+    stop_tun_client_for_qa_fault
+    expect_foreign_hosted_reply
+    echo 'REAL_TUN_NEGATIVE_DIRECT_HOSTING=PASS (native reply works without TUN)'
+    ;;
+  after-hosting) ;;
+  *) echo 'Invalid disposable TUN outage fault injection' >&2; exit 2 ;;
+esac
+assert_tun_policy_active || { echo 'REAL_TUN_FOREIGN_HOSTING_OUTAGE_GUARD=REJECTED (pre-hosting)' >&2; exit 1; }
 expect_foreign_hosted_reply
 hosting_outage=$(hosting_reply_packets)
 test "$hosting_outage" -gt "$hosting_active" || { echo 'FAIL: hosting replies did not survive VLESS outage' >&2; exit 1; }
-echo 'REAL_TUN_FOREIGN_HOSTING_OUTAGE=PASS (hosting replies preserved while selected VPN is down)'
+if [ "${SC_QA_TUN_OUTAGE_FAULT-}" = after-hosting ]; then
+  stop_tun_client_for_qa_fault
+  expect_foreign_hosted_reply
+  echo 'REAL_TUN_NEGATIVE_DIRECT_HOSTING=PASS (native reply works without TUN)'
+fi
+assert_tun_policy_active || { echo 'REAL_TUN_FOREIGN_HOSTING_OUTAGE_GUARD=REJECTED (post-hosting)' >&2; exit 1; }
+echo "REAL_TUN_FOREIGN_HOSTING_OUTAGE=PASS (reply packets $hosting_active -> $hosting_outage; TUN still active after VPN loss)"
