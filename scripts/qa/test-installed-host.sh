@@ -36,6 +36,7 @@ bash scripts/qa/test-host-apt-only.sh
 # since pull_request_target uses the trusted main workflow definition.
 PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/qa/test-wp-fcgi-check.py
 PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/qa/test-wp-proxy-prepend.py
+PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/qa/test-tun-dns-wire.py
 # The guard feasibility probe must be strictly guest-local and must reject
 # ambiguous kernel identities before the privileged disconnected guest runs.
 sh -n scripts/qa/host-activation-guard.sh
@@ -363,6 +364,8 @@ GOPROXY=off GOTOOLCHAIN=local CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
   go build -trimpath -o "$scratch/tun-config-qa" ./scripts/qa/tun_config_generator.go
 test -x "$scratch/tun-config-qa"
 docker cp "$scratch/tun-config-qa" "$container:/root/qa-tun-config-qa"
+docker cp "$root/scripts/qa/tun-dns-peer.py" "$container:/root/qa-tun-dns-peer.py"
+docker cp "$root/scripts/qa/tun-dns-client.py" "$container:/root/qa-tun-dns-client.py"
 docker cp "$root/scripts/qa/host-tun-path.sh" "$container:/root/qa-host-tun-path.sh"
 # Independently check resources omitted from the standard route/rule/link
 # digest, in addition to the guest's own explicit cleanup verdict.

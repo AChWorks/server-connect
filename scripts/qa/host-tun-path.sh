@@ -16,6 +16,7 @@ server_pid=
 origin_pid=
 hosting_pid=
 udp_pid=
+dns_pid=
 edge_added=no
 peer_added=no
 default_added=no
@@ -68,7 +69,7 @@ cleanup() {
   original_rc=$?
   cleanup_failed=no
   trap - EXIT INT TERM
-  for pid in "$client_pid" "$server_pid" "$origin_pid" "$hosting_pid" "$udp_pid"; do
+  for pid in "$client_pid" "$server_pid" "$origin_pid" "$hosting_pid" "$udp_pid" "$dns_pid"; do
     if [ -n "$pid" ]; then
       kill "$pid" 2>/dev/null || :
       wait "$pid" 2>/dev/null || :
@@ -99,7 +100,7 @@ cleanup() {
   fi
   rm -f "$client_cfg" "$server_cfg" /run/sc-qa-tun-origin.log \
     /run/sc-qa-tun-hosting.log /run/sc-qa-tun-udp.log \
-    /run/sc-qa-tun-server.log /run/sc-qa-tun-client.log ||
+    /run/sc-qa-tun-dns.log /run/sc-qa-tun-server.log /run/sc-qa-tun-client.log ||
       { echo 'REAL_TUN_LAB_CLEANUP=FAIL (temporary QA file deletion)' >&2; cleanup_failed=yes; }
   # Fail, rather than claim cleanup, if the real core leaked its TUN.
   if [ -e /sys/class/net/sctunqa0 ]; then
@@ -170,6 +171,8 @@ print(counters[0])
 
 direct_witness_packets() { peer_counter_packets direct_packets; }
 direct_udp_witness_packets() { peer_counter_packets direct_udp_packets; }
+direct_dns_udp_witness_packets() { peer_counter_packets direct_dns_udp_packets; }
+direct_dns_tcp_witness_packets() { peer_counter_packets direct_dns_tcp_packets; }
 hosting_reply_packets() { peer_counter_packets hosting_reply_packets; }
 
 # The fault is injected only by the disposable installed-host regression.
@@ -261,6 +264,13 @@ else:
 PYUDPCLIENT
 }
 
+dns_path() {
+  # Real DNS wire frames, not an HTTP proxy or fake DNS-success marker.
+  # Unique query names prevent accepting cached answers.
+  env -i HOME=/root PATH=/usr/bin:/bin:/sbin:/usr/sbin \
+    /usr/bin/python3 -I -B /root/qa-tun-dns-client.py "$1" "$2" "$3" "$4" "$5"
+}
+
 trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
@@ -294,11 +304,15 @@ ip netns exec "$peer" nft -f - <<'NFTWITNESS'
 table inet scqawitness {
   counter direct_packets { }
   counter direct_udp_packets { }
+  counter direct_dns_udp_packets { }
+  counter direct_dns_tcp_packets { }
   counter hosting_reply_packets { }
   chain incoming {
     type filter hook input priority filter; policy accept;
     iifname "scqapeer0" ip daddr 8.8.8.8 tcp dport 19180 counter name direct_packets
     iifname "scqapeer0" ip daddr 8.8.8.8 udp dport 19186 counter name direct_udp_packets
+    iifname "scqapeer0" ip daddr 8.8.8.8 udp dport 53 counter name direct_dns_udp_packets
+    iifname "scqapeer0" ip daddr 8.8.8.8 tcp dport 53 counter name direct_dns_tcp_packets
     iifname "scqapeer0" ip saddr 10.254.72.1 ip daddr 198.51.100.42 tcp sport 19184 counter name hosting_reply_packets
   }
 }
@@ -334,6 +348,12 @@ while True:
 PYUDPSERVER
 udp_pid=$!
 
+# The peer answers genuine DNS UDP and TCP messages. The A record identifies
+# the request source observed by an independent authoritative server.
+ip netns exec "$peer" /usr/bin/python3 -I -B -u /root/qa-tun-dns-peer.py \
+  >/run/sc-qa-tun-dns.log 2>&1 &
+dns_pid=$!
+
 # Host-side HTTP service simulates a website or administrative panel whose
 # visitor connects from an independently controlled foreign address.
 python3 -u - >/run/sc-qa-tun-hosting.log 2>&1 <<'PYHOSTING' &
@@ -366,6 +386,9 @@ while [ "$attempt" -lt 25 ]; do
      expect_source 8.8.8.8 10.254.72.1 &&
      udp_path 5.22.0.10 10.254.72.1 ready-domestic reply &&
      udp_path 8.8.8.8 10.254.72.1 ready-foreign reply &&
+     dns_path 5.22.0.10 192.0.2.11 ready-domestic-udp udp reply &&
+     dns_path 8.8.8.8 192.0.2.11 ready-foreign-udp udp reply &&
+     dns_path 8.8.8.8 192.0.2.11 ready-foreign-tcp tcp reply &&
      expect_foreign_hosted_reply; then
     ready=yes
     break
@@ -373,6 +396,7 @@ while [ "$attempt" -lt 25 ]; do
   kill -0 "$server_pid" 2>/dev/null || { echo "QA VLESS server exited" >&2; exit 1; }
   kill -0 "$hosting_pid" 2>/dev/null || { echo "QA hosting service exited" >&2; exit 1; }
   kill -0 "$udp_pid" 2>/dev/null || { echo "QA UDP service exited" >&2; exit 1; }
+  kill -0 "$dns_pid" 2>/dev/null || { echo "QA DNS server exited" >&2; exit 1; }
   attempt=$((attempt+1))
   sleep 0.2
 done
@@ -387,6 +411,13 @@ echo "REAL_TUN_DIRECT_WITNESS=PASS (positive control observed $witness_baseline 
 udp_witness_baseline=$(direct_udp_witness_packets)
 test "$udp_witness_baseline" -gt 0 || { echo 'FAIL: no positive native foreign UDP packet witness' >&2; exit 1; }
 echo "REAL_TUN_UDP_DIRECT_WITNESS=PASS (native foreign UDP packets=$udp_witness_baseline)"
+dns_udp_baseline=$(direct_dns_udp_witness_packets)
+dns_tcp_baseline=$(direct_dns_tcp_witness_packets)
+test "$dns_udp_baseline" -gt 0 && test "$dns_tcp_baseline" -gt 0 || {
+  echo "FAIL: native Direct DNS UDP/TCP packet witnesses lack positive controls" >&2
+  exit 1
+}
+echo "REAL_TUN_DNS_DIRECT_WITNESS=PASS (native DNS UDP/TCP positive controls)"
 hosting_baseline=$(hosting_reply_packets)
 test "$hosting_baseline" -gt 0 || { echo 'FAIL: no positive control of foreign visitor hosting reply' >&2; exit 1; }
 echo "REAL_TUN_FOREIGN_HOSTING_BASELINE=PASS (foreign visitor request/reply, packets=$hosting_baseline)"
@@ -433,6 +464,18 @@ test "$udp_witness_active" -eq "$udp_witness_baseline" || {
 }
 assert_tun_policy_active || { echo 'FAIL: TUN disappeared during selected UDP proof' >&2; exit 1; }
 echo "REAL_TUN_SELECTED_UDP_PATH=PASS (domestic Direct, foreign VLESS, no native foreign UDP packets)"
+assert_tun_policy_active || { echo 'FAIL: TUN unavailable before DNS wire proof' >&2; exit 1; }
+dns_path 5.22.0.10 192.0.2.11 tun-domestic-udp udp reply
+dns_path 5.22.0.10 192.0.2.11 tun-domestic-tcp tcp reply
+dns_path 8.8.8.8 192.0.2.22 tun-foreign-udp udp reply
+dns_path 8.8.8.8 192.0.2.22 tun-foreign-tcp tcp reply
+test "$(direct_dns_udp_witness_packets)" -eq "$dns_udp_baseline" &&
+test "$(direct_dns_tcp_witness_packets)" -eq "$dns_tcp_baseline" || {
+  echo 'FAIL: VPN-required DNS escaped native Direct with active TUN' >&2
+  exit 1
+}
+assert_tun_policy_active || { echo 'FAIL: TUN disappeared during DNS wire proof' >&2; exit 1; }
+echo "REAL_TUN_SELECTED_DNS_WIRE_PATH=PASS (UDP/TCP DNS answers source-bound, no foreign Direct leak)"
 assert_tun_policy_active || { echo 'FAIL: TUN not active before active hosting probe' >&2; exit 1; }
 expect_foreign_hosted_reply
 hosting_active=$(hosting_reply_packets)
@@ -488,6 +531,18 @@ test "$udp_witness_outage" -eq "$udp_witness_active" || {
 udp_path 5.22.0.10 10.254.72.1 outage-domestic reply
 assert_tun_policy_active || { echo 'FAIL: TUN lost during foreign UDP outage probe' >&2; exit 1; }
 echo 'REAL_TUN_UDP_NO_DIRECT_PACKETS_ON_UPSTREAM_LOSS=PASS (positive-controlled peer witness)'
+assert_tun_policy_active || { echo 'FAIL: TUN lost before DNS outage proof' >&2; exit 1; }
+dns_path 8.8.8.8 none outage-foreign-udp udp no-reply
+dns_path 8.8.8.8 none outage-foreign-tcp tcp no-reply
+dns_path 5.22.0.10 192.0.2.11 outage-domestic-udp udp reply
+dns_path 5.22.0.10 192.0.2.11 outage-domestic-tcp tcp reply
+test "$(direct_dns_udp_witness_packets)" -eq "$dns_udp_baseline" &&
+test "$(direct_dns_tcp_witness_packets)" -eq "$dns_tcp_baseline" || {
+  echo 'FAIL: VPN-required DNS leaked native Direct after VLESS loss' >&2
+  exit 1
+}
+assert_tun_policy_active || { echo 'FAIL: TUN lost during DNS outage proof' >&2; exit 1; }
+echo 'REAL_TUN_DNS_NO_DIRECT_PACKETS_ON_UPSTREAM_LOSS=PASS (UDP/TCP negative with independent witness)'
 expect_source 5.22.0.10 10.254.72.1
 echo "REAL_TUN_UPSTREAM_LOSS=PASS (VPN path failed closed, domestic/underlay Direct preserved)"
 # The isolated regression deliberately removes the real TUN after the
