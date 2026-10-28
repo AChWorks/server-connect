@@ -1,6 +1,7 @@
 package sc
 
 import (
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -22,42 +23,80 @@ type workloadProcCensusEntry struct {
 
 const (
 	workloadDescendantMaxProcEntries = 8192
-	workloadDescendantMaxChildren    = 64
+	// Include nonnumeric entries in the limit: procfs has global files and
+	// directories as well as per-PID directories.
+	workloadDescendantMaxDirEntries = workloadDescendantMaxProcEntries + 256
+	workloadDescendantDirBatchSize  = 128
+	workloadDescendantMaxChildren   = 64
 )
+
+// The private reader seam lets tests verify bounded streaming without
+// provisioning thousands of real host processes. Production always uses an
+// opened /proc directory; n must stay strictly positive and finite.
+type workloadProcDirReader interface {
+	ReadDir(n int) ([]os.DirEntry, error)
+}
 
 // A procfs census does not claim to observe all processes or threads.
 // Transient or inaccessible unrelated entries are skipped; every selected
 // candidate is rechecked separately and the two selected trees must agree.
 func workloadProcessCensusAt(root string) (map[int]workloadProcCensusEntry, error) {
-	entries, err := os.ReadDir(root)
+	dir, err := os.Open(root)
 	if err != nil {
 		return nil, workloadObservationUnavailable()
 	}
+	defer dir.Close()
+	return workloadProcessCensusFromReader(root, dir)
+}
+
+func workloadProcessCensusFromReader(root string, dir workloadProcDirReader) (map[int]workloadProcCensusEntry, error) {
 	observed := make(map[int]workloadProcCensusEntry)
-	numeric := 0
-	for _, entry := range entries {
-		if !entry.IsDir() {
-			continue
+	total, numeric := 0, 0
+	for {
+		// Request at most one entry beyond the total cap, so even the
+		// exhaustion check cannot materialize an unbounded directory slice.
+		batchSize := workloadDescendantDirBatchSize
+		if remaining := workloadDescendantMaxDirEntries - total + 1; remaining < batchSize {
+			batchSize = remaining
 		}
-		pid, err := strconv.Atoi(entry.Name())
-		if err != nil || pid < 1 {
-			continue
-		}
-		numeric++
-		if numeric > workloadDescendantMaxProcEntries {
+		entries, err := dir.ReadDir(batchSize)
+		if (err != nil && err != io.EOF) || len(entries) > batchSize {
 			return nil, workloadObservationUnavailable()
 		}
-		stat, err := readWorkloadProcFile(filepath.Join(root, entry.Name(), "stat"))
-		if err != nil {
-			continue
+		total += len(entries)
+		if total > workloadDescendantMaxDirEntries {
+			return nil, workloadObservationUnavailable()
 		}
-		parent, start, err := parseWorkloadStat(stat, pid)
-		if err != nil {
-			continue
+		for _, entry := range entries {
+			if !entry.IsDir() {
+				continue
+			}
+			pid, err := strconv.Atoi(entry.Name())
+			if err != nil || pid < 1 {
+				continue
+			}
+			numeric++
+			if numeric > workloadDescendantMaxProcEntries {
+				return nil, workloadObservationUnavailable()
+			}
+			stat, err := readWorkloadProcFile(filepath.Join(root, entry.Name(), "stat"))
+			if err != nil {
+				continue
+			}
+			parent, start, err := parseWorkloadStat(stat, pid)
+			if err != nil {
+				continue
+			}
+			observed[pid] = workloadProcCensusEntry{parent: parent, start: start}
 		}
-		observed[pid] = workloadProcCensusEntry{parent: parent, start: start}
+		if err == io.EOF {
+			return observed, nil
+		}
+		// A positive-size ReadDir must never return an empty, successful batch.
+		if len(entries) == 0 {
+			return nil, workloadObservationUnavailable()
+		}
 	}
-	return observed, nil
 }
 
 func workloadDescendantsFromCensus(census map[int]workloadProcCensusEntry, rootPID int) ([]int, error) {

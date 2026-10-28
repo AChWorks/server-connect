@@ -144,7 +144,12 @@ creating new traffic, modifying host routes or claiming ownership/path readiness
 
 The optional `workload-observe --pid N --descendants` must return a bounded
 sample of only currently visible Linux child processes and their birth ticks,
-parent identities and cgroups, with two procfs censuses and rechecks. The
+parent identities and cgroups, with two procfs censuses and rechecks. Both
+censuses must stream directory entries in bounded positive batches, refuse
+more than 8192 numeric PID entries or 8448 total entries (including nonnumeric
+entries), and never pre-materialize an unbounded directory listing. Verify
+exact/over-limit boundaries, early rejection and no partial evidence from a
+failed second census using synthetic and real filesystem fixtures. The
 optional combination with `--sockets` additionally reads each sampled child's
 held TCP/UDP FDs. A stable observed empty child list is distinct from missing
 visibility; no observation proves complete descendant/job ownership. Reject

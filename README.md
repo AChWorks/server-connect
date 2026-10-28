@@ -67,8 +67,12 @@ fabricated identification.
 For an **explicitly opted-in** sample of currently visible child processes,
 use `server-connect --json workload-observe --pid 12345 --descendants`.
 This performs two bounded, non-atomic procfs process censuses and rechecks the
-selected parent/child identities and cgroups. It includes only observed live
-children; short-lived, hidden, reparented or newly spawned workers can be
+selected parent/child identities and cgroups. Directory entries are streamed in
+batches of up to 128, with at most 8192 numeric PID entries and 8448 total
+entries per census (including nonnumeric files/directories). Exceeding either
+limit fails closed; no complete /proc listing is materialized first. The
+result includes only observed live children; short-lived, hidden, reparented or
+newly spawned workers can be
 missed. `observed_descendants` is present as an empty array when no child was
 seen, not as a guarantee that no child ever ran. An incomplete or changed
 selected tree fails with `workload_observation_unavailable`, without partial
