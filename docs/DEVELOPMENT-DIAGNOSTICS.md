@@ -1,0 +1,377 @@
+# Development candidate diagnostics and historical QA commands
+
+**Engineering-only reference; these commands are not a released product install path.** This section preserves current real CLI and QA behavior, including older named selective-intent and process-observation tools. It must not be mistaken for required per-job routing, working production Smart Routing TUN, or a release acceptance checklist. Accepted product behavior is in [PROJECT-SPEC.md](PROJECT-SPEC.md); tests in [ACCEPTANCE.md](ACCEPTANCE.md).
+
+## Development candidate checks (not a released installer)
+
+The current initial Linux target is **Debian 13 / amd64**. The manager is implemented in Go using only the standard library. Run `go test ./...` for source tests. Optional genuine local VLESS core tests require `SC_TEST_SINGBOX=/absolute/path/to/the/pinned/sing-box` and `go test ./...`. To create a **local QA-only** bundle from the separately fetched and digest-verified official upstream archive, run `scripts/package.sh /path/to/sing-box-1.14.3-linux-amd64.tar.gz`. The resulting artifact is not a public release; its local checksum alone is not a publisher signature.
+
+The online bootstrap candidate at `scripts/bootstrap-online.sh` requires an explicit HTTPS archive URL and independently obtained SHA-256 digest; it downloads the **complete** offline bundle and invokes the **same** local installer. The supported root invocation uses trusted Debian 13 `sudo` with standard environment reset followed by `/usr/bin/env -i HOME=/root PATH=/usr/sbin:/usr/bin:/sbin:/bin LC_ALL=C /bin/sh /root/bootstrap-online.sh ...`; this environment boundary must be applied **before** the interpreter starts, not merely via script-body `unset`. Custom sudo environment preservation and hostile root shells are unsupported. Actual online installation uses private `/root` staging, ignores inherited `TMPDIR` and archive overrides, enforces a **96 MiB** download-time ceiling (including chunked responses), and uses bounded Python 3 stdlib archive preflight/extraction with **128 MiB per-file / 192 MiB expanded aggregate** limits, a kernel per-file limit, time/memory/metadata limits, and at least 1 GiB or 10% host-filesystem free-space reserve. The exact official pinned core measures 31,678,266 compressed and 93,255,156 expanded bytes; these caps allow additional manager/metadata room without unbounded staging. Space is checked before transfer/extraction and before each extraction write, while concurrent host writers remain a limitation without a filesystem quota. Test-only HTTP is allowed only for parsed loopback hosts, with no redirects and no inherited proxy; production URLs and their redirects must use HTTPS. Python 3 and `timeout` are required for this **online development bootstrap only**, not for the offline installer. For a real root online installation on Debian 13, missing `curl`, Python 3 or HTTPS CA certificates are installed through the host's existing APT trust configuration (native essential `coreutils` must already be intact); this changes OS packages even if subsequent archive acquisition fails, and never changes product/network state on such a failure. `--verify-only` remains available to non-root callers but **never** installs prerequisites. This is not a published or publisher-authenticated one-line release. The offline installer refuses source paths with unsafe or symlinked ancestors before privileged payload use. A short public one-line release command must wait for the Owner-approved release endpoint, publisher authentication and license decision. Never use a made-up download URL or execute unverified release code as root.
+
+### Read-only host network preflight (developer diagnostic)
+
+On a Linux host with trusted native `/usr/bin/ip`, `server-connect --json host-preflight --endpoint 198.51.100.10 --management-peer 203.0.113.42` records actual IPv4/IPv6 routes, rules, links and kernel route lookups for **literal IPs**. Broadcast, multicast, unspecified, IPv4-mapped IPv6 and link-local addresses without a usable interface scope are rejected before native inspection; private IPv4, IPv6 ULA and loopback literals remain supported. It does not resolve DNS, touch state, enable a tunnel, change kernel networking or prove those peers are reachable. Both peer arguments are optional; supplying them is useful for future underlay and management-path planning. The report deliberately says `activation_ready: false` and `snapshot_atomic: false`: it is **not** an ownership journal, firewall inspection, activation authorization or replacement for the independent guards and SSH/reboot/field acceptance specified in Issue #2. This is a dependent development feature, not a released installation instruction.
+
+### Optional legacy workload diagnostic (not required for Smart Routing)
+
+When investigating which **Linux process** a particular aaPanel App Store
+installation actually starts, the development CLI can inspect an explicitly
+supplied, already-running PID and its current parent chain on unified-cgroup-v2
+Linux hosts:
+
+~~~sh
+server-connect --json workload-observe --pid 12345
+~~~
+
+Replace `12345` with a PID observed on **your own test host**. By default, the command reads only `/proc/PID/stat` and `/proc/PID/cgroup`
+for the PID and its ancestors. It does **not** read command-line arguments,
+environment variables, process memory, sockets or credentials. Returned PID/start-time-tick and cgroup
+observations help diagnose recycled PIDs, reparenting and shared service
+cgroups, but the snapshots are not atomic; a PID-namespace boundary may
+hide parent processes. The process can exit or be replaced
+immediately afterward. The raw cgroup path can reveal local service names;
+keep diagnostic output private rather than pasting it into public issues. A
+child with the **same cgroup as a panel daemon** is
+not an independently identifiable install job; a PID and cgroup path alone
+never authorize job selection or intercept future children. An inaccessible,
+vanished, ambiguous or unsupported cgroup yields a classified failure, not a
+fabricated identification.
+
+For an **explicitly opted-in** sample of currently visible child processes,
+use `server-connect --json workload-observe --pid 12345 --descendants`.
+This performs two bounded, non-atomic procfs process censuses and rechecks the
+selected parent/child identities and cgroups. Directory entries are streamed in
+batches of up to 128, with at most 8192 numeric PID entries and 8448 total
+entries per census (including nonnumeric files/directories). Exceeding either
+limit fails closed; no complete /proc listing is materialized first. The
+result includes only observed live children; short-lived, hidden, reparented or
+newly spawned workers can be
+missed. `observed_descendants` is present as an empty array when no child was
+seen, not as a guarantee that no child ever ran. An incomplete or changed
+selected tree fails with `workload_observation_unavailable`, without partial
+results. It is an observation, **not** a job identifier or continuous child
+tracking mechanism.
+
+For a deeper **explicitly opted-in** snapshot of the supplied parent **and
+its sampled children**, add `--sockets`. For example:
+
+~~~sh
+server-connect --json workload-observe --pid 12345 --descendants --sockets
+~~~
+
+Without `--descendants`, `server-connect --json workload-observe --pid 12345 --sockets`
+continues to inspect only the supplied PID. The socket option inspects open
+`socket:[inode]` file-descriptor links and TCP/UDP IPv4/IPv6 tables in each
+sampled PID's network namespace, then reports only entries whose inodes match
+its currently held sockets (protocol, numeric
+local/remote address, kernel state). It rechecks the namespace, socket-FD inode
+set and process ancestry before returning; inaccessible or changed observations
+fail closed. Unmatched FDs are counted as unclassified (e.g., Unix/netlink),
+not silently treated as TCP/UDP. The command does not initiate a network probe.
+
+With **both** `--descendants --sockets`, the root and all sampled descendants
+share a **64 MiB aggregate TCP/UDP namespace-table input budget** (plus at most
+one sentinel byte to detect an overflow), in addition to the existing 8 MiB
+per-table limit. A shared namespace may be read repeatedly; the budget counts
+each read. Exceeding the budget returns `workload_observation_unavailable`
+without any partial root/child evidence. This is an input/I/O budget, not a
+guarantee of wall-clock time, peak memory, complete coverage, or job ownership.
+The **single-PID** `--sockets` mode retains its prior per-table limits.
+
+**These are not authenticated job or flow records.** Socket FDs can be shared,
+inherited or reused; observations are non-atomic and do not establish complete child
+coverage, DNS resolution, actual egress interfaces, selected VPN paths or
+successful packet delivery. Numeric socket endpoints and cgroup names are
+sensitive operational diagnostics; retain them in private administrator output.
+No background aaPanel App Store task is claimed to be routable from this data.
+
+The command always returns `read_only: true`, `snapshot_atomic: false`,
+`attribution_verified: false`, `descendants_covered: false`,
+`traffic_path_verified: false` and `activation_ready: false`. It never creates
+a routing rule, cgroup, firewall change or VPN; there is **no transparent
+background-job selection** in this optional diagnostic. The future server-wide destination policy needs verified packet paths and independent guards, **not** authenticated per-Job/PID attribution. IPv4/IPv6/DNS capability and routed acceptance remain open in Issue #2.
+
+### Existing legacy selective route planning (non-TUN developer diagnostic)
+
+The development command below previews **only explicitly selected public CIDR destinations** against the live native Linux route, rule and link inventory. Both endpoint and current management/SSH peer must be literal IPs. The TUN name must be unused; it does not create an interface. For example, using **documentation-only placeholder peers** (replace them before a meaningful operator preview):
+
+~~~sh
+server-connect --json selective-plan --endpoint 198.51.100.10 \
+  --management-peer 203.0.113.42 --tunnel-if scplan0 \
+  --destination 8.8.8.0/24
+~~~
+
+A valid preview returns a deterministic bounded set of **candidate** table/priorities, destination-specific route/rule identities, and fingerprints for that observation and proposed plan. It rejects overlapping destinations, common private/special-purpose ranges, routes overlapping any existing non-default host route, reused interface identity, unsupported rule/table descriptions, and input that would capture the specified VPN endpoint or management peer. The planner also checks whether **earlier policy rules** could intercept selected traffic via a matching default route in another table (including source-, destination-, or mark-specific rules); unknown rule actions or unprovable precedence fail closed with `route_plan_uncertain` instead of silently overwriting third-party policy. Observation and plan fingerprints cover canonicalized route/rule/link inventories **plus the native route-get results for both protected endpoint and management peer**; missing or inconsistent protected lookup evidence is rejected. It is callable from menu option **12**; option **11** remains the previously merged read-only Path Diagnostics.
+
+**Safety boundary:** the output always states `read_only: true`, `activation_ready: false`, `snapshot_atomic: false`, `guard_armed: false`, `ownership_verified: false`. No table or priority is actually reserved; nothing is applied or saved. An unchanged preview, hash or apparently unused ID **does not** prove network ownership or safe SSH/HTTP(S) replies, domestic reachability, DNS/bootstrap or a bound VPN path. Do not run the displayed candidate policy manually. The internal fsync-backed PREPARED/UNCERTAIN intent journal does not attest route ownership or apply network changes. Guarded owned-route activation and rollback, an independent 600-second Activation Guard, authenticated new-session confirmation, reboot/timeout recovery and Runtime Health Guard (#3) remain separate mandatory implementation and acceptance gates.
+
+#### Private, unarmed Selective intent staging (Issue #2 development)
+
+The CLI can now bind a fresh Selective preview to a version-1 **private journal intent**, and explicitly abandon **only** its untouched PREPARED revision:
+
+~~~sh
+server-connect --json selective-stage-intent --endpoint 198.51.100.10 \
+  --management-peer 203.0.113.42 --tunnel-if scplan0 \
+  --destination 8.8.8.0/24
+server-connect --json activation-journal-status
+server-connect --json selective-verify-intent --operation-id OPERATION_ID --revision 1
+server-connect --json selective-abandon-intent --operation-id OPERATION_ID --revision 1
+~~~
+
+Use actual endpoints instead of documentation placeholders. Staging performs **two independent, non-atomic native preflights**, requires identical observation and plan SHA-256 fingerprints, and durably records a deterministic proposed *route/rule intent* linked to those fingerprints. It refuses ambiguous kernel observations, conflicting prior journals, incomplete/modified plan identities, and drift during staging. The journal is descriptor-pinned, mode 0600 and fsync-backed; only bounded phase, ID, revision and resource count reach the CLI. The returned ID is an exact-match identifier, **not** proof of host authorization. The private v1 record has an explicit `unarmed_selective_v1` subtype and persisted endpoint, management peer, interface, table and route/rule identities. Selective abandonment checks that complete binding, exact paired route/rule resource keys, prior absence, and the original deterministic plan digest **before** removing the verified inode. Legacy generic PREPARED journals, modified/uncertain records and unsupported future variants cannot be removed by `selective-abandon-intent`; they retain their evidence. The journal is protected against accidental and inconsistent edits, **not authenticated against a privileged actor who can rewrite all of its contents and recompute unkeyed SHA-256**. Staging creates private state (unlike `selective-plan`), may prevent starting another stage until the prior record is deliberately abandoned, and never writes `runtime.json` or `proxy-auth`.
+
+The developer-only `selective-verify-intent` command reopens the exact typed PREPARED operation under the shared Manager lock, performs **two new non-atomic native kernel inspections**, reconstructs the request from strictly validated paired resource evidence, and refuses mismatched plan/observation fingerprints, drift, invalid journal variants and wrong operation/revision. A successful bounded response includes `observations_match_stored_intent: true`, but all `snapshot_atomic`, `guard_armed`, `ownership_verified`, `activation_ready` and `recovery_verified` claims remain **false**. It never writes network state or changes the journal; the Manager lock cannot exclude foreign kernel writers. Its result is **not** a time-stable route reservation or authorization to apply: future activation must independently reobserve after a real rollback guard is armed.
+
+The stage, verify and abandon command responses are **receipts for the exact operation**, not fresh global journal snapshots after the transaction. A concurrent authorized manager may already have abandoned A or staged B when the caller receives A's response; the returned ID always belongs to A, never to B. A successful abandon response reports `phase: absent`, `present: false`, and **the ID/revision of the removed operation**. Use `activation-journal-status` separately to inspect the current journal; even a current `absent` result cannot prove network safety.
+
+**Critical boundary:** `prepared` means **no kernel mutation and no armed recovery guard**. It does not establish an owned TUN/interface, actually reserve the proposed table/rules, install routes or start sing-box; all `guard_armed`, `activation_ready` and `recovery_verified` fields remain **false**. This journal label is NOT the normative guarded PREPARED activation state in `SAFETY-RECOVERY.md`. After even two matching snapshots, another system can change kernel networking before a future activation. Real route execution must re-observe natively under its own guarded transaction and independently verify an armed reboot-capable rollback and ongoing health guard before applying anything. `selective-abandon-intent` fails closed on mismatched ID/revision, uncertain/corrupt journals or replay and **never** deletes network resources. Do not use these developer commands as a routing workaround or a production activation interface.
+
+### Explicit underlay TCP diagnostic (Issue #2 dependent development)
+
+For a *known* literal TCP endpoint and port, run
+`server-connect --json underlay-tcp --endpoint 198.51.100.10 --port 443`.
+If the configured VPN endpoint also uses a DNS name, explicitly verify that
+the **current host resolver** includes the intended pinned IP *before* the
+TCP attempt:
+`server-connect --json underlay-tcp --endpoint 198.51.100.10 --hostname vpn.example.net --port 443`.
+The hostname check rejects malformed/ambiguous names, resolves an absolute
+DNS-style name (never silently adding a local search suffix), caps resolution
+to three seconds, checks A/AAAA records against the pinned literal, refuses
+oversized or unsuitable resolver results, and **does not connect** if that
+literal is absent. It never silently substitutes another resolved address.
+The IP-only command remains a literal-only test and does not invoke DNS.
+
+Either form makes one bounded TCP connection attempt **with no application bytes**,
+using a Linux kernel route lookup qualified by **TCP protocol, the exact
+destination port and the CLI process UID**, followed by `SO_BINDTODEVICE` on
+that selected interface. The **same flow-qualified route and the relevant
+policy rules** are checked again afterward. Source-dependent, source-port,
+mark, VRF, output-interface or unrecognized rule selectors are classified as
+`underlay_policy_unsupported` instead of guessing the socket's effective
+route. It rejects ambiguous/missing/down interfaces and **never falls back
+to an unbound socket** when binding fails. Unreachable/refused/timeouts
+produce a nonzero exit code and a machine-readable partial report
+(`ok: false`). Invalid endpoint/port/hostname arguments return an error
+**without a fabricated `data` report**; failures after the diagnostic starts
+retain `read_only: true` and bounded partial observations. The
+command does not depend on proxy environment variables, saved profiles or
+systemd services. The optional --hostname mode **does** use the current host
+name resolver and requires a DNS-style ASCII hostname with at least two labels;
+IP-only mode never invokes name resolution. Both must be explicitly invoked by
+the operator rather than automatically testing an arbitrary endpoint.
+
+**Scope limitation:** TCP reachability on the selected current interface
+is not proof of a safe unmodified pre-VPN underlay, VPN/TLS authentication,
+UDP/QUIC transport, endpoint DNS bootstrap, existing/new SSH reply paths,
+aaPanel ingress or any Activation/Runtime Guard. The hostname match uses
+the **host-configured resolver** (which may use local hosts records/caches
+or an already-tunneled DNS path). It cannot prove a DNS query succeeded
+over an independent Direct underlay. Pinning an IP does not guarantee the
+VPN client will use that address later; activation planning must independently
+protect actual resolver, endpoint and management paths. This diagnostic never
+mutates routes, firewall, resolver files or host state; `activation_ready`
+and `dns_bootstrap_verified` both remain **false**, even on success.
+Existing third-party routing is possible; observations are non-atomic. The interactive diagnostic is menu option **13**; existing Path Diagnostics and Selective Plan retain options **11** and **12**.
+
+### Explicit resolver-bound DNS diagnostic (Issue #2, dependent development)
+
+The operator may separately check an **explicit DNS resolver path** rather than
+silently trusting the host's current resolver or cached hostname data:
+
+`server-connect --json underlay-dns --hostname vpn.example.net --endpoint 198.51.100.10 --resolver 1.1.1.1`
+
+Optionally set `--resolver-port 53` to target an explicitly selected nonstandard
+DNS service. This command validates the literal resolver and pinned endpoint,
+uses trusted native `/usr/bin/ip` to observe UDP and TCP resolver routes
+for the **exact DNS port and process UID**, and sends bounded standard DNS
+A/AAAA queries **only to that literal server**, with `SO_BINDTODEVICE` on
+the selected interface. Differing UDP/TCP paths, unknown routing selectors,
+source/mark/VRF/source-port-sensitive policies, and post-query route changes
+fail closed. There is no unbound or host-resolver fallback. Invalid input
+omits `data` rather than reporting fictitious safety flags. It refuses
+hosts-file-only answers, malformed inputs,
+a missing/unreachable resolver, unsupported address results, route drift,
+and any response lacking the operator-pinned endpoint IP. Each failure has
+structured `ok: false` evidence without connecting to the VPN endpoint or
+changing host DNS, system networking, profiles or services. Queries may reveal
+the supplied hostname to that resolver; invoke only with an operator-approved
+resolver.
+
+**Not an activation gate:** the resolver's response is not DNSSEC/TLS
+authenticated; an existing tunnel could still carry the interface-bound
+resolver traffic, and an eventual routing change could interrupt the route.
+Even a match leaves `read_only: true`, `dns_bootstrap_verified: false` and
+`activation_ready: false`. Independent route ownership, an owned-network transaction journal,
+activation/recovery guards, management proofs and physical post-change
+tests are still mandatory; the existing PREPARED/UNCERTAIN intent journal
+is not an applied route transaction. The exact CLI/API remains a development
+candidate, not a published stable release.
+
+The explicit resolver diagnostic is menu option **14**; existing Path Diagnostics **11**, Selective Plan **12**, and Underlay TCP **13** are retained.
+
+### Compare host routes and policy rules against a recorded baseline (Issue #2 development)
+
+Capture a baseline on the host *before* the intended maintenance or experiment;
+keep it private because interface and route information can be sensitive:
+
+```sh
+umask 077
+server-connect --json host-preflight --endpoint 198.51.100.10 --management-peer 203.0.113.42 > ./host-baseline.json
+server-connect --json host-drift --baseline ./host-baseline.json
+```
+
+The comparison repeats native, read-only Linux route/rule/link inspection
+including the **same literal** endpoint and management-peer queries from the
+baseline, but retains their addresses only as private lookup inputs. The Host
+Drift report does **not** print those baseline target addresses in JSON, text
+or menu output; component names indicate whether each optional lookup was
+compared. It reports per-component SHA-256 fingerprints (never raw baseline
+contents), `changed` flags and a nonzero `host_drift_detected` error when
+an observation differs. The **non-JSON CLI and interactive menu option 15**
+also display the safe per-component report on detected drift, together with
+an explicit classified failure; they never silently print only a generic
+error. Route and link arrays ignore enumeration-order differences;
+policy-rule ordering remains significant. Invalid, oversized,
+symlinked, non-private or structurally incomplete baseline files are
+rejected **before** any kernel inspection (including empty link inventories,
+identity-free kernel route lookups, policy rules lacking priority/action, or
+missing explicit `snapshot_atomic: false` and `activation_ready: false`
+assertions); no baseline file paths or raw file content appear in errors or
+diagnostic output. Legitimate empty route/rule families and verified
+iproute2 6.15 policy-rule formats are supported: table/lookup, numeric
+goto, terminal `action` (`blackhole`, `unreachable`, `prohibit`,
+`throw`, `anycast`, `multicast`, `xresolve`), null-valued `nop`
+and `l3mdev`, and deprecated NAT markers (`masquerade: null` or
+`nat_gateway`). Route-style policy `type` and
+boolean-valued native action markers are rejected as incomplete evidence.
+These formats are based on
+[iproute2 v6.15 print_rule()](https://github.com/iproute2/iproute2/blob/v6.15.0/ip/iprule.c)
+and actual isolated Linux namespace captures; validation establishes only
+minimal shape, not baseline authenticity or compatibility with unverified
+future `iproute2` serializers.
+
+**Important:** both snapshots are non-atomic and the saved file is
+operator-provided, not a trusted/cryptographically authenticated kernel
+record. A matching comparison is **not proof** of network resource ownership,
+DNS/bootstrap reachability, safe SSH or HTTP(S) replies, nftables/conntrack,
+independent activation/rollback guards or production readiness. It never
+touches routes, rules, services, DNS or manager state. A changing route report
+is a diagnostic requiring operator investigation, **not an instruction for
+Server Connect to overwrite foreign-owned network configuration**. This
+command is a development diagnostic and is not a routed-mode release.
+
+### Inspect the internal activation intent journal (Issue #2 development)
+
+### Installed independent guard foundation (experimental only)
+
+The local development installer now deploys **two root-owned, checksum-verified**
+`server-connect-activation-recover.service` / `.timer` units, **disabled and
+inactive by default**. This adds no routing policy, no new background timer
+and no production Activation Guard to Proxy Only. An active or ambiguous guard
+or a retained guarded-trial journal prevents update/uninstall, rather than
+removing the recovery executable for an outstanding operation. On ordinary
+uninstall, both product-owned units and their digest records are removed.
+
+A separate **disposable Docker systemd guest only** can exercise the actual
+installed Manager's `selective-trial-apply --operation-id HEX32 --revision 1
+--deadline-seconds 8` after an exact v1 staging receipt and explicitly
+`systemctl enable --now server-connect-activation-recover.timer`. Its strict
+loopback-only namespace/privilege gate rejects ordinary hosts. It fsyncs a v2
+operation journal **before creating any kernel effect**, then adds **one IPv4
+RPDB rule pointing at an empty table** with a fixed experimental protocol tag.
+The watchdog independently inspects that exact native rule and removes it on
+expiry after a killed controller or on a new boot identity. Foreign rules at
+the selected priority fail closed and preserve the pending journal. The
+operator can inspect `activation-trial-status` and, after verified rule-only
+recovery, clear the exact revision 3 via `activation-trial-clear`. The
+legacy `--qa-kill-after-rule` and phase-scoped `--qa-kill-at`
+interruption points (`before-journal`, `after-journal`, `after-add` during
+apply; `after-delete`, `before-recovered-journal` during recovery) are
+**disposable-guest-only QA**. A pending recovery with a stopped/masked
+systemd timer/service (or a competing runtime unit override) must report
+`guard_unavailable`, not a positive `scheduled` receipt. An already failed or
+start-rate-limited recovery executor is also refused even while the timer
+appears active. A recovered journal is re-observed against native kernel
+rules by all public recovery/status/clear operations. An unavailable executor
+still requires external repair; no guarantee of future guard liveness or
+routed VPN safety is implied.
+
+An additional **v3 disposable-only route-bearing trial** now exercises the
+same independent recovery timer and private journal with **one real numeric
+IPv4 route via existing loopback `lo` plus its matching RPDB rule**. The
+specific command is
+`selective-route-trial-apply --operation-id HEX32 --revision 1
+--deadline-seconds 8` after the same exact v1 stage operation. The v3 journal
+has a distinct version and type so old v2 rule-only journals retain their
+original semantics. The route is placed in the isolated table before the
+rule, and rollback removes the rule before the route. Both resources are
+reobserved natively; unknown routes or foreign policy consumers block
+recovery without deleting them. All public trial inspection, recovery, clear
+and installer-protection paths recognize v3, but never set production
+activation or `recovery_verified` claims. CLI QA interruption points include
+`after-route` and recovery `after-route-delete`, in addition to the earlier
+rule-only points. The v3 route is deliberately **not TUN** and does not carry
+any working VPN packets; it runs only in a disconnected loopback-only Docker
+systemd guest. Do not run these developer commands on hosting servers.
+
+**This is not Selective or Broad VPN activation**: v2 does not create a tunnel
+or route; v3 creates only a disposable loopback route and matching rule. Neither
+proves actual VPN path egress, physical SSH protection, authorizes a production
+network change, or satisfies the Runtime Health Guard. A successful **v2**
+trial demonstrates exact native **rule** recovery in the isolated guest; a
+successful **v3** trial demonstrates exact native **rule and loopback route**
+recovery, with distinct experimental receipts. Neither demonstrates a usable
+VPN or real-host fail-safe routing. Neither may be used on a real hosting
+server. The production guarded route/application transaction and physical
+reboot/field evidence remain acceptance gaps under Issue #2.
+
+`server-connect --json activation-journal-status` (interactive menu **16**)
+reports only the phase (`absent`, `prepared` or `uncertain`),
+operation identity, revision, creation timestamp and resource **count**
+from the existing strictly validated private version-1 intent journal.
+Private route/rule/interface `before` and `intended` records, observed
+destinations, and plan fingerprints are **not returned**. A corrupt, unsafe
+or untrusted record fails closed with a nonzero classified error and **no**
+fabricated safe-absent data; the record is retained for investigation.
+`prepared` and `uncertain` both explicitly require operator review.
+An `absent` record is *not* a verified safe network baseline.
+
+This command does not inspect or change host networking, authorize a route
+apply, arm a guard, commit a profile or perform rollback. The current journal
+still supports **only** `prepared` and `uncertain` phases. Pending
+confirmation, independent timers, fresh SSH authorization, actual owned
+resource reconciliation and reboot recovery remain **unimplemented**.
+Like existing Manager state operations, first inspection may create a private
+state directory and lifecycle `.lock` file; it does not create an intent
+journal or affect routes, firewall, DNS or service configuration. This
+development diagnostic is not an activation/release capability.
+
+### Proxy Only compatibility and application opt-in
+
+`server-connect --json status` distinguishes the saved desired state from the native systemd service observation; it does **not** claim a healthy outbound path. If native systemd inspection is unavailable or an active service's ownership cannot be verified, both JSON **and ordinary text status** now return a classified nonzero error and retain any verified-safe desired/observed/health fields (without inventing a state when loading failed). Internal service control uses only the trusted native `/usr/bin/systemctl` with a fixed sanitized child environment, not an operator-provided `PATH` or inherited systemd/DBus overrides. `connect` refuses an unknown, contradictory or newly active service at both the initial check and the post-core-validation recheck, **before writing persistent proxy credentials or runtime configuration**; a pending activation must never overwrite a possibly active service's runtime.
+
+- The link importer deliberately supports a **subset** of VLESS TCP/WebSocket and TLS/Reality query fields, rejecting unrecognized or incompatible parameters. **Local TCP VLESS through the pinned sing-box core has live integration evidence; TLS/WebSocket/Reality interoperability with real foreign providers is NOT_RUN.** Import and `validate` establish syntax/core-configuration acceptance, not remote reachability.
+- A selected application may opt in explicitly with `server-connect exec -- curl ...`, or with its own authenticated HTTP/SOCKS proxy settings. `server-connect probe --via proxy --url https://...` tests the selected path; `--via direct` independently tests host Direct connectivity. These commands require an already installed, selected and running development candidate.
+- **Multi-target, read-only path diagnostics (Issue #3 foundation; not an active health guard):**
+  `server-connect --json diagnose-path --via proxy --url https://one.example --url https://two.example`
+  checks two to four distinct hostnames through the selected Proxy Only transport, with **no Direct fallback**.
+  Run an independent `--via direct` invocation for the Direct baseline; Direct successes never count as Proxy
+  results. Responses contain only target indexes, bounded HTTP codes/error classifications, counts, and
+  `all_targets_reachable`, `mixed_results`, or `no_targets_reachable`; no URL, query or credentials are returned.
+  Proxy diagnostics pin one selected profile/runtime and service invocation across the target set, checking
+  identity before and after each request without holding the lifecycle lock during network I/O. If that
+  identity changes or becomes unverifiable, the whole set returns `path_changed_unverified` /
+  `diagnostic_path_changed`, with no sample marked reachable; prior successful samples are invalidated.
+  A single failed target returns `probe_set_partial`, **not** proof of a dead VPN. Redirects are never followed;
+  HTTP 3xx is `probe_redirect_unverified`, not verified destination content. Contradictory path/result
+  combinations never expose a success status; TLS hostname mismatches report `probe_tls`. At most four 12-second target
+  requests are made, without modifying host routes or firewall. Results explicitly mark
+  `tunnel_health_verified: false` and `activation_ready: false`. The existing selected-proxy lookup may
+  initialize private application state. These checks **do not attest foreign egress identity, independently
+  prove VPN-bound TUN routing, supervise a live tunnel, recover automatically, or replace the Activation or
+  Runtime Health Guards**. Real foreign-provider, reboot and field acceptance remain NOT_RUN.
+- **APT does not reliably honor generic HTTP proxy variables.** The opt-in `sudo server-connect apt -- apt-get update` (or menu option **9**, confirmed with `UPDATE`) explicitly configures `Acquire::http::Proxy` and `Acquire::https::Proxy` only for that child process. Native, root-owned Debian APT executables at `/usr/bin/apt-get`, `/usr/bin/apt` and `/usr/bin/apt-config` are verified before any proxy credential is accessed. Unqualified `apt-get` and `apt` are accepted only when PATH resolves to their native installation; `/bin` aliases from Debian usrmerge are also supported. Other same-basename programs, PATH shadows and substituted binaries are refused. The child runs with a fixed trusted PATH and without inherited proxy/loader overrides. The private proxy config is an unlinked mode-0600 descriptor; `/etc/apt` is never modified. Existing per-host `DIRECT`/proxy policy, proxy autodetection, untrusted extra config and conflicting caller overrides cause a clear fail-closed error. The **full APT execution path** is checked: the effective Debian 13 `Dir::Bin::*` native-method/compressor paths, `RootDir`/`Dir` roots, applicable binary-specific redirections and **all present native acquisition-method executables** (including PDiff `rred` and `mirror`) plus their exact native aliases must match the supported trusted installation. Missing optional Debian 13 helpers are accepted; unknown or untrusted additional transport methods are not supported. Caller method/root/compressor overrides are rejected *before* credentials are loaded; inherited conflicts cause a credential-safe policy error rather than rewriting system APT configuration. Custom APT method directories and redirected execution layouts are not yet supported. Standalone `apt-get update` and `apt update` enforce `--error-on=any`, even when cached indexes exist. Combined `-U`/`--update` package operations are deliberately **unsupported**: use a separate strict `apt-get update`, followed by the intended `apt-get install` command. APT retains its ordinary repository signatures and HTTPS verification; do not downgrade repository trust. Only the APT acquisition transport is covered, not arbitrary maintainer scripts or other applications. Never enable wire-debug traces that could expose `Proxy-Authorization` credentials.
+- **WordPress/PHP-FPM and plugins may use different HTTP clients or ignore shell environment variables.** For WordPress, an explicitly configured supported HTTP transport/proxy integration, isolated site test, and restoration plan are necessary; `server-connect exec` alone is not proof of WordPress API compatibility. Do not globally rewrite APT, PHP-FPM, aaPanel or customer proxy configuration. Earlier independent disposable tests covered WordPress PHP CLI with an installed manager and WordPress PHP-FPM with an independently started sing-box core, **not their combination**. The isolated installed-host QA now exercises genuine WordPress 7.1.3 + SQLite Database Integration 3.0.2 from **PHP-FPM and FastCGI alongside the same installed manager**, with QA-only pool-scoped `WP_PROXY_*`, fresh-origin nonce acquisition over selected VLESS, outage fail-closed, recovery, active same-source update, rollback and disconnect. Treat this as a PASS **only when the exact-candidate installed-host CI completes successfully**. This is not a test of an actual customer WordPress site, aaPanel, foreign network, signed release or safe persistent customer secret provisioning; Server Connect never edits a site automatically.
+- A user-facing inbound VPN/relay service (for example Marzban Node or Backhaul) does not automatically opt into `HTTP_PROXY`. Raw TCP/UDP forwarding and established inbound reply paths require their own explicitly verified routing/relay architecture.
+
+The current Go JSON/CLI and offline installer are **not production-supported interfaces** until review findings and exact-artifact acceptance are resolved.

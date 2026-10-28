@@ -91,6 +91,10 @@ ownership. No production host may invoke the trial path.
 
 The recovery mechanism must **not need the VPN to work**. It must not need GitHub, Cloudflare, an external API, functioning DNS, or the sing-box process to perform its local fallback. The local console/provider rescue option remains an emergency requirement; no in-host mechanism can repair an unbootable kernel or provider-side outage.
 
+The sole production routed mode is **Smart Routing (sing-box TUN)**: ordinary supported host traffic uses protected/Iran Direct or other-public VPN based on deterministic destination rules, **not per-job process selection**. Treat unavailable/invalid IP-domain lists, DNS interception, IPv4/IPv6, UDP/transport gaps and domain observability as possible safety failures; no VPN-required flow may silently fall back to Direct. The operator's explicit Direct exception is a deliberate policy, not an automatic failure bypass.
+
+An **optional Cloudflare Tunnel** connector is a separate service. Its failure or an unselected external-origin test failure must not disable a healthy outbound VPN, and the independent local Activation/Runtime Guard must not need Cloudflare, its API, DNS or external Internet to roll back. If cloudflared depends on the VPN path to reach Cloudflare, record that dependency and independently verify the connector; do not infer ingress success from VPN health.
+
 A successful rollback is **verified restoration of the last safe host network condition** within the manager's authority. If the original direct foreign Internet is intentionally restricted, rollback cannot promise to restore international Internet; it must recover domestic networking, ordinary site ingress/replies and management paths.
 
 ## 2. State model
@@ -127,7 +131,7 @@ On reboot, do not blindly reapply an unconfirmed TUN. Recover the prior durable 
 
 ## 4. Runtime Health Guard
 
-Independent lightweight supervisory logic runs while a profile actively changes network routing. It observes core process/service, exact owned interface/rules, path-constrained real HTTPS/TCP probes and separately domestic/control connectivity. A healthy process or ICMP echo is not enough. A direct Internet request that bypasses the profile may **not** count as VPN health.
+Independent lightweight supervisory logic runs while a profile actively changes network routing. For Smart Routing it must check that real packet paths obey the protected Direct, explicit exception and otherwise-VPN decisions, detect failed/stale DNS or Iranian rule source, and prevent unsupported or broken selected transports from silently leaking into Direct. It observes core process/service, exact owned interface/rules, path-constrained real HTTPS/TCP probes and separately domestic/control connectivity. A healthy process or ICMP echo is not enough. A direct Internet request that bypasses the profile may **not** count as VPN health.
 
 **Guard liveness is also an observed safety property.** An independently recoverable watchdog/supervisor (prefer a native, narrowly owned service/timer rather than a second full daemon) must detect an unexpectedly stopped, hung or disabled Runtime Health Guard while a host-wide route remains active. Failure to restore trustworthy observation within a bounded, tested interval must initiate safe owned-delta recovery instead of leaving an unmonitored dead route. Guard restart alone is not proof of route health; any conflicting or uncertain recovery must be reported explicitly. Neither this mechanism nor any local script can promise recovery after complete OS/kernel/provider failure.
 
