@@ -61,7 +61,11 @@ require_guest() {
 }
 
 cleanup() {
-  rc=$?
+  # Keep the intended test status separate from restoration failures.
+  # A deliberately rejected hosting test exits 1; any cleanup defect must
+  # instead exit 97 and must NEVER emit the cleanup PASS marker.
+  original_rc=$?
+  cleanup_failed=no
   trap - EXIT INT TERM
   for pid in "$client_pid" "$server_pid" "$origin_pid" "$hosting_pid"; do
     if [ -n "$pid" ]; then
@@ -70,43 +74,82 @@ cleanup() {
     fi
   done
   if [ "$default_added" = yes ]; then
-    ip -4 route del default via 10.254.72.2 dev "$edge" metric 100 2>/dev/null || rc=1
+    ip -4 route del default via 10.254.72.2 dev "$edge" metric 100 2>/dev/null ||
+      { echo 'REAL_TUN_LAB_CLEANUP=FAIL (owned default route deletion)' >&2; cleanup_failed=yes; }
   fi
   if [ "$edge_added" = yes ]; then
-    ip link del dev "$edge" 2>/dev/null || rc=1
+    ip link del dev "$edge" 2>/dev/null ||
+      { echo 'REAL_TUN_LAB_CLEANUP=FAIL (owned VETH deletion)' >&2; cleanup_failed=yes; }
   fi
   if [ "$peer_added" = yes ]; then
-    ip netns del "$peer" 2>/dev/null || rc=1
+    # Only the disconnected disposable CI guest can request this deliberate
+    # failed deletion. The outer harness must detect and repair the leak.
+    if [ "${SC_QA_TUN_CLEANUP_FAULT-}" = retain-namespace ]; then
+      echo 'REAL_TUN_LAB_CLEANUP=FAIL (injected namespace deletion failure)' >&2
+      cleanup_failed=yes
+    else
+      ip netns del "$peer" 2>/dev/null ||
+        { echo 'REAL_TUN_LAB_CLEANUP=FAIL (owned namespace deletion)' >&2; cleanup_failed=yes; }
+    fi
   fi
   if [ "$tun_device_created" = yes ]; then
-    rm -f /dev/net/tun || rc=1
+    rm -f /dev/net/tun ||
+      { echo 'REAL_TUN_LAB_CLEANUP=FAIL (owned TUN device file deletion)' >&2; cleanup_failed=yes; }
   fi
   rm -f "$client_cfg" "$server_cfg" /run/sc-qa-tun-origin.log \
-    /run/sc-qa-tun-hosting.log /run/sc-qa-tun-server.log /run/sc-qa-tun-client.log
+    /run/sc-qa-tun-hosting.log /run/sc-qa-tun-server.log /run/sc-qa-tun-client.log ||
+      { echo 'REAL_TUN_LAB_CLEANUP=FAIL (temporary QA file deletion)' >&2; cleanup_failed=yes; }
   # Fail, rather than claim cleanup, if the real core leaked its TUN.
   if [ -e /sys/class/net/sctunqa0 ]; then
-    echo "REAL_TUN_LAB_CLEANUP=FAIL (TUN still present)" >&2
-    rc=1
+    echo 'REAL_TUN_LAB_CLEANUP=FAIL (TUN still present)' >&2
+    cleanup_failed=yes
   fi
-  observed_default=$(normalized_default_route) || { echo 'REAL_TUN_LAB_CLEANUP=FAIL (default route read)' >&2; rc=1; observed_default=''; }
+  if [ -e /sys/class/net/"$edge" ]; then
+    echo 'REAL_TUN_LAB_CLEANUP=FAIL (VETH still present)' >&2
+    cleanup_failed=yes
+  fi
+  if [ "$tun_device_created" = yes ] && { [ -e /dev/net/tun ] || [ -L /dev/net/tun ]; }; then
+    echo 'REAL_TUN_LAB_CLEANUP=FAIL (created TUN device file still present)' >&2
+    cleanup_failed=yes
+  fi
+  if namespace_inventory=$(ip netns list); then
+    peer_present=$(printf '%s\n' "$namespace_inventory" |
+      awk -v expected="$peer" '$1 == expected { found=1 } END { print found+0 }') ||
+      { echo 'REAL_TUN_LAB_CLEANUP=FAIL (namespace inventory parsing)' >&2; cleanup_failed=yes; peer_present=1; }
+    if [ "$peer_present" != 0 ]; then
+      echo 'REAL_TUN_LAB_CLEANUP=FAIL (owned namespace still present)' >&2
+      cleanup_failed=yes
+    fi
+  else
+    echo 'REAL_TUN_LAB_CLEANUP=FAIL (namespace inventory inspection)' >&2
+    cleanup_failed=yes
+  fi
+  observed_default=$(normalized_default_route) ||
+    { echo 'REAL_TUN_LAB_CLEANUP=FAIL (default route read)' >&2; cleanup_failed=yes; observed_default=''; }
   if [ "$observed_default" != "default dev lo scope link metric 4242" ]; then
     echo "REAL_TUN_LAB_CLEANUP=FAIL (baseline default route changed; observed=[$observed_default])" >&2
     ip -4 route show table all >&2 || :
     ip -4 rule show >&2 || :
     ip -4 addr show dev lo >&2 || :
-    rc=1
+    cleanup_failed=yes
   fi
   if [ -n "$nft_before" ]; then
-    nft_after=$(nft -j list ruleset) || { echo 'REAL_TUN_LAB_CLEANUP=FAIL (nft inspection)' >&2; rc=1; nft_after=''; }
-    if [ "$nft_before" != "$nft_after" ]; then
-      echo 'REAL_TUN_LAB_CLEANUP=FAIL (nftables ruleset drift)' >&2
-      rc=1
+    if nft_after=$(nft -j list ruleset); then
+      if [ "$nft_before" != "$nft_after" ]; then
+        echo 'REAL_TUN_LAB_CLEANUP=FAIL (nftables ruleset drift)' >&2
+        cleanup_failed=yes
+      fi
+    else
+      echo 'REAL_TUN_LAB_CLEANUP=FAIL (nft inspection)' >&2
+      cleanup_failed=yes
     fi
   fi
-  if [ "$rc" -eq 0 ]; then
-    echo "REAL_TUN_LAB_CLEANUP=PASS (owned namespace, VETH, TUN, nftables and default removed)"
+  if [ "$cleanup_failed" = yes ]; then
+    echo "REAL_TUN_LAB_CLEANUP=FAIL (restoration incomplete; test_rc=$original_rc)" >&2
+    exit 97
   fi
-  exit "$rc"
+  echo 'REAL_TUN_LAB_CLEANUP=PASS (owned namespace, VETH, TUN, nftables and default removed)'
+  exit "$original_rc"
 }
 
 peer_counter_packets() {
