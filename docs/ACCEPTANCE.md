@@ -140,7 +140,21 @@ mid-observation tests must reject changed network namespace, socket FD sets,
 PID generation and cgroup membership. Real loopback UDP over IPv4 and, when
 supported, IPv6 should be observed with the ownership/activation flags false.
 The Linux installed-host CLI must expose real per-PID FD evidence without
-creating traffic, modifying host routes or claiming ownership/path readiness.
+creating new traffic, modifying host routes or claiming ownership/path readiness.
+
+The optional `workload-observe --pid N --descendants` must return a bounded
+sample of only currently visible Linux child processes and their birth ticks,
+parent identities and cgroups, with two procfs censuses and rechecks. The
+optional combination with `--sockets` additionally reads each sampled child's
+held TCP/UDP FDs. A stable observed empty child list is distinct from missing
+visibility; no observation proves complete descendant/job ownership. Reject
+root/selected-child PID reuse, reparenting, cgroup migration, disappearance,
+new descendants during the sampled window, oversized trees and malformed
+selected procfs records without partial output. Verify real live parent/child
+TCP socket evidence, an unrelated sibling excluded, default opt-out, truthful
+`descendants_covered: false`, and unchanged isolated guest routing plus
+SSH/HTTP. This remains **supporting laboratory evidence only**, not a real
+panel App Store job or authenticated selected traffic.
 Socket FDs may be inherited/shared, snapshots are non-atomic, and unmatched
 sockets are not coverage; a real aaPanel task, its subprocesses and a genuinely
 selected egress require separate physical/representative acceptance.

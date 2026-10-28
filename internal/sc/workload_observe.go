@@ -25,18 +25,20 @@ type WorkloadProcessIdentity struct {
 // captured by the displayed ancestry/cgroup snapshot. A real selected egress
 // requires a separate bound policy, kernel proof and both independent guards.
 type WorkloadObservation struct {
-	Mode                string                    `json:"mode"`
-	ReadOnly            bool                      `json:"read_only"`
-	SnapshotAtomic      bool                      `json:"snapshot_atomic"`
-	AttributionVerified bool                      `json:"attribution_verified"`
-	DescendantsCovered  bool                      `json:"descendants_covered"`
-	TrafficPathVerified bool                      `json:"traffic_path_verified"`
-	ActivationReady     bool                      `json:"activation_ready"`
-	Process             WorkloadProcessIdentity   `json:"process"`
-	Ancestors           []WorkloadProcessIdentity `json:"ancestors"`
-	SharesParentCgroup  bool                      `json:"shares_parent_cgroup"`
-	Limitations         []string                  `json:"limitations"`
-	Sockets             *WorkloadSocketEvidence   `json:"sockets,omitempty"`
+	Mode                string                           `json:"mode"`
+	ReadOnly            bool                             `json:"read_only"`
+	SnapshotAtomic      bool                             `json:"snapshot_atomic"`
+	AttributionVerified bool                             `json:"attribution_verified"`
+	DescendantsCovered  bool                             `json:"descendants_covered"`
+	TrafficPathVerified bool                             `json:"traffic_path_verified"`
+	ActivationReady     bool                             `json:"activation_ready"`
+	Process             WorkloadProcessIdentity          `json:"process"`
+	Ancestors           []WorkloadProcessIdentity        `json:"ancestors"`
+	SharesParentCgroup  bool                             `json:"shares_parent_cgroup"`
+	Limitations         []string                         `json:"limitations"`
+	Sockets             *WorkloadSocketEvidence          `json:"sockets,omitempty"`
+	ObservedDescendants *[]WorkloadDescendantObservation `json:"observed_descendants,omitempty"`
+	DescendantSurvey    string                           `json:"descendant_survey,omitempty"`
 }
 
 const workloadProcMaxBytes = 16 << 10

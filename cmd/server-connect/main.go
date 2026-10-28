@@ -187,12 +187,15 @@ func run(j bool, m *sc.Manager, args []string) int {
 		opts.SetOutput(io.Discard)
 		pid := opts.Int("pid", 0, "explicit Linux process ID to observe")
 		sockets := opts.Bool("sockets", false, "opt in to per-PID TCP/UDP socket FD evidence (not traffic ownership)")
+		descendants := opts.Bool("descendants", false, "opt in to non-atomic visible child-process and optional socket observations")
 		if e := opts.Parse(args); e != nil || len(opts.Args()) != 0 || *pid <= 1 {
 			return output(j, nil, sc.Fault("invalid_arguments", "workload-observe requires --pid N (N > 1)"))
 		}
 		var report sc.WorkloadObservation
 		var err error
-		if *sockets {
+		if *descendants {
+			report, err = sc.ObserveWorkloadProcessDescendants(*pid, *sockets)
+		} else if *sockets {
 			report, err = sc.ObserveWorkloadProcessSockets(*pid)
 		} else {
 			report, err = sc.ObserveWorkloadProcess(*pid)

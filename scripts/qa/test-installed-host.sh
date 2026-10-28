@@ -441,6 +441,13 @@ assert_network_unchanged workload-observe "$offline_before"
 verify_host_services workload-observe
 echo 'INSTALLED_WORKLOAD_PROCFS_OBSERVATION_ONLY=PASS (real PID, parent and unified cgroup v2)'
 echo 'INSTALLED_WORKLOAD_SOCKET_FD_EVIDENCE=PASS (real loopback background worker; no ownership or routing proof)'
+# Opt-in real descendant and per-child socket observation in the same isolated,
+# installed Debian 13 guest. No aaPanel product code or real job selection.
+docker cp "$root/scripts/qa/host-workload-descendants.sh" "$container:/root/qa-workload-descendants.sh"
+docker exec "$container" /bin/sh /root/qa-workload-descendants.sh
+assert_network_unchanged workload-descendants "$offline_before"
+verify_host_services workload-descendants
+docker exec "$container" /bin/rm -f /root/qa-workload-descendants.sh
 docker exec "$container" /bin/sh -c '
   printf "SC_QA_RETAIN_PROFILE_BYTES\n" > /var/lib/server-connect/profiles/qa-retained
   chmod 0600 /var/lib/server-connect/profiles/qa-retained
