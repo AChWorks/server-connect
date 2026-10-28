@@ -364,10 +364,115 @@ GOPROXY=off GOTOOLCHAIN=local CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
 test -x "$scratch/tun-config-qa"
 docker cp "$scratch/tun-config-qa" "$container:/root/qa-tun-config-qa"
 docker cp "$root/scripts/qa/host-tun-path.sh" "$container:/root/qa-host-tun-path.sh"
+# Independently check resources omitted from the standard route/rule/link
+# digest, in addition to the guest's own explicit cleanup verdict.
+tun_netns_before=$(docker exec "$container" /sbin/ip netns list)
+tun_nft_before=$(docker exec "$container" /usr/sbin/nft -j list ruleset)
+assert_tun_native_cleanup() {
+  local phase=$1 current
+  if ! current=$(docker exec "$container" /sbin/ip netns list); then
+    echo "REAL_TUN_NATIVE_CLEANUP($phase)=FAIL (namespace inventory)" >&2
+    exit 1
+  fi
+  [[ $current == "$tun_netns_before" ]] || {
+    echo "REAL_TUN_NATIVE_CLEANUP($phase)=FAIL (named namespace drift)" >&2
+    exit 1
+  }
+  if ! docker exec "$container" /bin/sh -c \
+      'test ! -e /sys/class/net/scqaedge0 && test ! -e /sys/class/net/sctunqa0'; then
+    echo "REAL_TUN_NATIVE_CLEANUP($phase)=FAIL (VETH or TUN still present)" >&2
+    exit 1
+  fi
+  if ! current=$(docker exec "$container" /usr/sbin/nft -j list ruleset); then
+    echo "REAL_TUN_NATIVE_CLEANUP($phase)=FAIL (nftables inspection)" >&2
+    exit 1
+  fi
+  [[ $current == "$tun_nft_before" ]] || {
+    echo "REAL_TUN_NATIVE_CLEANUP($phase)=FAIL (nftables drift)" >&2
+    exit 1
+  }
+  assert_network_unchanged "$phase" "$offline_before"
+  verify_host_services "$phase"
+  echo "REAL_TUN_NATIVE_CLEANUP($phase)=PASS"
+}
+# A valid negative outcome requires BOTH guard rejection and a clean guest
+# teardown. A cleanup error is never the expected guard's exit status.
+accept_tun_guard_rejection() {
+  local fault=$1 rc=$2 log=$3 expected_guard unexpected scan_rc
+  [[ $rc == 1 ]] || return 1
+  expected_guard=$([[ $fault == before-hosting ]] && echo pre-hosting || echo post-hosting)
+  grep -Fx 'REAL_TUN_NEGATIVE_DIRECT_HOSTING=PASS (native reply works without TUN)' "$log" >/dev/null || return 1
+  grep -Fx "REAL_TUN_FOREIGN_HOSTING_OUTAGE_GUARD=REJECTED ($expected_guard)" "$log" >/dev/null || return 1
+  grep -Fx 'REAL_TUN_LAB_CLEANUP=PASS (owned namespace, VETH, TUN, nftables and default removed)' "$log" >/dev/null || return 1
+  for unexpected in 'REAL_TUN_FOREIGN_HOSTING_OUTAGE=PASS' 'REAL_TUN_LAB_CLEANUP=FAIL'; do
+    if grep -F -- "$unexpected" "$log" >/dev/null; then
+      return 1
+    else
+      scan_rc=$?
+      [[ $scan_rc == 1 ]] || return 1
+    fi
+  done
+}
 echo 'REAL_TUN_LAB_STAGE=execute-guest-path'
 docker exec "$container" /bin/sh /root/qa-host-tun-path.sh
-assert_network_unchanged real-tun-candidate-cleanup "$offline_before"
-verify_host_services real-tun-candidate-cleanup
+assert_tun_native_cleanup real-tun-candidate-cleanup
+# Real sing-box faults must preserve native Direct HTTP and reject the
+# hosting-outage PASS; the guest must prove COMPLETE cleanup independently
+# of its intentional test exit 1, and the outer host independently verifies.
+for fault in before-hosting after-hosting; do
+  negative_log="$scratch/real-tun-$fault-negative.log"
+  if docker exec -e "SC_QA_TUN_OUTAGE_FAULT=$fault" \
+      "$container" /bin/sh /root/qa-host-tun-path.sh >"$negative_log" 2>&1; then
+    negative_rc=0
+  else
+    negative_rc=$?
+  fi
+  if ! accept_tun_guard_rejection "$fault" "$negative_rc" "$negative_log"; then
+    echo "TUN-loss rejection or cleanup failed validation ($fault; rc=$negative_rc)" >&2
+    cat "$negative_log" >&2
+    exit 1
+  fi
+  assert_tun_native_cleanup "real-tun-$fault-rejected-cleanup"
+  echo "REAL_TUN_HOSTING_FALSE_PASS_REJECTED=PASS (fault=$fault)"
+done
+# Discriminating cleanup-failure test: deliberately retain ONLY our disposable
+# namespace after genuine guard rejection. Both expected guard markers and
+# the native hosting reply must still occur, but acceptance MUST refuse it.
+cleanup_log="$scratch/real-tun-cleanup-failure-negative.log"
+if docker exec -e SC_QA_TUN_OUTAGE_FAULT=before-hosting \
+    -e SC_QA_TUN_CLEANUP_FAULT=retain-namespace \
+    "$container" /bin/sh /root/qa-host-tun-path.sh >"$cleanup_log" 2>&1; then
+  cleanup_rc=0
+else
+  cleanup_rc=$?
+fi
+[[ $cleanup_rc == 97 ]] &&
+  grep -Fx 'REAL_TUN_NEGATIVE_DIRECT_HOSTING=PASS (native reply works without TUN)' "$cleanup_log" >/dev/null &&
+  grep -Fx 'REAL_TUN_FOREIGN_HOSTING_OUTAGE_GUARD=REJECTED (pre-hosting)' "$cleanup_log" >/dev/null &&
+  grep -Fx 'REAL_TUN_LAB_CLEANUP=FAIL (owned namespace still present)' "$cleanup_log" >/dev/null || {
+    echo "Injected cleanup failure did not produce expected guard + distinct cleanup failure (rc=$cleanup_rc)" >&2
+    cat "$cleanup_log" >&2
+    exit 1
+  }
+if accept_tun_guard_rejection before-hosting "$cleanup_rc" "$cleanup_log"; then
+  echo 'Cleanup failure was accepted as a valid negative test' >&2
+  exit 1
+fi
+if grep -F 'REAL_TUN_FOREIGN_HOSTING_OUTAGE=PASS' "$cleanup_log" >/dev/null ||
+   grep -F 'REAL_TUN_LAB_CLEANUP=PASS' "$cleanup_log" >/dev/null; then
+  echo 'Injected cleanup failure emitted a forbidden success marker' >&2
+  cat "$cleanup_log" >&2
+  exit 1
+fi
+if ! docker exec "$container" /sbin/ip netns list | awk '$1 == "scqapeer" { found=1 } END { exit !found }'; then
+  echo 'Injected cleanup fault did not leave its expected owned namespace' >&2
+  exit 1
+fi
+# Recovery touches the single known QA namespace in this already-disposable
+# guest. Never ignore an ambiguous deletion or claim cleanup before recheck.
+docker exec "$container" /sbin/ip netns del scqapeer
+assert_tun_native_cleanup real-tun-injected-cleanup-recovery
+echo 'REAL_TUN_CLEANUP_FAILURE_REJECTED=PASS (guest cleanup failure != expected TUN rejection)'
 docker exec "$container" /bin/rm -f /root/qa-tun-config-qa /root/qa-host-tun-path.sh
 # Product code + installed inactive-by-default independent recovery units.
 # The actual RPDB rule is added ONLY in the verified disconnected guest.
