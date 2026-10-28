@@ -14,6 +14,7 @@ edge=scqaedge0
 client_pid=
 server_pid=
 origin_pid=
+hosting_pid=
 edge_added=no
 peer_added=no
 default_added=no
@@ -62,7 +63,7 @@ require_guest() {
 cleanup() {
   rc=$?
   trap - EXIT INT TERM
-  for pid in "$client_pid" "$server_pid" "$origin_pid"; do
+  for pid in "$client_pid" "$server_pid" "$origin_pid" "$hosting_pid"; do
     if [ -n "$pid" ]; then
       kill "$pid" 2>/dev/null || :
       wait "$pid" 2>/dev/null || :
@@ -81,7 +82,7 @@ cleanup() {
     rm -f /dev/net/tun || rc=1
   fi
   rm -f "$client_cfg" "$server_cfg" /run/sc-qa-tun-origin.log \
-    /run/sc-qa-tun-server.log /run/sc-qa-tun-client.log
+    /run/sc-qa-tun-hosting.log /run/sc-qa-tun-server.log /run/sc-qa-tun-client.log
   # Fail, rather than claim cleanup, if the real core leaked its TUN.
   if [ -e /sys/class/net/sctunqa0 ]; then
     echo "REAL_TUN_LAB_CLEANUP=FAIL (TUN still present)" >&2
@@ -108,17 +109,22 @@ cleanup() {
   exit "$rc"
 }
 
-direct_witness_packets() {
-  witness_json=$(ip netns exec "$peer" nft -j list counter inet scqawitness direct_packets) || return 1
+peer_counter_packets() {
+  counter_name=$1
+  witness_json=$(ip netns exec "$peer" nft -j list counter inet scqawitness "$counter_name") || return 1
   printf '%s\n' "$witness_json" | python3 -c '
 import json,sys
+name=sys.argv[1]
 items=json.load(sys.stdin)["nftables"]
-counters=[item["counter"]["packets"] for item in items if "counter" in item and item["counter"].get("name")=="direct_packets"]
+counters=[item["counter"]["packets"] for item in items if "counter" in item and item["counter"].get("name")==name]
 if len(counters) != 1 or not isinstance(counters[0],int):
-    sys.exit("missing or ambiguous direct-path packet witness")
+    sys.exit("missing or ambiguous independent packet witness")
 print(counters[0])
-'
+' "$counter_name"
 }
+
+direct_witness_packets() { peer_counter_packets direct_packets; }
+hosting_reply_packets() { peer_counter_packets hosting_reply_packets; }
 
 assert_tun_policy_active() {
   [ -n "$client_pid" ] && kill -0 "$client_pid" 2>/dev/null || return 1
@@ -139,6 +145,18 @@ expect_source() {
   destination=$1 source=$2
   response=$(without_proxy "http://$destination:19180/path") || return 1
   test "$response" = "SOURCE=$source"
+}
+
+# A synthetic foreign visitor makes a NEW inbound HTTP connection to the
+# hosting-side address, without going through the VPN. The reply destination
+# is a foreign public IP, so a response mistakenly captured by TUN would
+# break an ordinary web server even when host-origin foreign egress works.
+expect_foreign_hosted_reply() {
+  response=$(ip netns exec "$peer" env -i HOME=/root PATH=/usr/bin:/bin:/sbin:/usr/sbin \
+    /usr/bin/curl -q --fail --silent --show-error --noproxy '*' \
+    --interface 198.51.100.42 --connect-timeout 3 --max-time 6 \
+    http://10.254.72.1:19184/foreign-visitor) || return 1
+  test "$response" = 'HOST_REQUEST_SOURCE=198.51.100.42'
 }
 
 trap cleanup EXIT
@@ -167,14 +185,17 @@ ip -n "$peer" link set scqapeer0 up
 # Internet connectivity. Only source-path choice is under test.
 ip -n "$peer" addr add 5.22.0.10/32 dev lo
 ip -n "$peer" addr add 8.8.8.8/32 dev lo
+ip -n "$peer" addr add 198.51.100.42/32 dev lo
 # Independent peer-side packet counter: an ordinary Direct foreign TCP flow
 # must cross this VETH; the VLESS server's local-origin flow cannot count.
 ip netns exec "$peer" nft -f - <<'NFTWITNESS'
 table inet scqawitness {
   counter direct_packets { }
+  counter hosting_reply_packets { }
   chain incoming {
     type filter hook input priority filter; policy accept;
     iifname "scqapeer0" ip daddr 8.8.8.8 tcp dport 19180 counter name direct_packets
+    iifname "scqapeer0" ip saddr 10.254.72.1 ip daddr 198.51.100.42 tcp sport 19184 counter name hosting_reply_packets
   }
 }
 NFTWITNESS
@@ -196,6 +217,23 @@ ThreadingHTTPServer(("0.0.0.0",19180),Handler).serve_forever()
 PYORIGIN
 origin_pid=$!
 
+# Host-side HTTP service simulates a website or administrative panel whose
+# visitor connects from an independently controlled foreign address.
+python3 -u - >/run/sc-qa-tun-hosting.log 2>&1 <<'PYHOSTING' &
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+class Handler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        data = ("HOST_REQUEST_SOURCE=" + self.client_address[0]).encode()
+        self.send_response(200)
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+    def log_message(self, *args):
+        pass
+ThreadingHTTPServer(("10.254.72.1", 19184), Handler).serve_forever()
+PYHOSTING
+hosting_pid=$!
+
 cat > "$server_cfg" <<'JSONSERVER'
 {"log":{"level":"warn"},"inbounds":[{"type":"vless","tag":"qa-vless","listen":"10.254.72.2","listen_port":19182,"users":[{"uuid":"c2902f3a-1c25-41ef-a8dc-760b483aa247"}]}],"outbounds":[{"type":"direct","tag":"direct"}],"route":{"final":"direct"}}
 JSONSERVER
@@ -207,11 +245,14 @@ server_pid=$!
 ready=no
 attempt=0
 while [ "$attempt" -lt 25 ]; do
-  if expect_source 5.22.0.10 10.254.72.1 && expect_source 8.8.8.8 10.254.72.1; then
+  if expect_source 5.22.0.10 10.254.72.1 &&
+     expect_source 8.8.8.8 10.254.72.1 &&
+     expect_foreign_hosted_reply; then
     ready=yes
     break
   fi
   kill -0 "$server_pid" 2>/dev/null || { echo "QA VLESS server exited" >&2; exit 1; }
+  kill -0 "$hosting_pid" 2>/dev/null || { echo "QA hosting service exited" >&2; exit 1; }
   attempt=$((attempt+1))
   sleep 0.2
 done
@@ -223,6 +264,9 @@ if [ "$witness_baseline" -le 0 ]; then
 fi
 echo "REAL_TUN_LAB_UNTUNNELED_BASELINE=PASS (two native routes)"
 echo "REAL_TUN_DIRECT_WITNESS=PASS (positive control observed $witness_baseline direct packets)"
+hosting_baseline=$(hosting_reply_packets)
+test "$hosting_baseline" -gt 0 || { echo 'FAIL: no positive control of foreign visitor hosting reply' >&2; exit 1; }
+echo "REAL_TUN_FOREIGN_HOSTING_BASELINE=PASS (foreign visitor request/reply, packets=$hosting_baseline)"
 
 # Generate the candidate via the actual manager compiler, not a manually
 # duplicated sing-box config. The fixed lab credentials are not user secrets.
@@ -256,6 +300,10 @@ if [ "$ready" != yes ]; then
   exit 1
 fi
 echo "REAL_TUN_SELECTED_TCP_PATH=PASS (domestic Direct vs foreign VLESS; no HTTP proxy)"
+expect_foreign_hosted_reply
+hosting_active=$(hosting_reply_packets)
+test "$hosting_active" -gt "$hosting_baseline" || { echo 'FAIL: hosting replies did not reach foreign visitor while TUN active' >&2; exit 1; }
+echo 'REAL_TUN_FOREIGN_HOSTING_ACTIVE=PASS (independently observed foreign-visitor reply path)'
 
 # A completely separate proxy-unaware process must follow TUN too.
 wget_result=$(env -i HOME=/root PATH=/usr/bin:/bin:/sbin:/usr/sbin \
@@ -297,3 +345,7 @@ echo 'REAL_TUN_POLICY_DURING_OUTAGE=PASS (live client, TUN route, installed nfta
 echo 'REAL_TUN_NO_DIRECT_PACKETS_ON_UPSTREAM_LOSS=PASS (positive-controlled independent peer witness)'
 expect_source 5.22.0.10 10.254.72.1
 echo "REAL_TUN_UPSTREAM_LOSS=PASS (VPN path failed closed, domestic/underlay Direct preserved)"
+expect_foreign_hosted_reply
+hosting_outage=$(hosting_reply_packets)
+test "$hosting_outage" -gt "$hosting_active" || { echo 'FAIL: hosting replies did not survive VLESS outage' >&2; exit 1; }
+echo 'REAL_TUN_FOREIGN_HOSTING_OUTAGE=PASS (hosting replies preserved while selected VPN is down)'
