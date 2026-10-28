@@ -27,7 +27,7 @@ var smartTUNDeviceName = regexp.MustCompile("^[a-zA-Z0-9_.-]{1,15}$")
 
 func canonicalRoutePrefix(raw string) (netip.Prefix, error) {
 	p, err := netip.ParsePrefix(raw)
-	if err != nil || !p.IsValid() || p.Bits() == 0 || p.Masked().String() != raw {
+	if err != nil || !p.IsValid() || !p.Addr().Is4() || p.Bits() == 0 || p.Masked().String() != raw {
 		return netip.Prefix{}, errors.New("invalid or noncanonical CIDR")
 	}
 	return p, nil

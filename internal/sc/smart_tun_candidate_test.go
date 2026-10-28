@@ -71,6 +71,11 @@ func TestSmartTUNCandidateRejectsUnsafeConfigurations(t *testing.T) {
 		{"invalid-interface", func(_ *Profile, o *SmartTUNCandidateOptions) { o.UnderlayInterface = "bad;name" }},
 		{"invalid-tun", func(_ *Profile, o *SmartTUNCandidateOptions) { o.TunnelIPv4 = "8.8.8.1/30" }},
 		{"missing-domestic", func(_ *Profile, o *SmartTUNCandidateOptions) { o.DomesticCIDRs = nil }},
+		{"ipv6-domestic", func(_ *Profile, o *SmartTUNCandidateOptions) { o.DomesticCIDRs = []string{"2001:db8::/32"} }},
+		{"ipv6-operator", func(_ *Profile, o *SmartTUNCandidateOptions) {
+			o.Exceptions = []SmartTUNCIDRException{{CIDR: "2001:db8::/32", Via: "vpn"}}
+		}},
+		{"ipv6-protected", func(_ *Profile, o *SmartTUNCandidateOptions) { o.ProtectedCIDRs = []string{"2001:db8::/32"} }},
 		{"invalid-domestic", func(_ *Profile, o *SmartTUNCandidateOptions) { o.DomesticCIDRs = []string{"no-ip"} }},
 		{"noncanonical-domestic", func(_ *Profile, o *SmartTUNCandidateOptions) { o.DomesticCIDRs = []string{"5.22.0.1/17"} }},
 		{"global-bypass", func(_ *Profile, o *SmartTUNCandidateOptions) { o.ProtectedCIDRs = []string{"0.0.0.0/0"} }},

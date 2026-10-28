@@ -78,8 +78,12 @@ cleanup() {
     echo "REAL_TUN_LAB_CLEANUP=FAIL (TUN still present)" >&2
     rc=1
   fi
-  if [ "$(ip -4 route show default)" != "default dev lo scope link metric 4242" ]; then
-    echo "REAL_TUN_LAB_CLEANUP=FAIL (baseline default route changed)" >&2
+  observed_default=$(ip -4 route show default) || { echo 'REAL_TUN_LAB_CLEANUP=FAIL (default route read)' >&2; rc=1; observed_default=''; }
+  if [ "$observed_default" != "default dev lo scope link metric 4242" ]; then
+    echo "REAL_TUN_LAB_CLEANUP=FAIL (baseline default route changed; observed=[$observed_default])" >&2
+    ip -4 route show table all >&2 || :
+    ip -4 rule show >&2 || :
+    ip -4 addr show dev lo >&2 || :
     rc=1
   fi
   if [ -n "$nft_before" ]; then
