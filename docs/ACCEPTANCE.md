@@ -105,8 +105,7 @@ Code-only unit tests or a green check label are insufficient;
 original exact-candidate installed-host logs and actual assertion sources
 must be inspected. Native protocol tagging is not cryptographic identity,
 Docker restart is not physical reboot, and these tests cannot justify
-production Selective/Broad Tunnel, aaPanel job selection or Runtime Health
-Guard #3 acceptance.
+production Selective/Broad Tunnel or Runtime Health Guard #3 acceptance.
 
 ### Read-only workload ancestry observation (Issue #2 supporting diagnostic)
 
@@ -119,9 +118,9 @@ arguments, environments, secrets or executable paths. Real self-process and
 fixture ancestor/reuse/cgroup-migration tests must establish fail-closed
 behavior. Successful output must **always** say read-only, non-atomic, no
 verified aaPanel job owner, no descendant coverage, no traffic-path proof and
-no readiness to route. No procfs result fulfills the separate acceptance
-requirement for an actual aaPanel App Store job and its subprocesses or
-permits a guarded route to be activated.
+no readiness to route. No procfs result permits guarded route activation.
+These opt-in observations are supporting diagnostics, not a required per-job
+ownership gate for the Owner-approved Iran Direct / foreign VPN policy.
 
 Optional `workload-observe --pid N --sockets` adds an explicitly requested,
 read-only FD-inode join against the PID network namespace's TCP/UDP IPv4/IPv6
@@ -170,8 +169,9 @@ TCP socket evidence, an unrelated sibling excluded, default opt-out, truthful
 SSH/HTTP. This remains **supporting laboratory evidence only**, not a real
 panel App Store job or authenticated selected traffic.
 Socket FDs may be inherited/shared, snapshots are non-atomic, and unmatched
-sockets are not coverage; a real aaPanel task, its subprocesses and a genuinely
-selected egress require separate physical/representative acceptance.
+sockets are not coverage; representative acceptance now checks actual
+**host-wide destination-split VPN versus Direct** packet paths, not whether an
+individual aaPanel task or its subprocesses can be uniquely attributed.
 
 ### Product-integrated RPDB trial interruption and unavailable-watchdog evidence
 
@@ -247,9 +247,10 @@ SSH confirmation, or Runtime Health Guard. Those matrix items remain NOT_RUN.
 | Direct baseline | Install, off, disable, reboot, uninstall leave server networking/SSH/sites untouched except clearly owned state | Real Linux host state diff |
 | Import/profile | Known compatible sing-box/VLESS profile validates; malformed/malicious/unsupported inputs fail without secret exposure | Unit + real-core integration |
 | Proxy Only | Opted-in curl/APT, and WordPress where supported, must demonstrate the intended proxy route independently of Direct. APT children must be rooted in verified native executables **and effective native acquisition-method paths**; shadow binaries, caller/inherited `Dir::Bin` or `RootDir` redirection and alternative combined-update modes must be refused before any untrusted executable can receive selected-route traffic. APT child settings must be temporary and private with no host-wide `/etc/apt` changes; other apps/services stay Direct. Fail if a selected app accidentally falls back to Direct, if its temporary secret config lingers, or if a dead core causes unrelated host network failure. Do not infer WordPress coverage from PHP/cURL alone. | Real Linux core, APT/process settings, app-specific HTTP evidence and independent path attribution; mark missing WordPress/foreign testing NOT_RUN |
-| Selected non-curl applications and panel download/install jobs | Explicit Proxy Only client egress must be proven with non-curl clients and inherited subprocesses, and fail closed without unrequested Direct fallback. A panel-originated installer whose actual worker ignores proxy variables must either have a separately supported guarded job/destination selection with verified IPv4/IPv6/DNS and subprocess coverage, or be reported UNSUPPORTED; never claim a CLI proxy wrapper automatically covers an aaPanel GUI task | Genuine selected-proxy client tests on installed disconnected Linux; separate actual aaPanel App Store task/process/path evidence on disposable representative hosting host before advertising panel-job support |
+| Transparent whole-host foreign split routing | With the guarded mode active, locally verified Iranian public destinations, private/on-link networks and protected SSH/panel/hosting replies use Direct; other supported public outbound destinations use VPN **independent of which application/installer initiated them**. No per-job identity, shell proxy variables or individual App Store selection required. Ensure unsupported IPv6/UDP/DNS cases cannot silently bypass VPN-required traffic | Installed disposable Linux guest with independent Direct and VPN path/packet evidence; exercise ordinary non-proxy-aware tools plus a representative aaPanel App Store install or equivalent normal host application without claiming per-job ownership |
+| Optional foreign direct-first exception | A narrow explicit foreign exception may use a proven working Direct path and send **new flows** via VPN when Direct is unavailable, without replaying an application operation, route thrashing or leaking ordinary VPN-required destinations. This is secondary to first core split-routing evidence | Two independent destination/path checks and safe transition evidence on disposable guest; mark NOT_RUN until implemented |
 | VPN endpoint underlay and bootstrap DNS | Endpoint is addressable before VPN is active; no recursive tunnel path or resolver loop; Iran/private/foreign traffic uses expected route | Offline/restricted-DNS simulation and real Linux path observation |
-| Selective/Broad routing | Inbound SSH (existing/new), web requests and responses, IPv4/IPv6, DNS and aaPanel coexist across connect/off | Disposable hosting VM + selected field |
+| Selective/Broad routing | Demonstrate Iran Direct / non-Iran VPN by destination on supported protocols; verify new/existing SSH, established inbound HTTP(S) replies from **foreign** clients, DNS/IPv4/IPv6 truthfulness and normal aaPanel behavior across connect/off | Disposable hosting VM with real selected-path evidence; physical representative checks before release |
 | Activation expiry | 600-second/default or shorter test-configured expiry without new approved control connection returns to baseline | systemd and route journal check |
 | Activation confirmation | Fresh bound SSH/console identity accepted; stale/replayed/cross-operation confirmation rejected | Real SSH, negative tests |
 | Crash/uncertain | Kill manager or sing-box between mutation stages, concurrent apply, fsync failure and foreign rule conflict do not clobber unowned resources | Fault injection + host state diff |
@@ -271,7 +272,7 @@ Before implementing the complete menu or speculative protocols, demonstrate:
 3. Stopping sing-box or losing foreign network access cannot affect ordinary host routes or SSH in this mode; any product-owned app proxy settings are restored rather than left pointing to an unavailable local port.
 4. The exact files required for the supported target can be installed with foreign networking disabled.
 
-Then advance to guarded Selective Tunnel with independent recovery; do not deploy an unguarded system-wide TUN just to accelerate a demo.
+Then advance directly to **one guarded server-wide Iran Direct / foreign VPN destination-split vertical slice** on a disposable host, demonstrating transparent outbound use without per-process/job selection, real route-specific foreign-versus-domestic paths, preserved SSH/hosting reply traffic and independent rollback. Do not add another process-census or per-app adapter as a prerequisite; do not deploy an unguarded system-wide TUN just to accelerate a demo.
 
 ## Acceptance and authorization gates
 

@@ -12,12 +12,14 @@ The initial connectivity engine is **sing-box**. Rather than reinventing VPN pro
 | --- | --- |
 | **Direct** | Keep the existing server network unchanged; the default when no profile is active. |
 | **Proxy Only** | Use a local proxy for explicitly selected downloads, updates, or applications without changing the host's default route. |
-| **Selective Tunnel** | Route selected external traffic through the active profile while preserving domestic and protected management/service paths. |
+| **Selective Tunnel** | Default transparent split: Iran/local and protected host paths Direct; all other supported public outbound destinations via VPN. |
 | **Broad Tunnel** | Route a wider, explicitly chosen set of outbound traffic through the profile, with host safety exceptions. |
 
 A tunnel-affecting change must pass a guarded activation and an operator confirmation window before it is committed. If an active profile stops working, independent health/recovery mechanisms must restore the selected safe network policy. **Checking whether websites are reachable from abroad is optional**, depending on the operator's goal; a client VPN alone does not grant public inbound connectivity.
 
-**Selection is more than `curl`.** A real aaPanel App Store install may use a panel worker, a Python download helper, Git/wget or a separate installer subprocess, so a proxy exported in an operator's shell is not evidence that the panel's background job used it. The development Proxy Only wrapper supports explicitly opted-in **proxy-aware** commands; per-app support must be demonstrated by selected-path tests. Future guarded Selective routing must also support a precisely identified compatible panel job/service or destination scope, without redirecting the entire panel, root account, SSH or hosted services. Until this is physically tested and protected by route-activation and runtime guards, **transparent aaPanel installer selection is NOT IMPLEMENTED**. The detailed product rule lives in [PROJECT-SPEC.md](docs/PROJECT-SPEC.md) and the acceptance criteria in [ACCEPTANCE.md](docs/ACCEPTANCE.md).
+**One server-wide destination policy, not per-job routing.** In guarded Selective Tunnel mode, supported host-origin outbound traffic to Iranian IP destinations stays **Direct**, while other public destinations take the selected VPN by default. This is transparent to ordinary programs including aaPanel App Store jobs, APT, Git and WordPress: no individual PID, process tree, installer or app-specific proxy setting is required for the routed mode. Privileged SSH/control paths, existing inbound HTTP(S) replies, on-link networks and the VPN endpoint underlay are independently protected, even when a connecting remote client is foreign. A versioned Iranian IP-prefix source and honest IPv4/IPv6/DNS/protocol support checks are required; GeoIP alone cannot classify connection ownership or protect ingress replies.
+
+**Optional exceptions:** an operator may allow specific foreign destinations to use a verified Direct path first, selecting VPN for **new connections** if Direct is unavailable. Do not automatically replay application requests or leak ordinary VPN-required traffic to Direct on VPN failure. This convenience is secondary to the first working safe split-routing path. Unlike this future guarded tunnel mode, current **Proxy Only** still requires explicitly proxy-aware applications. Per-job/aaPanel-specific routing and continuous process/socket attribution are **not MVP requirements**. See [PROJECT-SPEC.md](docs/PROJECT-SPEC.md) and [Issue #2](https://github.com/AChWorks/server-connect/issues/2).
 
 Direct and single-active-profile Proxy Only are implemented as **development candidates** and tested with a local genuine sing-box VLESS TCP relay; guarded host-wide routing and automatic recovery are **not implemented or accepted**. A profile that works in Windows v2rayN/Karing may not be reachable from a particular Linux datacenter. No VPN protocol can restore international connectivity when the underlying network has no usable path.
 
@@ -116,9 +118,7 @@ The command always returns `read_only: true`, `snapshot_atomic: false`,
 `attribution_verified: false`, `descendants_covered: false`,
 `traffic_path_verified: false` and `activation_ready: false`. It never creates
 a routing rule, cgroup, firewall change or VPN; there is **no transparent
-background-job routing** in this feature. Authenticated aaPanel job ownership, continuous descendant/socket attribution,
-selected IPv4/IPv6/DNS packet-path proof and independently guarded outbound
-routing remain open Issue #2 acceptance work.
+background-job selection** in this optional diagnostic. The future server-wide destination policy needs verified packet paths and independent guards, **not** authenticated per-Job/PID attribution. IPv4/IPv6/DNS capability and routed acceptance remain open in Issue #2.
 
 ### Advisory selective route planning (Issue #2 development)
 
