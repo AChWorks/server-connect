@@ -15,6 +15,7 @@ client_pid=
 server_pid=
 origin_pid=
 hosting_pid=
+udp_pid=
 edge_added=no
 peer_added=no
 default_added=no
@@ -67,7 +68,7 @@ cleanup() {
   original_rc=$?
   cleanup_failed=no
   trap - EXIT INT TERM
-  for pid in "$client_pid" "$server_pid" "$origin_pid" "$hosting_pid"; do
+  for pid in "$client_pid" "$server_pid" "$origin_pid" "$hosting_pid" "$udp_pid"; do
     if [ -n "$pid" ]; then
       kill "$pid" 2>/dev/null || :
       wait "$pid" 2>/dev/null || :
@@ -97,7 +98,8 @@ cleanup() {
       { echo 'REAL_TUN_LAB_CLEANUP=FAIL (owned TUN device file deletion)' >&2; cleanup_failed=yes; }
   fi
   rm -f "$client_cfg" "$server_cfg" /run/sc-qa-tun-origin.log \
-    /run/sc-qa-tun-hosting.log /run/sc-qa-tun-server.log /run/sc-qa-tun-client.log ||
+    /run/sc-qa-tun-hosting.log /run/sc-qa-tun-udp.log \
+    /run/sc-qa-tun-server.log /run/sc-qa-tun-client.log ||
       { echo 'REAL_TUN_LAB_CLEANUP=FAIL (temporary QA file deletion)' >&2; cleanup_failed=yes; }
   # Fail, rather than claim cleanup, if the real core leaked its TUN.
   if [ -e /sys/class/net/sctunqa0 ]; then
@@ -167,6 +169,7 @@ print(counters[0])
 }
 
 direct_witness_packets() { peer_counter_packets direct_packets; }
+direct_udp_witness_packets() { peer_counter_packets direct_udp_packets; }
 hosting_reply_packets() { peer_counter_packets hosting_reply_packets; }
 
 # The fault is injected only by the disposable installed-host regression.
@@ -215,6 +218,49 @@ expect_foreign_hosted_reply() {
   test "$response" = 'HOST_REQUEST_SOURCE=198.51.100.42'
 }
 
+# Genuine proxy-unaware UDP socket: the peer namespace reports its observed
+# sender address and echoes a phase-specific token. No HTTP proxy, resolver,
+# shell /dev/udp extension, or sing-box control-plane socket participates.
+udp_path() {
+  env -i HOME=/root PATH=/usr/bin:/bin:/sbin:/usr/sbin \
+    /usr/bin/python3 - "$1" "$2" "$3" "$4" <<'PYUDPCLIENT'
+import errno
+import socket
+import sys
+
+destination, expected_source, token, mode = sys.argv[1:]
+if mode not in ("reply", "no-reply"):
+    raise SystemExit("invalid UDP QA mode")
+payload = ("scqa-udp:" + token).encode()
+sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+sock.settimeout(2)
+reply = None
+try:
+    sock.sendto(payload, (destination, 19186))
+    reply, _ = sock.recvfrom(256)
+except socket.timeout:
+    pass
+except OSError as exc:
+    # During a deliberately dead VLESS upstream, an explicit kernel error is
+    # also a failed VPN-required request, not successful Direct delivery.
+    if mode != "no-reply" or exc.errno not in (
+        errno.ENETUNREACH, errno.EHOSTUNREACH, errno.ECONNREFUSED
+    ):
+        raise
+finally:
+    sock.close()
+
+if mode == "no-reply":
+    if reply is not None:
+        raise SystemExit("UDP VPN-required reply escaped during outage")
+    print("REAL_TUN_UDP_OUTAGE_NO_RESPONSE=PASS")
+else:
+    expected = b"SOURCE=" + expected_source.encode() + b";ECHO=" + payload
+    if reply != expected:
+        raise SystemExit("UDP source-path/echo mismatch: " + repr(reply))
+PYUDPCLIENT
+}
+
 trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
@@ -247,10 +293,12 @@ ip -n "$peer" addr add 198.51.100.42/32 dev lo
 ip netns exec "$peer" nft -f - <<'NFTWITNESS'
 table inet scqawitness {
   counter direct_packets { }
+  counter direct_udp_packets { }
   counter hosting_reply_packets { }
   chain incoming {
     type filter hook input priority filter; policy accept;
     iifname "scqapeer0" ip daddr 8.8.8.8 tcp dport 19180 counter name direct_packets
+    iifname "scqapeer0" ip daddr 8.8.8.8 udp dport 19186 counter name direct_udp_packets
     iifname "scqapeer0" ip saddr 10.254.72.1 ip daddr 198.51.100.42 tcp sport 19184 counter name hosting_reply_packets
   }
 }
@@ -272,6 +320,19 @@ class Handler(BaseHTTPRequestHandler):
 ThreadingHTTPServer(("0.0.0.0",19180),Handler).serve_forever()
 PYORIGIN
 origin_pid=$!
+
+# Peer-side independent UDP echo endpoint. The observed sender proves whether
+# a proxy-unaware UDP request reached it via native VETH or VLESS egress.
+ip netns exec "$peer" python3 -u - >/run/sc-qa-tun-udp.log 2>&1 <<'PYUDPSERVER' &
+import socket
+sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+sock.bind(("0.0.0.0", 19186))
+while True:
+    payload, sender = sock.recvfrom(256)
+    if payload.startswith(b"scqa-udp:"):
+        sock.sendto(b"SOURCE=" + sender[0].encode() + b";ECHO=" + payload, sender)
+PYUDPSERVER
+udp_pid=$!
 
 # Host-side HTTP service simulates a website or administrative panel whose
 # visitor connects from an independently controlled foreign address.
@@ -303,12 +364,15 @@ attempt=0
 while [ "$attempt" -lt 25 ]; do
   if expect_source 5.22.0.10 10.254.72.1 &&
      expect_source 8.8.8.8 10.254.72.1 &&
+     udp_path 5.22.0.10 10.254.72.1 ready-domestic reply &&
+     udp_path 8.8.8.8 10.254.72.1 ready-foreign reply &&
      expect_foreign_hosted_reply; then
     ready=yes
     break
   fi
   kill -0 "$server_pid" 2>/dev/null || { echo "QA VLESS server exited" >&2; exit 1; }
   kill -0 "$hosting_pid" 2>/dev/null || { echo "QA hosting service exited" >&2; exit 1; }
+  kill -0 "$udp_pid" 2>/dev/null || { echo "QA UDP service exited" >&2; exit 1; }
   attempt=$((attempt+1))
   sleep 0.2
 done
@@ -320,6 +384,9 @@ if [ "$witness_baseline" -le 0 ]; then
 fi
 echo "REAL_TUN_LAB_UNTUNNELED_BASELINE=PASS (two native routes)"
 echo "REAL_TUN_DIRECT_WITNESS=PASS (positive control observed $witness_baseline direct packets)"
+udp_witness_baseline=$(direct_udp_witness_packets)
+test "$udp_witness_baseline" -gt 0 || { echo 'FAIL: no positive native foreign UDP packet witness' >&2; exit 1; }
+echo "REAL_TUN_UDP_DIRECT_WITNESS=PASS (native foreign UDP packets=$udp_witness_baseline)"
 hosting_baseline=$(hosting_reply_packets)
 test "$hosting_baseline" -gt 0 || { echo 'FAIL: no positive control of foreign visitor hosting reply' >&2; exit 1; }
 echo "REAL_TUN_FOREIGN_HOSTING_BASELINE=PASS (foreign visitor request/reply, packets=$hosting_baseline)"
@@ -356,6 +423,16 @@ if [ "$ready" != yes ]; then
   exit 1
 fi
 echo "REAL_TUN_SELECTED_TCP_PATH=PASS (domestic Direct vs foreign VLESS; no HTTP proxy)"
+assert_tun_policy_active || { echo 'FAIL: TUN not active before selected UDP path' >&2; exit 1; }
+udp_path 5.22.0.10 10.254.72.1 tun-domestic reply
+udp_path 8.8.8.8 8.8.8.8 tun-foreign reply
+udp_witness_active=$(direct_udp_witness_packets)
+test "$udp_witness_active" -eq "$udp_witness_baseline" || {
+  echo "FAIL: VPN-required UDP escaped native Direct ($udp_witness_baseline -> $udp_witness_active)" >&2
+  exit 1
+}
+assert_tun_policy_active || { echo 'FAIL: TUN disappeared during selected UDP proof' >&2; exit 1; }
+echo "REAL_TUN_SELECTED_UDP_PATH=PASS (domestic Direct, foreign VLESS, no native foreign UDP packets)"
 assert_tun_policy_active || { echo 'FAIL: TUN not active before active hosting probe' >&2; exit 1; }
 expect_foreign_hosted_reply
 hosting_active=$(hosting_reply_packets)
@@ -401,6 +478,16 @@ if [ "$witness_after_outage" -ne "$witness_before_outage" ]; then
 fi
 echo 'REAL_TUN_POLICY_DURING_OUTAGE=PASS (live client, TUN route, installed nftables policy)'
 echo 'REAL_TUN_NO_DIRECT_PACKETS_ON_UPSTREAM_LOSS=PASS (positive-controlled independent peer witness)'
+assert_tun_policy_active || { echo 'FAIL: TUN lost before foreign UDP outage probe' >&2; exit 1; }
+udp_path 8.8.8.8 unused outage-foreign no-reply
+udp_witness_outage=$(direct_udp_witness_packets)
+test "$udp_witness_outage" -eq "$udp_witness_active" || {
+  echo "FAIL: VPN-required UDP leaked native Direct on upstream loss ($udp_witness_active -> $udp_witness_outage)" >&2
+  exit 1
+}
+udp_path 5.22.0.10 10.254.72.1 outage-domestic reply
+assert_tun_policy_active || { echo 'FAIL: TUN lost during foreign UDP outage probe' >&2; exit 1; }
+echo 'REAL_TUN_UDP_NO_DIRECT_PACKETS_ON_UPSTREAM_LOSS=PASS (positive-controlled peer witness)'
 expect_source 5.22.0.10 10.254.72.1
 echo "REAL_TUN_UPSTREAM_LOSS=PASS (VPN path failed closed, domestic/underlay Direct preserved)"
 # The isolated regression deliberately removes the real TUN after the
