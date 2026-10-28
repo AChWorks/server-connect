@@ -64,19 +64,41 @@ never authorize job selection or intercept future children. An inaccessible,
 vanished, ambiguous or unsupported cgroup yields a classified failure, not a
 fabricated identification.
 
-For a deeper **explicitly opted-in** snapshot of the same already-running
-process, use `server-connect --json workload-observe --pid 12345 --sockets`.
-This additionally inspects open `socket:[inode]` file-descriptor links and
-TCP/UDP IPv4/IPv6 tables in that PID's network namespace, then reports only
-entries whose inodes match its currently held sockets (protocol, numeric
+For an **explicitly opted-in** sample of currently visible child processes,
+use `server-connect --json workload-observe --pid 12345 --descendants`.
+This performs two bounded, non-atomic procfs process censuses and rechecks the
+selected parent/child identities and cgroups. Directory entries are streamed in
+batches of up to 128, with at most 8192 numeric PID entries and 8448 total
+entries per census (including nonnumeric files/directories). Exceeding either
+limit fails closed; no complete /proc listing is materialized first. The
+result includes only observed live children; short-lived, hidden, reparented or
+newly spawned workers can be
+missed. `observed_descendants` is present as an empty array when no child was
+seen, not as a guarantee that no child ever ran. An incomplete or changed
+selected tree fails with `workload_observation_unavailable`, without partial
+results. It is an observation, **not** a job identifier or continuous child
+tracking mechanism.
+
+For a deeper **explicitly opted-in** snapshot of the supplied parent **and
+its sampled children**, add `--sockets`. For example:
+
+~~~sh
+server-connect --json workload-observe --pid 12345 --descendants --sockets
+~~~
+
+Without `--descendants`, `server-connect --json workload-observe --pid 12345 --sockets`
+continues to inspect only the supplied PID. The socket option inspects open
+`socket:[inode]` file-descriptor links and TCP/UDP IPv4/IPv6 tables in each
+sampled PID's network namespace, then reports only entries whose inodes match
+its currently held sockets (protocol, numeric
 local/remote address, kernel state). It rechecks the namespace, socket-FD inode
 set and process ancestry before returning; inaccessible or changed observations
 fail closed. Unmatched FDs are counted as unclassified (e.g., Unix/netlink),
 not silently treated as TCP/UDP. The command does not initiate a network probe.
 
 **These are not authenticated job or flow records.** Socket FDs can be shared,
-inherited or reused; observations are non-atomic and do not cover future child
-processes, DNS resolution, actual egress interfaces, selected VPN paths or
+inherited or reused; observations are non-atomic and do not establish complete child
+coverage, DNS resolution, actual egress interfaces, selected VPN paths or
 successful packet delivery. Numeric socket endpoints and cgroup names are
 sensitive operational diagnostics; retain them in private administrator output.
 No background aaPanel App Store task is claimed to be routable from this data.
@@ -85,7 +107,7 @@ The command always returns `read_only: true`, `snapshot_atomic: false`,
 `attribution_verified: false`, `descendants_covered: false`,
 `traffic_path_verified: false` and `activation_ready: false`. It never creates
 a routing rule, cgroup, firewall change or VPN; there is **no transparent
-background-job routing** in this feature. Authenticated aaPanel job ownership, descendant/socket attribution,
+background-job routing** in this feature. Authenticated aaPanel job ownership, continuous descendant/socket attribution,
 selected IPv4/IPv6/DNS packet-path proof and independently guarded outbound
 routing remain open Issue #2 acceptance work.
 
