@@ -96,6 +96,15 @@ set and process ancestry before returning; inaccessible or changed observations
 fail closed. Unmatched FDs are counted as unclassified (e.g., Unix/netlink),
 not silently treated as TCP/UDP. The command does not initiate a network probe.
 
+With **both** `--descendants --sockets`, the root and all sampled descendants
+share a **64 MiB aggregate TCP/UDP namespace-table input budget** (plus at most
+one sentinel byte to detect an overflow), in addition to the existing 8 MiB
+per-table limit. A shared namespace may be read repeatedly; the budget counts
+each read. Exceeding the budget returns `workload_observation_unavailable`
+without any partial root/child evidence. This is an input/I/O budget, not a
+guarantee of wall-clock time, peak memory, complete coverage, or job ownership.
+The **single-PID** `--sockets` mode retains its prior per-table limits.
+
 **These are not authenticated job or flow records.** Socket FDs can be shared,
 inherited or reused; observations are non-atomic and do not establish complete child
 coverage, DNS resolution, actual egress interfaces, selected VPN paths or

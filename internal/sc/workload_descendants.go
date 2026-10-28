@@ -156,8 +156,21 @@ func workloadTreeContainsRoot(report WorkloadObservation, rootPID int, rootStart
 }
 
 func observeWorkloadDescendantsAt(root string, pid int, sockets bool, afterEvidence func()) (WorkloadObservation, error) {
+	var budget *workloadSocketReadBudget
+	if sockets {
+		budget = &workloadSocketReadBudget{remaining: workloadSocketDescendantMaxNetBytes}
+	}
+	return observeWorkloadDescendantsAtWithBudget(root, pid, sockets, afterEvidence, budget)
+}
+
+// The budget seam remains package-private for precise synthetic fixtures;
+// production uses the fixed cumulative limit only when --sockets is opted in.
+func observeWorkloadDescendantsAtWithBudget(root string, pid int, sockets bool, afterEvidence func(), budget *workloadSocketReadBudget) (WorkloadObservation, error) {
 	if pid <= 1 {
 		return WorkloadObservation{}, Fault("invalid_arguments", "workload observation requires --pid greater than 1")
+	}
+	if sockets && (budget == nil || budget.remaining <= 0) {
+		return WorkloadObservation{}, workloadObservationUnavailable()
 	}
 	before, err := workloadProcessCensusAt(root)
 	if err != nil {
@@ -169,7 +182,7 @@ func observeWorkloadDescendantsAt(root string, pid int, sockets bool, afterEvide
 	}
 	var report WorkloadObservation
 	if sockets {
-		report, err = observeWorkloadWithSocketsAt(root, pid)
+		report, err = observeWorkloadWithSocketsAtBudget(root, pid, budget)
 	} else {
 		report, err = observeWorkloadAt(root, pid)
 	}
@@ -184,7 +197,7 @@ func observeWorkloadDescendantsAt(root string, pid int, sockets bool, afterEvide
 	for _, child := range children {
 		var observed WorkloadObservation
 		if sockets {
-			observed, err = observeWorkloadWithSocketsAt(root, child)
+			observed, err = observeWorkloadWithSocketsAtBudget(root, child, budget)
 		} else {
 			observed, err = observeWorkloadAt(root, child)
 		}

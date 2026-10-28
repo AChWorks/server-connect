@@ -151,8 +151,17 @@ entries), and never pre-materialize an unbounded directory listing. Verify
 exact/over-limit boundaries, early rejection and no partial evidence from a
 failed second census using synthetic and real filesystem fixtures. The
 optional combination with `--sockets` additionally reads each sampled child's
-held TCP/UDP FDs. A stable observed empty child list is distinct from missing
-visibility; no observation proves complete descendant/job ownership. Reject
+held TCP/UDP FDs. The parent and children must share a 64 MiB cumulative
+TCP/UDP namespace-table input budget (plus one bounded sentinel byte), on top
+of each table's existing 8 MiB limit. Verify exact-byte and over-limit
+synthetic tables, successful parent+child scans, and a budget overflow after
+the parent has been observed: return workload_observation_unavailable
+with no partial root/child report. Single-PID --sockets and child-only
+observations must retain their previous behavior and JSON semantics.
+This budget does not prove RSS or runtime bounds, process/socket ownership
+or aaPanel installation-job routing. A stable observed empty child list remains
+distinct from missing visibility; no observation proves complete descendant
+or job ownership. Reject
 root/selected-child PID reuse, reparenting, cgroup migration, disappearance,
 new descendants during the sampled window, oversized trees and malformed
 selected procfs records without partial output. Verify real live parent/child
