@@ -1,6 +1,7 @@
 package sc
 
 import (
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -41,17 +42,29 @@ type workloadProcDirReader interface {
 // Transient or inaccessible unrelated entries are skipped; every selected
 // candidate is rechecked separately and the two selected trees must agree.
 func workloadProcessCensusAt(root string) (map[int]workloadProcCensusEntry, error) {
+	census, _, err := workloadProcessCensusWithSkipsAt(root)
+	return census, err
+}
+
+// Counts are only directly observed skipped numeric stat entries, not hidden
+// processes, authenticated job coverage, or an estimate of missed children.
+func workloadProcessCensusWithSkipsAt(root string) (map[int]workloadProcCensusEntry, int, error) {
 	dir, err := os.Open(root)
 	if err != nil {
-		return nil, workloadObservationUnavailable()
+		return nil, 0, workloadObservationUnavailable()
 	}
 	defer dir.Close()
-	return workloadProcessCensusFromReader(root, dir)
+	return workloadProcessCensusFromReaderWithSkips(root, dir)
 }
 
 func workloadProcessCensusFromReader(root string, dir workloadProcDirReader) (map[int]workloadProcCensusEntry, error) {
+	census, _, err := workloadProcessCensusFromReaderWithSkips(root, dir)
+	return census, err
+}
+
+func workloadProcessCensusFromReaderWithSkips(root string, dir workloadProcDirReader) (map[int]workloadProcCensusEntry, int, error) {
 	observed := make(map[int]workloadProcCensusEntry)
-	total, numeric := 0, 0
+	total, numeric, skipped := 0, 0, 0
 	for {
 		// Request at most one entry beyond the total cap, so even the
 		// exhaustion check cannot materialize an unbounded directory slice.
@@ -61,11 +74,11 @@ func workloadProcessCensusFromReader(root string, dir workloadProcDirReader) (ma
 		}
 		entries, err := dir.ReadDir(batchSize)
 		if (err != nil && err != io.EOF) || len(entries) > batchSize {
-			return nil, workloadObservationUnavailable()
+			return nil, 0, workloadObservationUnavailable()
 		}
 		total += len(entries)
 		if total > workloadDescendantMaxDirEntries {
-			return nil, workloadObservationUnavailable()
+			return nil, 0, workloadObservationUnavailable()
 		}
 		for _, entry := range entries {
 			if !entry.IsDir() {
@@ -77,24 +90,26 @@ func workloadProcessCensusFromReader(root string, dir workloadProcDirReader) (ma
 			}
 			numeric++
 			if numeric > workloadDescendantMaxProcEntries {
-				return nil, workloadObservationUnavailable()
+				return nil, 0, workloadObservationUnavailable()
 			}
 			stat, err := readWorkloadProcFile(filepath.Join(root, entry.Name(), "stat"))
 			if err != nil {
+				skipped++
 				continue
 			}
 			parent, start, err := parseWorkloadStat(stat, pid)
 			if err != nil {
+				skipped++
 				continue
 			}
 			observed[pid] = workloadProcCensusEntry{parent: parent, start: start}
 		}
 		if err == io.EOF {
-			return observed, nil
+			return observed, skipped, nil
 		}
 		// A positive-size ReadDir must never return an empty, successful batch.
 		if len(entries) == 0 {
-			return nil, workloadObservationUnavailable()
+			return nil, 0, workloadObservationUnavailable()
 		}
 	}
 }
@@ -172,7 +187,7 @@ func observeWorkloadDescendantsAtWithBudget(root string, pid int, sockets bool, 
 	if sockets && (budget == nil || budget.remaining <= 0) {
 		return WorkloadObservation{}, workloadObservationUnavailable()
 	}
-	before, err := workloadProcessCensusAt(root)
+	before, beforeSkipped, err := workloadProcessCensusWithSkipsAt(root)
 	if err != nil {
 		return WorkloadObservation{}, err
 	}
@@ -218,7 +233,7 @@ func observeWorkloadDescendantsAtWithBudget(root string, pid int, sockets bool, 
 	if afterEvidence != nil {
 		afterEvidence()
 	}
-	after, err := workloadProcessCensusAt(root)
+	after, afterSkipped, err := workloadProcessCensusWithSkipsAt(root)
 	if err != nil {
 		return WorkloadObservation{}, err
 	}
@@ -237,6 +252,7 @@ func observeWorkloadDescendantsAtWithBudget(root string, pid int, sockets bool, 
 	report.ObservedDescendants = &evidence
 	report.DescendantSurvey = "two_non_atomic_procfs_censuses"
 	report.Limitations = append(report.Limitations,
+		fmt.Sprintf("Procfs numeric PID stat entries skipped: first census %d, second census %d. These are observed unreadable, missing or malformed stat entries, including unrelated processes; zero skips does not prove full descendant visibility.", beforeSkipped, afterSkipped),
 		"Observed descendants are only a bounded two-census procfs sample; short-lived, hidden and newly forked processes can be missed, and PID namespace boundaries can hide workers.",
 		"Shared cgroup/process ancestry, inherited sockets and observed child FDs do not authenticate aaPanel task IDs or exclusive job traffic.",
 		"No continuous child capture, DNS/packet-path verification, VPN egress selection, routing authorization or active guard is provided.",
