@@ -1,165 +1,59 @@
-# Safe activation, health, and recovery contract
+# Safety, activation and recovery contract
 
-- **Status:** normative requirements for the still-unimplemented production Activation Guard and Runtime Health Guard. Isolated QA-only in-boot rollback and disconnected Docker-restart pending-intent tests exist. The latter checks durable private fixture state and fresh boot-service no-op/conflict behavior after its kernel namespace resets. Neither demonstrates product guard integration, physical reboot/power-loss recovery or field acceptance.
-- **Source of product intent:** [PROJECT-SPEC.md](PROJECT-SPEC.md). This document details the behaviors necessary to implement those requirements.
+**Product intent:** [PROJECT-SPEC.md](PROJECT-SPEC.md). **Host/resource design:** [ARCHITECTURE.md](ARCHITECTURE.md). This document defines the safety behavior required for a *future production Smart Routing TUN*, not proof that it has already been implemented.
 
-## Experimental guarded loopback-route transaction v3 (not production ready)
+## Invariants
 
-A separately versioned, **disposable-only** laboratory transaction can now
-apply both one real IPv4 route through the existing loopback device (`lo`) and
-one matching RPDB rule to its otherwise empty selected table. This still
-cannot reach a VPN, and **never** creates a TUN, new interface, default route,
-firewall rule, DNS change, or a production egress policy. Its v3 private journal
-retains the validated original v1 Selective route/rule intent, has an exact
-operation identity and monotonic deadline, and is fsync-persisted **before**
-the route and rule are created. The independent installed systemd recovery
-service can recover v2 rule-only and v3 route+rule journals without a living
-initiator. A crash may leave no objects, only a route, or both objects; it
-must reconcile each state by fresh native numeric kernel observation.
+- **Off/Direct restores ordinary baseline networking.** Explicit Disconnect and verified guard-driven deactivation remove **all** Server Connect-owned host-wide interception and VPN-only egress blocks. Original host routes/services operate normally, including foreign destinations if the baseline host permits them. Saved profiles and operator routing rules persist as inactive configuration and are revalidated/reapplied on the next guarded activation; a saved policy is not an active kernel policy. Enable, disable, update, crash recovery and uninstall change only identified Server Connect resources, never unrelated routes, DNS, firewall, SSH, aaPanel, Docker, Fail2Ban, STL or tunnels.
+- **No unguarded host routing:** record a trustworthy pre-change host state, prearm and independently verify the recovery mechanism, then apply only an exact, reversible product-owned delta. If ownership or baseline is uncertain, refuse Apply and retain diagnostic evidence.
+- **Protect access:** preserve present and fresh SSH/provider-console paths, panel, established inbound hosting replies (including foreign clients), local/Iran routes and the outer VPN endpoint's independent underlay/DNS bootstrap.
+- **No hidden Direct fallback while routed:** while Smart Routing remains active or degraded, a failed/unsupported VPN transport must not silently send VPN-required public traffic Direct. Explicit operator Direct exceptions are a deliberate policy. A **verified transition to Direct/off** is different: the routed policy is disabled, its owned containment rules are removed, and the ordinary host routing policy resumes; never describe this as continuing VPN protection. Protect domestic, management and hosted traffic during diagnosis and transition.
+- Recovery must work locally without functioning sing-box, remote VPN, Cloudflare, GitHub, foreign DNS or other external service. A provider rescue console remains necessary for kernel/host-wide failure outside in-host recovery control.
 
-The standalone recovery deletes the RPDB rule first and the loopback route
-second, reobserving actual absence before marking a v3 journal recovered.
-Foreign route identity, extra routes in the selected table, relocated
-protocol-tagged matching routes in other tables, or unrelated RPDB consumers
-of that table cause refusal **before** deletion, retaining
-pending evidence and foreign kernel state. Status and clear also reobserve
-both resources for an already recovered v3 journal. The existing manager
-lock excludes another product operation, **not** arbitrary privileged writers;
-protocol tag 247 is not authenticated ownership and a TOCTOU race remains.
-The code requires root inside a systemd-PID1 Docker environment with only
-`lo`; the ordinary installer keeps the timer disabled by default. Even a
-successful v3 recovery **does not prove** production Activation Guard, route
-traffic via VPN, host management/ingress continuity, physical reboot/power
-failure, independent Runtime Health Guard (#3), or future watchdog liveness.
-These all remain open acceptance requirements.
+## Transaction states
 
-## Experimental product-integrated rule-only guard (not production ready)
+| State | Required meaning |
+| --- | --- |
+| `DIRECT` | No product-owned host-wide interception. |
+| `PREPARED` | Verified baseline, deterministic proposed delta and independently recoverable operation are established; no unsafe mutation yet. |
+| `PENDING_CONFIRMATION` | Independently guarded network policy is active temporarily within one exact operation deadline. |
+| `ACTIVE_VERIFIED` | All required selected-path, host safety and operator-confirmation gates passed; Runtime Guard is supervising the committed policy. |
+| `DEGRADED` / `RECOVERING` | Real path/guard uncertainty under bounded diagnosis or exact-resource recovery. |
+| `UNCERTAIN` | Conflict, incomplete proof or incomplete rollback; preserve evidence and refuse destructive guesses. |
 
-The development candidate now installs a root-owned independent recovery
-service and timer **disabled by default**. In a strict disconnected Docker
-systemd guest, the real Manager can durably transition an exact single-IPv4
-unarmed Selective intent into a v2 `trial_pending` record, after verifying an
-active independent timer and before creating any kernel rule. Only a
-protocol-tagged **RPDB rule to an empty routing table** is created; no tunnel,
-route, DNS, firewall, default route or product-active policy is installed.
-Its exact operation ID, plan/observations, boot identity, monotonic deadline,
-prior absence and proposed identity are protected by the existing shared
-Manager lock and fsync-safe private journal. Recovery inspects the native
-priority and exact selector; unknown/foreign identity refuses deletion and
-retains evidence. Successful rule-only recovery writes `trial_recovered`
-revision 3. Distinct `trial_rule_recovered` does **not** set the product-level
-`recovery_verified` or `activation_ready` fields. The actual kernel journal
-is blocked from generic v1 abandonment, and the installer refuses to remove
-its independent recovery units while pending/uncertain evidence exists.
+**Beware historical naming:** the developer's `selective-stage-intent` may report `prepared`, but its private **unarmed, non-atomic** journal is **not** the guarded `PREPARED` state above. QA-only v2 RPDB-rule and v3 loopback-route trials also do not create a real TUN or production Activation Guard. Their limits and reproducible tests are recorded in [ACCEPTANCE.md](ACCEPTANCE.md).
 
-The installed disposable-only trial also rechecks the **current native
-kernel rule** before returning an existing `trial_recovered` receipt; a
-reintroduced exact selector or modified foreign priority now refuses a
-misleading recovered response. When the timer/service becomes unavailable
-*during a still-pending deadline*, manual recovery returns `guard_unavailable`
-rather than asserting `guard_scheduled`. This does not automatically restart
-an externally disabled or masked watchdog: its overdue operation can recover
-when the independent service becomes available again, or through controlled
-operator recovery after expiry. Runtime unit masks/overrides in
-`/run/systemd/system` are rejected by direct filesystem inspection: `systemctl`
-may still report `loaded/static` because an installed `/etc` unit takes
-precedence over a lower-priority runtime mask. A runtime mask alone cannot
-prove that executor stopped; the guest acceptance separately masks the
-actual installed service while preserving/restoring its exact bytes.
-The current installed trial additionally inspects native systemd `Result`
-and `ActiveState` for its service and timer. A failed or start-rate-limited
-oneshot executor cannot produce a positive `guard_scheduled` response even
-when the timer remains active; classification uses `guard_unavailable` with a
-bounded executor-failed versus start-rate-limited diagnostic. The disposable
-guest must prove real executor failure, intact pending journal and kernel
-rule after expiry, and independent recovery after exact executable repair.
-An active timer still cannot guarantee its **future** executor availability:
-no autonomous repair exists if the executable stays missing. A persistent
-unmonitored rule is therefore an **unresolved unsafe/uncertain condition**,
-not success. These checks do not
-make a protocol tag an authenticated ownership credential or replace Runtime
-Health Guard #3.
+## Activation Guard
 
-This is a **bounded prerequisite experiment**, not a network-effective route
-activation, general ownership proof, physically rebooted field deployment,
-or demonstration of the required fresh SSH confirmation and ongoing health
-supervision. Follow-up implementation must reuse the guarded transaction
-rather than treating an experiment-only protocol tag as unconditional
-ownership. No production host may invoke the trial path.
+Default confirmation window: **600 seconds**, operator configurable. High-risk route changes require:
 
-## 1. Operational principle
+1. Inspect actual IPv4/IPv6 addresses, routes/rules, relevant packet filtering, conntrack/return paths, local resolver, VPN underlay, management access and foreign owners. Collect a deterministic minimum proposed delta and verified safe baseline, including expected **absence**.
+2. Serialize the operation and durably journal its exact ID, resource identities, before/after intent, phase, boot identity and rollback deadline. Reject stale or conflicting operations; use crash-safe fsync/atomic storage. Judge deadlines with a **monotonic clock within the same boot**; reboot, clock changes or unverifiable deadline state must conservatively trigger reconciliation, not extend an unconfirmed Apply.
+3. **Before any risky change**, arm and verify a recovery executor independent of the manager and sing-box; it must survive controller death and safely reconcile pending operations across reboot. A running timer alone is not sufficient proof that its executor can recover.
+4. Validate the selected sing-box/profile and endpoint bootstrap. Reobserve resource identity against competing host owners immediately before each bounded apply.
+5. Verify **real VPN-bound foreign egress**, **Direct Iranian/local**, endpoint underlay, active website/SSH replies and other selected checks through independent path-bound observations. A successful Direct probe is never proof of VPN delivery.
+6. Require a **fresh SSH management session or explicitly approved provider-console confirmation** tied to this exact operation, within its deadline; an old still-open session, unrelated/replayed ID or a cached site response cannot authorize commitment.
+7. Commit the desired state and disarm only the matching operation on complete evidence. On timeout, crash, reboot while pending, invalid confirmation or critical failure, restore only classified owned changes and verify the safest reachable baseline. Never reapply an unconfirmed TUN blindly after boot.
 
-The recovery mechanism must **not need the VPN to work**. It must not need GitHub, Cloudflare, an external API, functioning DNS, or the sing-box process to perform its local fallback. The local console/provider rescue option remains an emergency requirement; no in-host mechanism can repair an unbootable kernel or provider-side outage.
+If an existing resource was replaced or altered by another owner, classify `UNCERTAIN`, preserve it and require controlled operator recovery instead of deleting/overwriting it. Reobserve native kernel identity and all relevant foreign dependencies before cleanup: an `ip route`/RPDB protocol tag or a matching rule number alone is **not authenticated proof of Server Connect ownership**, and a Manager lock cannot exclude independent privileged writers.
 
-A successful rollback is **verified restoration of the last safe host network condition** within the manager's authority. If the original direct foreign Internet is intentionally restricted, rollback cannot promise to restore international Internet; it must recover domestic networking, ordinary site ingress/replies and management paths.
+## Runtime Health Guard
 
-## 2. State model
+An **independent** active supervisor tests the exact selected data path, owned interfaces/rules and a set of meaningful TCP/TLS/HTTPS endpoints. Direct-path success, process existence or a lone ICMP Ping is insufficient. Monitor actual DNS and supported IPv4/IPv6/UDP behavior and invalid/aged routing data when these can undermine the selected routing contract. Avoid treating one unreachable website as a dead VPN.
 
-| State | Meaning | Allowed next steps |
-| --- | --- | --- |
-| DIRECT | No product-owned host-wide interception | Stage profile or Proxy Only |
-| PREPARED | Verified baseline captured; proposed owned delta and recovery guard prepared | Apply trial or abandon |
-| PENDING_CONFIRMATION | Guarded high-risk routing trial active; deadline and operation identity persisted | Commit on evidence or rollback |
-| ACTIVE_VERIFIED | Committed desired profile, runtime health supervised | Continue / change via new transaction / recover |
-| DEGRADED | Suspected insufficient connectivity with classified probe data | Bounded recheck; recover if confirmed |
-| RECOVERING | Guard is reconciling owned resources to safe baseline | Verify then DIRECT/previous verified or explicit UNCERTAIN |
-| UNCERTAIN | Identity/foreign-resource conflict or incomplete rollback | Preserve evidence, restrict further mutation, operator recovery |
+Suggested **initial field-calibrated defaults**, not validated performance guarantees: health interval **15 s**, startup grace **30 s**, and **3** consecutive unhealthy rounds before declaring a recoverable path outage. A definitive core exit or lost owned interface may justify faster recovery.
 
-The current version-1 `selective-stage-intent` developer command records only an **unarmed** journal labelled `prepared` after two non-atomic read-only observations; it does **not** satisfy this table's guarded PREPARED state, does not prove an owned interface, and is not authorization to apply network changes. Only a complete `unarmed_selective_v1` record with a consistent, persisted plan binding and exact paired route/rule identities can be abandoned by the Selective-specific command, under the existing Manager lock. Generic, modified, uncertain and future guarded records cannot be selectively abandoned; they retain their evidence. The stage/abandon responses acknowledge their exact committed operation, **not** whichever journal another manager may have written after the lock was released. These digests are not a MAC or protection against a privileged filesystem owner who can rewrite and rehash the entire record. Future guarded activation must establish independent rollback and revalidate every live network identity after this advisory stage.
+The guard's **own liveness** must be supervised independently; a dead, disabled, masked, hung or start-rate-limited executor is not healthy merely because its systemd timer shows active. If bounded trustworthy supervision cannot be restored, reconcile the owned tunnel policy to a safe state rather than leaving indefinite unmonitored interception.
 
-Persist only necessary durable state with per-operation identity, original observed values including **absence**, expected objects, last verified safe state, and mutation progress. Prevent concurrent/stale operations and force fresh observation under lock before touching host state. Never treat a commit of desired state as evidence that foreign packets reach a peer.
+On confirmed failure, prevent **unobserved** Direct bypass while the Smart Routing policy remains active/degraded. If independent guard, host access and resource ownership remain safe, attempt a short, bounded reconnect sequence; report `RECOVERING` and require fresh selected VPN-path proof before returning to healthy `ACTIVE_VERIFIED`. If attempts are exhausted, the failure is critical or the guard cannot safely continue, deactivate the policy, recover the exact owned network delta, preserve management/domestic/hosting connectivity, and report the resulting mode and reason. A state is not `DIRECT` merely because the VPN process exited; incomplete ownership/recovery is `UNCERTAIN`.
 
-## 3. Activation Guard
+- `restore_direct` (MVP default): **deactivate** Smart Routing, remove its verified product-owned TUN/routing and any temporary VPN-only blocking rules, and restore normal host routing. Preserve the selected profile and saved routing settings for the next guarded enablement. Foreign Internet may or may not work over the restored Direct path; do not claim VPN protection or foreign reachability while off.
+- `restore_previous_verified` (optional, only if separately supported): transition to another previously verified active configuration only through a newly guarded, independently verified Apply; never treat it as Direct/off or switch blindly.
 
-**Risky tunnel changes are always guard-protected.** The UI lets operators choose appropriate tests and a confirmation deadline (default 600 seconds) but may not silently disable the only recovery mechanism for host-wide routing modifications.
+**Deferred, not an MVP/release requirement:** an operator-selected persistent block for VPN-designated destinations while the VPN is **off** (formerly `hold_selected_egress`) would be a different explicit policy. Do not build, apply or test it as part of the first release without a new Owner decision. The current Direct/off state has no such product-owned blocking.
 
-Sequence:
-1. Inspect management route, domestic reachability, IPv4/IPv6, local resolver, current selected core/profiles, owned and foreign network objects, and operator's specified purposes.
-2. Prepare deterministic minimal change plan plus trusted baseline and persistent operation journal. If the baseline or ownership cannot be established, **do not apply**.
-3. Independently arm rollback with a verified local scheduler/service **before any route/rule mutation**; persist crash/reboot recovery intent and verify the guard really exists and can run. A timer alone is insufficient for reboot.
-4. Validate sing-box configuration/transport and VPN endpoint underlay. Apply only the intended delta. Record each committed host effect before/after as required for crash reconciliation.
-5. Verify requested egress path **through the selected outbound** and direct domestic/control paths, with independent DNS diagnosis. Require newly established SSH/admin console proof for material route mutation, bound to **this exact operation**. An already established terminal does not count.
-6. Run an external fresh nonce/origin proof **only when operator selected ingress as an acceptance gate**. A user-facing link alone and a CDN cached response are not enough.
-7. Commit only on all selected mandatory checks and authenticated operator acknowledgement within the deadline; disarm exactly the matching operation guard. Wrong/stale/late confirmations must fail.
-8. Timeout, crash, reboot while pending, fatal preflight/dynamic safety loss, or failed mandatory check => immediate owned-delta rollback, last safe state verification and truthful report of missing proofs.
+**Initial, field-calibrated reconnect candidate:** at most **3 automatic attempts per confirmed outage incident**, with short increasing delays and an overall recovery deadline; allow operator adjustment of the bounded attempt/time budget. Flapping must not reset the incident budget into an endless loop; reconnect only the selected VPN transport, **never replay interrupted application requests or arbitrary host operations**. Exhaustion triggers verified `restore_direct` and **no further automatic retries until an explicit new enable action**. Critical guard, ownership or protected-host-access failures bypass the retry delay and restore the safest available host baseline immediately. Report the failure cause, attempt count, last result and true current mode in status and credential-safe local logs. **Optional outage/recovery notifications are Owner-deferred**; no mandatory external alerting service, delivery dependency or separate notification worker in the first release. **Cloudflare Tunnel**, if separately enabled, has its own connector health: an unselected/failed website-origin check must not tear down healthy outbound Smart Routing.
 
-On reboot, do not blindly reapply an unconfirmed TUN. Recover the prior durable intent conservatively before any attempted activation.
+## Required proof
 
-## 4. Runtime Health Guard
-
-Independent lightweight supervisory logic runs while a profile actively changes network routing. It observes core process/service, exact owned interface/rules, path-constrained real HTTPS/TCP probes and separately domestic/control connectivity. A healthy process or ICMP echo is not enough. A direct Internet request that bypasses the profile may **not** count as VPN health.
-
-**Guard liveness is also an observed safety property.** An independently recoverable watchdog/supervisor (prefer a native, narrowly owned service/timer rather than a second full daemon) must detect an unexpectedly stopped, hung or disabled Runtime Health Guard while a host-wide route remains active. Failure to restore trustworthy observation within a bounded, tested interval must initiate safe owned-delta recovery instead of leaving an unmonitored dead route. Guard restart alone is not proof of route health; any conflicting or uncertain recovery must be reported explicitly. Neither this mechanism nor any local script can promise recovery after complete OS/kernel/provider failure.
-
-Initial suggested defaults, operator-tunable and subject to physical validation:
-- Health interval: 15 seconds.
-- Startup grace: 30 seconds.
-- Confirm path failure: 3 consecutive unhealthy rounds using meaningful independent probes.
-- Terminal core loss or destroyed owned interface: prompt recovery without waiting for a DNS/ICMP timeout where identity is clear.
-- Avoid declaring dead on one inaccessible website, one blocked Ping endpoint or temporary DNS failure that leaves other profile-bound connectivity healthy.
-
-**On confirmed failure:** atomically/identity-safely remove the broken profile's owned routing effects; evaluate and apply the operator's failure policy; verify restored local routes and critical hosted/control paths; publish an explicit result and reason. The product must not remain stuck with an unusable intercepted default route.
-
-Failure policy:
-- **restore_direct (default):** retain/recover baseline host routing; no promise of foreign access.
-- **restore_previous_verified (optional):** only if a previously committed configuration remains objectively valid; treat the transition as a new guarded operation.
-- **hold_selected_egress (optional):** restore local management/domestic/hosting paths, but enforce a narrow fail-closed rule for operator-tagged VPN-required flows; never an unrequested whole-host lockout.
-
-Backoff, retry count, eligibility for reconnect, cooldown and alerting are adjustable. Default should not infinitely switch/reconnect after failure. A disabled/not-required ingress probe failure is diagnostic only, not a reason to tear down working VPN egress.
-
-## 5. Host conflicts, failure and crash
-
-- Apply and undo only identity-verified owned changes; on conflict with modified foreign/host state, refuse destructive cleanup and report **UNCERTAIN** with actionable console-safe diagnostics.
-- Detect if another manager changed an overlapping interface/route during the trial; do not replay an obsolete snapshot that overwrites newer external state.
-- Test interruption between every meaningful mutation stage, failed fsync/journal/lock, process killing, disabled/hung health supervisor, disarmed timer, reboot during trial and reboot after committed activity.
-- Local diagnostics must preserve original failure category: DNS, TCP, TLS, profile transport, route, firewall, interface, service, changed host baseline, insufficient permissions or probe endpoint failure.
-- Protect opaque operation identifiers and provenance without logging bearer tokens, credentials, full VLESS links or private keys.
-- Keep health state bounded and diagnosable; service restart does not magically attest that outbound traffic works.
-
-## 6. Mandatory acceptance signals before production
-
-Evidence must include real new SSH and real HTTP(S) requests to representative hosted services across enabled/disabled/failed states, both direct domestic and profile-bound foreign probes, local network ownership diff, rollback from an unconfirmed 10-minute activation, confirmed runtime outage, and power-cycle/reboot-stage recovery. Test nonfatal false positives to avoid spurious customer downtime.
-
-Record: exact build/profile engine version (never secret profile content), test host OS/kernel/arch, baseline route/firewall/SSH conditions, captured failure class, expected versus observed route and exit state, measured resource footprint, and whether a real foreign datacenter endpoint was reachable.
-
-**No claims of successful rollback or live connectivity exist before that evidence is collected.**
+The exact evidence and negative/physical test matrix lives in [ACCEPTANCE.md](ACCEPTANCE.md). Safety claims require at least authentic fresh SSH/hosting reply preservation, independent Direct versus VPN path evidence, expiry/replay/kill/reboot scenarios, competing host-network rules, and **failure of both the VPN and the guard itself**. Simulated or Docker-reset tests do not establish physical power-loss recovery.

@@ -1,83 +1,37 @@
-# Online and offline distribution, install, and update
+# Distribution, installation and update
 
-**Status:** installation contract; development-only installers exist in source, but **no authenticated, licensed release or official one-line install endpoint is available yet**.
+**Product requirements:** [PROJECT-SPEC.md](PROJECT-SPEC.md). This document owns the **package/trust and installation contract**; actual release identities, CI outcomes and installed-host evidence belong to GitHub and [ACCEPTANCE.md](ACCEPTANCE.md).
 
-## 1. Two installation paths, one installer
+## One bundle and one installer
 
-**Online (connected server):** one published installer command downloads a trusted bootstrap and lets it fetch the exact OS/architecture-specific, immutable release bundle, pinned upstream sing-box and any required verified prerequisites, then invoke the **same local installer** as offline mode. Support an optional pinned release version; resolve and verify an official latest channel only where publication policy allows. Network acquisition occurs **before** privileged installation, and failed downloads do not mutate installation or host networking.
+Publish one complete **versioned, target-specific, independently authenticated release bundle** for each supported OS/architecture. It includes the manager, pinned official sing-box binary and licenses, necessary local routing/Iranian IP-prefix data and other non-base runtime dependencies.
 
-**Offline (disconnected server):** the operator downloads **one complete release bundle per supported OS/CPU target** on another trusted Internet-connected device. The operator verifies provenance, copies/extracts it into a root-owned private staging folder on the target, and runs **one local command**. No network fetch (including DNS, APT or GitHub) is allowed in offline mode.
+| How the operator gets the bundle | Required behavior |
+| --- | --- |
+| **Official online** | Trusted bootstrap retrieves an immutable authenticated official release and required verified prerequisites. |
+| **Operator-hosted HTTPS mirror** | The operator uploads the **same immutable artifact and signed metadata** to a normal static website, including a host in Iran; a documented one-command bootstrap selects that URL, verifies **the publisher's** identity and installs it. |
+| **Manual offline upload** | Operator obtains and independently verifies the complete bundle elsewhere, uploads/extracts it to a private local directory and runs one local command with **no network access or attempted downloads**. |
 
-The bootstrap and release artifact must be authenticated against an independent trusted publisher key or digest. HTTPS and hashes delivered by the same untrusted script/archive are insufficient on their own. Source the bootstrap from an explicitly trusted operator-chosen distribution endpoint; never silently execute redirect-provided shell scripts. Before release, publish the real one-line online command and a separately verifiable trust procedure.
+An official source, an Iranian mirror and an offline copy differ only in **acquisition**. All call the **same local installer** for preflight, staging, validation, install, update, rollback, uninstall and state preservation. No second installer, mirror-side daemon, per-source feature divergence or mandatory foreign-host fetch.
 
-**Both paths:** the online bootstrap is only an acquisition/verification frontend. One shared installer handles version checks, preflight, staging, owned resources, state preservation, rollback, offline/online update and uninstall. No extra persistent fetch daemon, second installation state machine or feature difference is permitted.
+A mirror is an **untrusted byte host, not a signing authority**: even valid HTTPS or a checksum delivered alongside the archive cannot independently establish publisher identity. Verify a trusted publisher key/signed digest obtained through an independent channel **before privileged code executes**. Pin version/artifact/architecture; validate TLS, redirects, archive format and manifest. Never publish a `curl | sh` command that executes an unverified arbitrary mirror script.
 
-On a connected Linux host, privileged installation must create **root-owned private download/extraction staging before fetching or unpacking anything**; escalating a user-owned mutable archive directory after verification is not sufficient. Non-root dry-run archive `--verify-only` remains acceptable when no privileged installation follows. The development bootstrap needs Debian 13 native `curl`, `sha256sum`, `timeout` and `python3` for online-only bounded acquisition/archive parsing; it can install missing `curl`, Python 3 and CA certificates through Debian 13 APT only in a real root installation (not `--verify-only`), while requiring the Debian base's own `coreutils` without automatic system repair. Python is **not** an offline-installer dependency. The online preflight enforces an in-flight **96 MiB compressed transfer ceiling** (operator may only lower it with `--max-download-bytes`), **128 MiB per regular file / 192 MiB total expanded bytes** and a kernel-enforced per-file write limit, a hard memory/time limit on archive parsing, a 1 MiB metadata budget and strict member types/paths before staged extraction. These ceilings are anchored to the exact official pinned sing-box 1.14.3 upstream archive: **31,678,266 compressed and 93,255,156 expanded bytes** (independently SHA256-verified), leaving significant fixed room for the manager, license, manifest and packaging. Before transfer the bootstrap verifies filesystem available space can sustain the maximum transfer+expansion **plus a 1 GiB or 10% filesystem free-space reserve**, whichever is larger; after validation and before every extraction write it checks the remaining reserve again while enforcing the process-local aggregate byte budget. A concurrent unrelated writer could still consume disk independently between checks: these checks are not an atomic host-wide filesystem quota, so extremely small/unreliable shared volumes fail closed rather than proceeding. The bootstrap validates/extracts with one parser to avoid parser differences, rejecting unsafe links, duplicates and traversal. Production acquisition and redirects must be HTTPS-only. CI-only HTTP requires a parsed genuine `127.0.0.1` or `localhost` authority with a valid explicit port; rejects userinfo, does not follow any redirect, bypasses proxy environment variables and pins localhost resolution to `127.0.0.1`. For a **real root online installation on Debian 13**, the development bootstrap now detects missing native `curl`, Python 3 and HTTPS CA certificates and acquires only those fixed packages through the host's existing APT trust policy (without changing package sources or upgrading the whole host). It refuses unsupported OS versions and missing trust/staging preconditions before APT. This is an **OS package mutation before the release archive has been fetched**: an APT-installed prerequisite can remain even if later acquisition or signature/digest checks fail. No Server Connect installation or host-network routing is attempted on that failure. In contrast, `--verify-only` **never** installs packages and reports missing tools instead, whether invoked as root or non-root; the offline installer never uses APT. If the native Debian package path is blocked, use an independently verified complete offline bundle rather than forcing a new repository or proxy. No authenticated public one-line release is advertised yet. A matching user-supplied checksum only verifies the bytes against that value and does not resolve the separate publisher authenticity/release-authorization gate.
+**Current truth:** source includes developer offline packaging and an online bootstrap, but no authenticated public release, official/mirror one-liner, approved publisher key/licensing decision or accepted physical support matrix is available. Examples are **not** safe public installation instructions until those gates pass.
 
-The first implementation's installer and CLI share an exclusive product lifecycle lock for operations that change service/profile state. Uninstall preserves stored profiles but explicitly clears active proxy intent and owned runtime configuration; reinstall starts Direct unless an explicitly separately approved restore policy exists. A failed staging or update transaction must not leave an unowned service, a dangling command link or unverified previous active state; print recovery-required evidence when restoration cannot be proved.
+## Lifecycle and offline guarantees
 
+- Check exact distro/kernel/architecture/ABI, systemd/TUN/network primitives, local dependency availability, package signatures and resource conflicts **before host-network activation**. Never claim arbitrary Debian/Ubuntu versions are supported without tests.
+- **Offline acquisition/install/update and inactive first launch** must not attempt implicit DNS, HTTP(S), APT, GitHub or other network **dependency downloads**. Local profile/rule import, offline recovery, disable and uninstall must not fetch missing components either: supply all required runtime and rule data or fail with a concrete missing-file diagnostic. This is **not** a ban on an operator's later explicit **Connect**: contacting the selected VPN endpoint, its required bootstrap DNS and deliberate path-bound health probes is intentional VPN traffic, **not a packaging fetch**. Never use VPN activation as a pretext for implicit dependency acquisition.
+- Verified online prerequisites may be acquired through the host's existing trusted OS package system. **Important observed distinction:** on supported Debian 13 hosts the current root online bootstrap may install missing `curl`, Python 3 or CA certificates **before bundle acquisition**; those OS packages can remain if a later fetch/verification fails. `--verify-only` must never perform that mutation; offline install never uses APT. Do not claim a full host transaction rollback here.
+- Treat downloaded archives and files as untrusted until verified: bound transfer and expansion size, metadata/parser cost, symlinks, traversal, nested paths, disk reserve and redirects. Use protected **root-owned private staging with trusted ancestry** for privileged work. Remove inherited untrusted loader/shell/proxy environment **before the interpreter starts**; script-body cleanup alone is too late.
+- Installed profile IDs, secrets, selected rules and relevant operator state survive an ordinary verified update/reinstall; disabling/uninstalling removes precisely owned runtime/network resources. Default first installation is **Direct**. Purging private operator data is a separately authorized destructive action.
+- Package and routing-list updates are separately validated, versioned and rollback-safe. A bad/old Iranian data feed must not force an untrusted online download or enable a silent foreign Direct leak. Do not rewrite system DNS or change APT repositories to make a mirror appear reachable.
+- Existing pending/uncertain activation or guard-trial journal must be safely reconciled before replacing/removing its recovery executable. Ordinary install must not silently arm a production TUN or keep experimental timers running.
 
-Current local QA candidate layout (future signed release may add authentication metadata):
+## Reproducible developer evidence
 
-~~~text
-/root/server-connect/
-  install.sh
-  server-connect.service
-  bin/
-    server-connect
-    sing-box
-    libcronet.so
-  THIRD-PARTY-LICENSES/
-    sing-box-LICENSE
-  manifest.json
-  checksums.sha256
-  # Publisher authentication still required before public release.
-~~~
+The **current QA-only** bundle is built by `scripts/package.sh` from an independently checked pinned sing-box archive; the shared installer is `install.sh`; the online development bootstrap is `scripts/bootstrap-online.sh`. Source and exact tests own concrete CLI flags, archive size limits and compatibility checks — do not maintain a second changing copy of them here.
 
-Local QA **offline** one-command invocation (disposable hosts only; not an authenticated release):
+Relevant test entry points: `scripts/test_bootstrap_online.py`, `scripts/qa/test-online-minimal-host.sh`, `scripts/qa/test-installed-host.sh`, and `.github/workflows/installed-host-qa.yml`. The disconnected QA uses Docker/systemd and a local loopback test source; it does **not** establish official publisher authenticity, an Iranian public mirror, field-host access or a stable release.
 
-~~~sh
-sudo -- /usr/bin/env -i HOME=/root PATH=/usr/sbin:/usr/bin:/sbin:/bin LC_ALL=C \
-  /bin/sh /root/server-connect/install.sh --offline
-~~~
-
-The supported privileged entry is a trusted Debian 13 `sudo` privilege transition with default `env_reset` (no `sudo -E`, `--preserve-env`, custom environment forwarding or writable sudo policy), followed by an explicit `/usr/bin/env -i` allowlist **before** `/bin/sh` starts. The allowlist intentionally passes only `HOME`, a native system `PATH`, and `LC_ALL`. Do not launch with `sudo bash` or a noninteractive Bash interpreter inherited from an untrusted environment: `BASH_ENV` and loader variables can affect processes **before** shell-body `unset` commands run. A custom sudo policy preserving dangerous loader variables is outside the supported security boundary and must be corrected at the privilege-transition configuration, not inside the script. For an already trusted root shell, use the same `/usr/bin/env -i ... /bin/sh` invocation; this cannot retroactively repair a root shell that has already executed untrusted startup code.
-
-The offline source must be an absolute, canonical, non-symlinked, independently verified path whose **every ancestor** from `/` is root-owned and not writable by group/others; private `/root/server-connect` is the recommended staging location. Do not invoke the privileged script from `/tmp`, a user-managed mount, a symlinked alias, or a mutable parent. Verify provenance **before** asking a root interpreter to read the script; in-script ancestry checks protect subsequent reads and service mutations, not a hostile initial source file. Actual installed-host verification remains separate.
-
-This local command can run only after an exact trusted bundle is staged and verified. It is **not** production installation guidance while the publisher authentication and license gates remain unresolved. The **online** one-line release command will be published after its authenticated release URL and bootstrap trust chain exist; do not invent a URL. Do not recommend fetching an installer over GitHub during a foreign network shutdown.
-
-## 2. Offline mode means no implicit online dependencies
-
-For every advertised target:
-- The package carries the pinned manager, sing-box binary, local routing rule sets, templates, and **every dependency not already guaranteed and verified on the supported base OS**; no post-download fetch of a core, dashboard, GitHub release, runtime library or APT repository.
-- Installer startup, preflight, install, first launch, profile import (from local file/link), routing activation, guards, recovery, disable, uninstall and **offline update** all work without Internet outside Iran.
-- Package the necessary distro-signed local OS packages when required. Check exact ABI/library/kernel/TUN/systemd/capability versions; do not pretend one arbitrary .deb works for every Debian/Ubuntu release.
-- An incompatible kernel/OS/architecture, missing local package, signature failure or foreign service conflict is an actionable error **before changing host networking**. No silent APT install and no trust downgrade **in offline mode**. In online mode, fetch prerequisite packages from explicitly verified supported sources; do not run an unbounded system upgrade.
-- A network-free install test must detect even accidental external HTTP/DNS resolution attempted by a script.
-
-A bundle may support additional optional cores **only when tested and intentionally supplied**. Missing optional cores do not block a supported sing-box installation.
-
-## 3. Trust and lifecycle
-
-- Release references immutable version, artifact digest, upstream sing-box version/identity, support matrix and generated provenance. Authenticate **manager release** and **third-party binary** separately.
-- A same-bundle checksum provides integrity against accidental corruption, **not trusted publisher identity**. The operator obtains a trustworthy signature/public key or signed digest through an independent trusted channel before privileged execution. Keep installation guidance usable in offline conditions.
-- Protect private staging from other local users, refuse unsafe symbolic links/file ownership, validate archive entries and reject path traversal. Treat executable shell code as trusted only after provenance review; running ./install.sh is already privileged execution.
-- Verify all required bytes/config/schema and local preconditions first; stage replacements; preserve existing profiles/secrets and unowned host state; activate binaries only after validation, with an independently available rollback/recovery path.
-- Installation should produce a clear inventory of owned files and units. No mandatory new public port or always-on management API.
-- Ordinary uninstall removes owned executable/service/network resources but **preserves operator profile material** by default; destructive purge is separately confirmed.
-- Online and offline package updates converge on the same verified local-bundle path and never silently replaces unrelated applications or network controls. A failed update must leave a usable prior version or explicit recoverable state.
-- Default after first install: **Direct**, no active TUN/host-wide routing takeover. The two product-owned independent recovery service/timer units for the experimental rule-only acceptance path are packaged and installed **disabled/inactive**; they do not cause a background service or host-policy change on ordinary Proxy Only hosts. Both online bounded-archive allowlist and offline shared-installer manifest include these exact units. A pending or unresolved trial blocks update/uninstall until conservatively recovered and explicitly cleared.
-- Opt-in `server-connect apt -- apt-get ...` uses only verified root-owned system APT executables (and `/usr/bin/apt-config` for policy preflight), an unlinked private mode-0600 config descriptor, and a sanitized child environment. It **never** persists `/etc/apt` proxy settings. Host/caller proxy overrides are rejected. Native Debian 13 method-handler paths, root-directory resolution and relevant executable/compressor settings must also pass private effective-policy verification; a nonstandard host APT layout fails closed without modifying the host. The standalone `update` action enforces `--error-on=any`; combined `-U`/`--update` operations are rejected instead of risking a silent partial index refresh. Run a separate strict update before an ordinary package operation. APT/download applications are not required to honor generic environment variables; unrelated services must remain unchanged.
-
-## 4. Versioned compatibility and honest support
-
-The implementation must publish a table of supported distro release, architecture, kernel/network primitives, package prerequisites and file formats, derived from **tested** packaged artifacts. Before this exists, do not advertise Debian/Ubuntu versions, protocol combinations or CPU memory requirements as production-compatible.
-
-Package and security claims for **both** acquisition paths require the tested, exact-artifact evidence defined by [ACCEPTANCE.md](ACCEPTANCE.md); no external private contract is required to implement or validate the shared installer.
-
-## 5. Failure states and safe assistance
-
-Errors must report the stage, failed requirement, exact local corrective step and whether host state changed. If an offline prerequisite is absent, instruct the user which trusted file to download **on another machine** and where to place it. If online fetch fails, report the exact failure, do not partially install, and offer the offline procedure. Never ask the disconnected host to curl the missing file.
-
-If a new sing-box version changes config schema, migration must be explicitly tested against stored profiles. Keep old readable state and rollback boundaries; unsupported combinations are refused, not silently reinterpreted.
+A release must publish reproducible per-target archive identity, signature/public-key verification procedure, tested OS/arch and upstream versions, upstream license compliance, installation commands for **all three choices**, and matching user-visible update/uninstall instructions. See [release acceptance](ACCEPTANCE.md).
