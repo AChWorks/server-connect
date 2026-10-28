@@ -49,8 +49,7 @@ newly spawned workers can be
 missed. `observed_descendants` is present as an empty array when no child was
 seen, not as a guarantee that no child ever ran. An incomplete or changed
 selected tree fails with `workload_observation_unavailable`, without partial
-results. It is an observation, **not** a job identifier or continuous child
-tracking mechanism.
+results. The existing `limitations` array reports how many numeric PID entries had missing, unreadable or malformed `stat` records in **each** census. These counts may include unrelated processes and are not an estimate of missed children; even **zero skips does not prove full visibility**. No new JSON field is introduced. It is an observation, **not** a job identifier or continuous child tracking mechanism.
 
 For a deeper **explicitly opted-in** snapshot of the supplied parent **and
 its sampled children**, add `--sockets`. For example:
