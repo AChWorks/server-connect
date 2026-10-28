@@ -1,122 +1,61 @@
 # Architecture and integration boundaries
 
-- **Status:** authoritative design contract; a Proxy Only development candidate has source and isolated installed-host CI evidence. Host-wide guarded routing, production guards and physical field acceptance remain unimplemented or unproven; this is not a released build.
-- **Product requirements:** [PROJECT-SPEC.md](PROJECT-SPEC.md) — canonical.
+**Product goal:** [PROJECT-SPEC.md](PROJECT-SPEC.md). This document owns *how components interact*, how traffic is classified, and which host resources Server Connect may change. It does not record active Issues, test runs or the history of experimental implementations.
 
-The development-only product-integrated recovery foundation installs
-checksum-verified systemd service/timer units, **disabled and inactive by
-default**, and supports two strictly versioned, exact-operation experiments
-inside a **disconnected, disposable Docker/systemd guest only**:
+## Components and lifecycle
 
-- **v2 rule-only:** the private v2 journal precedes one tagged IPv4 RPDB rule
-  pointing to an otherwise empty, unused routing table; no route is added.
-- **v3 loopback route + rule:** a separate v3 journal precedes one real IPv4
-  route through the guest's existing `lo` interface into the selected table,
-  followed by its matching destination-specific RPDB rule. No new link or
-  tunnel is created. After the deadline or controller crash, recovery removes
-  only the classified rule **before** the classified loopback route and
-  confirms both are absent before marking the operation recovered.
+```text
+Operator -> one menu / CLI + structured JSON
+         -> manager: profiles, validated rules, desired/observed state
+            |-> official pinned sing-box: local Proxy Only or TUN + selected outbound
+            |-> Linux policy: exact owned routes/rules/nftables/interfaces
+            |-> independent Activation Guard and Runtime Health Guard
+            |-> shared installer: official / mirror download or offline bundle
+Optional: independent cloudflared connector -> Cloudflare -> approved HTTP(S) origin
+```
 
-Both experiments share the descriptor-pinned, fsync-backed private journal
-and the same independently prearmed installed systemd recovery service/timer.
-The service must reobserve native kernel identity and refuse foreign or
-ambiguous resources, retaining the pending journal instead of flushing or
-adopting another owner's objects. Neither experiment activates a TUN, a real
-VPN path, production route policy or Runtime Health Guard. Production routed
-modes remain unavailable pending complete Activation/Runtime Guards and
-physical field acceptance. The ordinary Proxy Only installation does **not**
-enable this timer or add these experimental kernel resources.
+The manager is a small Linux CLI/control plane, not a replacement tunnel protocol or a mandatory hosted dashboard. The current usable development foundation is Direct and opt-in Proxy Only; **production Smart Routing and its guards are not yet implemented/accepted**. Source and CI history must not be confused with a released or field-proven build.
 
-## 1. Shape
+Use one authenticated stored-profile identity and **one selected active outbound** for the first version. Keep profile data, rules, runtime state and replaceable binaries separate. Do not introduce multi-outbound abstractions or a per-job router for possible future features.
 
-A single-host, offline-first CLI/terminal manager with a small control plane and **upstream sing-box** as the initial optional data plane. Avoid a universal daemon, a second VPN engine, a mandatory UI server or new Foundation.
+## Smart Routing — one transparent host policy
 
-~~~text
-Operator / automation
-     | menu / stable CLI+JSON
-     v
-Server Connect control plane
-   |-- profile validation + protected configuration
-   |-- reachability/diagnostics + routing policy planning
-   |-- transaction coordinator + owned network resources
-   |-- independent Activation Guard and Runtime Health Guard
-   |-- official/mirror online fetch OR manual offline bundle -> one shared installer
-     |
-     +--> sing-box (pinned third-party core)
-     |       | Proxy Only (loopback) or guarded TUN
-     |       + selected remote VPN/proxy transport
-     |
-     +--> Linux kernel routing/nftables/conntrack/systemd (observed authority)
-~~~
+Smart Routing uses the **official sing-box Linux TUN data plane** plus minimal native Linux packet/routing integration required on the supported host. It captures ordinary supported outbound host connections regardless of process identity or proxy awareness. Existing `server-connect exec` / APT / WordPress explicit-proxy helpers belong **only to optional Proxy Only**; they are not required to route background aaPanel installers or any other compatible application through Smart Routing.
 
-The menu and machine interface call the same application behavior; interactive presentation is not an automation contract. The system should be small enough to understand and uninstall; select implementation language and packaging only after the representative host capability spike.
+Traffic policy is deterministic and has these conceptual priorities:
 
-## 2. Trust and ownership boundaries
+1. **Protected host paths:** connected/loopback/private networks, VPN endpoint and bootstrap DNS underlay, verified SSH/panel administration and existing/new inbound-service replies. A foreign client IP alone never makes its server reply VPN-bound.
+2. **Operator-controlled rules:** exact domain/suffix, IP/CIDR or validated local rule-list Direct/VPN exceptions. Define deterministic overlap/priority, show effective decisions and prevent rules from overriding essential protections.
+3. **Iranian public IPs:** locally bundled, validated and versioned IPv4/IPv6 prefixes; Direct by default. Imported/updated data must remain independently verifiable, usable offline and rollback-safe.
+4. **Other public destinations:** the selected VPN by default; never silently use Direct when VPN-required routing fails. An optional Direct-first probe for explicitly exempted foreign destinations can affect **new flows**, not replay an application operation.
 
-| Boundary | Owner / rule |
+**Domain rules require real knowledge of the destination name** from supported DNS/routing correlation, not merely an IP geolocation guess. Raw-IP connections follow IP rules. Handle resolver bootstrap versus application DNS without recursive tunnel loops. Verify actual support for TCP/UDP, IPv4/IPv6 and DNS along the selected upstream, including failure/leak cases; TUN configuration alone does not prove comprehensive capture. Detect unsupported network namespaces or other host-specific exclusions instead of reporting false coverage.
+
+Linux policy must coexist with existing kernel routing, nftables/iptables, conntrack, reverse-path filters, Docker/Fail2Ban, aaPanel, hosting and other VPN tools. A manager plan is not a reservation: reobserve identities immediately before guarded mutation. Never flush global tables, rewrite the system resolver speculatively, seize third-party listeners, or restore an old snapshot over changes made by another owner.
+
+The VPN server's *outer transport* needs an independently reachable bootstrap path before it can carry any tunneled traffic. Underlay reachability, selected VPN data-plane delivery and hosted inbound replies are **three different proofs**.
+
+## Resource ownership and recovery boundaries
+
+| State or resource | Responsibility |
 | --- | --- |
-| User intent and profile selection | Local authorized operator; no cloud account necessary |
-| Saved manager desired state | Server Connect; private protected local store, versioned schema |
-| Effective Linux network | Linux kernel/host and other applications, **not** Server Connect's private state |
-| Product-owned route/rule/mark/interface/unit fragments | Server Connect only when identity/provenance is verified |
-| All other host routes, firewall policy, SSH, aaPanel, Docker, Fail2Ban and STL | Their respective owners; never adopt or flush |
-| Connectivity protocols and packet forwarding | Official pinned sing-box runtime; no reimplementation |
-| Optional cloudflared connector, hostname and account | Operator-approved Cloudflare integration only; never an implicit VPN inbound service |
-| Keys, tokens and profile URLs | Protected runtime secret material, never Git/logs/artifacts |
+| Desired profiles, rule configuration, secrets | Manager-owned protected versioned local storage |
+| Actual routes/rules/firewall/networks | Linux host and existing owners; only precisely attributed Server Connect deltas are mutable |
+| Sing-box and its service/listeners | Manager-controlled only for the installed selected profile |
+| Activation/Runtime Guard | Independently supervised host-local recovery, not reliant on sing-box or international access |
+| SSH, aaPanel, WordPress, Docker, Fail2Ban, STL | Independent owners; preserve their existing services and traffic |
+| Cloudflare account, DNS, site origin | Operator/external service; modify only explicitly approved objects |
 
-Separate **desired**, **observed**, **pending/uncertain**, and **last verified safe** states. A saved profile or a live process alone proves neither actual foreign reachability nor safe host routing.
+Track **desired, observed, pending/uncertain and last verified safe** states separately. An observed process, successful Direct probe, route-plan fingerprint or private intent journal is not proof of safe TUN activation. Exact transaction semantics and recovery belong to [SAFETY-RECOVERY.md](SAFETY-RECOVERY.md).
 
-## 3. Routes and process behavior
+## Optional inbound website connectivity
 
-1. **Direct:** no product-owned host-wide routes or firewall changes. Clean-off is a real product feature.
-2. **Proxy Only:** an explicit local SOCKS/HTTP endpoint (prefer loopback or Unix socket); users/apps opt in. Prefer per-invocation application/environment proxy selection. When an application proxy file is product-managed, its prior exact content/absence and owner must be recorded and its owned change undone on disable/core failure. Never take over operator-owned proxy settings or silently alter global DNS/default routes.
-3. **Smart Routing (TUN):** one transparent host-wide destination-based Iran Direct / other-public VPN policy via sing-box TUN plus owned Linux policy; protect the VPN underlay, domestic routes and independently classified ingress replies. No separate Selective/Broad engine or per-job policy.
+A selected consumer VPN does **not** create public inbound ports. A separately enabled **official cloudflared** connector may open an outbound connection to Cloudflare and serve an explicitly approved HTTP(S) hostname from a bounded local origin, via Direct or the verified Smart Routing VPN if needed. Its account/domain/DNS, credentials, trusted proxy/source-IP handling, TLS, origin binding and service lifecycle are separately authorized and independently diagnosed.
 
-#### Smart Routing: one destination policy, not a per-job routing engine
+The connector must not change aaPanel/Nginx virtual hosts, intercept another tunnel, or couple its failure to healthy outbound VPN service. Cloudflare Tunnel is not a generic public raw TCP/UDP, Xray/Marzban or Backhaul relay. Further service-specific ingress is outside this design.
 
-Capture ordinary supported outbound traffic at the Linux TUN/system-routing layer, independent of each program's proxy support. **Routing is destination-based**, not PID, UID, cgroup or aaPanel task ID. Existing Proxy Only exec/APT/WordPress paths remain separate explicit opt-in behavior; optional read-only workload-observe diagnostics do not select flows and are not acceptance gates.
+## Packaging and host targets
 
-Rule precedence: (1) protected management, VPN endpoint underlay/bootstrap DNS, established and new inbound hosting replies, local/private/on-link routes; (2) explicit operator domain/IP/CIDR and trusted local-list exceptions, with deterministic collision handling and override limits; (3) verified offline-available Iranian public IP prefixes; (4) remaining public destinations to the selected VPN. Domain rules need a real DNS/sniff correlation path; a raw IP flow must not be misclassified from an unavailable hostname. Allow rule lists shipped offline, authenticated online/mirror updates and validated manual imports, with rollback on invalid/stale data. Direct-first availability probing and new-flow VPN fallback for explicit foreign exceptions may follow the working core; no replay or automatic learning is required.
+Target only **tested** Linux OS/kernel/architecture/sing-box combinations with systemd and the required TUN/network capabilities. Acquire immutable verified bytes via official online, operator-hosted HTTPS mirror, or manual offline upload; all invoke one shared installer. Keep host-specific package, signature and installation rules in [OFFLINE-DISTRIBUTION.md](OFFLINE-DISTRIBUTION.md).
 
-The objective is Windows-TUN-like **transparent coverage for all supported ordinary outbound programs**, including non-proxy-aware aaPanel installers. Verify actual TCP/UDP/DNS/IPv4/IPv6 packet paths (and distinguish protocol, VPN transport and Linux namespace limits); do not claim universal traffic capture from a TUN configuration alone. VPN-required traffic must never silently escape via Direct on an unsupported protocol or core outage.
-
-A country-prefix list alone cannot protect foreign-client SSH or HTTP reply flows. Inspect native route/rule/nftables/conntrack ownership, reverse path filtering, DNS, MTU, interfaces and foreign owners first. Only the exact manager-owned delta may be applied/undone, after independent Activation Guard is armed and verified; Runtime Health Guard is mandatory while active. Protect the VPN endpoint's independent Direct path and bootstrap resolution. Refuse ambiguous host state rather than overwrite Docker/aaPanel/Fail2Ban/STL resources. [Simple Connect](https://github.com/AChWorks/simple-connect) is a conceptual IPv4 TCP/DNS interception reference, not the transport engine or UDP/IPv6 proof.
-
-### Future-compatible state only (no speculative framework)
-
-The current manager uses one selected profile and one upstream tag; preserve stable stored profile identity, explicit migrations and independent path-bound health, without making internal tags public APIs. [Issue #7](https://github.com/AChWorks/server-connect/issues/7) remains Owner-deferred for possible concurrent profiles. Do not implement per-job/per-workload routing, multiple competing TUN owners or profile-specific daemon infrastructure now.
-
-## 4. Optional Cloudflare Tunnel website ingress (separate feature)
-
-The core Smart Routing mode is **outbound only**. A consumer VLESS profile does not expose public ports or restore direct foreign-to-Iran reachability. An opt-in official **cloudflared** connector can instead publish approved HTTP(S) hostnames by creating an **outbound** connection to Cloudflare and forwarding to an approved local origin (such as a protected aaPanel/Nginx virtual host). If Cloudflare is inaccessible Direct, that connector may use the Smart Routing VPN **after independent path proof**; Cloudflare uses outbound QUIC/UDP or HTTP2/TCP on port 7844, subject to actual path/transport availability.
-
-Keep this as a separately controlled/observed unit: Cloudflare credentials, account/domain/DNS operations, origin binding, trusted proxy/client-IP headers and TLS need explicit operator authorization and secure state. Never seize another existing tunnel, DNS record, port, origin configuration or web-service owner. An unavailable connector must not tear down healthy outbound VPN traffic; conversely a VPN failure may legitimately disrupt only a connector dependent on it. External nonce checks must reach the origin, not just a CDN cache. A generic raw public TCP/UDP/Marzban/Backhaul relay is **not** supplied; non-HTTP Cloudflare publication has different client and plan restrictions.
-
-Core safe outbound release remains independent of this post-core [Cloudflare integration Issue #48](https://github.com/AChWorks/server-connect/issues/48); [Issue #4](https://github.com/AChWorks/server-connect/issues/4) owns optional visibility/check UX. Reference: [Cloudflare published routes](https://developers.cloudflare.com/tunnel/concepts/routing/) and [connector egress requirements](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/configure-tunnels/tunnel-with-firewall/).
-
-## 5. Modularity without speculative frameworks
-
-Keep implementation concepts separate, not necessarily separate processes:
-- Profile parser/adapter: accepted input, secret handling, compatibility validation.
-- Core runner: exact pinned sing-box executable and state; future alternative adapter only after observed need.
-- Routing planner/applier: exact resource identities, validate/plan/apply/undo.
-- Guards: activation transaction, runtime proof/failure resolution, and a minimal independent liveness/recovery trigger for **health-guard failure itself**; no unmonitored host-wide interception.
-- Host inspector: Linux/network/systemd/aaPanel coexistence evidence without taking ownership.
-- Shared lifecycle: official HTTPS, operator-hosted HTTPS mirror or manual offline upload of the same authenticated bundle feed identical installer/update/owned-state cleanup.
-- Terminal/CLI: commands, concise operator errors, structured machine results.
-
-Do not introduce public Go libraries, generic plugin registries, distributed orchestration, databases or additional always-on services by default. Keep a simple replaceable boundary around sing-box instead of baking a provider-specific format into every command.
-
-## 6. Dependencies and support targets
-
-- Target initially Debian/Ubuntu with systemd and supported Linux TUN/network facilities, **subject to an explicit tested OS/kernel/arch matrix** before any release. No promise of every Debian/Ubuntu or arbitrary Linux version.
-- Integrate native host tools carefully; avoid global NetworkManager, resolv.conf or arbitrary iptables/nftables ownership assumptions.
-- Offline packaging must carry every required runtime artifact and verified local Iranian IP/rule data for the advertised target; no hidden GitHub/API dependency. Official and user-hosted HTTPS mirror online acquisition must verify identical publisher-authenticated bytes before invoking the same installer.
-- The standalone packaging, validation, and state-recovery requirements are owned by this repository's [offline distribution](OFFLINE-DISTRIBUTION.md), [acceptance](ACCEPTANCE.md), and [safety](SAFETY-RECOVERY.md) contracts. No private framework or governance repository is a runtime or contributor prerequisite.
-- Existing [STL](https://github.com/ach1992/simple-tun-link) is a separate point-to-point Link product; [SSO](https://github.com/ach1992/simple-server-optimizer) is a separate tuning/host utility. Neither owns global server VPN routing or is modified here.
-
-## 7. Evolution gates
-
-Cheap-to-preserve seams: additional profile parser, different probe target, local rule-source format, optional Cloudflare Tunnel connector and OS-specific host adapter. Implement only accepted modes. Operator-hosted **static mirrors are required acquisition options**, but automatic mirror discovery or DNS rewriting, profile marketplaces and permanent process telemetry are not.
-
-Implementation evidence and acceptance: [ACCEPTANCE.md](ACCEPTANCE.md). Recovery detail: [SAFETY-RECOVERY.md](SAFETY-RECOVERY.md).
+Operational safety details live in [SAFETY-RECOVERY.md](SAFETY-RECOVERY.md); real scenario coverage and known limits in [ACCEPTANCE.md](ACCEPTANCE.md). Existing development-only procfs observations, unarmed selective plans and loopback RPDB trials remain code/test diagnostics, **not** release-blocking implementations of Smart Routing.

@@ -1,298 +1,47 @@
-# Test and release acceptance
+# Acceptance and evidence contract
 
-**Current status:** genuine pinned-core Proxy Only, selected application paths and isolated Debian 13 systemd install/lifecycle behavior have source and CI evidence; **no authenticated public release, actual foreign-VPN field acceptance, fully implemented production guards or complete release-matrix acceptance exists.** The Selective developer `selective-stage-intent`/`selective-verify-intent`/`selective-abandon-intent` workflow writes only private, unarmed route/rule intent, performs exact operation-bound non-atomic read-only live reinspection, or removes its exact untouched revision. Its operation-specific receipts and strict subtype/binding/plan-digest/pair validation reject wrong identity and modified records; live verification additionally refuses mismatched double native observations while preserving journal bytes and keeping every guard/ownership claim false. Read-only double observations, journal fsync and unkeyed digests do not prove an atomic baseline, authenticated filesystem provenance, installed TUN, guard, kernel ownership or recovery. PR/CI logs own exact candidate evidence. This is a **test contract**, not a claim that all scenarios pass.
+**Goal:** Prove the delivered features of [PROJECT-SPEC.md](PROJECT-SPEC.md) on exact source, build, package and network environments. This document owns the **test matrix and proof threshold**; Issues own unfinished work and PR/CI/Release artifacts own particular runs and verdicts.
 
-## Evidence grades
+## Evidence rules
 
-- **Source/contract:** review or pure tests; no evidence of real packet delivery.
-- **Isolated Linux:** disposable VM/namespace/systemd environment that exercises genuine Linux interfaces/routes and crash/reboot simulation.
-- **Physical field:** two-sided observations on real accessible Iran/foreign network paths, including under actual relevant restrictions where legally/operationally permitted.
-- **Packaged host:** exact release archive, installer/updater and binary identities on advertised OS/arch.
-- **Production:** a separate Owner-authorized rollout with backups, rescue console and rollback; not implied by any preceding grade.
+- Identify the exact commit, release/archive hash, official upstream sing-box version, OS/kernel/architecture, actual active profile path (without secrets), relevant host baseline, required duration, results and rollback evidence.
+- Record **PASS / FAIL / NOT_RUN / UNSUPPORTED** explicitly. Never infer a real foreign VPN path from a healthy sing-box process, Direct internet request, code test, Docker loopback, a Windows client or synthetic network outage.
+- Evidence levels differ: **source/unit**, **disposable installed Linux guest**, **independently observed real Iran/foreign field path**, **authenticated distributable artifact**, and **separately authorized production rollout**. A lower level never implies a higher one.
+- Privileged/network-affecting implementation needs exact-candidate fault and safety tests and **fresh author-separated high-assurance review**. Production server changes and publication require their own applicable Owner approval. No real customer server is an initial test host.
 
-Record exact commit SHA, artifact digest, sing-box version, OS/kernel/arch, baseline host network, probe destination class (without secrets), test duration, pass/fail/NOT_RUN and rollback evidence. Do not convert a simulated restricted connection into proof of connectivity during a real war/outage.
+## Required release matrix
 
-## Disposable Debian 13 installed-host QA harness
-
-The path-scoped GitHub Actions workflow `.github/workflows/installed-host-qa.yml` builds a **QA-only** bundle from the independently SHA-256-verified pinned official core, then starts a disposable Debian 13 Docker container with real `systemd` PID 1, no external Docker networking and no prior product installation. The test script `scripts/qa/test-installed-host.sh` is intended **only for disposable GitHub-hosted CI** and checks GitHub Actions environment flags as an accident-prevention guard; those environment variables are **not a trustworthy security boundary** and must never be used to authorize privileged execution on a customer or persistent server. The workflow refuses fork Pull Requests before running privileged Docker. The script exercises the root-owned shared offline installer in `--verify-only`, a fail-closed missing-core negative case, install, reinstall and uninstall modes. Process-complete `strace -ff -yy` records `%network` and `%process` (including `execve` and `execveat`) for each **traced inactive offline** operation. Its fail-closed scanner rejects IPv4/IPv6 socket creation, destination-specific connect/bind/send attempts, decoded TCP/UDP send attempts and prohibited fetch/package helpers. Missing, unreadable or unscannable per-process traces, an entirely empty trace set, or scanner errors fail acceptance instead of yielding a false `ZERO` report; an individual empty child trace is valid when the invocation has actual records. A separately fail-closed snapshot checks all IPv4/IPv6 routes, policy rules and links after **every traced inactive offline** lifecycle boundary (verify-only, missing-core rejection, first install, reinstall, uninstall), and separately after loopback online installation and uninstall against the loopback baseline. Isolated negative tests intentionally fail the scanner and each of the five `ip` queries. The harness also checks that the installed service remains Direct/inactive, product-owned resources disappear on uninstall and private test profile bytes survive. A separate **guest-loopback-only** OpenSSH service with ephemeral pinned host/client keys and a local HTTP origin run throughout the installer lifecycle. Fresh authenticated SSH commands and actual HTTP GET requests must succeed before and after verify-only, missing-core rejection, first install, reinstall and uninstall, plus loopback online install/uninstall. The harness then stops the independent guest SSH and HTTP services and must reject subsequent probes, including an HTTP GET to the stopped origin; these destructive fixture checks run only after all positive lifecycle phases. A separate non-networked regression suite injects valid-looking stdout followed by failed HTTP/SSH/timeout exits, mismatched responses, unavailable service status, and unreachable endpoints to ensure the same probe script fails closed. These independent systemd services and their connections remain entirely inside Docker `--network none`; the tests do **not** prove externally reachable SSH/aaPanel, preservation of established remote SSH sessions, real site ingress, foreign VPN reachability, or customer-host coexistence.
-
-The Docker guest has its **own** fresh /run tmpfs, initially with `private` mount propagation. That isolation prevented systemd's per-unit credential mounts from appearing inside services: independent disposable `DynamicUser=yes` tests using both `SetCredential=` and `LoadCredential=` failed with a missing credential path. Within the disconnected disposable guest only, the QA harness changes **that tmpfs** to `rshared` before installing anything, verifies its propagation mode, then requires both independent credential tests to pass before exercising the installed product. This preserves the product's existing `LoadCredential=` and service sandboxing. The before/after evidence is in CI runs [40049908621](https://github.com/AChWorks/server-connect/actions/runs/40049908621) (negative) and [40050986774](https://github.com/AChWorks/server-connect/actions/runs/40050986774) (positive, same Docker-hosted QA class). This is not a host mount-propagation change or a claim about customer-server configuration. The expanded CI-only path additionally starts a real pinned sing-box VLESS server on the guest's loopback, imports and selects a dummy local VLESS profile in the *installed* manager, and checks both explicit Direct and selected Proxy HTTP requests against a separate loopback origin. Stopping the VLESS upstream and installed core must fail the selected proxy without losing Direct or independent guest SSH/HTTP. The active instance is updated with a distinct same-source Go binary while preserving its selected profile and listener, then a third QA candidate with a deliberately broken unit must fail after switch and restore the prior running service, unit digest, release link and preserved profile; rejected candidate resources must not remain. The source/active install remains confined to the guest's disconnected Docker network. The guest intentionally adds a synthetic IPv4 default route via its **own loopback** before the first lifecycle snapshot, solely because the pinned sing-box's local direct outbound requires a detectable default interface; Docker external networking stays disabled and real foreign egress remains NOT_RUN. Strict process-complete zero-AF_INET tracing applies to inactive installer phases; **active update phases need local listener readiness and are not currently verified zero-attempt by that trace scanner**. These same-source QA candidates are **not** a true cross-version schema/ABI migration, authenticated public release, physical site/coexistence proof, or foreign VPN egress evidence.
-
-A second **isolated-loopback-only** acquisition validates the development online bootstrap handoff to the same installer and subsequent uninstall. Image preparation and genuine upstream core download happen on the connected disposable GitHub runner **before** the disconnected installer test. This does **not** prove an authenticated public one-line channel, physical disconnected server, upgrade to a different release, **external** SSH/aaPanel coexistence, foreign VPN reachability, reboot/power-loss recovery or safe host routing. Root-capable Docker is confined to a disposable no-secret hosted CI runner; it is not a supported server-install mechanism. Base any PASS claim on the exact completed CI run and job logs, not the existence of this test. Field-host acceptance and publisher/licensing decisions remain independent gates.
-
-#### Connected minimal Debian 13 online-to-installed acceptance (separate QA-only guest)
-
-The same exact-candidate installed-host workflow additionally calls `scripts/qa/test-online-minimal-host.sh` in a **separate disposable Docker systemd guest** built from `Dockerfile.online-minimal-systemd`. The guest starts with **no `curl` and no Python 3**. Unlike the existing fully disconnected fixture, it temporarily uses Docker bridge egress solely for native Debian 13 APT prerequisite acquisition; an independently SHA-256-verified local QA bundle is served on **guest loopback**, not fetched from a real public publisher. The real root bootstrap must install its missing native prerequisites through existing OS APT policy, then invoke the **actual shared installer** and leave the product in Direct/inactive mode. The harness compares IPv4/IPv6 addresses/routes/rules and resolver state before and after install, then explicitly **disconnects external Docker networking**, performs the real offline uninstall and checks preserved operator profile bytes and the disconnected network baseline. Both fixtures must remove their task-owned container/image/scratch on success and failure; a bounded hermetic fake-Docker regression tests container-created/start-failed, partial-build, inspection-error and removal-error cleanup without a privileged guest. Evidence markers `CONNECTED_MINIMAL_ONLINE_INSTALL=PASS` and `DISCONNECTED_MINIMAL_ONLINE_TO_OFFLINE_UNINSTALL=PASS` are valid only if produced in the exact completed installed-host CI logs. This proof deliberately includes OS-package mutation **inside the disposable guest**; it does not prove a signed public release endpoint, installation on physical servers, hosting-service ingress, vendor network reachability or production readiness.
-
-
-
-### Installed native APT selected-path acceptance
-
-The same isolated Docker `--network none` Debian 13 guest also exercises the **installed CLI's actual native `apt-get update`**, not just a proxy-aware curl, a generated JSON response, or a Go test invoking lower-level APT helpers. A synthetic unsigned `Packages` and checksum-bearing `Release` index is served by the independent guest-loopback HTTP origin; a temporary source uses `trusted=yes` **only inside this disposable guest** and must never be presented as an authenticated public package repository. The native manager command `server-connect apt -- apt-get update` routes through the selected installed VLESS profile with `--error-on=any`, private unlinked credential-bearing APT configuration, and native Debian 13 method verification. One isolated disposable APT source fixture is reused across phases; every phase gets **fresh isolated package-list and cache paths**; successful updates must produce a real `apt-cache show` result for the fixture package. Stopping the independent VLESS upstream or sing-box core, and Disconnect, must yield a **mechanism-classified** nonzero APT update (native APT acquisition failure versus exact manager proxy-unavailable rejection), under a SIGTERM/SIGKILL bounded process-group timeout; native `apt-cache` must verifiably reject a recovered cached index. Missing/failing commands, timeout infrastructure errors, failed inventory scans or policy-hash calculation are not successful fail-closed observations. Replacements with a distinct same-source manager executable and a rejected post-switch update must preserve the selected APT path, including renewed upstream-stopped negative tests after each transition. The independent `/etc/apt` policy/config inventory must remain byte-identical and no ephemeral APT proxy configuration file may linger. The policy snapshot must abort on any nested directory enumeration failure, unreadable file, invalid baseline digest or incomplete credential-descriptor scan; a syntactically valid hash of an incomplete tree is not acceptance evidence. Only index acquisition (not package installation or unattended upgrades) is covered; nothing is written to the guest's persistent host APT sources or package cache, and no external repository can be reached from this guest. These assertions do **not** establish a signed distribution trust chain, real customer APT mirrors, external networking, a physical hosting server or successful package installation.
-
-### Installed WordPress/PHP-FPM application acceptance (QA-only)
-
-The disposable Debian 13 systemd harness additionally tests **the installed manager and active pinned sing-box/VLESS profile in the same isolated guest as a genuine WordPress 7.1.3 + SQLite Database Integration 3.0.2 PHP-FPM application**. The CI image downloads these third-party fixture bytes **on the connected disposable runner before guest isolation** and verifies fixed SHA-256 digests (`d2a09acb6a15e3b9c471d72557753c266d6f41a79ed19bfe04cbfe49e283b2a5` and `1602e75577ad9b3a7e3e4a6a44a81b9541cdee2124d48928faf61c6fd3cd4f74`). A real WordPress SQLite site is installed in the disposable guest. A separately started native PHP-FPM worker receives genuine FastCGI requests and invokes real WordPress `wp_remote_get()` with QA-only pool-local authenticated `WP_PROXY_*` settings derived through the manager's supported selected-proxy exec environment into an isolated permission-restricted FPM include, and a fresh per-request nonce. The independent HTTP origin on `127.0.0.1` stays directly reachable while the selected VLESS upstream or product core is stopped; each outage must yield a classified WordPress FastCGI HTTP 502 instead of a direct fallback, followed by successful recovery. Repeating the selected-path check and upstream failure after an active different-binary offline update and rejected-update rollback tests application-level continuity. The disconnected state must reject explicitly selected WP egress while independent Direct SSH/HTTP and the origin remain usable. The installed guest-only HTTP listener is independently probed without proxy credentials and again with deliberately incorrect credentials; both requests must return HTTP 407 rather than reach the independent origin, while authenticated WordPress remains working. This rejection is checked initially, after the active same-source update, and after rejected-update rollback, without logging credentials or protocol responses. The fixture and its PHP-FPM service, root-level QA helper scripts, private FPM configuration and credentials must be removed before product uninstall and verified absent; the preloaded WordPress archive template remains in the immutable disposable container image until Docker image teardown. The same fail-closed FastCGI response checker is exercised by hermetic negative-classification regressions; missing response, wrong process, wrong path, false nonce, mismatched response status or malformed JSON is never a PASS.
-
-This fixture **never configures or modifies a customer WordPress site, aaPanel or host-wide PHP-FPM**. Its hardcoded WordPress proxy definitions are disposable test-only application settings, **not product-owned settings**; a disconnected proxy must not be described as transparent WordPress direct failover. CI can prove only a guest-loopback selected path, not a foreign provider, physical host, publicly reachable web ingress, customer PHP-FPM/aaPanel coexistence or a publisher-authenticated release. A planned test is not evidence until the corresponding exact-candidate CI run completes successfully.
-
-### Privileged installed-host CI admission
-
-The installed-host Docker test uses `--privileged` **only** inside a fresh, credential-free GitHub-hosted runner. Its `pull_request_target` workflow definition is taken from the repository's **trusted default branch**, rather than a PR-submitted revision (see [GitHub's pull_request_target security guidance](https://docs.github.com/en/actions/reference/security/securely-using-pull_request_target)). The base-owned job-level gate requires that the PR head has **both** the same immutable repository ID and exact repository full name; a fork cannot authorize execution by changing its own copy of the workflow or by spoofing a display name. Only a same-repository candidate passes that gate. `workflow_dispatch` remains available for authorized repository writers running an internal branch or tag, with no supplied external source-ref input. Neither trigger passes GitHub secrets to test scripts. The workflow uses only `contents: read`, disables persisted checkout credentials and caching, and never runs on self-hosted infrastructure.
-
-Because `pull_request_target` would otherwise check out the default branch, admitted same-repository PRs explicitly check out their **synthetic merge ref** and verify both parents match the event's base and head SHAs before executing QA scripts. A stale or unexpectedly replaced merge must fail closed. Manual dispatch instead verifies the checked-out HEAD against the dispatched SHA. These identity checks preserve integration-target coverage; the default-branch workflow definition is intentionally separate from PR candidate code. The path filter includes `bundle/server-connect.service` so unit-only changes trigger this CI, while unrelated docs-only modifications do not. A dependency-free policy regression script tests admission conditions, required paths and checkout identity guards. `pull_request_target` workflow-definition trust is a GitHub platform guarantee, **not** created by that regression script. The source QA workflow still uses the normal unprivileged PR event.
-
-The trusted-base event behavior cannot itself be observed on an **unmerged** workflow revision: until integration, GitHub uses the existing default-branch workflow for `pull_request_target`. During review, use a writer-triggered `workflow_dispatch` run of the exact candidate plus source/policy validation, and explicitly distinguish that from a post-integration default-branch PR event. This admission design does not override repository/organization policy for *other* fork-authored workflows, and is not a justification to run arbitrary fork code under `pull_request_target`.
-
-### Independent activation-guard feasibility experiment (isolated QA only)
-
-The installed-host Debian 13 Docker `--network none` guest exercises an **experimental, QA-only in-boot independent systemd rollback deadline**, **not** the product's Activation Guard. The fixture runs a separately armed deadline for three controller `SIGKILL` stages: after an owned dummy interface is ready but before its route, after the route but before its rule, and after the full route/rule policy. A strict fresh native-kernel classifier must determine each stage without trusting the crashed controller marker; incomplete, unexpected or foreign-modified objects fail closed *before* deletion. Fixed fixture dummy links require only the supported native Debian 13 link JSON field set (with harmless kernel-assigned ifindex variation), rejecting unrecognized link attributes including added alternative names rather than adopting unsupported foreign state. The disposable dummy interfaces intentionally have fixed MACs, no assigned IPv4/IPv6 addresses and no IPv6 automatic address generation, so the independent verifier can reject unexpected MTU/master/link identity, all assigned addresses and foreign IPv4/IPv6 route dependencies across **all** tables (not just table 20120) before deleting an interface. Three independent native-Linux negative guest tests attach an unexpected IPv4 address, other-table route, or interface **alternative name** after controller SIGKILL. The independent systemd rollback must refuse destructive deletion and preserve both the foreign resource and the original interface. Fresh acceptance requires a new systemd service invocation ID, monotonic service-start/exit timestamps after *this* timer activation and foreign injection, timer trigger evidence and an exact independent-classifier refusal status. Prior failed unit status is explicitly invalidated before each arm; the *same* verifier is checked before the new deadline to reject stale success. Only after verifying the current timer refusal may controlled disposable QA cleanup remove the injected resource. This does not establish physical-host ownership, atomic inspection-to-deletion semantics or support for arbitrary foreign kernel dependencies. Each run must leave independently created foreign policy intact, restore the pre-experiment kernel inventory and preserve guest-local SSH/HTTP. After Proxy Only uninstall, with only loopback present, the fixture verifies that a disposable systemd service and eight-second timer are active **before** creating any dummy network links, table routes or destination-scoped RPDB rules. The fixture deliberately `SIGKILL`s its controller in a separate guest process without disabling systemd PID 1. When the deadline fires, the independent service must re-observe the exact route, rule, fixed dummy-interface identity and all relevant attached network dependencies, remove only the fixed fixture-owned objects, and preserve a simulated foreign policy and route in the **same** routing table. The test requires distinct native route selections before and after rollback, records the timer's actual service success, then removes its simulated foreign fixture and confirms the **entire guest route/rule/link inventory** matches the snapshot from before any test objects were created. Hermetic negative classifiers reject missing/modified objects, inverted or ambiguous rules, unsupported JSON, unexpected foreign entries, false Direct selected-path success and incomplete recovery. Both the guest-only timer and its state are under `/run`; destroying the disconnected container tears down all remaining test resources.
-
-This is a **feasibility proof of independent in-boot timeout + process-death rollback semantics**, not an installed product route-activation feature or evidence of actual external VPN transport, authenticated fresh SSH/console confirmation, durable activation journal, every mutation-stage crash, persistent reboot/power-loss recovery, real conflicting network owners, or a running Runtime Health Guard. It **must not** set `activation_ready=true`, expose production Smart Routing/TUN activation to operators or close guarded-routing Issue #2. Mandatory actual activation, reboot and health-guard acceptance in the matrix below remain NOT_RUN until separately implemented and tested on authorized disposable hosts.
-
-### Product-integrated route-bearing v3 laboratory acceptance
-
-The installed Debian 13 disconnected Docker/systemd guest also exercises a
-separately versioned **v3 route + RPDB rule** transaction through the actual
-installed Manager and prearmed independent recovery timer. Unlike the v2
-rule-only experiment, this creates one genuine IPv4 kernel table route via
-**existing `lo`**, followed by its matching policy rule. This is a
-route-bearing rollback **only in a loopback-only disposable namespace**;
-there is still no TUN or real VPN transport. Installed-host evidence must
-prove after-route and after-rule controller SIGKILL, a mid-rollback SIGKILL
-between rule and route deletion, a crash after the route deletion but before
-a recovered-journal write, exact pending journal preservation, independent
-timer reconciliation, route/rule absence and exact recovered revision
-clearance. Separately introduce a foreign native route identity and
-an additional foreign RPDB consumer of the selected table, and require
-classified refusal and unchanged pending journal/foreign state before
-separate test fixture repair. Each v3 foreign-route/foreign-policy consumer
-fixture additionally requires a fresh independent systemd recovery service
-start after the injected conflict, `ExecMainStatus=41`, and unchanged
-native journal/kernel evidence. After controlled fixture repair and exact
-journal clearance, only the known guest-owned failed unit state may be
-reset before subsequent trials; an unknown executor result must fail. A
-stale recovered v3 journal with a newly reintroduced exact-selector route
-must be refused by status, recovery and clear until the foreign test fixture
-is separately removed. A tagged matching
-route moved to a different table must likewise refuse a recovered receipt,
-without deleting the route in that foreign table. The route table must be empty again after every
-successful recovery, and unrelated SSH/HTTP/Direct guest paths must remain
-preserved. The v3 disposable-only follow-up also injects four bounded, test-only
-failure branches: an intentionally invalid non-mutating native iproute2
-invocation at route-add, rule-add, and route-delete execution boundaries,
-and a simulated refusal to persist the recovered journal revision. Each
-must report the classified error, retain the unchanged pending journal,
-show exactly the expected absent/partial native rule and route, and recover
-only through independently rearmed or already scheduled systemd execution,
-followed by exact recovered-journal clearance. Native ip invocation failure
-exercises the production error-handler path but is NOT an actual netlink
-permission/EIO failure at the intended route/rule command; the simulated
-journal refusal is NOT an actual filesystem fsync/disk failure. These cases
-require original exact-head installed-host evidence before claiming PASS,
-and cannot substitute for future physical recovery or destructive storage
-fault testing. The QA controls are rejected outside strict disposable guest
-admission and do not enable production tunnel modes. An explicitly selected
-v3 **recovery** failure point requires a valid *pending v3* journal: an absent
-journal, a valid unarmed v1 PREPARED journal, a pending v2 rule-only journal,
-or an already recovered v3 journal must each return `invalid_arguments`
-without changing journal bytes or native kernel routes/rules. For both
-recovery fault-point values the installed-host fixture must verify these
-negative states, while the ordinary no-flag recovery service still reports
-`absent`, `unarmed_prepared`, or verified `trial_recovered` as applicable.
-
-Code-only unit tests or a green check label are insufficient;
-original exact-candidate installed-host logs and actual assertion sources
-must be inspected. Native protocol tagging is not cryptographic identity,
-Docker restart is not physical reboot, and these tests cannot justify
-production Smart Routing/TUN or Runtime Health Guard #3 acceptance.
-
-### Read-only workload ancestry observation (Issue #2 supporting diagnostic)
-
-The development CLI `workload-observe --pid N` inspects only existing process
-stat start ticks, parent PID and unified cgroup-v2 membership, with a bounded
-first pass followed by a complete second pass to reject observed generation,
-parent or cgroup drift. It must reject malformed/ambiguous procfs, unsupported
-hierarchies, inaccessible processes and invalid PIDs, without printing process
-arguments, environments, secrets or executable paths. Real self-process and
-fixture ancestor/reuse/cgroup-migration tests must establish fail-closed
-behavior. Successful output must **always** say read-only, non-atomic, no
-verified aaPanel job owner, no descendant coverage, no traffic-path proof and
-no readiness to route. No procfs result permits guarded route activation.
-These opt-in observations are supporting diagnostics, not a required per-job
-ownership gate for the Owner-approved Iran Direct / foreign VPN policy.
-
-Optional `workload-observe --pid N --sockets` adds an explicitly requested,
-read-only FD-inode join against the PID network namespace's TCP/UDP IPv4/IPv6
-tables. Test with a live **open loopback TCP socket** (not only synthetic rows),
-valid empty-FD observations, native IPv6 header variants, foreign namespace
-socket entries and missing/malformed/oversized/duplicate table or FD records.
-For any supported procfs TCP/UDP row, absence of a complete native
-terminating newline or the native ref field after inode, as well as invalid
-row serial identifiers, must fail closed without partial evidence. The ref
-field itself must contain a bounded ASCII unsigned decimal socket count
-(including native zero) without a sign, prefix or zero padding; validate it
-for BOTH held and unrelated namespace-table rows BEFORE inode filtering.
-Malformed or overflowing ref content must fail closed with no socket data,
-not merely pass the minimum recognized field count. Deterministic
-mid-observation tests must reject changed network namespace, socket FD sets,
-PID generation and cgroup membership. Real loopback UDP over IPv4 and, when
-supported, IPv6 should be observed with the ownership/activation flags false.
-The Linux installed-host CLI must expose real per-PID FD evidence without
-creating new traffic, modifying host routes or claiming ownership/path readiness.
-
-The optional `workload-observe --pid N --descendants` must return a bounded
-sample of only currently visible Linux child processes and their birth ticks,
-parent identities and cgroups, with two procfs censuses and rechecks. The
-existing `limitations` array must report per-census counts of numeric PID
-directories whose stat records were missing, unreadable or malformed, without
-changing the public JSON field names. Counts include unrelated processes,
-do NOT estimate missing descendants and do NOT establish complete coverage,
-even when both counts are zero. Verify first/second-census differences,
-malformed/unreadable records, exact limit enforcement, and no partial output
-when a selected root/child disappears. Both censuses must stream directory
-entries in bounded positive batches, refuse
-more than 8192 numeric PID entries or 8448 total entries (including nonnumeric
-entries), and never pre-materialize an unbounded directory listing. Verify
-exact/over-limit boundaries, early rejection and no partial evidence from a
-failed second census using synthetic and real filesystem fixtures. The
-optional combination with `--sockets` additionally reads each sampled child's
-held TCP/UDP FDs. The parent and children must share a 64 MiB cumulative
-TCP/UDP namespace-table input budget (plus one bounded sentinel byte), on top
-of each table's existing 8 MiB limit. Verify exact-byte and over-limit
-synthetic tables, successful parent+child scans, and a budget overflow after
-the parent has been observed: return workload_observation_unavailable
-with no partial root/child report. Single-PID --sockets and child-only
-observations must retain their previous behavior and JSON semantics.
-This budget does not prove RSS or runtime bounds, process/socket ownership
-or aaPanel installation-job routing. A stable observed empty child list remains
-distinct from missing visibility; no observation proves complete descendant
-or job ownership. Reject
-root/selected-child PID reuse, reparenting, cgroup migration, disappearance,
-new descendants during the sampled window, oversized trees and malformed
-selected procfs records without partial output. Verify real live parent/child
-TCP socket evidence, an unrelated sibling excluded, default opt-out, truthful
-`descendants_covered: false`, and unchanged isolated guest routing plus
-SSH/HTTP. This remains **supporting laboratory evidence only**, not a real
-panel App Store job or authenticated selected traffic.
-Socket FDs may be inherited/shared, snapshots are non-atomic, and unmatched
-sockets are not coverage; representative acceptance now checks actual
-**host-wide destination-split VPN versus Direct** packet paths, not whether an
-individual aaPanel task or its subprocesses can be uniquely attributed.
-
-### Product-integrated RPDB trial interruption and unavailable-watchdog evidence
-
-The installed disconnected Debian 13 systemd Docker acceptance also tests
-**the installed Server Connect Manager**, its private v2 journal, real native
-`iproute2` rule mutation and independently scheduled service/timer. The
-candidate test now includes pre-journal SIGKILL (untouched v1 journal),
-post-journal/pre-add SIGKILL (pending v2 but no kernel rule), post-add SIGKILL,
-post-delete SIGKILL and post-native-absence/pre-recovered-journal SIGKILL.
-Each checks exact pending/recovered revision, native rule absence or presence,
-private journal digest, and actual independently invoked recovery after a
-crash. Stopping the timer or masking the recovery service while pending must
-not produce a false `guard_scheduled` or `trial_recovered` receipt,
-including when `systemctl show` reports `loaded/static` because `/etc`
-service units take precedence over a competing `/run/systemd/system` mask.
-This is an override-conflict refusal, **not** proof that the runtime mask
-disabled the unit. The distinct negative guest exercise then replaces only
-the installed guest-owned `/etc` unit with an effective mask, verifies
-`LoadState=masked`, retains the exact previous unit bytes and digest,
-checks the pending journal/real rule after deadline, and restores the unit
-before independently rearming recovery. After an
-externally impaired service is restored, the overdue experiment must recover
-without deleting foreign rules. A deliberately reintroduced protocol-tagged
-rule after successful recovery must fail **all three public operations**:
-`activation-trial-status`, `activation-trial-recover` and
-`activation-trial-clear`. Each refusal must preserve the exact journal digest
-and the same native rule inventory before separate guest fixture cleanup.
-Additionally the guest must break only the installed recovery executable,
-observe a real failed systemd oneshot with timer still active, preserve the
-pending journal and native rule after expiry, then restore the exact executable
-and require independently scheduled recovery. It must also induce a real
-systemd `start-limit-hit`, reject false scheduled claims before deadline, and
-prove recovery after clearing that degraded state. Neither test implies
-future executor liveness or automatic repair of a permanently failed guard.
-Only an **exact-candidate completed CI job
-and original guest logs** establish PASS for these scenarios. Local Go and
-shell tests alone do not prove Linux kernel/systemd recovery; none of this
-proves independent liveness repair for routed operation, physical reboot,
-authenticated host ownership or Runtime Health Guard #3.
-
-### Independent boot-time pending-intent observation (disposable QA only)
-
-A separate, newly created **Debian 13 systemd Docker guest with `--network none`** exercises **three Docker restart cycles** independently of the installed product and earlier in-boot timer fixture. The positive cycle persists a QA-only pending-operation record with file and directory fsync under the guest's private `/var/lib`, enables a dedicated oneshot recovery service, and restarts the guest. A freshly executed boot service may acknowledge only the clean-network **no-op** for that exact operation. Two subsequent negative restarts preserve the same pending-operation journal bytes and independently inject **(1) an unexpected dummy interface without a table route** and **(2) a table-20120 route via the existing `lo` interface without an unexpected link**. The recovery service must refuse with **distinct cause-specific exit codes and structured stderr diagnostics**, checked against the actual failed systemd service invocation; unrelated invalid invocation, journal or native `ip` inspection errors must fail closed but cannot satisfy the conflict acceptance. The outer harness verifies new Docker starts, ordered actual unit execution, exact operation identity, untouched pending bytes, observed and preserved foreign objects, and removal of only its own labelled disposable Docker guest.
-
-This is **evidence of service scheduling after Docker restart, private journal survival, operation-specific no-op acknowledgment and negative foreign-state refusal**. It is deliberately **NOT** a production guard or an installed Server Connect feature. Docker restart recreates the network namespace and thereby drops transient route/link state without a product rollback; it does **not** simulate physical kernel reboot, recovery of persistent host routing policy, a durable product Activation Guard, ownership-safe post-mutation reconciliation, power-loss durability or live VPN/SSH/hosting acceptance. Every corresponding physical reboot/field criterion below remains **NOT_RUN**.
-
-### Product-integrated guarded IPv4 rule trial (new isolated acceptance)
-
-The installed development manager and independently installed, initially
-**disabled** systemd recovery units now have an experimental *single RPDB rule*
-transaction. The acceptance harness in disconnected Debian 13 `Docker
---network none` must enable/verify the exact timer, stage the exact native
-Selective intent, durably pre-record the v2 pending journal, kill the Manager
-after one real protocol-tagged rule is added, and observe **fresh** independent
-systemd timeout recovery. It must establish the exact before/after native
-rule inventory and continued loopback SSH/HTTP operation. A second negative
-run must replace the rule with an independently created foreign protocol at
-the same priority, observe a fresh, **cause-specific systemd exit 41** watchdog refusal
-without deletion or journal modification, remove only the injected fixture, and recover/clear
-the original operation. Stale IDs, pending uninstall, malformed journals,
-invalid rule metadata and wrong revision must be refused. Broad source tests
-must exercise schema, duplicate-member, foreign-rule and nonproduction
-receipt guards. These checks do not prove a real Linux TUN route, internet
-through the VPN, production Activation Guard, physical power-loss recovery,
-SSH confirmation, or Runtime Health Guard. Those matrix items remain NOT_RUN.
-
-## Required matrix
-
-| Scenario | What must be demonstrated | Minimum evidence |
+| Area | Observable acceptance | Evidence |
 | --- | --- | --- |
-| Official online acquisition | Connected host retrieves authenticated bootstrap and pinned manager/core bundle from official endpoint, verifies publisher identity before privileged execution, and uses shared installer without host-route takeover | Real connected Linux host, full fetch/verify/install trace, artifact identity |
-| Operator-hosted HTTPS mirror | On an Iranian/operator static web host, publish the **same immutable bundle/metadata**. Verify identical release hash and independent publisher trust, pinned version, redirect/TLS errors and unsupported/missing bytes; use exactly the same installer and final owned state. No foreign Internet download or separate mirror daemon needed on target | Real HTTPS mirror-to-install trace, checksums/provenance and comparison with official/offline install |
-| Offline first install | Whole package works with foreign Internet/GitHub blocked, attempts **no** DNS/HTTP/package fetch and refuses absent prerequisites without host mutation | Packaged isolated host, exact artifact |
-| Direct baseline | Install, off, disable, reboot, uninstall leave server networking/SSH/sites untouched except clearly owned state | Real Linux host state diff |
-| Import/profile | Known compatible sing-box/VLESS profile validates; malformed/malicious/unsupported inputs fail without secret exposure | Unit + real-core integration |
-| Proxy Only | Opted-in curl/APT, and WordPress where supported, must demonstrate the intended proxy route independently of Direct. APT children must be rooted in verified native executables **and effective native acquisition-method paths**; shadow binaries, caller/inherited `Dir::Bin` or `RootDir` redirection and alternative combined-update modes must be refused before any untrusted executable can receive selected-route traffic. APT child settings must be temporary and private with no host-wide `/etc/apt` changes; other apps/services stay Direct. Fail if a selected app accidentally falls back to Direct, if its temporary secret config lingers, or if a dead core causes unrelated host network failure. Do not infer WordPress coverage from PHP/cURL alone. | Real Linux core, APT/process settings, app-specific HTTP evidence and independent path attribution; mark missing WordPress/foreign testing NOT_RUN |
-| Smart Routing TUN — transparent host capture | With guarded mode active, ordinary TCP/UDP outbound from supported Linux host programs, including non-proxy-aware installers and aaPanel/WordPress/APT/Git, uses **Iran/local/protected Direct** and **other public VPN** without individual jobs, HTTP_PROXY or app settings; verify path-bound distinct exits and preserved SSH/hosting replies | Real sing-box Linux TUN and native policy on disposable installed host; independent packet/route/exit observations and representative real applications |
-| Smart Routing protocol and leak coverage | Test DNS/bootstrap and domain correlation, TCP, UDP, IPv4 and IPv6 in supported combinations; prove required protocols work, and unhandled transports/namespaces are clearly refused or fail closed instead of silently escaping Direct. A connected but unusable VPN is not a PASS | Native packet traces, forced negative failures, route/port observations and actual selected upstream |
-| Local rule data and manual routing exceptions | Verified bundled Iranian IPv4/IPv6 source available offline; explicit operator domain/suffix, IP and CIDR Direct/VPN rules, imported trusted local lists, deterministic priority and conflicts, atomic validated refresh from official/mirror/manual source. Domain-literal and IP-only requests obey observable rules, not inferred domains | Offline run, reproducible DNS/packet/collision checks, same-version data hashes and bad/stale list rejection |
-| VPN endpoint underlay and bootstrap DNS | Endpoint is addressable before VPN is active; no recursive tunnel path or resolver loop; Iran/private/foreign traffic uses expected route | Offline/restricted-DNS simulation and real Linux path observation |
-| Smart Routing host coexistence | Verify new/existing SSH, aaPanel, hosted HTTP(S) replies from **foreign-client IPs**, VPN underlay/endpoint DNS, Docker/Fail2Ban/other rules and real local services across Connect, Disconnect, failure and reboot, without adopting their resources | Disposable hosting VM and then separately approved representative physical-host observations |
-| Activation expiry | 600-second/default or shorter test-configured expiry without new approved control connection returns to baseline | systemd and route journal check |
-| Activation confirmation | Fresh bound SSH/console identity accepted; stale/replayed/cross-operation confirmation rejected | Real SSH, negative tests |
-| Crash/uncertain | Kill manager or sing-box between mutation stages, concurrent apply, fsync failure and foreign rule conflict do not clobber unowned resources | Fault injection + host state diff |
-| Reboot while pending | Uncommitted route effects are not silently persisted; recovery reconciles journal | Real reboot from installed artifact |
-| Runtime failure | Core exit, unreachable VPN endpoint, simulated packet drop, multi-probe outage return network to valid operator policy | Path-bound probe and host route evidence |
-| Guard liveness failure | Stop/hang/disable Runtime Health Guard while routed VPN remains; an independent bounded recovery mechanism prevents indefinite unmanaged interception | Real systemd/service supervision and host route recovery evidence |
-| False failure | One blocked Ping, broken single foreign website, transient DNS issue do not spuriously tear down healthy profile | Deterministic + actual profile |
-| Fail-closed exceptions | Selected VPN-required flows cannot silently egress direct while other hosting/domestic/management paths recover | Packet trace / rules inspection |
-| Optional ingress reachability test | No external-origin test required for outbound-only mode; if operator explicitly selects one, a fresh uncached foreign request must reach the **actual origin**, never just a CDN cache or an old terminal session. A failed optional check must not disable a healthy outbound VPN | Independent external request + origin receipt, never inference from Cloudflare DNS/proxy status |
-| Package and routing-list update/uninstall | Official online, mirror online and manual offline source converge on the same verified bundle/installer/update transaction, preserve profiles and owned route state; separate trusted rule-list updates have safe rollback; uninstall does not erase foreign firewall/routes | Exact release/metadata/rule-set digests + host lifecycle evidence |
-| Performance | Compare steady/peak CPU, memory, latency, throughput and recovery overhead in Direct, Proxy, Tunnel | Same representative VM/host and workload |
-| Host coexistence | No blind modification of actual aaPanel, SSH, Fail2Ban, Docker, existing VPN/STL or provider network configs | Snapshot + scoped before/after diff |
+| Authentic release and support | Independently authenticated publisher bytes, upstream license compliance, real OS/arch/kernel support; no guessed public download URL | Exact signed artifact, supported-host installed test |
+| Three acquisition choices | Official online, operator-hosted **HTTPS mirror** and manually uploaded offline all install/update the **same verified bundle** through one installer; bad mirror/TLS/signature/redirect/version fails safely; offline attempts **zero** DNS/HTTP/APT downloads | Separate official/mirror/offline fetch-and-install records, artifact identity, network trace |
+| Basic lifecycle | First install defaults Direct; reinstall/update preserves private profiles; disable/uninstall restores only owned files/services and routes; interrupted update has a recoverable prior state | Packaged host inventory and before/after state |
+| Profile and Proxy Only | Accepted sing-box formats validate with real core; selected APT, normal CLI and supported WordPress calls genuinely use the explicit proxy; direct apps unaffected; failed upstream does not leave stale proxy residue or leak selected traffic | Installed pinned core, app-specific requests, negative outage tests |
+| Operator menu and CLI | Same behavior in interactive and stable structured CLI: import/select/test profile, Connect/Disconnect, status, rule add/remove/import, selected profile and Direct/VPN path proof, confirmation deadline, health/recovery and explicit unsupported/uncertain states; no credential leakage | Real installed CLI/menu flows and negative input/state cases |
+| Smart Routing TUN | Real sing-box TUN carries ordinary host-origin traffic from proxy-unaware applications/aaPanel installer equivalents, APT, Git, WordPress and others **without per-app settings or PID/Job selection**. Distinct Iran Direct and other-public VPN egress are independently observed | Disposable installed Linux kernel/TUN and two-sided packet/exit observations, then representative authorized field paths |
+| Rules and datasets | Offline-bundled Iranian IP prefixes, domain/IP/CIDR Direct/VPN overrides and trusted list imports give correct precedence; overlapping/malformed/stale data and raw-IP/domain-only cases cannot silently misroute | Independent DNS/packet observations, verified version/hash, negative updates |
+| Protocol and leak coverage | TCP, UDP, DNS, IPv4, IPv6, required namespaces and profile transport are either genuinely supported or explicitly rejected; VPN-required foreign flows do **not** escape Direct after core failure or unsupported transport | Positive/negative path-bound packet capture per advertised combination |
+| VPN endpoint/bootstrap | Outer VPN connection and endpoint DNS do not recurse through their own TUN; no false VPN-health proof from Direct path | Underlay and inner data-plane observed separately |
+| Hosting and foreign owners | Current/new SSH, aaPanel, inbound HTTP(S) replies to **foreign-client IPs**, Iranian/local networks, Docker/Fail2Ban/other rules survive connect, disconnect, crash and reboot | Live connections plus exact network ownership diff |
+| Activation Guard | Independent guard **armed before mutation**; wrong/replayed confirmation, no fresh SSH/console approval, 600-second deadline, crash, reboot and foreign object collisions recover exact owned state without deleting other owners' resources | Systemd/journal/route evidence and new management connection; fault injection at each mutation phase |
+| Runtime Health Guard | Actual VPN path failure, core exit, broken DNS, one-site false alarms, dead/masked/hung watchdog and reboot lead to honest state and independently verified safe recovery; narrow fail-closed semantics preserved | Separate normal/negative supervisor and selected-route tests |
+| Performance | Measure Direct versus Proxy Only versus Smart Routing CPU/RAM, throughput/latency and guard overhead for representative host workloads | Same controlled host/workload before/after |
+| Optional foreign Direct-first probing | **Not a prerequisite** for initial static exception support. If shipped, Direct success is path-bound and failures affect only **new** flows, without replaying transactions or flapping | Separate opted-in functional and negative cases |
+| Optional Cloudflare website ingress | **Not a first outbound-only release gate.** If advertised later: approved hostname/origin, official cloudflared identity, reachable Cloudflare egress (Direct or verified VPN), fresh uncached **origin** request, independent connector failure/credentials/DNS/TLS checks | Actual external origin receipt plus separated cloudflared/outbound health |
 
-## Optional routing enhancements (only if included in a release)
+## Existing tests and their limits
 
-The **Direct-first availability probe** for a specific foreign exception is a future convenience, not mandatory for the initial Smart Routing release. If implemented, demonstrate that an explicitly approved destination uses a verified Direct path when available and VPN for **new connections** on proven Direct failure, without automatic learning, replaying application transactions, route flapping or VPN-required leaks. Mark NOT_RUN until the feature is actually implemented; static manual domain/IP/CIDR rules remain a core requirement.
+The repository already includes **valuable disposable-host evidence and regression harnesses**, but **not** proof of production TUN or public release. Keep authoritative test procedures in the actual sources instead of copying their full logs or thousands of assertions into Markdown:
 
-## Optional post-core Cloudflare Tunnel acceptance (only if feature is advertised)
+- [Installed-host QA workflow](../.github/workflows/installed-host-qa.yml), [installed host](../scripts/qa/test-installed-host.sh) and [online minimal host](../scripts/qa/test-online-minimal-host.sh) exercise real Debian 13 systemd/Docker, offline lifecycle and local online bootstrap, with loopback-only VPN/SSH/HTTP. A local-sourced bundle and synthetic default route are **not** foreign field evidence. Inactive offline phases have process-complete network-attempt traces; active update tests cannot claim the identical zero-network-attempt property.
+- [APT](../scripts/qa/host-apt-only.sh) and [WordPress/FastCGI](../scripts/qa/host-wordpress-fpm.sh) fixtures test genuine selected **Proxy Only** application behavior and outages, **not** transparent TUN. APT needs native method/credential controls and cannot assume generic `HTTP_PROXY`; the guest's unsigned `trusted=yes` test repository is never production guidance. WordPress' `WP_PROXY_*` settings are disposable **QA-only** pool-local configuration, never a customer-site change.
+- [Recovery fixture](../scripts/qa/host-product-guard-trial.sh), [boot fixture](../scripts/qa/test-activation-boot-qa.sh) and [state tests](../scripts/qa/test-installed-host.sh) contain **development-only** v1 unarmed intent, v2 RPDB-rule and v3 loopback-route + rule experiments. They proved limited native observation/recovery properties but **never install TUN, prove owned production routing or establish Runtime Health Guard**. A Docker restart recreates its network namespace and removes transient routes; it is **not** a physical reboot/power-loss recovery proof.
+- The disposable Docker `/run` tmpfs originally had **private mount propagation**, breaking systemd credential mounts. The test guest switched only its own `/run` to `rshared` and checked `SetCredential`/`LoadCredential`; retain the distinction between [negative run 40049908621](https://github.com/AChWorks/server-connect/actions/runs/40049908621) and [positive run 40050986774](https://github.com/AChWorks/server-connect/actions/runs/40050986774). **Do not generalize this isolated fixture fix to production hosts.**
+- Existing `workload-observe` PID/descendant/socket diagnostics are **read-only, non-atomic and never an authenticated Job/flow selector**. Incomplete procfs visibility, zero skipped entries or socket inode matches do not prove total descendants or real egress. They are not Smart Routing acceptance gates; source tests and [workload fixture](../scripts/qa/host-workload-descendants.sh) own their exact input budgets/negative cases.
+- Privileged installed-host QA uses `pull_request_target` **trusted-base** workflow ownership and same-repository admission with exact merge/commit identity; it is **not** a general license to run fork code or production Docker as root. Recheck actual current workflow and [policy tests](../scripts/qa/test-installed-workflow-policy.py) before changing CI admission.
 
-[Issue #48](https://github.com/AChWorks/server-connect/issues/48) is **not** a mandatory gate for the first outbound-only release. Once enabled, verify official cloudflared identity, operator-approved Cloudflare domain and mapped local HTTP(S) origin, authenticated control-plane changes, and a live outgoing connector that reaches Cloudflare (via protected Direct or verified Smart Routing VPN when needed). Independently prove that an uncached external nonce reaches the origin; test missing credentials, failed UDP/TCP Cloudflare egress, connector crash, wrong origin/DNS, and secure disable/removal without touching aaPanel, existing tunnels or outbound VPN health. Do not claim arbitrary raw public TCP/UDP forwarding. Obtain exact-artifact independent review and field evidence for any advertised connector capability.
+## Delivery sequence
 
-## Next evidence-producing slice
+The next meaningful network milestone is **one real independently guarded Smart Routing TUN vertical slice** with two-sided Iran Direct/foreign VPN proof, no per-job workstream, protected SSH/foreign-client website replies and genuine DNS/UDP/IPv4/IPv6 truthfulness. Then finish Runtime Guard and host safety, official/mirror/offline package acceptance and representative field checks. A signed release must not advertise unimplemented features.
 
-The initial genuine pinned-core **Proxy Only** path, selected APT/WordPress integrations, and disconnected installer fixtures already have isolated QA evidence as described above. This evidence does **not** prove transparent routed VPN traffic, mirror authenticity or released software. Do not repeat per-app/procfs diagnostic development instead of delivering the required next outcome.
-
-Advance directly to **one guarded Smart Routing sing-box TUN vertical slice** in a disposable host: independent real Direct/VPN packet-path proof from non-proxy-aware programs, DNS/UDP/IPv4/IPv6 truthfulness, bundled Iranian source and operator domain/IP rules, protected SSH/hosted replies and independent owned rollback. Do not add process-census or per-app adapters as prerequisites or deploy unguarded TUN for a quick demo.
-
-## Acceptance and authorization gates
-
-- Every substantive network/privileged change must pass meaningful fault and safety tests and **fresh author-separated independent high-assurance review** before integration or release.
-- A green unit test is not a successful field test. Recheck only evidence invalidated by exact candidate changes.
-- Owner approval is required before touching a production panel/website server, changing routing on a real customer environment, or publishing a production release when not already specifically authorized.
-- Never use production connectivity as the first demonstration of rollback. Keep a provider console/snapshot and observable escape route on disposable test hosts.
-- A release is not accepted merely because a GitHub Issue or PR closed; installation, guards and recovery on the exact artifact are separate proof.
-
-This matrix is authoritative for acceptance categories; GitHub Issues own which categories remain actionable and CI/run artifacts own the actual results.
+A failed or incomplete required test remains open in its owning Issue and exact PR/CI evidence. The complete runtime recovery rules are in [SAFETY-RECOVERY.md](SAFETY-RECOVERY.md); packaging trust in [OFFLINE-DISTRIBUTION.md](OFFLINE-DISTRIBUTION.md).
