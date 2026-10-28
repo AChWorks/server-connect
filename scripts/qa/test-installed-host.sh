@@ -341,6 +341,13 @@ run_offline first-install --offline
 verify_direct_install
 assert_network_unchanged first-install "$offline_before"
 verify_host_services first-install
+# The trusted-base CI workflow still syntax-checks the old fixture pathname.
+# This installed-guest negative proves the retired command is actually gone.
+docker cp "$root/scripts/qa/host-workload-descendants.sh" "$container:/root/qa-retired-workload.sh"
+docker exec "$container" /bin/sh /root/qa-retired-workload.sh
+assert_network_unchanged retired-workload-command "$offline_before"
+verify_host_services retired-workload-command
+docker exec "$container" /bin/rm -f /root/qa-retired-workload.sh
 docker exec "$container" /bin/sh -c '
   printf "SC_QA_RETAIN_PROFILE_BYTES\n" > /var/lib/server-connect/profiles/qa-retained
   chmod 0600 /var/lib/server-connect/profiles/qa-retained
