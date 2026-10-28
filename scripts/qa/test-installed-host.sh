@@ -40,6 +40,7 @@ PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/qa/test-wp-proxy-prepend.py
 # ambiguous kernel identities before the privileged disconnected guest runs.
 sh -n scripts/qa/host-activation-guard.sh
 sh -n scripts/qa/host-product-guard-trial.sh
+sh -n scripts/qa/host-tun-path.sh
 bash scripts/qa/test-installer-rollback-backups.sh
 PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/qa/test-activation-guard-inspect.py
 # Separate reboot-scheduling QA remains a disposable-container proof only.
@@ -456,6 +457,17 @@ run_offline reinstall --offline
 verify_direct_install
 assert_network_unchanged reinstall "$offline_before"
 verify_host_services reinstall
+# A REAL Linux TUN+VLESS path is exercised only in the disconnected
+# disposable guest; the installed product still has no public TUN Apply.
+GOPROXY=off GOTOOLCHAIN=local CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+  go build -trimpath -o "$scratch/tun-config-qa" ./scripts/qa/tun_config_generator.go
+test -x "$scratch/tun-config-qa"
+docker cp "$scratch/tun-config-qa" "$container:/root/qa-tun-config-qa"
+docker cp "$root/scripts/qa/host-tun-path.sh" "$container:/root/qa-host-tun-path.sh"
+docker exec "$container" /bin/sh /root/qa-host-tun-path.sh
+assert_network_unchanged real-tun-candidate-cleanup "$offline_before"
+verify_host_services real-tun-candidate-cleanup
+docker exec "$container" /bin/rm -f /root/qa-tun-config-qa /root/qa-host-tun-path.sh
 # Product code + installed inactive-by-default independent recovery units.
 # The actual RPDB rule is added ONLY in the verified disconnected guest.
 docker cp "$root/scripts/qa/host-product-guard-trial.sh" "$container:/root/qa-product-guard-trial.sh"

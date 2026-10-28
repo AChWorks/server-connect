@@ -4,7 +4,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 ENV container=docker
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
-      ca-certificates curl wget git gzip iproute2 openssh-client openssh-server passwd procps \
+      ca-certificates curl wget git gzip iproute2 nftables openssh-client openssh-server passwd procps \
       python3 strace systemd systemd-sysv tar util-linux \
       php8.4-cli php8.4-fpm php8.4-curl php8.4-sqlite3 php8.4-xml \
       libfcgi-bin unzip \
