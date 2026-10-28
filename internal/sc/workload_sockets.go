@@ -47,7 +47,17 @@ const (
 	workloadSocketMaxFDs      = 8192
 	workloadSocketMaxNetBytes = 8 << 20
 	workloadSocketMaxNetRows  = 30000
+	// An opt-in parent + descendant socket census must have an aggregate
+	// table-read bound, not just 65 independent 8 MiB per-table bounds.
+	// This is cumulative input, not peak RSS or command-runtime budgeting.
+	workloadSocketDescendantMaxNetBytes = 64 << 20
 )
+
+// A single private budget is shared by the root and every observed child.
+// A nil budget retains the existing one-PID socket-only behavior.
+type workloadSocketReadBudget struct {
+	remaining int64
+}
 
 func readWorkloadFDInodes(root string, pid int) (map[uint64]bool, error) {
 	dir, err := os.Open(filepath.Join(root, strconv.Itoa(pid), "fd"))
@@ -229,8 +239,23 @@ func parseWorkloadSocketTable(data []byte, protocol string, held map[uint64]bool
 }
 
 func readWorkloadSocketTable(root string, pid int, protocol string, held map[uint64]bool) ([]WorkloadSocket, error) {
+	return readWorkloadSocketTableWithBudget(root, pid, protocol, held, nil)
+}
+
+func readWorkloadSocketTableWithBudget(root string, pid int, protocol string, held map[uint64]bool, budget *workloadSocketReadBudget) ([]WorkloadSocket, error) {
 	if protocol != "tcp4" && protocol != "tcp6" && protocol != "udp4" && protocol != "udp6" {
 		return nil, workloadObservationUnavailable()
+	}
+	// A strictly positive budget must be checked BEFORE reading the table.
+	// One sentinel byte detects when a table exceeds the remaining budget.
+	limit := int64(workloadSocketMaxNetBytes + 1)
+	if budget != nil {
+		if budget.remaining <= 0 {
+			return nil, workloadObservationUnavailable()
+		}
+		if remainingWithSentinel := budget.remaining + 1; remainingWithSentinel < limit {
+			limit = remainingWithSentinel
+		}
 	}
 	name := protocol[:3]
 	if strings.HasSuffix(protocol, "6") {
@@ -241,9 +266,15 @@ func readWorkloadSocketTable(root string, pid int, protocol string, held map[uin
 		return nil, workloadObservationUnavailable()
 	}
 	defer f.Close()
-	data, err := io.ReadAll(io.LimitReader(f, workloadSocketMaxNetBytes+1))
+	data, err := io.ReadAll(io.LimitReader(f, limit))
 	if err != nil || len(data) > workloadSocketMaxNetBytes {
 		return nil, workloadObservationUnavailable()
+	}
+	if budget != nil {
+		if int64(len(data)) > budget.remaining {
+			return nil, workloadObservationUnavailable()
+		}
+		budget.remaining -= int64(len(data))
 	}
 	return parseWorkloadSocketTable(data, protocol, held)
 }
@@ -252,10 +283,18 @@ func observeWorkloadWithSocketsAt(root string, pid int) (WorkloadObservation, er
 	return observeWorkloadWithSocketsAtAfterTables(root, pid, nil)
 }
 
+func observeWorkloadWithSocketsAtBudget(root string, pid int, budget *workloadSocketReadBudget) (WorkloadObservation, error) {
+	return observeWorkloadWithSocketsAtAfterTablesBudget(root, pid, nil, budget)
+}
+
 // afterTables is a same-package deterministic test seam for simulated procfs
 // changes between table collection and the final identity rechecks. The
 // installed CLI always supplies nil; no operator callback can be injected.
 func observeWorkloadWithSocketsAtAfterTables(root string, pid int, afterTables func()) (WorkloadObservation, error) {
+	return observeWorkloadWithSocketsAtAfterTablesBudget(root, pid, afterTables, nil)
+}
+
+func observeWorkloadWithSocketsAtAfterTablesBudget(root string, pid int, afterTables func(), budget *workloadSocketReadBudget) (WorkloadObservation, error) {
 	report, err := observeWorkloadAt(root, pid)
 	if err != nil {
 		return WorkloadObservation{}, err
@@ -271,7 +310,7 @@ func observeWorkloadWithSocketsAtAfterTables(root string, pid int, afterTables f
 	all := make([]WorkloadSocket, 0)
 	seen := make(map[uint64]bool)
 	for _, protocol := range []string{"tcp4", "tcp6", "udp4", "udp6"} {
-		sockets, err := readWorkloadSocketTable(root, pid, protocol, held)
+		sockets, err := readWorkloadSocketTableWithBudget(root, pid, protocol, held, budget)
 		if err != nil {
 			return WorkloadObservation{}, err
 		}
