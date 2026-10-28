@@ -51,9 +51,11 @@ require_guest() {
   test -z "$(ip -6 route show default)"
   test ! -e /sys/class/net/"$edge"
   test ! -e /sys/class/net/sctunqa0
-  if ip netns list | grep -q "^$peer "; then
+  namespace_inventory=$(ip netns list) || { echo 'REAL_TUN_LAB_PREFLIGHT=FAIL (cannot enumerate network namespaces)' >&2; return 1; }
+  peer_present=$(printf '%s\n' "$namespace_inventory" | awk -v expected="$peer" '$1 == expected { found=1 } END { print found+0 }') || return 1
+  if [ "$peer_present" != 0 ]; then
     echo "QA peer network namespace already exists" >&2
-    exit 1
+    return 1
   fi
 }
 
@@ -106,6 +108,27 @@ cleanup() {
   exit "$rc"
 }
 
+direct_witness_packets() {
+  witness_json=$(ip netns exec "$peer" nft -j list counter inet scqawitness direct_packets) || return 1
+  printf '%s\n' "$witness_json" | python3 -c '
+import json,sys
+items=json.load(sys.stdin)["nftables"]
+counters=[item["counter"]["packets"] for item in items if "counter" in item and item["counter"].get("name")=="direct_packets"]
+if len(counters) != 1 or not isinstance(counters[0],int):
+    sys.exit("missing or ambiguous direct-path packet witness")
+print(counters[0])
+'
+}
+
+assert_tun_policy_active() {
+  [ -n "$client_pid" ] && kill -0 "$client_pid" 2>/dev/null || return 1
+  test -e /sys/class/net/sctunqa0 || return 1
+  ip -4 route show table all | grep -F 'dev sctunqa0' >/dev/null || return 1
+  ip -4 rule show >/dev/null || return 1
+  installed_nft=$(nft -j list ruleset) || return 1
+  [ "$installed_nft" != "$nft_before" ] || return 1
+}
+
 without_proxy() {
   env -i HOME=/root PATH=/usr/bin:/bin:/sbin:/usr/sbin \
     /usr/bin/curl -q --fail --silent --show-error --noproxy '*' \
@@ -144,6 +167,17 @@ ip -n "$peer" link set scqapeer0 up
 # Internet connectivity. Only source-path choice is under test.
 ip -n "$peer" addr add 5.22.0.10/32 dev lo
 ip -n "$peer" addr add 8.8.8.8/32 dev lo
+# Independent peer-side packet counter: an ordinary Direct foreign TCP flow
+# must cross this VETH; the VLESS server's local-origin flow cannot count.
+ip netns exec "$peer" nft -f - <<'NFTWITNESS'
+table inet scqawitness {
+  counter direct_packets { }
+  chain incoming {
+    type filter hook input priority filter; policy accept;
+    iifname "scqapeer0" ip daddr 8.8.8.8 tcp dport 19180 counter name direct_packets
+  }
+}
+NFTWITNESS
 ip -4 route add default via 10.254.72.2 dev "$edge" metric 100
 default_added=yes
 
@@ -182,7 +216,13 @@ while [ "$attempt" -lt 25 ]; do
   sleep 0.2
 done
 test "$ready" = yes || { echo "disposable origins not ready" >&2; exit 1; }
+witness_baseline=$(direct_witness_packets)
+if [ "$witness_baseline" -le 0 ]; then
+  echo 'FAIL: direct-path packet witness did not detect positive-control traffic' >&2
+  exit 1
+fi
 echo "REAL_TUN_LAB_UNTUNNELED_BASELINE=PASS (two native routes)"
+echo "REAL_TUN_DIRECT_WITNESS=PASS (positive control observed $witness_baseline direct packets)"
 
 # Generate the candidate via the actual manager compiler, not a manually
 # duplicated sing-box config. The fixed lab credentials are not user secrets.
@@ -223,11 +263,19 @@ wget_result=$(env -i HOME=/root PATH=/usr/bin:/bin:/sbin:/usr/sbin \
 test "$wget_result" = SOURCE=8.8.8.8
 echo "REAL_TUN_PROXY_UNAWARE_WGET=PASS"
 
+assert_tun_policy_active || { echo 'FAIL: TUN and kernel policy not active before outage' >&2; exit 1; }
+witness_before_outage=$(direct_witness_packets)
+if [ "$witness_before_outage" -ne "$witness_baseline" ]; then
+  echo 'FAIL: foreign Direct packets observed while VLESS was healthy' >&2
+  exit 1
+fi
+
 # Stopping the actual VLESS server must not allow foreign-VPN-required traffic
 # to silently use the ordinary direct veth path while TUN remains active.
 kill "$server_pid"
 wait "$server_pid" 2>/dev/null || :
 server_pid=
+assert_tun_policy_active || { echo 'FAIL: TUN and kernel policy lost on upstream termination' >&2; exit 1; }
 if without_proxy http://8.8.8.8:19180/should-fail >/run/sc-qa-tun-leak-check 2>/dev/null; then
   echo "FAIL: VPN-required traffic silently escaped Direct" >&2
   rm -f /run/sc-qa-tun-leak-check
@@ -239,5 +287,13 @@ if [ -s /run/sc-qa-tun-leak-check ]; then
   exit 1
 fi
 rm -f /run/sc-qa-tun-leak-check
+assert_tun_policy_active || { echo 'FAIL: TUN and kernel policy did not remain active during failed foreign request' >&2; exit 1; }
+witness_after_outage=$(direct_witness_packets)
+if [ "$witness_after_outage" -ne "$witness_before_outage" ]; then
+  echo "FAIL: foreign Direct TCP packets leaked ($witness_before_outage -> $witness_after_outage)" >&2
+  exit 1
+fi
+echo 'REAL_TUN_POLICY_DURING_OUTAGE=PASS (live client, TUN route, installed nftables policy)'
+echo 'REAL_TUN_NO_DIRECT_PACKETS_ON_UPSTREAM_LOSS=PASS (positive-controlled independent peer witness)'
 expect_source 5.22.0.10 10.254.72.1
-echo "REAL_TUN_UPSTREAM_LOSS=PASS (VPN path blocked, domestic/underlay Direct preserved)"
+echo "REAL_TUN_UPSTREAM_LOSS=PASS (VPN path failed closed, domestic/underlay Direct preserved)"

@@ -2,6 +2,7 @@ package sc
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"testing"
 )
@@ -79,6 +80,21 @@ func TestSmartTUNCandidateRejectsUnsafeConfigurations(t *testing.T) {
 		{"invalid-domestic", func(_ *Profile, o *SmartTUNCandidateOptions) { o.DomesticCIDRs = []string{"no-ip"} }},
 		{"noncanonical-domestic", func(_ *Profile, o *SmartTUNCandidateOptions) { o.DomesticCIDRs = []string{"5.22.0.1/17"} }},
 		{"global-bypass", func(_ *Profile, o *SmartTUNCandidateOptions) { o.ProtectedCIDRs = []string{"0.0.0.0/0"} }},
+		{"single-public-broad-protection", func(_ *Profile, o *SmartTUNCandidateOptions) {
+			o.ProtectedCIDRs = []string{"8.0.0.0/8"}
+		}},
+		{"two-complementary-half-space-protections", func(_ *Profile, o *SmartTUNCandidateOptions) {
+			o.ProtectedCIDRs = []string{"0.0.0.0/1", "128.0.0.0/1"}
+		}},
+		{"overlapping-protected-controls", func(_ *Profile, o *SmartTUNCandidateOptions) {
+			o.ProtectedCIDRs = []string{"203.0.113.40/29", "203.0.113.44/30"}
+		}},
+		{"aggregate-narrow-protected-controls", func(_ *Profile, o *SmartTUNCandidateOptions) {
+			o.ProtectedCIDRs = nil
+			for i := 0; i < 9; i++ {
+				o.ProtectedCIDRs = append(o.ProtectedCIDRs, fmt.Sprintf("203.0.113.%d/29", i*8))
+			}
+		}},
 		{"protected-overlap", func(_ *Profile, o *SmartTUNCandidateOptions) {
 			o.Exceptions = []SmartTUNCIDRException{{CIDR: "203.0.113.0/24", Via: "vpn"}}
 		}},
@@ -103,5 +119,45 @@ func TestSmartTUNCandidateRejectsUnsafeConfigurations(t *testing.T) {
 				t.Fatal("unsafe config unexpectedly accepted")
 			}
 		})
+	}
+}
+
+func TestSmartTUNCandidateAllowsNarrowManagementAndUnderlay(t *testing.T) {
+	profile, o := smartTUNFixture()
+	// The private underlay is already protected by the built-in private block;
+	// a narrow public management subnet and host require explicit admission.
+	o.ProtectedCIDRs = []string{"10.254.72.0/30", "198.51.100.40/29", "203.0.113.42/32"}
+	config, err := SmartTUNCandidateConfig(profile, o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var v struct {
+		Inbounds []struct {
+			Excluded []string `json:"route_exclude_address"`
+		} `json:"inbounds"`
+	}
+	if err := json.Unmarshal(config, &v); err != nil {
+		t.Fatal(err)
+	}
+	if len(v.Inbounds) != 1 {
+		t.Fatal("missing TUN inbound")
+	}
+	has := make(map[string]bool)
+	for _, prefix := range v.Inbounds[0].Excluded {
+		has[prefix] = true
+	}
+	if !has["10.0.0.0/8"] || !has["198.51.100.40/29"] || !has["203.0.113.42/32"] {
+		t.Fatalf("narrow control or private underlay not protected: %v", v.Inbounds[0].Excluded)
+	}
+}
+
+func TestSmartTUNCandidateAllowsBoundedAggregate(t *testing.T) {
+	profile, o := smartTUNFixture()
+	o.ProtectedCIDRs = nil
+	for i := 0; i < 8; i++ {
+		o.ProtectedCIDRs = append(o.ProtectedCIDRs, fmt.Sprintf("203.0.113.%d/29", i*8))
+	}
+	if _, err := SmartTUNCandidateConfig(profile, o); err != nil {
+		t.Fatalf("64 narrowly identified protected addresses should be allowed: %v", err)
 	}
 }

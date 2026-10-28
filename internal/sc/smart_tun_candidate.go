@@ -73,20 +73,55 @@ func SmartTUNCandidateConfig(profile Profile, o SmartTUNCandidateOptions) ([]byt
 	// Kernel bypass for essential Direct paths. Inbound website/SSH foreign
 	// reply preservation is NOT inferred from this insufficient list.
 	protected := []string{"127.0.0.0/8", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "169.254.0.0/16", server + "/32"}
+	baseProtectedCount := len(protected)
 	protected = append(protected, o.ProtectedCIDRs...)
 	seen := map[string]bool{}
 	exclusions := []string{}
 	protections := []netip.Prefix{}
-	for _, raw := range protected {
+	// Extra kernel exclusions are only for narrow, identified host/control paths.
+	// Deliberately broad Direct policy belongs in explicit operator exceptions.
+	// Bounding the total also prevents many small prefixes from composing a
+	// near-global exclusion. This is admission control, not proof of path ownership.
+	const maxExtraProtectedAddresses = 64
+	extraProtectedAddresses := 0
+	for i, raw := range protected {
 		prefix, err := canonicalRoutePrefix(raw)
 		if err != nil {
 			return nil, errors.New("invalid protected CIDR")
 		}
-		if !seen[raw] {
-			seen[raw] = true
-			exclusions = append(exclusions, raw)
-			protections = append(protections, prefix)
+		if seen[raw] {
+			continue
 		}
+		if i >= baseProtectedCount {
+			if prefix.Bits() < 29 {
+				return nil, errors.New("protected control path exceeds a narrow IPv4 /29")
+			}
+			// A caller may redundantly identify a private/on-link or endpoint
+			// host already excluded by the essential built-in protections.
+			alreadyProtected := false
+			for _, base := range protections[:baseProtectedCount] {
+				if base.Contains(prefix.Addr()) && prefix.Bits() >= base.Bits() {
+					alreadyProtected = true
+					break
+				}
+			}
+			if alreadyProtected {
+				seen[raw] = true
+				continue
+			}
+			for _, existing := range protections {
+				if routePrefixesOverlap(prefix, existing) {
+					return nil, errors.New("overlapping protected control paths")
+				}
+			}
+			extraProtectedAddresses += 1 << (32 - prefix.Bits())
+			if extraProtectedAddresses > maxExtraProtectedAddresses {
+				return nil, errors.New("aggregate protected control paths exceed bounded IPv4 admission")
+			}
+		}
+		seen[raw] = true
+		exclusions = append(exclusions, raw)
+		protections = append(protections, prefix)
 	}
 	rules := []any{map[string]any{"ip_cidr": exclusions, "action": "bypass", "outbound": "direct"}}
 	operator := []netip.Prefix{}
