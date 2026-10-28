@@ -37,12 +37,12 @@ One independently authenticated, complete, versioned bundle and **one shared ins
 - **Operator-hosted online mirror**, including a static Iranian web host holding the same verified release bytes.
 - **Manual upload and fully offline** installation and update, with no network downloads on the target.
 
-Operators should manage compatible profiles, routing rules, connection state, diagnostics, safe Disconnect, updates, and recovery through one understandable menu and stable CLI. When off, the original host routing should remain intact. Avoid mandatory cloud management, additional background services while unused, and unnecessary resource consumption.
+Operators should manage compatible profiles, routing rules, connection state, diagnostics, safe Disconnect, updates, and recovery through one understandable menu and stable CLI. **Profiles and operator routing settings remain saved while disconnected** and are revalidated and reapplied on the next guarded Smart Routing activation; users must not configure them again merely because the VPN was switched off. In **Direct/off**, ordinary applications return to the host's original network paths, with **no Server Connect-owned VPN-only routing or blocking rules left active**. Avoid mandatory cloud management, additional background services while unused, and unnecessary resource consumption.
 
 ## Non-negotiable boundaries
 
 - Protect existing and new SSH/administrative access, aaPanel, websites and **their replies to foreign visitors**, local/connected routes, VPN bootstrap, and third-party network owners.
-- Any host-affecting routing activation requires an independently effective **Activation Guard** and exact owned-resource rollback. Active routed operation requires an independent **Runtime Health Guard**; failures must not silently leak VPN-required traffic Direct.
+- Any host-affecting routing activation requires an independently effective **Activation Guard** and exact owned-resource rollback. Active routed operation requires an independent **Runtime Health Guard**; failures must not silently leak VPN-required traffic Direct **while Smart Routing is in effect**. Deliberate or guard-driven deactivation must restore ordinary Direct/off networking and report the mode transition truthfully.
 - Privileged changes must be narrow, reversible, independently testable and conservative when host networking is ambiguous.
 - No speculative per-job routing framework, second VPN data plane, universal plugin system, or mandatory multi-profile concurrency.
 - **Inbound foreign website access is separate from outbound VPN.** An **optional, separately controlled Cloudflare Tunnel** integration may publish operator-approved HTTP(S) origins over a reachable outbound connector. It must not become a prerequisite for outbound VPN use or claim universal raw public TCP/UDP forwarding.

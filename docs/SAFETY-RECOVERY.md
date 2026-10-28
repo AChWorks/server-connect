@@ -4,10 +4,10 @@
 
 ## Invariants
 
-- **Off/Direct preserves baseline routing.** Enable, disable, update, crash recovery and uninstall change only clearly identified Server Connect resources, never arbitrary routes, DNS, firewall, SSH, aaPanel, Docker, Fail2Ban, STL or unrelated tunnels.
+- **Off/Direct restores ordinary baseline networking.** Explicit Disconnect and verified guard-driven deactivation remove **all** Server Connect-owned host-wide interception and VPN-only egress blocks. Original host routes/services operate normally, including foreign destinations if the baseline host permits them. Saved profiles and operator routing rules persist as inactive configuration and are revalidated/reapplied on the next guarded activation; a saved policy is not an active kernel policy. Enable, disable, update, crash recovery and uninstall change only identified Server Connect resources, never unrelated routes, DNS, firewall, SSH, aaPanel, Docker, Fail2Ban, STL or tunnels.
 - **No unguarded host routing:** record a trustworthy pre-change host state, prearm and independently verify the recovery mechanism, then apply only an exact, reversible product-owned delta. If ownership or baseline is uncertain, refuse Apply and retain diagnostic evidence.
 - **Protect access:** preserve present and fresh SSH/provider-console paths, panel, established inbound hosting replies (including foreign clients), local/Iran routes and the outer VPN endpoint's independent underlay/DNS bootstrap.
-- **No VPN-required Direct leak:** a failed/unsupported VPN transport must not silently reroute VPN-required public traffic Direct. Explicit operator Direct exceptions are a deliberate policy, not an automatic outage bypass. Maintain safe domestic, management and hosted traffic while containing selected VPN-required flows.
+- **No hidden Direct fallback while routed:** while Smart Routing remains active or degraded, a failed/unsupported VPN transport must not silently send VPN-required public traffic Direct. Explicit operator Direct exceptions are a deliberate policy. A **verified transition to Direct/off** is different: the routed policy is disabled, its owned containment rules are removed, and the ordinary host routing policy resumes; never describe this as continuing VPN protection. Protect domestic, management and hosted traffic during diagnosis and transition.
 - Recovery must work locally without functioning sing-box, remote VPN, Cloudflare, GitHub, foreign DNS or other external service. A provider rescue console remains necessary for kernel/host-wide failure outside in-host recovery control.
 
 ## Transaction states
@@ -45,11 +45,12 @@ Suggested **initial field-calibrated defaults**, not validated performance guara
 
 The guard's **own liveness** must be supervised independently; a dead, disabled, masked, hung or start-rate-limited executor is not healthy merely because its systemd timer shows active. If bounded trustworthy supervision cannot be restored, reconcile the owned tunnel policy to a safe state rather than leaving indefinite unmonitored interception.
 
-On confirmed failure, recover the exact owned network delta, preserve verified management/domestic/hosting routes, record the reason, and apply the operator's chosen failure policy:
+On confirmed failure, first prevent **unobserved** Direct bypass while the Smart Routing policy is still in effect, then recover the exact owned network delta, preserve management/domestic/hosting connectivity, and report the resulting mode and reason. A state is not `DIRECT` merely because the VPN process exited; incomplete ownership/recovery is `UNCERTAIN`.
 
-- `restore_direct` (default): restore host baseline; **do not** claim foreign reachability where Direct is blocked. VPN-required flows must still observe their designated fail-closed constraints.
-- `restore_previous_verified` (optional): only through a newly guarded independently verified transition, not blind profile switching.
-- `hold_selected_egress` (optional): restore safe host routes but keep narrowly designated VPN-required flows blocked rather than leaked.
+- `restore_direct` (MVP default): **deactivate** Smart Routing, remove its verified product-owned TUN/routing and any temporary VPN-only blocking rules, and restore normal host routing. Preserve the selected profile and saved routing settings for the next guarded enablement. Foreign Internet may or may not work over the restored Direct path; do not claim VPN protection or foreign reachability while off.
+- `restore_previous_verified` (optional, only if separately supported): transition to another previously verified active configuration only through a newly guarded, independently verified Apply; never treat it as Direct/off or switch blindly.
+
+**Deferred, not an MVP/release requirement:** an operator-selected persistent block for VPN-designated destinations while the VPN is **off** (formerly `hold_selected_egress`) would be a different explicit policy. Do not build, apply or test it as part of the first release without a new Owner decision. The current Direct/off state has no such product-owned blocking.
 
 Retries, cooldown/backoff and failure thresholds are bounded and visible; no automatic endless reconnect loops. **Cloudflare Tunnel**, if separately enabled, has its own connector health: an unselected/failed website-origin check must not tear down healthy outbound Smart Routing.
 

@@ -12,6 +12,8 @@ Server Connect is an offline-first Linux server connectivity manager, designed e
 | **Proxy Only** | Optional local HTTP/SOCKS proxy for applications that explicitly use it. |
 | **Smart Routing (TUN)** | One host-level destination policy using official sing-box and Linux TUN: Iran/local/protected paths Direct, other public traffic VPN by default, with operator domain/IP/CIDR and trusted-list exceptions. |
 
+Switching Smart Routing **off** is meant to restore the server's ordinary network paths, without leftover VPN-only blocking, while keeping saved profiles and routing rules for the next guarded activation. This behavior is a product requirement, **not yet an implemented TUN feature**.
+
 Smart Routing must protect SSH, aaPanel, website replies, connected networks and the VPN endpoint; it requires independent activation and ongoing recovery safeguards. **Working TUN for all claimed TCP/UDP/DNS/IPv4/IPv6 combinations still needs real evidence.** Optional Cloudflare Tunnel website ingress is a **separate later feature**, not a property of the outbound VPN.
 
 ## Installation approach

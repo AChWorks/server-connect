@@ -16,7 +16,7 @@ Optional: independent cloudflared connector -> Cloudflare -> approved HTTP(S) or
 
 The manager is a small Linux CLI/control plane, not a replacement tunnel protocol or a mandatory hosted dashboard. The current usable development foundation is Direct and opt-in Proxy Only; **production Smart Routing and its guards are not yet implemented/accepted**. Source and CI history must not be confused with a released or field-proven build.
 
-Use one authenticated stored-profile identity and **one selected active outbound** for the first version. Keep profile data, rules, runtime state and replaceable binaries separate. Do not introduce multi-outbound abstractions or a per-job router for possible future features.
+Use one authenticated stored-profile identity and **one selected active outbound** for the first version. Keep profile data, rules, runtime state and replaceable binaries separate. A saved profile/rule set is **configuration**, not an active Linux route: explicit Disconnect or guard-confirmed fallback to Direct removes the precisely owned TUN/policy and any VPN-only egress blocks, but preserves stored settings for the next independently guarded Apply. While routing is active or degraded, an unavailable VPN-required path must not silently bypass through Direct. Do not introduce multi-outbound abstractions or a per-job router for possible future features.
 
 ## Smart Routing — one transparent host policy
 
