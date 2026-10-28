@@ -20,6 +20,13 @@ default_added=no
 tun_device_created=no
 nft_before=
 
+# iproute2 can emit an inconsequential trailing space after link deletion;
+# retain strict route semantics while excluding display-only whitespace.
+normalized_default_route() {
+  route_text=$(ip -4 route show default) || return 1
+  printf '%s\n' "$route_text" | sed 's/[[:space:]]*$//'
+}
+
 require_guest() {
   test "$(id -u)" -eq 0
   test -f /.dockerenv
@@ -40,7 +47,7 @@ require_guest() {
     echo 'REAL_TUN_LAB_PREFLIGHT=FAIL (no kernel TUN character device)' >&2
     return 1
   fi
-  test "$(ip -4 route show default)" = "default dev lo scope link metric 4242"
+  test "$(normalized_default_route)" = "default dev lo scope link metric 4242"
   test -z "$(ip -6 route show default)"
   test ! -e /sys/class/net/"$edge"
   test ! -e /sys/class/net/sctunqa0
@@ -78,7 +85,7 @@ cleanup() {
     echo "REAL_TUN_LAB_CLEANUP=FAIL (TUN still present)" >&2
     rc=1
   fi
-  observed_default=$(ip -4 route show default) || { echo 'REAL_TUN_LAB_CLEANUP=FAIL (default route read)' >&2; rc=1; observed_default=''; }
+  observed_default=$(normalized_default_route) || { echo 'REAL_TUN_LAB_CLEANUP=FAIL (default route read)' >&2; rc=1; observed_default=''; }
   if [ "$observed_default" != "default dev lo scope link metric 4242" ]; then
     echo "REAL_TUN_LAB_CLEANUP=FAIL (baseline default route changed; observed=[$observed_default])" >&2
     ip -4 route show table all >&2 || :
