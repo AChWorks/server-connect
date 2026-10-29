@@ -21,6 +21,9 @@ tls_pid=
 native_apps_pid=
 native_apps_created=no
 native_apps_dir=/run/sc-qa-tun-native-apps
+wp_pid=
+wp_fixture_created=no
+wp_fixture_dir=/run/sc-qa-tun-wp
 tls_cert=/run/sc-qa-tun-tls.crt
 tls_key=/run/sc-qa-tun-tls.key
 edge_added=no
@@ -48,8 +51,10 @@ require_guest() {
   test -x /root/qa-tun-config-qa
   test -f /root/qa-tun-sni-client.py
   test -f /root/qa-tun-native-apps.py
+  test -f /root/qa-tun-wordpress-fpm.sh && test -f /root/qa-tun-wp-check.py
   test -x /usr/bin/apt-get && test -x /usr/bin/git
   test ! -e "$native_apps_dir" && test ! -L "$native_apps_dir"
+  test ! -e "$wp_fixture_dir" && test ! -L "$wp_fixture_dir"
   command -v openssl >/dev/null
   test -x "$core"
   if [ ! -c /dev/net/tun ]; then
@@ -87,7 +92,7 @@ cleanup() {
   if [ "${SC_QA_TUN_GUARD_LAB-}" = yes ] && ! qa_tun_guard_cleanup; then
     cleanup_failed=yes
   fi
-  for pid in "$client_pid" "$server_pid" "$origin_pid" "$hosting_pid" "$udp_pid" "$dns_pid" "$tls_pid" "$native_apps_pid"; do
+  for pid in "$client_pid" "$server_pid" "$origin_pid" "$hosting_pid" "$udp_pid" "$dns_pid" "$tls_pid" "$native_apps_pid" "$wp_pid"; do
     if [ -n "$pid" ]; then
       kill "$pid" 2>/dev/null || :
       wait "$pid" 2>/dev/null || :
@@ -124,6 +129,12 @@ cleanup() {
   if [ "$native_apps_created" = yes ]; then
     if ! rm -rf -- "$native_apps_dir" || [ -e "$native_apps_dir" ] || [ -L "$native_apps_dir" ]; then
       echo 'REAL_TUN_LAB_CLEANUP=FAIL (owned native-app fixture)' >&2
+      cleanup_failed=yes
+    fi
+  fi
+  if [ "$wp_fixture_created" = yes ]; then
+    if ! rm -rf -- "$wp_fixture_dir" || [ -e "$wp_fixture_dir" ] || [ -L "$wp_fixture_dir" ]; then
+      echo 'REAL_TUN_LAB_CLEANUP=FAIL (owned WordPress FPM fixture)' >&2
       cleanup_failed=yes
     fi
   fi
@@ -260,6 +271,14 @@ tls_path() {
 native_apps() {
   env -i HOME=/root PATH=/usr/bin:/bin:/sbin:/usr/sbin \
     /usr/bin/python3 -I -B /root/qa-tun-native-apps.py "$1"
+}
+
+wp_probe() {
+  # WordPress/PHP-FPM performs a genuine HTTP API call without WP_PROXY_*,
+  # per-application environment proxy or process tracking. The HTTP peer and
+  # native nftables counter separately prove delivery versus Direct leakage.
+  env -i HOME=/root PATH=/usr/bin:/bin:/sbin:/usr/sbin \
+    /bin/sh /root/qa-tun-wordpress-fpm.sh probe "$1" "$2"
 }
 
 # A synthetic foreign visitor makes a NEW inbound HTTP connection to the
@@ -531,8 +550,10 @@ default_added=yes
 
 # No public repository, package installation or host APT source edits:
 # generate disposable index/Git objects in the guest before networking.
-native_apps_created=yes
 native_apps prepare
+# Only a successful, atomic helper-created fixture can be removed by the
+# parent. On any failed preflight/mkdir the path may be foreign-owned.
+native_apps_created=yes
 ip netns exec "$peer" /usr/bin/python3 -I -B -u /root/qa-tun-native-apps.py serve \
   >/run/sc-qa-tun-native-apps-server.log 2>&1 &
 native_apps_pid=$!
@@ -679,6 +700,31 @@ test "$native_apps_baseline" -gt "$native_apps_before" || {
   exit 1
 }
 echo 'REAL_TUN_NATIVE_APPS_WITNESS=PASS (native APT/Git baseline positive-control)'
+if [ "${SC_QA_TUN_GUARD_LAB-}" != yes ]; then
+  # mkdir is exclusive: only a successfully created QA-owned fixture is
+  # eligible for cleanup, including when WordPress setup partially fails.
+  mkdir -m 0755 "$wp_fixture_dir"
+  wp_fixture_created=yes
+  /bin/sh /root/qa-tun-wordpress-fpm.sh setup
+  /usr/sbin/php-fpm8.4 --nodaemonize --fpm-config "$wp_fixture_dir/fpm.conf" \
+    >"$wp_fixture_dir/fpm-start.log" 2>&1 &
+  wp_pid=$!
+  wp_ready=no
+  for attempt in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
+    if kill -0 "$wp_pid" 2>/dev/null && test -S "$wp_fixture_dir/fpm.sock"; then
+      wp_ready=yes
+      break
+    fi
+    sleep 0.2
+  done
+  test "$wp_ready" = yes || { echo 'REAL_TUN_WORDPRESS=FAIL (FPM failed to start)' >&2; exit 1; }
+  wp_probe positive 10.254.72.1
+  wp_baseline=$(native_app_direct_packets)
+  test "$wp_baseline" -gt "$native_apps_baseline" || {
+    echo 'REAL_TUN_WORDPRESS=FAIL (missing native Direct positive-control)' >&2; exit 1;
+  }
+  native_apps_baseline=$wp_baseline
+fi
 udp_witness_baseline=$(direct_udp_witness_packets)
 test "$udp_witness_baseline" -gt 0 || { echo 'FAIL: no positive native foreign UDP packet witness' >&2; exit 1; }
 echo "REAL_TUN_UDP_DIRECT_WITNESS=PASS (native foreign UDP packets=$udp_witness_baseline)"
@@ -858,6 +904,15 @@ assert_tun_policy_active || {
   exit 1
 }
 echo 'REAL_TUN_NATIVE_APPS_SELECTED_WITNESS=PASS (APT/Git VLESS, no native Direct leak)'
+if [ "${SC_QA_TUN_GUARD_LAB-}" != yes ]; then
+  wp_probe positive 8.8.8.8
+  test "$(native_app_direct_packets)" -eq "$native_apps_baseline" || {
+    echo 'REAL_TUN_WORDPRESS=FAIL (native Direct leak under VPN)' >&2; exit 1;
+  }
+  assert_tun_policy_active || {
+    echo 'REAL_TUN_WORDPRESS=FAIL (policy disappeared during selected request)' >&2; exit 1;
+  }
+fi
 
 if [ "${SC_QA_TUN_GUARD_LAB-}" = yes ]; then
   guarded_real_tun_deadline_trial
@@ -909,6 +964,13 @@ assert_tun_policy_active || {
   exit 1
 }
 echo 'REAL_TUN_NATIVE_APPS_OUTAGE_WITNESS=PASS (APT/Git failed closed, independent Direct witness unchanged)'
+wp_probe negative none
+test "$(native_app_direct_packets)" -eq "$native_apps_baseline" || {
+  echo 'REAL_TUN_WORDPRESS=FAIL (native Direct leak after VLESS loss)' >&2; exit 1;
+}
+assert_tun_policy_active || {
+  echo 'REAL_TUN_WORDPRESS=FAIL (policy disappeared during outage)' >&2; exit 1;
+}
 # A domestic destination must NOT become Direct just because the upstream
 # stopped when the explicit SNI rule still requires VPN. A nonmatching SNI
 # to the SAME destination must remain Direct: independent routing proof.
