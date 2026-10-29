@@ -365,6 +365,133 @@ assert data["license"]=="CC-BY-4.0"
 assert data["attribution"].startswith("IP Geolocation by DB-IP")
 '
 echo 'IR_GEO_ESTIMATE_OFFLINE_INSTALLED_CLI=PASS (DB-IP country estimate only; no route activation)'
+
+# Read-only native firewall drift evidence must come from the INSTALLED CLI.
+# All nftables mutations below belong strictly to this disconnected, labelled
+# disposable guest. Do not flush the ruleset or adopt any foreign host policy.
+echo 'HOST_NFTABLES_PREFLIGHT_STAGE=installed-disconnected-guest'
+nft_before=$(docker exec "$container" /usr/sbin/nft -j list ruleset)
+docker exec "$container" /usr/local/bin/server-connect --json host-preflight \
+  --endpoint 127.0.0.1 --management-peer 127.0.0.2 --with-nftables \
+  > "$scratch/qa-nft-baseline.json"
+python3 - "$scratch/qa-nft-baseline.json" <<'PYNFTBASE'
+import json,sys,re
+with open(sys.argv[1],encoding='utf-8') as file: envelope=json.load(file)
+assert envelope['ok'] is True
+snapshot=envelope['data']
+assert snapshot['mode']=='observation_with_nftables'
+assert snapshot['read_only'] is True
+assert snapshot['snapshot_atomic'] is False
+assert snapshot['activation_ready'] is False
+assert snapshot['firewall']['observed'] is True
+assert re.fullmatch('[0-9a-f]{64}',snapshot['firewall']['ruleset_sha256'])
+assert isinstance(snapshot['firewall']['object_count'],int)
+assert snapshot['firewall']['object_count'] >= 1  # Native output always begins with metainfo.
+assert 'nftables' not in snapshot['firewall']   # No raw ruleset disclosure
+PYNFTBASE
+docker cp "$scratch/qa-nft-baseline.json" "$container:/root/qa-nft-baseline.json"
+docker exec "$container" /bin/chmod 0600 /root/qa-nft-baseline.json
+docker exec "$container" /usr/local/bin/server-connect --json host-drift \
+  --baseline /root/qa-nft-baseline.json >"$scratch/qa-nft-match.json"
+python3 - "$scratch/qa-nft-match.json" <<'PYNFTMATCH'
+import json,sys
+with open(sys.argv[1],encoding='utf-8') as file: envelope=json.load(file)
+assert envelope['ok'] is True
+data=envelope['data']
+assert data['mode']=='host_drift_diagnostic' and data['read_only'] is True
+assert data['current_observed'] is True and data['changed'] is False
+assert data['activation_ready'] is False and data['snapshot_atomic'] is False
+assert len(data['components']) == 8
+assert data['components'][-1]['name']=='nftables_ruleset'
+assert all(not item['changed'] for item in data['components'])
+PYNFTMATCH
+
+# A structurally complete baseline may not silently drop only its firewall
+# fingerprint. Reject this artificial downgrade before observing native state.
+python3 - "$scratch/qa-nft-baseline.json" "$scratch/qa-nft-downgrade.json" <<'PYNFTDOWNGRADE'
+import json,sys
+with open(sys.argv[1],encoding='utf-8') as file: doc=json.load(file)
+assert doc['data']['mode']=='observation_with_nftables'
+del doc['data']['firewall']
+with open(sys.argv[2],'w',encoding='utf-8') as file: json.dump(doc,file)
+PYNFTDOWNGRADE
+docker cp "$scratch/qa-nft-downgrade.json" "$container:/root/qa-nft-downgrade.json"
+docker exec "$container" /bin/chmod 0600 /root/qa-nft-downgrade.json
+if docker exec "$container" /usr/local/bin/server-connect --json host-drift \
+    --baseline /root/qa-nft-downgrade.json >"$scratch/qa-nft-downgrade-result.json"; then
+  echo 'HOST_NFTABLES_PREFLIGHT=FAIL (firewall baseline downgrade accepted)' >&2
+  exit 1
+fi
+python3 - "$scratch/qa-nft-downgrade-result.json" <<'PYNFTREJECT'
+import json,sys
+with open(sys.argv[1],encoding='utf-8') as file: doc=json.load(file)
+assert doc['ok'] is False and doc['error']['code']=='invalid_baseline'
+assert 'data' not in doc
+PYNFTREJECT
+
+# Exact absence prevents hijacking a table installed by any pre-existing
+# network owner. The guest-only chain is deliberately UNHOOKED: these named
+# and anonymous counters cannot change packet filtering or host networking.
+if docker exec "$container" /usr/sbin/nft list table inet sc_qa_foreign_fp >/dev/null 2>&1; then
+  echo 'HOST_NFTABLES_PREFLIGHT=FAIL (foreign fixture table exists)' >&2
+  exit 1
+fi
+docker exec "$container" /usr/sbin/nft add table inet sc_qa_foreign_fp
+docker exec "$container" /usr/sbin/nft add counter inet sc_qa_foreign_fp sc_qa_named_fp
+docker exec "$container" /usr/sbin/nft add chain inet sc_qa_foreign_fp sc_qa_unhooked
+docker exec "$container" /usr/sbin/nft add rule inet sc_qa_foreign_fp sc_qa_unhooked counter
+# The native exporter, unlike JSON rule-creation INPUT, must provide BOTH
+# uint64 counter members. This tests real named/anonymous Debian 13 output,
+# not only our synthetic Go fixtures, without touching any packet path.
+docker exec "$container" /usr/sbin/nft -j list ruleset | python3 -c '
+import json,sys
+objects=json.load(sys.stdin)["nftables"]
+named=[entry["counter"] for entry in objects if "counter" in entry
+       and entry["counter"].get("table") == "sc_qa_foreign_fp"]
+anonymous=[expr["counter"] for entry in objects if "rule" in entry
+           and entry["rule"].get("table") == "sc_qa_foreign_fp"
+           for expr in entry["rule"].get("expr",[]) if "counter" in expr]
+assert len(named)==1 and len(anonymous)==1,(len(named),len(anonymous))
+for record in named+anonymous:
+    assert all(type(record.get(field)) is int and 0 <= record[field] <= 2**64-1
+               for field in ("packets","bytes")),record
+'
+docker exec "$container" /usr/local/bin/server-connect --json host-preflight \
+  --endpoint 127.0.0.1 --management-peer 127.0.0.2 --with-nftables |
+  python3 -c '
+import json,sys
+result=json.load(sys.stdin)
+assert result["ok"] is True
+assert result["data"]["firewall"]["observed"] is True
+assert result["data"]["firewall"]["object_count"] >= 5
+'
+echo 'HOST_NFTABLES_NATIVE_COUNTER_OUTPUT=PASS (real named/anonymous counters accepted by installed CLI)'
+if docker exec "$container" /usr/local/bin/server-connect --json host-drift \
+    --baseline /root/qa-nft-baseline.json >"$scratch/qa-nft-drift-result.json"; then
+  echo 'HOST_NFTABLES_PREFLIGHT=FAIL (foreign nftables table was not detected)' >&2
+  exit 1
+fi
+python3 - "$scratch/qa-nft-drift-result.json" <<'PYNFTDRIFT'
+import json,sys
+with open(sys.argv[1],encoding='utf-8') as file: doc=json.load(file)
+assert doc['ok'] is False and doc['error']['code']=='host_drift_detected'
+report=doc['data']
+assert report['read_only'] is True and report['activation_ready'] is False
+assert report['changed'] is True and report['current_observed'] is True
+changed=[x['name'] for x in report['components'] if x['changed']]
+assert changed==['nftables_ruleset'],changed
+assert 'sc_qa_foreign_fp' not in json.dumps(doc)
+PYNFTDRIFT
+docker exec "$container" /usr/sbin/nft delete table inet sc_qa_foreign_fp
+test "$(docker exec "$container" /usr/sbin/nft -j list ruleset)" = "$nft_before"
+docker exec "$container" /usr/local/bin/server-connect --json host-drift \
+  --baseline /root/qa-nft-baseline.json >"$scratch/qa-nft-restored.json"
+python3 - "$scratch/qa-nft-restored.json" <<'PYNFTRESTORED'
+import json,sys
+with open(sys.argv[1],encoding='utf-8') as file: doc=json.load(file)
+assert doc['ok'] is True and doc['data']['changed'] is False
+PYNFTRESTORED
+echo 'HOST_NFTABLES_PREFLIGHT=PASS (installed CLI, actual foreign table drift, exact cleanup, private evidence)'
 assert_network_unchanged first-install "$offline_before"
 verify_host_services first-install
 # The trusted-base CI workflow still syntax-checks the old fixture pathname.

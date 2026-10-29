@@ -32,18 +32,19 @@ type HostRouteLookup struct {
 // HostPreflight is observational only. The multi-command snapshot is not
 // atomic and must never be used as an activation journal or ownership proof.
 type HostPreflight struct {
-	Mode            string           `json:"mode"`
-	ReadOnly        bool             `json:"read_only"`
-	SnapshotAtomic  bool             `json:"snapshot_atomic"`
-	ActivationReady bool             `json:"activation_ready"`
-	Links           json.RawMessage  `json:"links"`
-	IPv4Routes      json.RawMessage  `json:"ipv4_routes"`
-	IPv6Routes      json.RawMessage  `json:"ipv6_routes"`
-	IPv4Rules       json.RawMessage  `json:"ipv4_rules"`
-	IPv6Rules       json.RawMessage  `json:"ipv6_rules"`
-	Endpoint        *HostRouteLookup `json:"endpoint,omitempty"`
-	ManagementPeer  *HostRouteLookup `json:"management_peer,omitempty"`
-	Limitations     []string         `json:"limitations"`
+	Mode            string                   `json:"mode"`
+	ReadOnly        bool                     `json:"read_only"`
+	SnapshotAtomic  bool                     `json:"snapshot_atomic"`
+	ActivationReady bool                     `json:"activation_ready"`
+	Links           json.RawMessage          `json:"links"`
+	IPv4Routes      json.RawMessage          `json:"ipv4_routes"`
+	IPv6Routes      json.RawMessage          `json:"ipv6_routes"`
+	IPv4Rules       json.RawMessage          `json:"ipv4_rules"`
+	IPv6Rules       json.RawMessage          `json:"ipv6_rules"`
+	Endpoint        *HostRouteLookup         `json:"endpoint,omitempty"`
+	ManagementPeer  *HostRouteLookup         `json:"management_peer,omitempty"`
+	Firewall        *HostFirewallObservation `json:"firewall,omitempty"`
+	Limitations     []string                 `json:"limitations"`
 }
 
 func parsePreflightAddress(value, label string) (netip.Addr, error) {

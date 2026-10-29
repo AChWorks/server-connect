@@ -398,10 +398,17 @@ func run(j bool, m *sc.Manager, args []string) int {
 		opts.SetOutput(io.Discard)
 		endpoint := opts.String("endpoint", "", "literal VPN endpoint IPv4 or IPv6 address")
 		management := opts.String("management-peer", "", "literal SSH/admin peer IPv4 or IPv6 address")
+		withNft := opts.Bool("with-nftables", false, "add read-only native nftables fingerprint; never grants ownership")
 		if e := opts.Parse(args); e != nil || len(opts.Args()) != 0 {
 			return output(j, nil, sc.Fault("invalid_arguments", "invalid host-preflight options"))
 		}
-		report, err := sc.InspectHostRoutes(*endpoint, *management)
+		var report sc.HostPreflight
+		var err error
+		if *withNft {
+			report, err = sc.InspectHostRoutesAndFirewall(*endpoint, *management)
+		} else {
+			report, err = sc.InspectHostRoutes(*endpoint, *management)
+		}
 		return output(j, report, err)
 	case "host-drift":
 		opts := flag.NewFlagSet(name, flag.ContinueOnError)
@@ -517,8 +524,9 @@ Commands:
                               Two to four distinct hosts; diagnostic only
   exec -- curl -I https://example.org
   apt -- apt-get update        Strict opt-in APT via trusted native binary
-  host-preflight [--endpoint IP] [--management-peer IP]
-                              Observe kernel routes/rules; no activation
+  host-preflight [--endpoint IP] [--management-peer IP] [--with-nftables]
+                              Observe routes/rules and optionally native nftables;
+                              no activation or firewall ownership
   selective-plan --endpoint IP --management-peer IP --tunnel-if NAME
                  --destination CIDR [--destination CIDR...]
                               Advisory selective routing preview; never applies
@@ -553,6 +561,9 @@ traffic globally. Path diagnostics never fall back to Direct, do not echo
 targets in results, and do not establish tunnel health or start recovery.
 Host preflight is observational: a route lookup does not
 prove connectivity, safety, routing ownership or readiness to activate TUN.
+The --with-nftables option adds a privacy-preserving read-only firewall
+fingerprint when trusted native nftables inspection is available. It cannot
+prove firewall ownership, prevent concurrent changes or authorize TUN Apply.
 Host drift compares separate, non-atomic network observations without changing
 the host, and is never an activation guard or a recovery journal.
 Activation-journal-status shows only safe metadata for the internal v1
@@ -586,7 +597,7 @@ routing changes, authenticate DNS, or authorize tunnel activation.
 func menu(m *sc.Manager) int {
 	in := bufio.NewReader(os.Stdin)
 	for {
-		fmt.Println("\nServer Connect | 1 Status  2 Profiles  3 Import  4 Select  5 Connect  6 Test  7 Disconnect  8 Remove  9 APT Update  10 Host Preflight  11 Path Diagnostics  12 Selective Plan  13 Underlay TCP  14 Underlay DNS  15 Host Drift  16 Activation Journal  0 Exit")
+		fmt.Println("\nServer Connect | 1 Status  2 Profiles  3 Import  4 Select  5 Connect  6 Test  7 Disconnect  8 Remove  9 APT Update  10 Host Preflight  11 Path Diagnostics  12 Selective Plan  13 Underlay TCP  14 Underlay DNS  15 Host Drift  16 Activation Journal  17 Firewall Preflight  0 Exit")
 		fmt.Print("Choice: ")
 		raw, e := in.ReadString('\n')
 		if e != nil {
@@ -628,6 +639,8 @@ func menu(m *sc.Manager) int {
 			run(false, m, []string{"disconnect"})
 		case "10":
 			run(false, m, []string{"host-preflight"})
+		case "17":
+			run(false, m, []string{"host-preflight", "--with-nftables"})
 		case "11":
 			fmt.Print("First independent HTTP(S) target: ")
 			first, _ := in.ReadString('\n')
