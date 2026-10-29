@@ -16,6 +16,7 @@ server_pid=
 origin_pid=
 hosting_pid=
 udp_pid=
+payload_pid=
 dns_pid=
 tls_pid=
 native_apps_pid=
@@ -51,6 +52,7 @@ require_guest() {
   test -x /root/qa-tun-config-qa
   test -f /root/qa-tun-sni-client.py
   test -f /root/qa-tun-native-apps.py
+  test -f /root/qa-tun-payload-wire.py
   test -f /root/qa-tun-wordpress-fpm.sh && test -f /root/qa-tun-wp-check.py
   test -x /usr/bin/apt-get && test -x /usr/bin/git
   test ! -e "$native_apps_dir" && test ! -L "$native_apps_dir"
@@ -92,7 +94,7 @@ cleanup() {
   if [ "${SC_QA_TUN_GUARD_LAB-}" = yes ] && ! qa_tun_guard_cleanup; then
     cleanup_failed=yes
   fi
-  for pid in "$client_pid" "$server_pid" "$origin_pid" "$hosting_pid" "$udp_pid" "$dns_pid" "$tls_pid" "$native_apps_pid" "$wp_pid"; do
+  for pid in "$client_pid" "$server_pid" "$origin_pid" "$hosting_pid" "$udp_pid" "$dns_pid" "$tls_pid" "$native_apps_pid" "$wp_pid" "$payload_pid"; do
     if [ -n "$pid" ]; then
       kill "$pid" 2>/dev/null || :
       wait "$pid" 2>/dev/null || :
@@ -122,7 +124,7 @@ cleanup() {
       { echo 'REAL_TUN_LAB_CLEANUP=FAIL (owned TUN device file deletion)' >&2; cleanup_failed=yes; }
   fi
   rm -f /run/scqa-tun-guard-controller.log "$client_cfg" "$server_cfg" /run/sc-qa-tun-origin.log \
-    /run/sc-qa-tun-hosting.log /run/sc-qa-tun-udp.log \
+    /run/sc-qa-tun-hosting.log /run/sc-qa-tun-udp.log /run/sc-qa-tun-payload.log \
     /run/sc-qa-tun-dns.log /run/sc-qa-tun-server.log /run/sc-qa-tun-client.log \
     /run/sc-qa-tun-tls.log /run/sc-qa-tun-cert.log /run/sc-qa-tun-native-apps-server.log "$tls_cert" "$tls_key" ||
       { echo 'REAL_TUN_LAB_CLEANUP=FAIL (temporary QA file deletion)' >&2; cleanup_failed=yes; }
@@ -207,6 +209,8 @@ print(counters[0])
 
 direct_witness_packets() { peer_counter_packets direct_packets; }
 direct_udp_witness_packets() { peer_counter_packets direct_udp_packets; }
+payload_tcp_direct_packets() { peer_counter_packets payload_tcp_direct_packets; }
+payload_udp_direct_packets() { peer_counter_packets payload_udp_direct_packets; }
 direct_dns_udp_witness_packets() { peer_counter_packets direct_dns_udp_packets; }
 direct_dns_tcp_witness_packets() { peer_counter_packets direct_dns_tcp_packets; }
 hosting_reply_packets() { peer_counter_packets hosting_reply_packets; }
@@ -336,6 +340,11 @@ else:
 PYUDPCLIENT
 }
 
+payload_path() {
+  env -i HOME=/root PATH=/usr/bin:/bin:/sbin:/usr/sbin \
+    /usr/bin/python3 -I -B /root/qa-tun-payload-wire.py "$@"
+}
+
 dns_path() {
   # Real DNS wire frames, not an HTTP proxy or fake DNS-success marker.
   # Unique query names prevent accepting cached answers.
@@ -354,6 +363,15 @@ case "${SC_QA_TUN_GUARD_CLEANUP_FAULT-}" in
     [ "${SC_QA_TUN_GUARD_LAB-}" = yes ] || exit 2 ;;
   * ) echo 'Invalid real-TUN guard cleanup fault mode' >&2; exit 2 ;;
 esac
+
+# Large-payload QA runs only in the normal disposable positive/outage guest.
+# Avoid expanding unrelated deadline, hosting and forced-cleanup regressions.
+payload_trial=no
+if [ "${SC_QA_TUN_GUARD_LAB-}" != yes ] &&
+   [ -z "${SC_QA_TUN_OUTAGE_FAULT-}" ] &&
+   [ -z "${SC_QA_TUN_CLEANUP_FAULT-}" ]; then
+  payload_trial=yes
+fi
 
 guarded_real_tun_deadline_trial() {
   # Stop the original shell-owned test TUN first. The second activation is
@@ -526,6 +544,8 @@ ip netns exec "$peer" nft -f - <<'NFTWITNESS'
 table inet scqawitness {
   counter direct_packets { }
   counter direct_udp_packets { }
+  counter payload_tcp_direct_packets { }
+  counter payload_udp_direct_packets { }
   counter direct_dns_udp_packets { }
   counter direct_dns_tcp_packets { }
   counter domestic_tls_direct_packets { }
@@ -536,6 +556,8 @@ table inet scqawitness {
     type filter hook input priority filter; policy accept;
     iifname "scqapeer0" ip daddr 8.8.8.8 tcp dport 19180 counter name direct_packets
     iifname "scqapeer0" ip daddr 8.8.8.8 udp dport 19186 counter name direct_udp_packets
+    iifname "scqapeer0" ip daddr 8.8.8.8 tcp dport 19188 counter name payload_tcp_direct_packets
+    iifname "scqapeer0" ip daddr 8.8.8.8 udp dport 19189 counter name payload_udp_direct_packets
     iifname "scqapeer0" ip daddr 8.8.8.8 udp dport 53 counter name direct_dns_udp_packets
     iifname "scqapeer0" ip daddr 8.8.8.8 tcp dport 53 counter name direct_dns_tcp_packets
     iifname "scqapeer0" ip daddr 5.22.0.10 tcp dport 19181 counter name domestic_tls_direct_packets
@@ -620,6 +642,12 @@ while True:
 PYUDPSERVER
 udp_pid=$!
 
+# Independent peer receives full binary TCP/UDP transfers, not an application
+# success marker. Actual observed source and echoed bytes prove delivery.
+ip netns exec "$peer" /usr/bin/python3 -I -B -u /root/qa-tun-payload-wire.py serve \
+  >/run/sc-qa-tun-payload.log 2>&1 &
+payload_pid=$!
+
 # The peer answers genuine DNS UDP and TCP messages. The A record identifies
 # the request source observed by an independent authoritative server.
 ip netns exec "$peer" /usr/bin/python3 -I -B -u /root/qa-tun-dns-peer.py \
@@ -700,6 +728,17 @@ test "$native_apps_baseline" -gt "$native_apps_before" || {
   exit 1
 }
 echo 'REAL_TUN_NATIVE_APPS_WITNESS=PASS (native APT/Git baseline positive-control)'
+if [ "$payload_trial" = yes ]; then
+  payload_path tcp 8.8.8.8 10.254.72.1 reply
+  payload_path udp 8.8.8.8 10.254.72.1 reply
+  payload_tcp_baseline=$(payload_tcp_direct_packets)
+  payload_udp_baseline=$(payload_udp_direct_packets)
+  test "$payload_tcp_baseline" -gt 0 && test "$payload_udp_baseline" -gt 0 || {
+    echo 'REAL_TUN_PAYLOAD_DIRECT_BASELINE=FAIL (missing native positive controls)' >&2
+    exit 1
+  }
+  echo 'REAL_TUN_PAYLOAD_DIRECT_BASELINE=PASS (TCP and UDP independent native counters)'
+fi
 if [ "${SC_QA_TUN_GUARD_LAB-}" != yes ]; then
   # mkdir is exclusive: only a successfully created QA-owned fixture is
   # eligible for cleanup, including when WordPress setup partially fails.
@@ -914,6 +953,46 @@ if [ "${SC_QA_TUN_GUARD_LAB-}" != yes ]; then
   }
 fi
 
+if [ "$payload_trial" = yes ]; then
+  assert_tun_policy_active || { echo 'REAL_TUN_PAYLOAD=FAIL (missing TUN before payload)' >&2; exit 1; }
+  payload_path tcp 8.8.8.8 8.8.8.8 reply
+  payload_path udp 8.8.8.8 8.8.8.8 reply
+  # An underlay VETH with MTU 1280 must carry multi-packet VLESS traffic
+  # through a 1400-byte TUN interface, without native Direct escape.
+  test "$(cat /sys/class/net/sctunqa0/mtu)" = 1400 || {
+    echo 'REAL_TUN_PAYLOAD=FAIL (unexpected TUN MTU)' >&2; exit 1;
+  }
+  edge_mtu=$(cat "/sys/class/net/$edge/mtu")
+  peer_mtu=$(ip -n "$peer" -j link show dev scqapeer0 |
+    python3 -c 'import json,sys; print(json.load(sys.stdin)[0]["mtu"])')
+  test "$edge_mtu" -gt 1280 && test "$peer_mtu" -gt 1280 || {
+    echo 'REAL_TUN_PAYLOAD=FAIL (no meaningful underlay MTU reduction)' >&2; exit 1;
+  }
+  ip link set dev "$edge" mtu 1280
+  ip -n "$peer" link set dev scqapeer0 mtu 1280
+  test "$(cat "/sys/class/net/$edge/mtu")" = 1280 &&
+    test "$(ip -n "$peer" -j link show dev scqapeer0 |
+      python3 -c 'import json,sys; print(json.load(sys.stdin)[0]["mtu"])')" = 1280 || {
+      echo 'REAL_TUN_PAYLOAD=FAIL (underlay MTU reduction)' >&2; exit 1;
+    }
+  payload_path tcp 8.8.8.8 8.8.8.8 reply
+  payload_path udp 8.8.8.8 8.8.8.8 reply
+  payload_path df 8.8.8.8
+  test "$(payload_tcp_direct_packets)" -eq "$payload_tcp_baseline" &&
+    test "$(payload_udp_direct_packets)" -eq "$payload_udp_baseline" || {
+      echo 'REAL_TUN_PAYLOAD=FAIL (foreign Direct leak under reduced MTU)' >&2; exit 1;
+    }
+  assert_tun_policy_active || { echo 'REAL_TUN_PAYLOAD=FAIL (TUN lost during reduced MTU)' >&2; exit 1; }
+  ip link set dev "$edge" mtu "$edge_mtu"
+  ip -n "$peer" link set dev scqapeer0 mtu "$peer_mtu"
+  test "$(cat "/sys/class/net/$edge/mtu")" = "$edge_mtu" &&
+    test "$(ip -n "$peer" -j link show dev scqapeer0 |
+      python3 -c 'import json,sys; print(json.load(sys.stdin)[0]["mtu"])')" = "$peer_mtu" || {
+      echo 'REAL_TUN_PAYLOAD=FAIL (underlay MTU restoration)' >&2; exit 1;
+    }
+  echo 'REAL_TUN_PAYLOAD_REDUCED_MTU=PASS (real VLESS TCP/UDP echo, MTU 1280, no native Direct leak)'
+fi
+
 if [ "${SC_QA_TUN_GUARD_LAB-}" = yes ]; then
   guarded_real_tun_deadline_trial
   exit 0
@@ -964,6 +1043,23 @@ assert_tun_policy_active || {
   exit 1
 }
 echo 'REAL_TUN_NATIVE_APPS_OUTAGE_WITNESS=PASS (APT/Git failed closed, independent Direct witness unchanged)'
+if [ "$payload_trial" = yes ]; then
+  payload_path tcp 8.8.8.8 none no-reply
+  payload_path udp 8.8.8.8 none no-reply
+  kill -0 "$payload_pid" 2>/dev/null || {
+    echo 'REAL_TUN_PAYLOAD=FAIL (independent peer died before outage witness)' >&2; exit 1;
+  }
+  # Positive native Direct control AFTER failure: the origin is still alive,
+  # so a foreign no-reply cannot pass merely because the whole peer died.
+  payload_path tcp 5.22.0.10 10.254.72.1 reply
+  payload_path udp 5.22.0.10 10.254.72.1 reply
+  test "$(payload_tcp_direct_packets)" -eq "$payload_tcp_baseline" &&
+    test "$(payload_udp_direct_packets)" -eq "$payload_udp_baseline" || {
+      echo 'REAL_TUN_PAYLOAD=FAIL (foreign TCP/UDP native Direct leak on upstream loss)' >&2; exit 1;
+    }
+  assert_tun_policy_active || { echo 'REAL_TUN_PAYLOAD=FAIL (TUN lost on upstream loss)' >&2; exit 1; }
+  echo 'REAL_TUN_PAYLOAD_OUTAGE=PASS (large TCP/UDP fail closed, no native Direct packets)'
+fi
 wp_probe negative none
 test "$(native_app_direct_packets)" -eq "$native_apps_baseline" || {
   echo 'REAL_TUN_WORDPRESS=FAIL (native Direct leak after VLESS loss)' >&2; exit 1;
