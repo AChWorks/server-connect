@@ -42,6 +42,7 @@ PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/qa/test-tun-dns-wire.py
 sh -n scripts/qa/host-activation-guard.sh
 sh -n scripts/qa/host-product-guard-trial.sh
 sh -n scripts/qa/host-tun-path.sh
+sh -n scripts/qa/tun-guard-unit-lab.sh
 bash scripts/qa/test-installer-rollback-backups.sh
 PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/qa/test-activation-guard-inspect.py
 # Separate reboot-scheduling QA remains a disposable-container proof only.
@@ -367,6 +368,7 @@ docker cp "$scratch/tun-config-qa" "$container:/root/qa-tun-config-qa"
 docker cp "$root/scripts/qa/tun-dns-peer.py" "$container:/root/qa-tun-dns-peer.py"
 docker cp "$root/scripts/qa/tun-dns-client.py" "$container:/root/qa-tun-dns-client.py"
 docker cp "$root/scripts/qa/host-tun-path.sh" "$container:/root/qa-host-tun-path.sh"
+docker cp "$root/scripts/qa/tun-guard-unit-lab.sh" "$container:/root/qa-tun-guard-unit-lab.sh"
 # Independently check resources omitted from the standard route/rule/link
 # digest, in addition to the guest's own explicit cleanup verdict.
 tun_netns_before=$(docker exec "$container" /sbin/ip netns list)
@@ -419,6 +421,13 @@ accept_tun_guard_rejection() {
 echo 'REAL_TUN_LAB_STAGE=execute-guest-path'
 docker exec "$container" /bin/sh /root/qa-host-tun-path.sh
 assert_tun_native_cleanup real-tun-candidate-cleanup
+# The same genuine TUN is started again, but only after an independently
+# armed systemd timer. SIGKILL the initiating controller and prove a fresh
+# PID1 recovery executor restores native Direct without the parent doing it.
+# This is a QA-only feasibility proof, NOT the product Activation Guard.
+echo 'REAL_TUN_LAB_STAGE=prearmed-guard-controller-death'
+docker exec -e SC_QA_TUN_GUARD_LAB=yes "$container" /bin/sh /root/qa-host-tun-path.sh
+assert_tun_native_cleanup real-tun-independent-deadline-cleanup
 # Real sing-box faults must preserve native Direct HTTP and reject the
 # hosting-outage PASS; the guest must prove COMPLETE cleanup independently
 # of its intentional test exit 1, and the outer host independently verifies.
@@ -476,7 +485,7 @@ fi
 docker exec "$container" /sbin/ip netns del scqapeer
 assert_tun_native_cleanup real-tun-injected-cleanup-recovery
 echo 'REAL_TUN_CLEANUP_FAILURE_REJECTED=PASS (guest cleanup failure != expected TUN rejection)'
-docker exec "$container" /bin/rm -f /root/qa-tun-config-qa /root/qa-host-tun-path.sh
+docker exec "$container" /bin/rm -f /root/qa-tun-config-qa /root/qa-host-tun-path.sh /root/qa-tun-guard-unit-lab.sh
 # Product code + installed inactive-by-default independent recovery units.
 # The actual RPDB rule is added ONLY in the verified disconnected guest.
 docker cp "$root/scripts/qa/host-product-guard-trial.sh" "$container:/root/qa-product-guard-trial.sh"
