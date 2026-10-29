@@ -921,7 +921,11 @@ client_pid=$!
 ready=no
 attempt=0
 while [ "$attempt" -lt 35 ]; do
-  if [ -e /sys/class/net/sctunqa0 ]; then
+  # TUN existence alone precedes completed native RPDB/nft installation.
+  # Never send a foreign probe into that window: a correct startup can
+  # otherwise leak a test packet before the redirect is armed. The exact
+  # independent Direct-witness baseline stays fixed and must not be reset.
+  if assert_tun_policy_active; then
     if expect_source 5.22.0.10 10.254.72.1 &&
        expect_source 8.8.8.8 8.8.8.8; then
       ready=yes
@@ -939,6 +943,17 @@ done
 if [ "$ready" != yes ]; then
   cat /run/sc-qa-tun-client.log >&2
   echo "TUN route did not prove distinct direct/VLESS source paths" >&2
+  exit 1
+fi
+# A positive VLESS response is not sufficient if an earlier attempt escaped
+# to Direct. Preserve the pre-TUN positive-control witness across all retries
+# and fail with the actual native count, not an unrelated downstream label.
+witness_at_ready=$(direct_witness_packets) || {
+  echo 'REAL_TUN_SELECTED_TCP_PATH=FAIL (native Direct witness unavailable)' >&2
+  exit 1
+}
+if [ "$witness_at_ready" -ne "$witness_baseline" ]; then
+  echo "REAL_TUN_SELECTED_TCP_PATH=FAIL (foreign Direct packets during startup: baseline=$witness_baseline observed=$witness_at_ready)" >&2
   exit 1
 fi
 echo "REAL_TUN_SELECTED_TCP_PATH=PASS (domestic Direct vs foreign VLESS; no HTTP proxy)"

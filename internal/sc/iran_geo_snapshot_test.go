@@ -88,6 +88,9 @@ func TestIRGeoEstimateSnapshotRejectsAmbiguousAndUnsafeSources(t *testing.T) {
 		{"future-schema", func(x *iranGeoSnapshot) { x.SchemaVersion = 2 }, false},
 		{"invalid-date", func(x *iranGeoSnapshot) { x.AsOf = "2026-13-01" }, false},
 		{"digest-mismatch", func(x *iranGeoSnapshot) { x.IPv4[0] = "2.57.4.0/24" }, false},
+		// This remains canonical, sorted and disjoint; the self-rehashed
+		// metadata alone must not authorize a substituted prefix set.
+		{"self-rehashed-valid-substitution", func(x *iranGeoSnapshot) { x.IPv4[0] = "2.57.3.0/25" }, true},
 		{"duplicate-prefix", func(x *iranGeoSnapshot) { x.IPv4[1] = x.IPv4[0] }, true},
 		{"overlapping-prefix", func(x *iranGeoSnapshot) { x.IPv4[1] = "2.57.3.0/25" }, true},
 		{"not-ordered", func(x *iranGeoSnapshot) { x.IPv4[0], x.IPv4[1] = x.IPv4[1], x.IPv4[0] }, true},

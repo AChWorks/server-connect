@@ -26,6 +26,32 @@ func main() {
 			{Domain: "only-exact.test", Via: "vpn"},
 		},
 	}
+	// Fail-closed IPv4 input trials are configuration generation ONLY;
+	// the disconnected guest never starts a TUN using these invalid values.
+	switch os.Getenv("SC_QA_TUN_IPV4_ADMISSION") {
+	case "":
+	case "broad-operator-direct":
+		opts.Exceptions = []sc.SmartTUNCIDRException{{CIDR: "20.0.0.0/8", Via: "direct"}}
+	case "aggregate-operator-direct":
+		for i := 0; i < 65; i++ {
+			opts.Exceptions = append(opts.Exceptions, sc.SmartTUNCIDRException{
+				CIDR: fmt.Sprintf("20.%d.0.0/24", i), Via: "direct",
+			})
+		}
+	case "broad-domestic-direct":
+		opts.DomesticCIDRs = []string{"8.0.0.0/7"}
+	case "aggregate-domestic-direct":
+		opts.DomesticCIDRs = []string{"8.0.0.0/8", "9.0.0.0/8", "11.0.0.0/8"}
+	case "domestic-rfc1918-overlap":
+		opts.DomesticCIDRs = []string{"172.0.0.0/8"}
+	case "domestic-link-local-overlap":
+		opts.DomesticCIDRs = []string{"169.0.0.0/8"}
+	case "domestic-special-anycast":
+		opts.DomesticCIDRs = []string{"192.88.99.2/32"}
+	default:
+		fmt.Fprintln(os.Stderr, "Unsupported isolated IPv4 admission QA mode")
+		os.Exit(2)
+	}
 	// Dual-stack is an isolated-guest-only explicitly opted-in proof.
 	// All addresses below are synthetic: no real Iran/foreign classification.
 	switch os.Getenv("SC_QA_TUN_IPV6") {

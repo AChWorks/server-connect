@@ -63,6 +63,10 @@ type IranGeoSnapshotStatus struct {
 // Only this exact dated, attributed free CSV may back the embedded snapshot.
 // It is source-byte pinned but has no publisher signature: report that fact.
 const iranGeoArchiveSHA256 = "097426b8ddae89157d444a59ac1847e873f7943c32d52becc4371c8b0273af80"
+
+// Independent, reviewed source-code pin. A self-consistent JSON metadata
+// digest is insufficient: an altered prefix set could simply be rehashed.
+const iranGeoPrefixSHA256 = "edb8fc88cff754e9622695e03d980afec6640939cf53627f8800ac54d9170f0e"
 const iranGeoArchiveURL = "https://download.db-ip.com/free/dbip-country-lite-2026-10.csv.gz"
 const iranGeoLicense = "CC-BY-4.0"
 const iranGeoAttribution = "IP Geolocation by DB-IP (https://db-ip.com)"
@@ -109,7 +113,8 @@ func decodeIranGeoSnapshot(raw []byte) (iranGeoSnapshot, error) {
 		snapshot.AsOf != "2026-10-01" || snapshot.Source != iranGeoArchiveURL ||
 		snapshot.SourceSHA256 != iranGeoArchiveSHA256 ||
 		snapshot.License != iranGeoLicense || snapshot.Attribution != iranGeoAttribution ||
-		snapshot.Changes != iranGeoChanges || len(snapshot.PrefixSHA256) != 64 {
+		snapshot.Changes != iranGeoChanges ||
+		snapshot.PrefixSHA256 != iranGeoPrefixSHA256 {
 		return iranGeoSnapshot{}, fail
 	}
 	if _, err := hex.DecodeString(snapshot.PrefixSHA256); err != nil ||
@@ -160,15 +165,40 @@ func decodeIranGeoSnapshot(raw []byte) (iranGeoSnapshot, error) {
 	return snapshot, nil
 }
 
+// Conservative offline IANA IPv4 Special-Purpose Address Space, last updated
+// 2025-10-09: https://www.iana.org/assignments/iana-ipv4-special-registry
+// Every registered block is excluded, even if a special-use service is marked
+// globally reachable. More-specific assignments inside 0/8, 192.0.0/24 and
+// 192.88.99/24 are covered by their parent blocks. IPv4 multicast and the
+// existing IPv6 documentation exclusion are also retained. This static list
+// is an admission boundary, not proof of geography or current reachability.
+var specialPurposeExclusions = [...]netip.Prefix{
+	netip.MustParsePrefix("0.0.0.0/8"),
+	netip.MustParsePrefix("10.0.0.0/8"),
+	netip.MustParsePrefix("100.64.0.0/10"),
+	netip.MustParsePrefix("127.0.0.0/8"),
+	netip.MustParsePrefix("169.254.0.0/16"),
+	netip.MustParsePrefix("172.16.0.0/12"),
+	netip.MustParsePrefix("192.0.0.0/24"),
+	netip.MustParsePrefix("192.0.2.0/24"),
+	netip.MustParsePrefix("192.31.196.0/24"),
+	netip.MustParsePrefix("192.52.193.0/24"),
+	netip.MustParsePrefix("192.88.99.0/24"),
+	netip.MustParsePrefix("192.168.0.0/16"),
+	netip.MustParsePrefix("192.175.48.0/24"),
+	netip.MustParsePrefix("198.18.0.0/15"),
+	netip.MustParsePrefix("198.51.100.0/24"),
+	netip.MustParsePrefix("203.0.113.0/24"),
+	netip.MustParsePrefix("224.0.0.0/4"), // Multicast (outside the unicast IANA registry).
+	netip.MustParsePrefix("240.0.0.0/4"),
+	netip.MustParsePrefix("2001:db8::/32"),
+}
+
 func overlapsSpecialPurpose(p netip.Prefix) bool {
-	// Reject documentation, CGNAT, benchmarking and other non-public blocks,
-	// even when IsGlobalUnicast() alone would label them ordinary unicast.
-	reserved := []string{"0.0.0.0/8", "100.64.0.0/10", "192.0.0.0/24", "192.0.2.0/24",
-		"198.18.0.0/15", "198.51.100.0/24", "203.0.113.0/24", "240.0.0.0/4",
-		"2001:db8::/32"}
-	for _, text := range reserved {
-		r := netip.MustParsePrefix(text)
-		if r.Addr().Is4() == p.Addr().Is4() && routePrefixesOverlap(p, r) {
+	for _, reserved := range specialPurposeExclusions {
+		// Prefix.Overlaps examines the full address range, not only Addr().
+		// Different address families never overlap.
+		if p.Overlaps(reserved) {
 			return true
 		}
 	}
