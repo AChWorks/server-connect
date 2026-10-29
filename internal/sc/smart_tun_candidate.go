@@ -15,10 +15,16 @@ type SmartTUNCandidateOptions struct {
 	TunnelInterface   string
 	UnderlayInterface string
 	TunnelIPv4        string
-	ProtectedCIDRs    []string
-	DomesticCIDRs     []string
-	Exceptions        []SmartTUNCIDRException
-	DomainExceptions  []SmartTUNDomainException
+	// Optional, explicitly selected dual-stack development candidate.
+	// This does not authorize privileged routing or production activation.
+	TunnelIPv6         string
+	ProtectedCIDRs     []string
+	ProtectedIPv6CIDRs []string
+	DomesticCIDRs      []string
+	DomesticIPv6CIDRs  []string
+	Exceptions         []SmartTUNCIDRException
+	IPv6Exceptions     []SmartTUNCIDRException
+	DomainExceptions   []SmartTUNDomainException
 }
 
 type SmartTUNCIDRException struct {
@@ -60,16 +66,101 @@ func canonicalSmartTUNDomain(raw string, suffix bool) (string, error) {
 	return name, nil
 }
 
-func canonicalRoutePrefix(raw string) (netip.Prefix, error) {
+func canonicalRoutePrefixFamily(raw string, ipv6 bool) (netip.Prefix, error) {
 	p, err := netip.ParsePrefix(raw)
-	if err != nil || !p.IsValid() || !p.Addr().Is4() || p.Bits() == 0 || p.Masked().String() != raw {
+	if err != nil || !p.IsValid() || p.Addr().Is6() != ipv6 ||
+		p.Bits() == 0 || p.Masked().String() != raw {
 		return netip.Prefix{}, errors.New("invalid or noncanonical CIDR")
 	}
 	return p, nil
 }
 
+func canonicalRoutePrefix(raw string) (netip.Prefix, error) {
+	return canonicalRoutePrefixFamily(raw, false)
+}
+
 func routePrefixesOverlap(a, b netip.Prefix) bool {
 	return a.Addr().Is4() == b.Addr().Is4() && (a.Contains(b.Addr()) || b.Contains(a.Addr()))
+}
+
+// smartTUNIPv6Policy is opt-in, development-only, and does not infer
+// geographic correctness. It preserves essential IPv6 underlay/local paths
+// ahead of any operator override, with no catch-all public Direct bypass.
+func smartTUNIPv6Policy(o SmartTUNCandidateOptions) ([]string, []any, error) {
+	if o.TunnelIPv6 == "" {
+		if len(o.DomesticIPv6CIDRs) != 0 || len(o.ProtectedIPv6CIDRs) != 0 || len(o.IPv6Exceptions) != 0 {
+			return nil, nil, errors.New("IPv6 rules require an explicit private IPv6 TUN address")
+		}
+		return nil, nil, nil
+	}
+	tun, err := netip.ParsePrefix(o.TunnelIPv6)
+	if err != nil || !tun.IsValid() || !tun.Addr().Is6() || !tun.Addr().IsPrivate() ||
+		tun.Bits() < 64 || tun.Bits() > 126 || len(o.DomesticIPv6CIDRs) == 0 {
+		return nil, nil, errors.New("IPv6 TUN requires a private IPv6 address and domestic prefixes")
+	}
+	if len(o.ProtectedIPv6CIDRs) > 64 || len(o.IPv6Exceptions) > 128 ||
+		len(o.DomesticIPv6CIDRs) > 10000 {
+		return nil, nil, errors.New("IPv6 rule set exceeds candidate limits")
+	}
+	base := []string{"::1/128", "fc00::/7", "fe80::/10"}
+	exclusions := append([]string(nil), base...)
+	protections := make([]netip.Prefix, 0, len(base)+len(o.ProtectedIPv6CIDRs))
+	for _, text := range base {
+		protections = append(protections, netip.MustParsePrefix(text))
+	}
+	for _, text := range o.ProtectedIPv6CIDRs {
+		prefix, err := canonicalRoutePrefixFamily(text, true)
+		if err != nil || prefix.Bits() != 128 {
+			return nil, nil, errors.New("IPv6 extra control path must be a canonical single host")
+		}
+		covered := false
+		for _, previous := range protections {
+			if previous.Contains(prefix.Addr()) {
+				covered = true
+				break
+			}
+		}
+		if covered {
+			continue
+		}
+		protections = append(protections, prefix)
+		exclusions = append(exclusions, text)
+	}
+	rules := []any{}
+	operator := []netip.Prefix{}
+	for _, exception := range o.IPv6Exceptions {
+		prefix, err := canonicalRoutePrefixFamily(exception.CIDR, true)
+		if err != nil || (exception.Via != "direct" && exception.Via != "vpn") {
+			return nil, nil, errors.New("invalid IPv6 operator exception")
+		}
+		for _, p := range protections {
+			if routePrefixesOverlap(prefix, p) {
+				return nil, nil, errors.New("IPv6 operator exception overlaps protected path")
+			}
+		}
+		for _, p := range operator {
+			if routePrefixesOverlap(prefix, p) {
+				return nil, nil, errors.New("overlapping IPv6 operator exceptions")
+			}
+		}
+		operator = append(operator, prefix)
+		out := "upstream"
+		if exception.Via == "direct" {
+			out = "direct"
+		}
+		rules = append(rules, map[string]any{"ip_cidr": []string{exception.CIDR}, "action": "route", "outbound": out})
+	}
+	seen := map[string]bool{}
+	for _, raw := range o.DomesticIPv6CIDRs {
+		prefix, err := canonicalRoutePrefixFamily(raw, true)
+		if err != nil || prefix.Bits() < 24 || !prefix.Addr().IsGlobalUnicast() ||
+			prefix.Addr().IsPrivate() || prefix.Addr().IsLoopback() ||
+			prefix.Addr().IsLinkLocalUnicast() || seen[raw] {
+			return nil, nil, errors.New("invalid or duplicate IPv6 domestic prefix")
+		}
+		seen[raw] = true
+	}
+	return exclusions, rules, nil
 }
 
 // SmartTUNCandidateConfig compiles a real Linux sing-box TUN configuration.
@@ -188,6 +279,14 @@ func SmartTUNCandidateConfig(profile Profile, o SmartTUNCandidateOptions) ([]byt
 			return nil, errors.New("invalid domestic CIDR")
 		}
 	}
+	v6Exclusions, v6Rules, err := smartTUNIPv6Policy(o)
+	if err != nil {
+		return nil, err
+	}
+	if len(v6Exclusions) > 0 {
+		exclusions = append(exclusions, v6Exclusions...)
+		rules = append(rules, v6Rules...)
+	}
 	// Only explicit VPN-only operator domain exceptions are admitted. Sniffed
 	// names cannot permit Direct, since an application can forge Host/SNI.
 	// More specific exact names precede longer suffixes; IP exceptions have
@@ -240,11 +339,16 @@ func SmartTUNCandidateConfig(profile Profile, o SmartTUNCandidateOptions) ([]byt
 		}
 	}
 	rules = append(rules, map[string]any{"ip_cidr": o.DomesticCIDRs, "action": "route", "outbound": "direct"})
+	addresses := []string{o.TunnelIPv4}
+	if len(v6Exclusions) != 0 {
+		rules = append(rules, map[string]any{"ip_cidr": o.DomesticIPv6CIDRs, "action": "route", "outbound": "direct"})
+		addresses = append(addresses, o.TunnelIPv6)
+	}
 	return json.MarshalIndent(map[string]any{
 		"log": map[string]any{"level": "warn"},
 		"inbounds": []any{map[string]any{
 			"type": "tun", "tag": "tun-in", "interface_name": o.TunnelInterface,
-			"address": []string{o.TunnelIPv4}, "mtu": 1400,
+			"address": addresses, "mtu": 1400,
 			"auto_route": true, "auto_redirect": true, "strict_route": true,
 			// The 1.14.x default DNS hijack rewrites port 53 and would
 			// silently override this candidate's explicit Direct/VPN IP rules.
