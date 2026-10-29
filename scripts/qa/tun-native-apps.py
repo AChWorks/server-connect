@@ -11,11 +11,14 @@ import hashlib
 import os
 from pathlib import Path
 import signal
+import shutil
+import stat
 import subprocess
 import sys
 from datetime import datetime, timezone
 from email.utils import format_datetime
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import parse_qs
 
 ROOT = Path("/run/sc-qa-tun-native-apps")
 PUBLIC = ROOT / "public"
@@ -82,64 +85,81 @@ def checked(argv):
 def prepare():
     if ROOT.exists() or ROOT.is_symlink():
         raise RuntimeError("native-app QA fixture already exists")
+    # Exclusive mkdir is the ownership boundary. A foreign preexisting path,
+    # including one created after preflight, must never become QA-owned.
     ROOT.mkdir(mode=0o755)
-    PUBLIC.mkdir(mode=0o755)
-    (ROOT / "home").mkdir(mode=0o700)
-    # The native APT method drops to _apt; permit fixture metadata traversal
-    # even when the parent QA shell runs with umask 077.
-    ROOT.chmod(0o755)
-    PUBLIC.chmod(0o755)
-    apt_dir = PUBLIC / "apt/dists/qa"
-    index_dir = apt_dir / "main/binary-amd64"
-    index_dir.mkdir(parents=True)
-    index = (
-        f"Package: {PACKAGE}\nVersion: 1.0\nArchitecture: amd64\n"
-        "Maintainer: Disposable TUN QA <qa@invalid.test>\n"
-        "Description: synthetic index-only, never installed\n\n"
-    ).encode("ascii")
-    compressed = gzip.compress(index, mtime=0)
-    (index_dir / "Packages").write_bytes(index)
-    (index_dir / "Packages.gz").write_bytes(compressed)
-    entry = lambda name, blob: (
-        f" {hashlib.sha256(blob).hexdigest()} {len(blob)} {name}\n"
-    )
-    release = (
-        "Origin: Server Connect isolated TUN QA\n"
-        "Label: Synthetic native APT routing proof\n"
-        "Suite: qa\nCodename: qa\nArchitectures: amd64\nComponents: main\n"
-        f"Date: {format_datetime(datetime.now(timezone.utc))}\n"
-        "SHA256:\n"
-        + entry("main/binary-amd64/Packages", index)
-        + entry("main/binary-amd64/Packages.gz", compressed)
-    )
-    (apt_dir / "Release").write_text(release, encoding="ascii")
-    (ROOT / "sources.list").write_text(
-        f"deb [trusted=yes] {ORIGIN}/apt qa main\n", encoding="ascii"
-    )
+    root_info = ROOT.lstat()
+    try:
+        PUBLIC.mkdir(mode=0o755)
+        (ROOT / "home").mkdir(mode=0o700)
+        # The native APT method drops to _apt; permit fixture metadata traversal
+        # even when the parent QA shell runs with umask 077.
+        ROOT.chmod(0o755)
+        PUBLIC.chmod(0o755)
+        apt_dir = PUBLIC / "apt/dists/qa"
+        index_dir = apt_dir / "main/binary-amd64"
+        index_dir.mkdir(parents=True)
+        index = (
+            f"Package: {PACKAGE}\nVersion: 1.0\nArchitecture: amd64\n"
+            "Maintainer: Disposable TUN QA <qa@invalid.test>\n"
+            "Description: synthetic index-only, never installed\n\n"
+        ).encode("ascii")
+        compressed = gzip.compress(index, mtime=0)
+        (index_dir / "Packages").write_bytes(index)
+        (index_dir / "Packages.gz").write_bytes(compressed)
+        entry = lambda name, blob: (
+            f" {hashlib.sha256(blob).hexdigest()} {len(blob)} {name}\n"
+        )
+        release = (
+            "Origin: Server Connect isolated TUN QA\n"
+            "Label: Synthetic native APT routing proof\n"
+            "Suite: qa\nCodename: qa\nArchitectures: amd64\nComponents: main\n"
+            f"Date: {format_datetime(datetime.now(timezone.utc))}\n"
+            "SHA256:\n"
+            + entry("main/binary-amd64/Packages", index)
+            + entry("main/binary-amd64/Packages.gz", compressed)
+        )
+        (apt_dir / "Release").write_text(release, encoding="ascii")
+        (ROOT / "sources.list").write_text(
+            f"deb [trusted=yes] {ORIGIN}/apt qa main\n", encoding="ascii"
+        )
 
-    source = ROOT / "git-source"
-    bare = PUBLIC / "git/fixture.git"
-    bare.parent.mkdir(parents=True)
-    checked(["/usr/bin/git", "init", "-q", "-b", "main", str(source)])
-    (source / "route-proof.txt").write_text(
-        "Server Connect TUN native Git route proof\n", encoding="ascii"
-    )
-    checked(["/usr/bin/git", "-C", str(source), "add", "route-proof.txt"])
-    checked([
-        "/usr/bin/git", "-C", str(source),
-        "-c", "user.name=QA", "-c", "user.email=qa@invalid.test",
-        "commit", "-q", "-m", "disposable route proof",
-    ])
-    sha = checked(["/usr/bin/git", "-C", str(source), "rev-parse", "HEAD"]).decode().strip()
-    if len(sha) != 40 or any(c not in "0123456789abcdef" for c in sha):
-        raise RuntimeError("invalid synthetic Git commit identity")
-    checked(["/usr/bin/git", "clone", "--bare", "-q", str(source), str(bare)])
-    # Intentionally omit update-server-info: this origin supports local
-    # *smart* HTTP transfer, not the legacy dumb-HTTP fallback that stalled
-    # after every loose object was fetched in the selected-path trial.
-    (ROOT / "expected-git-sha").write_text(sha + "\n", encoding="ascii")
-    WITNESS.touch(mode=0o600)
-    print("REAL_TUN_NATIVE_APP_FIXTURES=PASS (isolated APT index and Git objects)")
+        source = ROOT / "git-source"
+        bare = PUBLIC / "git/fixture.git"
+        bare.parent.mkdir(parents=True)
+        checked(["/usr/bin/git", "init", "-q", "-b", "main", str(source)])
+        (source / "route-proof.txt").write_text(
+            "Server Connect TUN native Git route proof\n", encoding="ascii"
+        )
+        checked(["/usr/bin/git", "-C", str(source), "add", "route-proof.txt"])
+        checked([
+            "/usr/bin/git", "-C", str(source),
+            "-c", "user.name=QA", "-c", "user.email=qa@invalid.test",
+            "commit", "-q", "-m", "disposable route proof",
+        ])
+        sha = checked(["/usr/bin/git", "-C", str(source), "rev-parse", "HEAD"]).decode().strip()
+        if len(sha) != 40 or any(c not in "0123456789abcdef" for c in sha):
+            raise RuntimeError("invalid synthetic Git commit identity")
+        checked(["/usr/bin/git", "clone", "--bare", "-q", str(source), str(bare)])
+        # Intentionally omit update-server-info: this origin supports local
+        # *smart* HTTP transfer, not the legacy dumb-HTTP fallback that stalled
+        # after every loose object was fetched in the selected-path trial.
+        (ROOT / "expected-git-sha").write_text(sha + "\n", encoding="ascii")
+        WITNESS.touch(mode=0o600)
+        print("REAL_TUN_NATIVE_APP_FIXTURES=PASS (isolated APT index and Git objects)")
+    except Exception:
+        # A partial fixture created by this attempt is disposable, but only
+        # while the original directory identity still owns the exact path.
+        try:
+            current = ROOT.lstat()
+        except FileNotFoundError:
+            pass
+        else:
+            if stat.S_ISDIR(current.st_mode) and (current.st_dev, current.st_ino) == (
+                root_info.st_dev, root_info.st_ino
+            ):
+                shutil.rmtree(ROOT)
+        raise
 
 
 class OriginHandler(SimpleHTTPRequestHandler):
@@ -202,6 +222,23 @@ class OriginHandler(SimpleHTTPRequestHandler):
 
     def do_GET(self):
         path, _, query = self.path.partition("?")
+        if path == "/wp/nonce":
+            params = parse_qs(query, strict_parsing=True)
+            nonce = params.get("value", [])
+            if len(nonce) != 1 or len(nonce[0]) != 16 or any(
+                c not in "0123456789abcdef" for c in nonce[0]
+            ):
+                self.send_error(400, "invalid synthetic WP nonce")
+                return
+            self.witness(self.path)
+            data = f"SC_QA_WP_NONCE:{nonce[0]};SOURCE={self.client_address[0]}".encode("ascii")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+            return
         if path.startswith("/apt/"):
             self.witness(path)
             super().do_GET()
@@ -278,6 +315,21 @@ def check_witness(expected, required):
         raise RuntimeError("native-app HTTP requests escaped via unexpected path")
 
 
+def wp_witness(expected, nonce):
+    if expected not in ("10.254.72.1", "8.8.8.8", "none") or len(nonce) != 16 or any(
+        c not in "0123456789abcdef" for c in nonce
+    ):
+        raise RuntimeError("invalid WordPress origin-witness request")
+    records = WITNESS.read_text(encoding="ascii").splitlines()
+    if expected == "none":
+        if records:
+            raise RuntimeError("WordPress origin unexpectedly reached during upstream outage")
+    elif not records or any(
+        record != f"{expected}\t/wp/nonce?value={nonce}" for record in records
+    ):
+        raise RuntimeError("WordPress origin source/nonce mismatch or missing request")
+
+
 def exercise(phase):
     if phase not in ("baseline", "selected", "outage"):
         raise RuntimeError("invalid native-app phase")
@@ -339,8 +391,16 @@ def exercise(phase):
 
 
 def main():
+    if len(sys.argv) == 4 and sys.argv[1] == "wp-check":
+        wp_witness(sys.argv[2], sys.argv[3])
+        return
     if len(sys.argv) != 2:
-        raise RuntimeError("usage: tun-native-apps.py prepare|serve|baseline|selected|outage")
+        raise RuntimeError("usage: tun-native-apps.py prepare|serve|baseline|selected|outage|wp-reset|wp-check SOURCE NONCE")
+    if sys.argv[1] == "wp-reset":
+        if not WITNESS.is_file():
+            raise RuntimeError("WordPress origin witness missing")
+        WITNESS.write_text("", encoding="ascii")
+        return
     if sys.argv[1] == "prepare":
         prepare()
     elif sys.argv[1] == "serve":

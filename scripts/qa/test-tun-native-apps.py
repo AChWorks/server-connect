@@ -3,6 +3,8 @@
 
 import importlib.util
 from pathlib import Path
+import urllib.error
+import urllib.request
 import socket
 import tempfile
 import threading
@@ -60,6 +62,28 @@ class WitnessTests(unittest.TestCase):
                          "/git/fixture.git/git-upload-pack"],
                     )
 
+    def test_wordpress_nonce_and_independent_path_witness(self):
+        nonce = "0123456789abcdef"
+        self.write(f"10.254.72.1\t/wp/nonce?value={nonce}")
+        apps.wp_witness("10.254.72.1", nonce)
+        self.write(f"8.8.8.8\t/wp/nonce?value={nonce}")
+        apps.wp_witness("8.8.8.8", nonce)
+        for records, expected in (
+            ((f"10.254.72.1\t/wp/nonce?value={nonce}",), "8.8.8.8"),
+            (("8.8.8.8\t/wp/nonce?value=stale1234567890",), "8.8.8.8"),
+            ((f"8.8.8.8\t/wp/nonce?value={nonce}", "8.8.8.8\t/apt/"), "8.8.8.8"),
+            ((), "8.8.8.8"),
+        ):
+            with self.subTest(records=records):
+                self.write(*records)
+                with self.assertRaises(RuntimeError):
+                    apps.wp_witness(expected, nonce)
+        self.write()
+        apps.wp_witness("none", nonce)
+        self.write(f"10.254.72.1\t/wp/nonce?value={nonce}")
+        with self.assertRaises(RuntimeError):
+            apps.wp_witness("none", nonce)
+
     def test_outage_requires_empty_independent_origin_witness(self):
         self.write()
         apps.check_witness("", [])
@@ -111,6 +135,54 @@ class FixtureTests(unittest.TestCase):
                 self.assertIn("8.8.8.8:19187", (root / "sources.list").read_text())
                 with self.assertRaisesRegex(RuntimeError, "already exists"):
                     apps.prepare()
+
+    def test_prepare_preserves_foreign_path_and_cleans_own_partial_fixture(self):
+        with tempfile.TemporaryDirectory(prefix="scqa-app-ownership-") as temp:
+            root = Path(temp) / "native"
+            with patch.object(apps, "ROOT", root), patch.object(apps, "PUBLIC", root / "public"), \
+                 patch.object(apps, "WITNESS", root / "witness"):
+                root.mkdir()
+                foreign = root / "foreign-data"
+                foreign.write_text("must not be removed")
+                with self.assertRaisesRegex(RuntimeError, "already exists"):
+                    apps.prepare()
+                self.assertEqual(foreign.read_text(), "must not be removed")
+                foreign.unlink()
+                root.rmdir()
+                # Force failure after the atomic directory creation. No
+                # partially created QA fixture must survive a failed setup.
+                with patch.object(apps, "checked", side_effect=RuntimeError("injected setup fault")):
+                    with self.assertRaisesRegex(RuntimeError, "injected setup fault"):
+                        apps.prepare()
+                self.assertFalse(root.exists())
+
+    def test_genuine_http_wordpress_origin_records_real_source_and_nonce(self):
+        with tempfile.TemporaryDirectory(prefix="scqa-wp-origin-") as temp:
+            witness = Path(temp) / "witness"
+            with patch.object(apps, "WITNESS", witness):
+                witness.touch()
+                server = apps.ThreadingHTTPServer(("127.0.0.1", 0), apps.OriginHandler)
+                thread = threading.Thread(target=server.serve_forever, daemon=True)
+                thread.start()
+                base = f"http://127.0.0.1:{server.server_port}"
+                nonce = "0123456789abcdef"
+                try:
+                    with urllib.request.urlopen(f"{base}/wp/nonce?value={nonce}", timeout=3) as response:
+                        self.assertEqual(response.status, 200)
+                        self.assertEqual(response.read(),
+                            f"SC_QA_WP_NONCE:{nonce};SOURCE=127.0.0.1".encode())
+                    self.assertEqual(witness.read_text(),
+                        f"127.0.0.1\t/wp/nonce?value={nonce}\n")
+                    for invalid in ("0", "not-a-hex-string", "0123456789abcdef012345"):
+                        with self.assertRaises(urllib.error.HTTPError) as context:
+                            urllib.request.urlopen(f"{base}/wp/nonce?value={invalid}", timeout=3)
+                        self.assertEqual(context.exception.code, 400)
+                    self.assertEqual(witness.read_text(),
+                        f"127.0.0.1\t/wp/nonce?value={nonce}\n")
+                finally:
+                    server.shutdown()
+                    server.server_close()
+                    thread.join(timeout=3)
 
     def test_genuine_loopback_smart_http_clone(self):
         # No privileged namespace or production socket. Exercise the actual
