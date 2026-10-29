@@ -329,11 +329,13 @@ func SmartTUNCandidateConfig(profile Profile, o SmartTUNCandidateOptions) ([]byt
 	var domesticAddresses uint64
 	for _, raw := range o.DomesticCIDRs {
 		prefix, err := canonicalRoutePrefix(raw)
-		if err != nil || prefix.Bits() < minDomesticDirectBits ||
-			!prefix.Addr().IsGlobalUnicast() || prefix.Addr().IsPrivate() ||
+		if err != nil || prefix.Bits() < minDomesticDirectBits {
+			return nil, errors.New("invalid, nonpublic or broad IPv4 domestic Direct prefix")
+		}
+		if !prefix.Addr().IsGlobalUnicast() || prefix.Addr().IsPrivate() ||
 			prefix.Addr().IsLoopback() || prefix.Addr().IsLinkLocalUnicast() ||
 			overlapsSpecialPurpose(prefix) {
-			return nil, errors.New("invalid, nonpublic or broad IPv4 domestic Direct prefix")
+			return nil, errors.New("IPv4 domestic Direct prefix intersects special-purpose or nonpublic space")
 		}
 		domestic = append(domestic, prefix)
 		domesticAddresses += uint64(1) << (32 - prefix.Bits())

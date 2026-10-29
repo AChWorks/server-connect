@@ -146,6 +146,49 @@ func TestSmartTUNIPv4DomesticDirectCoverage(t *testing.T) {
 	assertIPv4DirectCandidate(t, huge, false)
 }
 
+// A network address may be public while its entire CIDR contains a private,
+// link-local or deprecated special-purpose allocation. All such candidates
+// must be rejected before even a synthetic runnable config is returned.
+func TestSmartTUNIPv4RejectsWholeSpecialPurposeCIDR(t *testing.T) {
+	cases := []struct {
+		name     string
+		unsafe   string
+		neighbor string
+	}{
+		{"rfc1918-inside-public-starting-8", "172.0.0.0/8", "172.15.0.0/16"},
+		{"link-local-inside-public-starting-8", "169.0.0.0/8", "169.253.0.0/16"},
+		{"cgnat-inside-public-starting-8", "100.0.0.0/8", "100.63.0.0/16"},
+		{"deprecated-six-to-four", "192.88.99.0/24", "192.88.100.0/24"},
+		{"six-a44-relay-anycast", "192.88.99.2/32", "192.88.98.0/24"},
+		{"as112-ipv4", "192.31.196.0/24", "192.31.195.0/24"},
+		{"amt-ipv4", "192.52.193.0/24", "192.52.192.0/24"},
+		{"as112-direct-delegation", "192.175.48.0/24", "192.175.49.0/24"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			profile, opts := smartTUNFixture()
+			opts.DomesticCIDRs = []string{tc.unsafe}
+			config, err := SmartTUNCandidateConfig(profile, opts)
+			if err == nil || err.Error() != "IPv4 domestic Direct prefix intersects special-purpose or nonpublic space" || len(config) != 0 {
+				t.Fatalf("unsafe CIDR %s accepted or rejected for the wrong reason: error=%v, config_bytes=%d", tc.unsafe, err, len(config))
+			}
+			opts.DomesticCIDRs = []string{tc.neighbor}
+			config, err = SmartTUNCandidateConfig(profile, opts)
+			if err != nil || len(config) == 0 {
+				t.Fatalf("public neighbor %s unexpectedly rejected: %v", tc.neighbor, err)
+			}
+		})
+	}
+
+	// Special-use destinations may still be explicitly classified VPN-only:
+	// the restriction must not interfere with the existing operator hierarchy.
+	profile, opts := smartTUNFixture()
+	opts.Exceptions = []SmartTUNCIDRException{{CIDR: "192.88.99.2/32", Via: "vpn"}}
+	if raw, err := SmartTUNCandidateConfig(profile, opts); err != nil || len(raw) == 0 {
+		t.Fatalf("special-use VPN-only operator rule was rejected: %v", err)
+	}
+}
+
 // A complete embedded IR estimate may be compiled only when explicitly
 // supplied by the caller. This is NOT authenticated Iranian routing, automatic
 // admission, or permission to enable a real host TUN.

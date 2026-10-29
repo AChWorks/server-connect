@@ -393,7 +393,9 @@ docker cp "$scratch/tun-config-qa" "$container:/root/qa-tun-config-qa"
 # BEFORE it emits runnable config or starts any TUN. This complements Go
 # boundary tests with a disconnected installed-host execution witness.
 for fault in broad-operator-direct aggregate-operator-direct \
-             broad-domestic-direct aggregate-domestic-direct; do
+             broad-domestic-direct aggregate-domestic-direct \
+             domestic-rfc1918-overlap domestic-link-local-overlap \
+             domestic-special-anycast; do
   rejected_config="$scratch/tun-direct-rejected-$fault.json"
   rejected_log="$scratch/tun-direct-rejected-$fault.stderr"
   if docker exec -e "SC_QA_TUN_IPV4_ADMISSION=$fault" \
@@ -414,6 +416,8 @@ for fault in broad-operator-direct aggregate-operator-direct \
       expected='invalid, nonpublic or broad IPv4 domestic Direct prefix' ;;
     aggregate-domestic-direct)
       expected='aggregate IPv4 domestic Direct address coverage exceeds candidate limit' ;;
+    domestic-rfc1918-overlap|domestic-link-local-overlap|domestic-special-anycast)
+      expected='IPv4 domestic Direct prefix intersects special-purpose or nonpublic space' ;;
   esac
   grep -Fx "QA candidate generation failed: $expected" "$rejected_log" >/dev/null || {
     echo "REAL_TUN_IPV4_DIRECT_ADMISSION=FAIL ($fault wrong rejection)" >&2

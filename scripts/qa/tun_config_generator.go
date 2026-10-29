@@ -42,6 +42,12 @@ func main() {
 		opts.DomesticCIDRs = []string{"8.0.0.0/7"}
 	case "aggregate-domestic-direct":
 		opts.DomesticCIDRs = []string{"8.0.0.0/8", "9.0.0.0/8", "11.0.0.0/8"}
+	case "domestic-rfc1918-overlap":
+		opts.DomesticCIDRs = []string{"172.0.0.0/8"}
+	case "domestic-link-local-overlap":
+		opts.DomesticCIDRs = []string{"169.0.0.0/8"}
+	case "domestic-special-anycast":
+		opts.DomesticCIDRs = []string{"192.88.99.2/32"}
 	default:
 		fmt.Fprintln(os.Stderr, "Unsupported isolated IPv4 admission QA mode")
 		os.Exit(2)
