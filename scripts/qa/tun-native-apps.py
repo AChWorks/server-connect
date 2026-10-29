@@ -63,6 +63,11 @@ def run(argv, timeout=22):
             capture_output=True, check=False, timeout=3,
         )
         socket_rows = sockets.stdout.decode("utf-8", errors="replace").splitlines()[-8:]
+        server_log_path = Path("/run/sc-qa-tun-native-apps-server.log")
+        server_tail = (
+            server_log_path.read_text(errors="replace")[-2600:]
+            if server_log_path.is_file() else "NOT_AVAILABLE"
+        )
         try:
             os.killpg(proc.pid, signal.SIGKILL)
         except ProcessLookupError:
@@ -79,7 +84,8 @@ def run(argv, timeout=22):
         raise RuntimeError(
             f"native client exceeded bounded timeout: {argv[0]}; "
             f"stderr_tail={detail!r}; peer_requests={witnessed!r}; "
-            f"owned_processes={process_rows!r}; sockets={socket_rows!r}"
+            f"owned_processes={process_rows!r}; sockets={socket_rows!r}; "
+            f"smart_http_origin_tail={server_tail!r}"
         ) from exc
     return subprocess.CompletedProcess(argv, proc.returncode, stdout, stderr)
 
@@ -187,9 +193,17 @@ class OriginHandler(SimpleHTTPRequestHandler):
             "CONTENT_LENGTH": str(len(body)),
             "REMOTE_ADDR": self.client_address[0],
         }
+        print(
+            f"SMART_HTTP_BACKEND_START method={self.command} path={path} "
+            f"request_bytes={len(body)}", flush=True,
+        )
         response = subprocess.run(
             ["/usr/lib/git-core/git-http-backend"], input=body,
             env=env, capture_output=True, check=False, timeout=10,
+        )
+        print(
+            f"SMART_HTTP_BACKEND_EXIT method={self.command} path={path} "
+            f"rc={response.returncode} stdout_bytes={len(response.stdout)}", flush=True,
         )
         header, sep, payload = response.stdout.partition(b"\r\n\r\n")
         if not sep:
@@ -211,6 +225,10 @@ class OriginHandler(SimpleHTTPRequestHandler):
         self.send_header("Connection", "close")
         self.end_headers()
         self.wfile.write(payload)
+        print(
+            f"SMART_HTTP_BACKEND_SENT method={self.command} path={path} "
+            f"payload_bytes={len(payload)}", flush=True,
+        )
 
     def do_GET(self):
         path, _, query = self.path.partition("?")
@@ -237,7 +255,10 @@ class OriginHandler(SimpleHTTPRequestHandler):
             self.send_error(413, "invalid synthetic Git request length")
             return
         self.witness(path)
-        self.serve_git(path, query, self.rfile.read(size))
+        print(f"SMART_HTTP_POST_BEGIN expected_bytes={size}", flush=True)
+        body = self.rfile.read(size)
+        print(f"SMART_HTTP_POST_READ bytes={len(body)}", flush=True)
+        self.serve_git(path, query, body)
 
     def log_message(self, *args):
         pass
