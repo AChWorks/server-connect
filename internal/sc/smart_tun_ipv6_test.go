@@ -2,6 +2,8 @@ package sc
 
 import (
 	"encoding/json"
+	"fmt"
+	"net/netip"
 	"os"
 	"slices"
 	"strings"
@@ -93,6 +95,15 @@ func TestSmartTUNOptionalDualStackFailClosedInvalidConfigurations(t *testing.T) 
 		{"ipv4-domestic", func(o *SmartTUNCandidateOptions) { o.DomesticIPv6CIDRs = []string{"5.22.0.0/17"} }},
 		{"noncanonical-domestic", func(o *SmartTUNCandidateOptions) { o.DomesticIPv6CIDRs = []string{"2001:db8:5::1/64"} }},
 		{"broad-domestic", func(o *SmartTUNCandidateOptions) { o.DomesticIPv6CIDRs = []string{"2000::/3"} }},
+		{"near-global-operator-direct", func(o *SmartTUNCandidateOptions) {
+			o.IPv6Exceptions = []SmartTUNCIDRException{{CIDR: "2000::/3", Via: "direct"}}
+		}},
+		{"too-broad-operator-direct-63", func(o *SmartTUNCandidateOptions) {
+			o.IPv6Exceptions = []SmartTUNCIDRException{{CIDR: "2001:db8:9::/63", Via: "direct"}}
+		}},
+		{"too-broad-domestic-31", func(o *SmartTUNCandidateOptions) {
+			o.DomesticIPv6CIDRs = []string{"2001:db8::/31"}
+		}},
 		{"duplicate-domestic", func(o *SmartTUNCandidateOptions) {
 			o.DomesticIPv6CIDRs = []string{"2001:db8:5::/64", "2001:db8:5::/64"}
 		}},
@@ -118,6 +129,83 @@ func TestSmartTUNOptionalDualStackFailClosedInvalidConfigurations(t *testing.T) 
 			if _, err := SmartTUNCandidateConfig(p, o); err == nil {
 				t.Fatal("unsafe optional IPv6 candidate was accepted")
 			}
+		})
+	}
+}
+
+func testCandidateIPv6Policy(t *testing.T, o SmartTUNCandidateOptions, accepted bool) {
+	t.Helper()
+	profile, _ := dualStackTUNFixture()
+	config, err := SmartTUNCandidateConfig(profile, o)
+	if accepted && (err != nil || len(config) == 0) {
+		t.Fatalf("bounded IPv6 Direct candidate unexpectedly rejected: %v", err)
+	}
+	if !accepted && (err == nil || len(config) != 0) {
+		t.Fatalf("unsafe IPv6 Direct candidate generated runnable config: %v", err)
+	}
+}
+
+func TestSmartTUNIPv6DirectBreadthAndAggregateLimits(t *testing.T) {
+	_, base := dualStackTUNFixture()
+	// The existing narrow foreign Direct /128 and domestic VPN /128 remain valid.
+	testCandidateIPv6Policy(t, base, true)
+	_, boundary64 := dualStackTUNFixture()
+	boundary64.IPv6Exceptions = []SmartTUNCIDRException{
+		{CIDR: "2001:db8:9::/64", Via: "direct"},
+		{CIDR: "2001:db8:5::10/128", Via: "vpn"},
+	}
+	testCandidateIPv6Policy(t, boundary64, true)
+	_, invalid63 := dualStackTUNFixture()
+	invalid63.IPv6Exceptions = []SmartTUNCIDRException{
+		{CIDR: "2001:db8:9::/63", Via: "direct"},
+	}
+	testCandidateIPv6Policy(t, invalid63, false)
+	_, global := dualStackTUNFixture()
+	global.IPv6Exceptions = []SmartTUNCIDRException{{CIDR: "2000::/3", Via: "direct"}}
+	testCandidateIPv6Policy(t, global, false)
+
+	// A collection of individually allowed disjoint /64 Direct rules cannot
+	// silently compose more than the accepted IPv6 operator Direct budget.
+	for _, count := range []int{64, 65} {
+		_, options := dualStackTUNFixture()
+		options.IPv6Exceptions = nil
+		for i := 0; i < count; i++ {
+			addr := netip.MustParseAddr(fmt.Sprintf("2001:db8:9:%x::", i))
+			optionsPrefix := netip.PrefixFrom(addr, 64).Masked().String()
+			options.IPv6Exceptions = append(options.IPv6Exceptions,
+				SmartTUNCIDRException{CIDR: optionsPrefix, Via: "direct"})
+		}
+		t.Run(fmt.Sprintf("operator-distinct-64s-%d", count), func(t *testing.T) {
+			testCandidateIPv6Policy(t, options, count == 64)
+		})
+	}
+	// Narrow exceptions inside the same /64 count once, not 64 times.
+	_, narrow := dualStackTUNFixture()
+	narrow.IPv6Exceptions = nil
+	for i := 0; i < 65; i++ {
+		narrow.IPv6Exceptions = append(narrow.IPv6Exceptions,
+			SmartTUNCIDRException{CIDR: fmt.Sprintf("2001:db8:9::%x/128", i+1), Via: "direct"})
+	}
+	testCandidateIPv6Policy(t, narrow, true)
+}
+
+func TestSmartTUNIPv6SyntheticDomesticBreadthAndAggregate(t *testing.T) {
+	_, narrow := dualStackTUNFixture()
+	narrow.DomesticIPv6CIDRs = []string{"2001:db8::/32"}
+	testCandidateIPv6Policy(t, narrow, true)
+	_, tooBroad := dualStackTUNFixture()
+	tooBroad.DomesticIPv6CIDRs = []string{"2001:db8::/31"}
+	testCandidateIPv6Policy(t, tooBroad, false)
+	for _, count := range []int{1024, 1025} {
+		_, options := dualStackTUNFixture()
+		options.DomesticIPv6CIDRs = nil
+		for i := 0; i < count; i++ {
+			addr := netip.MustParseAddr(fmt.Sprintf("2004:%x::", i))
+			options.DomesticIPv6CIDRs = append(options.DomesticIPv6CIDRs,
+				netip.PrefixFrom(addr, 32).Masked().String())
+		}
+		t.Run(fmt.Sprintf("domestic-distinct-32s-%d", count), func(t *testing.T) {
+			testCandidateIPv6Policy(t, options, count == 1024)
 		})
 	}
 }

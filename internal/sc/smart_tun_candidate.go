@@ -126,6 +126,16 @@ func smartTUNIPv6Policy(o SmartTUNCandidateOptions) ([]string, []any, error) {
 		protections = append(protections, prefix)
 		exclusions = append(exclusions, text)
 	}
+	// This development-only IPv6 admission policy is deliberately narrower
+	// than an arbitrary public country allocation: explicit operator Direct
+	// covers at most 64 distinct /64s (each exception /64 or narrower).
+	// The synthetic domestic list may include /32s, but at most 1024
+	// distinct /32 blocks. Neither bound authenticates real Iranian prefixes.
+	const minOperatorDirectBits = 64
+	const maxOperatorDirect64s = 64
+	const minDomesticDirectBits = 32
+	const maxDomesticDirect32s = 1024
+	operatorDirect64s := make(map[netip.Prefix]bool)
 	rules := []any{}
 	operator := []netip.Prefix{}
 	for _, exception := range o.IPv6Exceptions {
@@ -146,28 +156,42 @@ func smartTUNIPv6Policy(o SmartTUNCandidateOptions) ([]string, []any, error) {
 		operator = append(operator, prefix)
 		out := "upstream"
 		if exception.Via == "direct" {
+			if prefix.Bits() < minOperatorDirectBits {
+				return nil, nil, errors.New("IPv6 operator Direct exception exceeds /64 breadth")
+			}
+			operatorDirect64s[netip.PrefixFrom(prefix.Addr(), 64).Masked()] = true
+			if len(operatorDirect64s) > maxOperatorDirect64s {
+				return nil, nil, errors.New("aggregate IPv6 operator Direct exceptions exceed 64 distinct /64s")
+			}
 			out = "direct"
 		}
 		rules = append(rules, map[string]any{"ip_cidr": []string{exception.CIDR}, "action": "route", "outbound": out})
 	}
 	seen := map[string]bool{}
+	domesticDirect32s := make(map[netip.Prefix]bool)
 	for _, raw := range o.DomesticIPv6CIDRs {
 		prefix, err := canonicalRoutePrefixFamily(raw, true)
-		if err != nil || prefix.Bits() < 24 || !prefix.Addr().IsGlobalUnicast() ||
-			prefix.Addr().IsPrivate() || prefix.Addr().IsLoopback() ||
-			prefix.Addr().IsLinkLocalUnicast() || seen[raw] {
-			return nil, nil, errors.New("invalid or duplicate IPv6 domestic prefix")
+		if err != nil || prefix.Bits() < minDomesticDirectBits ||
+			!prefix.Addr().IsGlobalUnicast() || prefix.Addr().IsPrivate() ||
+			prefix.Addr().IsLoopback() || prefix.Addr().IsLinkLocalUnicast() ||
+			seen[raw] {
+			return nil, nil, errors.New("invalid, broad or duplicate IPv6 domestic Direct prefix")
 		}
 		seen[raw] = true
+		domesticDirect32s[netip.PrefixFrom(prefix.Addr(), 32).Masked()] = true
+		if len(domesticDirect32s) > maxDomesticDirect32s {
+			return nil, nil, errors.New("aggregate IPv6 domestic Direct prefixes exceed 1024 distinct /32s")
+		}
 	}
 	return exclusions, rules, nil
 }
 
 // SmartTUNCandidateConfig compiles a real Linux sing-box TUN configuration.
-// No production Apply path exists. IPv6, trustworthy DNS/domain correlation,
-// imported rule-list validation, protected foreign-client replies, resource
-// ownership, guards and verified rollback remain
-// unimplemented and must block production activation.
+// No production Apply path exists. Optional IPv6 candidate compilation is
+// development-only; trustworthy DNS/domain correlation, imported rule lists,
+// independently protected foreign-client replies, production IPv6/IPv4 Apply,
+// resource ownership, guards and verified rollback remain unimplemented and
+// must block production activation.
 func SmartTUNCandidateConfig(profile Profile, o SmartTUNCandidateOptions) ([]byte, error) {
 	if !smartTUNDeviceName.MatchString(o.TunnelInterface) ||
 		!smartTUNDeviceName.MatchString(o.UnderlayInterface) ||

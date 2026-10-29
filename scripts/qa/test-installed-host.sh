@@ -472,7 +472,12 @@ echo 'REAL_TUN_LAB_STAGE=disconnected-dual-stack-ipv6'
 ipv6_tun_log="$scratch/real-tun-ipv6-path.log"
 docker exec -e SC_QA_TUN_IPV6=yes "$container" /bin/sh /root/qa-host-tun-path.sh | tee "$ipv6_tun_log"
 grep -Fx 'REAL_TUN_IPV6_DIRECT_BASELINE=PASS (independent TCP/UDP source and native counters)' "$ipv6_tun_log" >/dev/null
+grep -Fx 'REAL_TUN_IPV6_OVERRIDE_UDP_DIRECT_BASELINE=PASS (native UDP positive-controlled counter)' "$ipv6_tun_log" >/dev/null
+grep -Fx 'REAL_TUN_IPV6_EXPLICIT_DIRECT_UDP_SELECTED=PASS (exact source and payload)' "$ipv6_tun_log" >/dev/null
+grep -Fx 'REAL_TUN_IPV6_OVERRIDE_UDP_SELECTED=PASS (VLESS source and unchanged native UDP counter)' "$ipv6_tun_log" >/dev/null
 grep -Fx 'REAL_TUN_IPV6_SELECTED=PASS (native domestic Direct, explicit override, foreign VLESS, no Direct leak)' "$ipv6_tun_log" >/dev/null
+grep -Fx 'REAL_TUN_IPV6_EXPLICIT_DIRECT_UDP_OUTAGE=PASS (exact source and payload)' "$ipv6_tun_log" >/dev/null
+grep -Fx 'REAL_TUN_IPV6_OVERRIDE_UDP_OUTAGE=PASS (no reply and unchanged native UDP counter)' "$ipv6_tun_log" >/dev/null
 grep -Fx 'REAL_TUN_IPV6_OUTAGE=PASS (VPN-required TCP/UDP failed closed, native Direct preserved)' "$ipv6_tun_log" >/dev/null
 grep -F 'REAL_TUN_LAB_CLEANUP=PASS' "$ipv6_tun_log" >/dev/null
 assert_tun_native_cleanup real-tun-ipv6-candidate-cleanup

@@ -226,6 +226,7 @@ payload_udp_direct_packets() { peer_counter_packets payload_udp_direct_packets; 
 ipv6_foreign_tcp_direct_packets() { peer_counter_packets ipv6_foreign_tcp_packets; }
 ipv6_foreign_udp_direct_packets() { peer_counter_packets ipv6_foreign_udp_packets; }
 ipv6_override_direct_packets() { peer_counter_packets ipv6_override_packets; }
+ipv6_override_udp_direct_packets() { peer_counter_packets ipv6_override_udp_packets; }
 direct_dns_udp_witness_packets() { peer_counter_packets direct_dns_udp_packets; }
 direct_dns_tcp_witness_packets() { peer_counter_packets direct_dns_tcp_packets; }
 hosting_reply_packets() { peer_counter_packets hosting_reply_packets; }
@@ -596,6 +597,7 @@ table inet scqawitness {
   counter ipv6_foreign_tcp_packets { }
   counter ipv6_foreign_udp_packets { }
   counter ipv6_override_packets { }
+  counter ipv6_override_udp_packets { }
   counter payload_tcp_direct_packets { }
   counter payload_udp_direct_packets { }
   counter direct_dns_udp_packets { }
@@ -611,6 +613,7 @@ table inet scqawitness {
     iifname "scqapeer0" ip6 daddr 2001:db8:8::8 tcp dport 19192 counter name ipv6_foreign_tcp_packets
     iifname "scqapeer0" ip6 daddr 2001:db8:8::8 udp dport 19193 counter name ipv6_foreign_udp_packets
     iifname "scqapeer0" ip6 daddr 2001:db8:5::10 tcp dport 19192 counter name ipv6_override_packets
+    iifname "scqapeer0" ip6 daddr 2001:db8:5::10 udp dport 19193 counter name ipv6_override_udp_packets
     iifname "scqapeer0" ip daddr 8.8.8.8 tcp dport 19188 counter name payload_tcp_direct_packets
     iifname "scqapeer0" ip daddr 8.8.8.8 udp dport 19189 counter name payload_udp_direct_packets
     iifname "scqapeer0" ip daddr 8.8.8.8 udp dport 53 counter name direct_dns_udp_packets
@@ -798,7 +801,8 @@ if [ "$ipv6_trial" = yes ]; then
     if ! ip -6 addr show dev "$edge" | grep -Eq 'tentative|dadfailed' &&
       ipv6_path tcp 2001:db8:8::8 fd73:1::1 reply &&
       ipv6_path udp 2001:db8:8::8 fd73:1::1 reply &&
-      ipv6_path tcp 2001:db8:5::10 fd73:1::1 reply; then
+      ipv6_path tcp 2001:db8:5::10 fd73:1::1 reply &&
+      ipv6_path udp 2001:db8:5::10 fd73:1::1 reply; then
       ipv6_ready=yes
       break
     fi
@@ -814,12 +818,15 @@ if [ "$ipv6_trial" = yes ]; then
   ipv6_foreign_tcp_baseline=$(ipv6_foreign_tcp_direct_packets)
   ipv6_foreign_udp_baseline=$(ipv6_foreign_udp_direct_packets)
   ipv6_override_baseline=$(ipv6_override_direct_packets)
+  ipv6_override_udp_baseline=$(ipv6_override_udp_direct_packets)
   test "$ipv6_foreign_tcp_baseline" -gt 0 &&
     test "$ipv6_foreign_udp_baseline" -gt 0 &&
-    test "$ipv6_override_baseline" -gt 0 || {
+    test "$ipv6_override_baseline" -gt 0 &&
+    test "$ipv6_override_udp_baseline" -gt 0 || {
       echo 'REAL_TUN_IPV6=FAIL (missing native Direct positive-control counters)' >&2; exit 1;
     }
   echo 'REAL_TUN_IPV6_DIRECT_BASELINE=PASS (independent TCP/UDP source and native counters)'
+  echo 'REAL_TUN_IPV6_OVERRIDE_UDP_DIRECT_BASELINE=PASS (native UDP positive-controlled counter)'
 fi
 if [ "$payload_trial" = yes ]; then
   payload_path tcp 8.8.8.8 10.254.72.1 reply
@@ -948,15 +955,19 @@ if [ "$ipv6_trial" = yes ]; then
   ipv6_path tcp 2001:db8:8::8 2001:db8:8::8 reply
   ipv6_path udp 2001:db8:8::8 2001:db8:8::8 reply
   ipv6_path tcp 2001:db8:8::9 fd73:1::1 reply
+  ipv6_path udp 2001:db8:8::9 fd73:1::1 reply
   test "$(ipv6_foreign_tcp_direct_packets)" -eq "$ipv6_foreign_tcp_baseline" &&
     test "$(ipv6_foreign_udp_direct_packets)" -eq "$ipv6_foreign_udp_baseline" &&
-    test "$(ipv6_override_direct_packets)" -eq "$ipv6_override_baseline" || {
+    test "$(ipv6_override_direct_packets)" -eq "$ipv6_override_baseline" &&
+    test "$(ipv6_override_udp_direct_packets)" -eq "$ipv6_override_udp_baseline" || {
       echo 'REAL_TUN_IPV6=FAIL (VPN-required IPv6 leaked native Direct)' >&2; exit 1;
     }
   assert_tun_policy_active || { echo 'REAL_TUN_IPV6=FAIL (TUN/IPv4 policy disappeared)' >&2; exit 1; }
   ip -6 route show table all | grep -F 'dev sctunqa0' >/dev/null || {
     echo 'REAL_TUN_IPV6=FAIL (IPv6 policy disappeared)' >&2; exit 1;
   }
+  echo 'REAL_TUN_IPV6_OVERRIDE_UDP_SELECTED=PASS (VLESS source and unchanged native UDP counter)'
+  echo 'REAL_TUN_IPV6_EXPLICIT_DIRECT_UDP_SELECTED=PASS (exact source and payload)'
   echo 'REAL_TUN_IPV6_SELECTED=PASS (native domestic Direct, explicit override, foreign VLESS, no Direct leak)'
 fi
 # Explicit, synthetic HTTP Host exceptions exercise native sing-box sniff.
@@ -1164,6 +1175,7 @@ if [ "$ipv6_trial" = yes ]; then
   ipv6_path tcp 2001:db8:8::8 none no-reply
   ipv6_path udp 2001:db8:8::8 none no-reply
   ipv6_path tcp 2001:db8:5::10 none no-reply
+  ipv6_path udp 2001:db8:5::10 none no-reply
   kill -0 "$ipv6_pid" 2>/dev/null || {
     echo 'REAL_TUN_IPV6=FAIL (independent peer dead during outage)' >&2; exit 1;
   }
@@ -1171,15 +1183,19 @@ if [ "$ipv6_trial" = yes ]; then
   ipv6_path tcp 2001:db8:5::11 fd73:1::1 reply
   ipv6_path udp 2001:db8:5::11 fd73:1::1 reply
   ipv6_path tcp 2001:db8:8::9 fd73:1::1 reply
+  ipv6_path udp 2001:db8:8::9 fd73:1::1 reply
   test "$(ipv6_foreign_tcp_direct_packets)" -eq "$ipv6_foreign_tcp_baseline" &&
     test "$(ipv6_foreign_udp_direct_packets)" -eq "$ipv6_foreign_udp_baseline" &&
-    test "$(ipv6_override_direct_packets)" -eq "$ipv6_override_baseline" || {
+    test "$(ipv6_override_direct_packets)" -eq "$ipv6_override_baseline" &&
+    test "$(ipv6_override_udp_direct_packets)" -eq "$ipv6_override_udp_baseline" || {
       echo 'REAL_TUN_IPV6=FAIL (native Direct IPv6 leak on upstream loss)' >&2; exit 1;
     }
   ip -6 route show table all | grep -F 'dev sctunqa0' >/dev/null &&
     assert_tun_policy_active || {
       echo 'REAL_TUN_IPV6=FAIL (IPv6 routing policy vanished during outage)' >&2; exit 1;
     }
+  echo 'REAL_TUN_IPV6_OVERRIDE_UDP_OUTAGE=PASS (no reply and unchanged native UDP counter)'
+  echo 'REAL_TUN_IPV6_EXPLICIT_DIRECT_UDP_OUTAGE=PASS (exact source and payload)'
   echo 'REAL_TUN_IPV6_OUTAGE=PASS (VPN-required TCP/UDP failed closed, native Direct preserved)'
 fi
 if [ "$payload_trial" = yes ]; then
