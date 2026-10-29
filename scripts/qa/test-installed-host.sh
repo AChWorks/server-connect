@@ -38,6 +38,7 @@ PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/qa/test-wp-fcgi-check.py
 PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/qa/test-wp-proxy-prepend.py
 PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/qa/test-tun-dns-wire.py
 PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/qa/test-tun-native-apps.py
+PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/qa/test-tun-payload-wire.py
 PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/qa/test-tun-wp-check.py
 sh -n scripts/qa/tun-wordpress-fpm.sh
 # The guard feasibility probe must be strictly guest-local and must reject
@@ -391,6 +392,7 @@ docker cp "$root/scripts/qa/tun-dns-peer.py" "$container:/root/qa-tun-dns-peer.p
 docker cp "$root/scripts/qa/tun-dns-client.py" "$container:/root/qa-tun-dns-client.py"
 docker cp "$root/scripts/qa/tun-sni-client.py" "$container:/root/qa-tun-sni-client.py"
 docker cp "$root/scripts/qa/tun-native-apps.py" "$container:/root/qa-tun-native-apps.py"
+docker cp "$root/scripts/qa/tun-payload-wire.py" "$container:/root/qa-tun-payload-wire.py"
 docker cp "$root/scripts/qa/tun-wordpress-fpm.sh" "$container:/root/qa-tun-wordpress-fpm.sh"
 docker cp "$root/scripts/qa/tun-wp-check.py" "$container:/root/qa-tun-wp-check.py"
 docker cp "$root/scripts/qa/host-tun-path.sh" "$container:/root/qa-host-tun-path.sh"
@@ -456,6 +458,10 @@ grep -F 'REAL_TUN_NATIVE_APPS_SELECTED_WITNESS=PASS' "$regular_tun_log" >/dev/nu
 grep -F 'REAL_TUN_NATIVE_APPS_OUTAGE_WITNESS=PASS' "$regular_tun_log" >/dev/null
 grep -F 'REAL_TUN_WORDPRESS_positive_WITNESS=PASS' "$regular_tun_log" >/dev/null
 grep -F 'REAL_TUN_WORDPRESS_negative_WITNESS=PASS' "$regular_tun_log" >/dev/null
+grep -Fx 'REAL_TUN_PAYLOAD_DIRECT_BASELINE=PASS (TCP and UDP independent native counters)' "$regular_tun_log" >/dev/null
+grep -Fx 'REAL_TUN_PAYLOAD_REDUCED_MTU=PASS (real VLESS TCP/UDP echo, MTU 1280, no native Direct leak)' "$regular_tun_log" >/dev/null
+grep -Fx 'REAL_TUN_PAYLOAD_OUTAGE=PASS (large TCP/UDP fail closed, no native Direct packets)' "$regular_tun_log" >/dev/null
+grep -Fx 'REAL_TUN_PAYLOAD_DF_LIMIT=PASS (oversized DF datagram rejected locally)' "$regular_tun_log" >/dev/null
 assert_tun_native_cleanup real-tun-candidate-cleanup
 # The same genuine TUN is started again, but only after an independently
 # armed systemd timer. SIGKILL the initiating controller and prove a fresh
@@ -564,7 +570,12 @@ fi
 docker exec "$container" /sbin/ip netns del scqapeer
 assert_tun_native_cleanup real-tun-injected-cleanup-recovery
 echo 'REAL_TUN_CLEANUP_FAILURE_REJECTED=PASS (guest cleanup failure != expected TUN rejection)'
-docker exec "$container" /bin/rm -f /root/qa-tun-config-qa /root/qa-host-tun-path.sh /root/qa-tun-guard-unit-lab.sh /root/qa-tun-sni-client.py /root/qa-tun-native-apps.py
+# Remove exactly the QA helpers copied for the completed TUN trials. This
+# also closes the earlier WordPress intermediate guest-helper cleanup gap.
+docker exec "$container" /bin/rm -f /root/qa-tun-config-qa /root/qa-host-tun-path.sh \
+  /root/qa-tun-guard-unit-lab.sh /root/qa-tun-sni-client.py /root/qa-tun-native-apps.py \
+  /root/qa-tun-dns-peer.py /root/qa-tun-dns-client.py /root/qa-tun-wordpress-fpm.sh \
+  /root/qa-tun-wp-check.py /root/qa-tun-payload-wire.py
 # Product code + installed inactive-by-default independent recovery units.
 # The actual RPDB rule is added ONLY in the verified disconnected guest.
 docker cp "$root/scripts/qa/host-product-guard-trial.sh" "$container:/root/qa-product-guard-trial.sh"
