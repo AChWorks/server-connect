@@ -180,6 +180,12 @@ func run(j bool, m *sc.Manager, args []string) int {
 		return output(j, map[string]bool{"direct_reconciled": err == nil}, err)
 	case "version":
 		return output(j, map[string]string{"manager": managerVersion, "sing_box": sc.CoreVersion}, nil)
+	case "smart-routing-data":
+		if len(args) != 0 {
+			return output(j, nil, sc.Fault("invalid_arguments", "smart-routing-data takes no options"))
+		}
+		report, err := sc.BundledIranGeoSnapshotStatus()
+		return output(j, report, err)
 	case "status":
 		return runStatus(j, m.Status)
 	case "activation-journal-status":
@@ -503,6 +509,9 @@ Commands:
   disconnect                 Stop and disable product-owned local proxy service
   status [--json]            Desired/observed service state, not fake VPN health
   activation-journal-status  Private intent state/operation ID only; no host mutation
+  smart-routing-data        Inspect bundled IR country geolocation estimate offline
+                              Country geolocation is estimated, not verified;
+                              no network Apply or trusted country policy exists
   probe --via proxy|direct --url https://example.org
   diagnose-path --via proxy|direct --url https://one.example --url https://two.example
                               Two to four distinct hosts; diagnostic only

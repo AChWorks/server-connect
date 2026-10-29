@@ -341,6 +341,25 @@ assert_no_offline_fetch missing-core
 echo 'OFFLINE_MISSING_CORE_FAIL_CLOSED=PASS (installer NOT applied)'
 run_offline first-install --offline
 verify_direct_install
+# Exercise the INSTALLED manager, not only Go unit tests: its embedded IR
+# country estimate snapshot must work inside this --network none guest,
+# without a selected profile, a live sing-box process or any routed policy.
+docker exec "$container" /usr/local/bin/server-connect --json smart-routing-data |
+  python3 -c '
+import json,sys
+reply=json.load(sys.stdin)
+data=reply["data"]
+assert reply["ok"] is True
+assert data["country"]=="IR" and data["ipv4_count"]==2024 and data["ipv6_count"]==1014
+assert data["basis"]=="dbip_lite_country_geolocation_estimate"
+assert data["format_and_checksum_verified"] is True
+assert data["publisher_signature_verified"] is False
+assert data["safe_for_geographic_routing"] is False
+assert data["activation_ready"] is False
+assert data["license"]=="CC-BY-4.0"
+assert data["attribution"].startswith("IP Geolocation by DB-IP")
+'
+echo 'IR_GEO_ESTIMATE_OFFLINE_INSTALLED_CLI=PASS (DB-IP country estimate only; no route activation)'
 assert_network_unchanged first-install "$offline_before"
 verify_host_services first-install
 # The trusted-base CI workflow still syntax-checks the old fixture pathname.
