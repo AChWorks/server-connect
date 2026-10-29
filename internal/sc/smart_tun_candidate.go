@@ -221,6 +221,11 @@ func SmartTUNCandidateConfig(profile Profile, o SmartTUNCandidateOptions) ([]byt
 	if len(o.DomesticCIDRs) == 0 {
 		return nil, errors.New("missing domestic prefix source")
 	}
+	// Bound caller-controlled collections before any O(n^2) exception overlap
+	// checks or network configuration generation (mirrors IPv6 candidate caps).
+	if len(o.ProtectedCIDRs) > 64 || len(o.Exceptions) > 128 {
+		return nil, errors.New("IPv4 protected or operator exception count exceeds candidate limits")
+	}
 	// Kernel bypass for essential Direct paths. Inbound website/SSH foreign
 	// reply preservation is NOT inferred from this insufficient list.
 	protected := []string{"127.0.0.0/8", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "169.254.0.0/16", server + "/32"}
@@ -275,6 +280,12 @@ func SmartTUNCandidateConfig(profile Profile, o SmartTUNCandidateOptions) ([]byt
 		protections = append(protections, prefix)
 	}
 	rules := []any{map[string]any{"ip_cidr": exclusions, "action": "bypass", "outbound": "direct"}}
+	// Development-only IPv4 admission: untrusted inputs must not turn a
+	// near-global collection into Direct while the default remains VPN.
+	// These budgets do NOT authenticate geography or operator intent.
+	const minOperatorDirectBits = 24
+	const maxOperatorDirect24s = 64
+	operatorDirect24s := make(map[netip.Prefix]bool)
 	operator := []netip.Prefix{}
 	for _, r := range o.Exceptions {
 		prefix, err := canonicalRoutePrefix(r.CIDR)
@@ -294,13 +305,54 @@ func SmartTUNCandidateConfig(profile Profile, o SmartTUNCandidateOptions) ([]byt
 		operator = append(operator, prefix)
 		out := "upstream"
 		if r.Via == "direct" {
+			if prefix.Bits() < minOperatorDirectBits {
+				return nil, errors.New("IPv4 operator Direct exception exceeds /24 breadth")
+			}
+			operatorDirect24s[netip.PrefixFrom(prefix.Addr(), 24).Masked()] = true
+			if len(operatorDirect24s) > maxOperatorDirect24s {
+				return nil, errors.New("aggregate IPv4 operator Direct exceptions exceed 64 distinct /24s")
+			}
 			out = "direct"
 		}
 		rules = append(rules, map[string]any{"ip_cidr": []string{r.CIDR}, "action": "route", "outbound": out})
 	}
+	// Synthetic domestic Direct candidates are bounded in BOTH number and
+	// effective address coverage. A pile of individually narrow prefixes
+	// must not silently route almost all public IPv4 traffic outside VPN.
+	const minDomesticDirectBits = 8
+	const maxDomesticDirectPrefixes = 10000
+	const maxDomesticDirectAddresses uint64 = 1 << 25
+	if len(o.DomesticCIDRs) > maxDomesticDirectPrefixes {
+		return nil, errors.New("IPv4 domestic Direct prefix count exceeds candidate limit")
+	}
+	domestic := make([]netip.Prefix, 0, len(o.DomesticCIDRs))
+	var domesticAddresses uint64
 	for _, raw := range o.DomesticCIDRs {
-		if _, err := canonicalRoutePrefix(raw); err != nil {
-			return nil, errors.New("invalid domestic CIDR")
+		prefix, err := canonicalRoutePrefix(raw)
+		if err != nil || prefix.Bits() < minDomesticDirectBits ||
+			!prefix.Addr().IsGlobalUnicast() || prefix.Addr().IsPrivate() ||
+			prefix.Addr().IsLoopback() || prefix.Addr().IsLinkLocalUnicast() ||
+			overlapsSpecialPurpose(prefix) {
+			return nil, errors.New("invalid, nonpublic or broad IPv4 domestic Direct prefix")
+		}
+		domestic = append(domestic, prefix)
+		domesticAddresses += uint64(1) << (32 - prefix.Bits())
+		if domesticAddresses > maxDomesticDirectAddresses {
+			return nil, errors.New("aggregate IPv4 domestic Direct address coverage exceeds candidate limit")
+		}
+	}
+	// Sorting only the parsed copy leaves the emitted policy in the explicit
+	// caller-provided order; reject overlaps/duplicates regardless of order.
+	sort.Slice(domestic, func(i, j int) bool {
+		a, b := domestic[i], domestic[j]
+		if cmp := a.Addr().Compare(b.Addr()); cmp != 0 {
+			return cmp < 0
+		}
+		return a.Bits() < b.Bits()
+	})
+	for i := 1; i < len(domestic); i++ {
+		if routePrefixesOverlap(domestic[i-1], domestic[i]) {
+			return nil, errors.New("overlapping or duplicate IPv4 domestic Direct prefixes")
 		}
 	}
 	v6Exclusions, v6Rules, err := smartTUNIPv6Policy(o)

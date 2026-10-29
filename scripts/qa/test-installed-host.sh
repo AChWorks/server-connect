@@ -389,6 +389,39 @@ GOPROXY=off GOTOOLCHAIN=local CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
   go build -trimpath -o "$scratch/tun-config-qa" ./scripts/qa/tun_config_generator.go
 test -x "$scratch/tun-config-qa"
 docker cp "$scratch/tun-config-qa" "$container:/root/qa-tun-config-qa"
+# The actual guest generator must refuse all unsafe Direct admissions
+# BEFORE it emits runnable config or starts any TUN. This complements Go
+# boundary tests with a disconnected installed-host execution witness.
+for fault in broad-operator-direct aggregate-operator-direct \
+             broad-domestic-direct aggregate-domestic-direct; do
+  rejected_config="$scratch/tun-direct-rejected-$fault.json"
+  rejected_log="$scratch/tun-direct-rejected-$fault.stderr"
+  if docker exec -e "SC_QA_TUN_IPV4_ADMISSION=$fault" \
+      "$container" /root/qa-tun-config-qa >"$rejected_config" 2>"$rejected_log"; then
+    echo "REAL_TUN_IPV4_DIRECT_ADMISSION=FAIL ($fault unexpectedly accepted)" >&2
+    exit 1
+  fi
+  test ! -s "$rejected_config" || {
+    echo "REAL_TUN_IPV4_DIRECT_ADMISSION=FAIL ($fault emitted config)" >&2
+    exit 1
+  }
+  case "$fault" in
+    broad-operator-direct)
+      expected='IPv4 operator Direct exception exceeds /24 breadth' ;;
+    aggregate-operator-direct)
+      expected='aggregate IPv4 operator Direct exceptions exceed 64 distinct /24s' ;;
+    broad-domestic-direct)
+      expected='invalid, nonpublic or broad IPv4 domestic Direct prefix' ;;
+    aggregate-domestic-direct)
+      expected='aggregate IPv4 domestic Direct address coverage exceeds candidate limit' ;;
+  esac
+  grep -Fx "QA candidate generation failed: $expected" "$rejected_log" >/dev/null || {
+    echo "REAL_TUN_IPV4_DIRECT_ADMISSION=FAIL ($fault wrong rejection)" >&2
+    cat "$rejected_log" >&2
+    exit 1
+  }
+done
+echo 'REAL_TUN_IPV4_DIRECT_ADMISSION=PASS (invalid broad and aggregate Direct policies produce no runnable config)'
 docker cp "$root/scripts/qa/tun-dns-peer.py" "$container:/root/qa-tun-dns-peer.py"
 docker cp "$root/scripts/qa/tun-dns-client.py" "$container:/root/qa-tun-dns-client.py"
 docker cp "$root/scripts/qa/tun-sni-client.py" "$container:/root/qa-tun-sni-client.py"
@@ -448,6 +481,7 @@ accept_tun_guard_rejection() {
     fi
   done
 }
+assert_tun_native_cleanup ipv4-direct-rejected-before-tun
 echo 'REAL_TUN_LAB_STAGE=execute-guest-path'
 regular_tun_log="$scratch/real-tun-domain-path.log"
 docker exec "$container" /bin/sh /root/qa-host-tun-path.sh | tee "$regular_tun_log"

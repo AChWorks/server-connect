@@ -63,6 +63,10 @@ type IranGeoSnapshotStatus struct {
 // Only this exact dated, attributed free CSV may back the embedded snapshot.
 // It is source-byte pinned but has no publisher signature: report that fact.
 const iranGeoArchiveSHA256 = "097426b8ddae89157d444a59ac1847e873f7943c32d52becc4371c8b0273af80"
+
+// Independent, reviewed source-code pin. A self-consistent JSON metadata
+// digest is insufficient: an altered prefix set could simply be rehashed.
+const iranGeoPrefixSHA256 = "edb8fc88cff754e9622695e03d980afec6640939cf53627f8800ac54d9170f0e"
 const iranGeoArchiveURL = "https://download.db-ip.com/free/dbip-country-lite-2026-10.csv.gz"
 const iranGeoLicense = "CC-BY-4.0"
 const iranGeoAttribution = "IP Geolocation by DB-IP (https://db-ip.com)"
@@ -109,7 +113,8 @@ func decodeIranGeoSnapshot(raw []byte) (iranGeoSnapshot, error) {
 		snapshot.AsOf != "2026-10-01" || snapshot.Source != iranGeoArchiveURL ||
 		snapshot.SourceSHA256 != iranGeoArchiveSHA256 ||
 		snapshot.License != iranGeoLicense || snapshot.Attribution != iranGeoAttribution ||
-		snapshot.Changes != iranGeoChanges || len(snapshot.PrefixSHA256) != 64 {
+		snapshot.Changes != iranGeoChanges ||
+		snapshot.PrefixSHA256 != iranGeoPrefixSHA256 {
 		return iranGeoSnapshot{}, fail
 	}
 	if _, err := hex.DecodeString(snapshot.PrefixSHA256); err != nil ||
