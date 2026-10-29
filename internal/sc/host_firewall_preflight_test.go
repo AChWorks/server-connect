@@ -144,6 +144,131 @@ func TestFirewallLargeNumbersAndMalformedJSONFailClosed(t *testing.T) {
 	}
 }
 
+func TestFirewallFlowtableNativeFieldTypes(t *testing.T) {
+	makeSnapshot := func(priority, devices string) string {
+		return `{"nftables":[` + nftMeta + `,{"flowtable":{"family":"inet","table":"t","name":"f","hook":"ingress","prio":` +
+			priority + `,"dev":` + devices + `}}]}`
+	}
+	for _, tc := range []struct {
+		name, priority, devices string
+	}{
+		{"zero-single-device", `0`, `"eth0"`},
+		{"negative-multiple-devices", `-200`, `["eth0","eth1"]`},
+		{"positive-single-device", `10`, `"eth1"`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			report, err := decodeNFTSnapshot([]byte(makeSnapshot(tc.priority, tc.devices)))
+			if err != nil || !report.Observed || report.ObjectCount != 2 ||
+				!firewallDigest.MatchString(report.RulesetSHA256) {
+				t.Fatalf("valid native flowtable rejected: %+v err=%v", report, err)
+			}
+		})
+	}
+	for _, tc := range []struct {
+		name, priority, devices string
+	}{
+		{"string-priority", `"invalid-priority"`, `"eth0"`},
+		{"boolean-priority", `true`, `"eth0"`},
+		{"null-priority", `null`, `"eth0"`},
+		{"fractional-priority", `1.5`, `"eth0"`},
+		{"exponent-priority", `1e3`, `"eth0"`},
+		{"overflow-priority", `9223372036854775808`, `"eth0"`},
+		{"boolean-device", `0`, `false`},
+		{"object-device", `0`, `{}`},
+		{"null-device", `0`, `null`},
+		{"empty-string-device", `0`, `""`},
+		{"empty-array-device", `0`, `[]`},
+		{"mixed-device-list", `0`, `["eth0",false]`},
+		{"empty-device-member", `0`, `["eth0",""]`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			report, err := decodeNFTSnapshot([]byte(makeSnapshot(tc.priority, tc.devices)))
+			if ErrorCode(err) != "host_preflight_unavailable" ||
+				report != (HostFirewallObservation{}) {
+				t.Fatalf("invalid flowtable yielded evidence: %+v err=%v", report, err)
+			}
+		})
+	}
+}
+
+func TestFirewallCounterTypesValidatedBeforeNormalization(t *testing.T) {
+	wrappers := []struct {
+		name string
+		wrap func(string, string) string
+	}{
+		{
+			name: "named",
+			wrap: func(packets, bytes string) string {
+				return `{"nftables":[` + nftMeta +
+					`,{"counter":{"family":"inet","table":"t","name":"count","packets":` +
+					packets + `,"bytes":` + bytes + `}}]}`
+			},
+		},
+		{
+			name: "anonymous-rule-statement",
+			wrap: func(packets, bytes string) string {
+				return `{"nftables":[` + nftMeta +
+					`,{"rule":{"family":"inet","table":"t","chain":"c","expr":[{"counter":{"packets":` +
+					packets + `,"bytes":` + bytes + `}}]}}]}`
+			},
+		},
+	}
+	for _, fixture := range wrappers {
+		t.Run(fixture.name, func(t *testing.T) {
+			first, err := decodeNFTSnapshot([]byte(fixture.wrap("0", "9007199254740993")))
+			if err != nil || !first.Observed || !firewallDigest.MatchString(first.RulesetSHA256) {
+				t.Fatalf("genuine counters rejected: %+v err=%v", first, err)
+			}
+			second, err := decodeNFTSnapshot([]byte(fixture.wrap("18446744073709551615", "0")))
+			if err != nil || first.RulesetSHA256 != second.RulesetSHA256 {
+				t.Fatalf("valid uint64 counters caused false drift: %+v vs %+v err=%v", first, second, err)
+			}
+			for _, tc := range []struct {
+				name, value string
+			}{
+				{"string", `"invalid"`},
+				{"boolean", `true`},
+				{"null", `null`},
+				{"object", `{}`},
+				{"array", `[]`},
+				{"negative", `-1`},
+				{"fractional", `1.0`},
+				{"exponent", `1e3`},
+				{"overflow", `18446744073709551616`},
+			} {
+				for _, field := range []string{"packets", "bytes"} {
+					t.Run(field+"-"+tc.name, func(t *testing.T) {
+						packets, bytes := "1", "2"
+						if field == "packets" {
+							packets = tc.value
+						} else {
+							bytes = tc.value
+						}
+						report, err := decodeNFTSnapshot([]byte(fixture.wrap(packets, bytes)))
+						if ErrorCode(err) != "host_preflight_unavailable" ||
+							report != (HostFirewallObservation{}) ||
+							report.RulesetSHA256 == first.RulesetSHA256 {
+							t.Fatalf("malformed counter matched valid fingerprint: %+v err=%v", report, err)
+						}
+					})
+				}
+			}
+		})
+	}
+	// The native schema also allows a rule to reference a named counter.
+	namedRef := `{"nftables":[` + nftMeta +
+		`,{"rule":{"family":"inet","table":"t","chain":"c","expr":[{"counter":"count"}]}}]}`
+	report, err := decodeNFTSnapshot([]byte(namedRef))
+	if err != nil || !report.Observed {
+		t.Fatalf("native named-counter reference rejected: %+v err=%v", report, err)
+	}
+	malformedRef := strings.Replace(namedRef, `"counter":"count"`, `"counter":false`, 1)
+	report, err = decodeNFTSnapshot([]byte(malformedRef))
+	if ErrorCode(err) != "host_preflight_unavailable" || report != (HostFirewallObservation{}) {
+		t.Fatalf("invalid counter reference yielded evidence: %+v err=%v", report, err)
+	}
+}
+
 func TestFirewallNativeCommandBoundedAndNoPATHShadow(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("Linux-specific native nftables inspection")

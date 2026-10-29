@@ -10,6 +10,7 @@ import (
 	"io"
 	"os/exec"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -31,26 +32,61 @@ type HostFirewallObservation struct {
 	ObjectCount   int    `json:"object_count"`
 }
 
-// Counted traffic must not be reported as a policy edit. Strip only
-// packet/byte counters: quota consumption, limits, timeouts and all other
-// potentially decision-relevant values must remain observable as drift.
-func normalizeNftVolatile(value any) {
+// Native counters are unsigned 64-bit integers. Validate exactly the
+// representation emitted by nft -j, before volatile values are discarded.
+func validNftCounterValues(counter map[string]any) bool {
+	for _, field := range []string{"packets", "bytes"} {
+		value, present := counter[field]
+		if !present {
+			continue
+		}
+		number, ok := value.(json.Number)
+		if !ok {
+			return false
+		}
+		if _, err := strconv.ParseUint(number.String(), 10, 64); err != nil {
+			return false
+		}
+	}
+	return true
+}
+
+// Counted traffic must not be reported as a policy edit. Validate native
+// named/anonymous counters before stripping their volatile packet/byte values.
+// A named-counter reference is a string and must not be normalized away.
+// Quota consumption, limits and other policy-relevant values remain hashed.
+func normalizeNftVolatile(value any) bool {
 	switch node := value.(type) {
 	case []any:
 		for _, child := range node {
-			normalizeNftVolatile(child)
+			if !normalizeNftVolatile(child) {
+				return false
+			}
 		}
 	case map[string]any:
 		for key, child := range node {
 			if key == "counter" {
-				if stats, ok := child.(map[string]any); ok {
+				switch stats := child.(type) {
+				case map[string]any:
+					if !validNftCounterValues(stats) {
+						return false
+					}
 					delete(stats, "packets")
 					delete(stats, "bytes")
+				case string:
+					if stats == "" {
+						return false
+					}
+				default:
+					return false
 				}
 			}
-			normalizeNftVolatile(child)
+			if !normalizeNftVolatile(child) {
+				return false
+			}
 		}
 	}
+	return true
 }
 
 // validNftObject checks the documented libnftables JSON envelope and the
@@ -127,7 +163,37 @@ func validNftObject(kind string, value any) bool {
 			return false
 		}
 	case "flowtable":
-		if !presentString("hook") || fields["prio"] == nil || fields["dev"] == nil {
+		if !presentString("hook") {
+			return false
+		}
+		priority, ok := fields["prio"].(json.Number)
+		if !ok {
+			return false
+		}
+		// Signed integer priorities are native; strings, fractions and
+		// numbers outside the supported signed range are not.
+		if _, err := strconv.ParseInt(priority.String(), 10, 64); err != nil {
+			return false
+		}
+		validDevice := func(value any) bool {
+			name, ok := value.(string)
+			return ok && name != "" && strings.TrimSpace(name) == name
+		}
+		switch devices := fields["dev"].(type) {
+		case string:
+			if !validDevice(devices) {
+				return false
+			}
+		case []any:
+			if len(devices) == 0 {
+				return false
+			}
+			for _, device := range devices {
+				if !validDevice(device) {
+					return false
+				}
+			}
+		default:
 			return false
 		}
 	default:
@@ -193,7 +259,9 @@ func decodeNFTSnapshot(raw []byte) (HostFirewallObservation, error) {
 			}
 		}
 	}
-	normalizeNftVolatile(top)
+	if !normalizeNftVolatile(top) {
+		return HostFirewallObservation{}, bad()
+	}
 	canonical, err := json.Marshal(top)
 	if err != nil {
 		return HostFirewallObservation{}, bad()
