@@ -159,7 +159,10 @@ func SmartTUNCandidateConfig(profile Profile, o SmartTUNCandidateOptions) ([]byt
 			"type": "tun", "tag": "tun-in", "interface_name": o.TunnelInterface,
 			"address": []string{o.TunnelIPv4}, "mtu": 1400,
 			"auto_route": true, "auto_redirect": true, "strict_route": true,
-			"route_exclude_address": exclusions,
+			// The 1.14.x default DNS hijack rewrites port 53 and would
+			// silently override this candidate's explicit Direct/VPN IP rules.
+			// Full resolver/domain-policy integration is not implemented yet.
+			"dns_mode": "disabled", "route_exclude_address": exclusions,
 		}},
 		"outbounds": []any{json.RawMessage(profile.Outbound), map[string]any{"type": "direct", "tag": "direct"}},
 		"route":     map[string]any{"default_interface": o.UnderlayInterface, "rules": rules, "final": "upstream"},

@@ -26,6 +26,7 @@ func TestSmartTUNCandidateRouteHierarchy(t *testing.T) {
 	var v struct {
 		Inbounds []struct {
 			Type         string   `json:"type"`
+			DNSMode      string   `json:"dns_mode"`
 			AutoRoute    bool     `json:"auto_route"`
 			AutoRedirect bool     `json:"auto_redirect"`
 			StrictRoute  bool     `json:"strict_route"`
@@ -45,6 +46,7 @@ func TestSmartTUNCandidateRouteHierarchy(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(v.Inbounds) != 1 || v.Inbounds[0].Type != "tun" ||
+		v.Inbounds[0].DNSMode != "disabled" ||
 		!v.Inbounds[0].AutoRoute || !v.Inbounds[0].AutoRedirect || !v.Inbounds[0].StrictRoute ||
 		len(v.Inbounds[0].Excluded) < 6 {
 		t.Fatal("not a real strict TUN with host underlay exceptions")
