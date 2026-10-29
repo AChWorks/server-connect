@@ -10,6 +10,7 @@ import gzip
 import hashlib
 import os
 from pathlib import Path
+import signal
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -30,17 +31,37 @@ BASE_ENV = {
     "GIT_CONFIG_NOSYSTEM": "1",
     "GIT_CONFIG_GLOBAL": "/dev/null",
     "GIT_TERMINAL_PROMPT": "0",
+    # Diagnostic only; the fake repository never contains operator secrets.
+    "GIT_TRACE_CURL": "1",
+    "GIT_TRACE_CURL_NO_DATA": "1",
 }
 
 
 def run(argv, timeout=22):
+    # Native APT and Git spawn helpers. A timeout must terminate the entire
+    # QA-owned subprocess group, not abandon a child that can keep sockets open.
+    proc = subprocess.Popen(
+        argv, env=BASE_ENV, stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE, start_new_session=True,
+    )
     try:
-        return subprocess.run(
-            argv, env=BASE_ENV, stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE, timeout=timeout, check=False,
-        )
+        stdout, stderr = proc.communicate(timeout=timeout)
     except subprocess.TimeoutExpired as exc:
-        raise RuntimeError(f"native client exceeded bounded timeout: {argv[0]}") from exc
+        os.killpg(proc.pid, signal.SIGKILL)
+        stdout, stderr = proc.communicate(timeout=5)
+        witnessed = (
+            WITNESS.read_text(encoding="ascii").splitlines()[-14:]
+            if WITNESS.is_file() else []
+        )
+        # All URLs and credentials here are generated inside the disposable
+        # guest. Failure-only bounded output helps distinguish stalled Git
+        # object transport from a missing fixture or wrong native path.
+        detail = stderr.decode("utf-8", errors="replace")[-2600:]
+        raise RuntimeError(
+            f"native client exceeded bounded timeout: {argv[0]}; "
+            f"stderr_tail={detail!r}; peer_requests={witnessed!r}"
+        ) from exc
+    return subprocess.CompletedProcess(argv, proc.returncode, stdout, stderr)
 
 
 def checked(argv):
@@ -180,6 +201,8 @@ def exercise(phase):
     apt_update, apt_cache = apt_args(phase)
     apt = run(apt_update, timeout=20)
     package = run(apt_cache, timeout=7)
+    if phase == "selected":
+        print(f"REAL_TUN_NATIVE_APT_SELECTED_STEP=OBSERVED (update={apt.returncode}, show={package.returncode})", flush=True)
     clone_path = ROOT / f"git-clone-{phase}"
     clone = run([
         "/usr/bin/git",
