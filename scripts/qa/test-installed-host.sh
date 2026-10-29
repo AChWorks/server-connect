@@ -686,7 +686,7 @@ assert_network_unchanged uninstall "$offline_before"
 verify_host_services uninstall
 
 echo 'DISCONNECTED_OFFLINE_CYCLE=PASS'
-echo 'LIMITATION: WordPress/PHP-FPM verification used disconnected guest loopback and QA-only WP_PROXY_*; real hosting/foreign field acceptance is NOT_RUN'
+echo 'LIMITATION: Proxy Only WordPress/PHP-FPM used guest loopback with QA-only WP_PROXY_*; transparent TUN WordPress used no application proxy and synthetic egress; physical host/foreign field acceptance is NOT_RUN'
 
 echo '=== Independent activation-deadline feasibility in disconnected guest (QA ONLY) ==='
 # Fixed dummy links and policy exist only inside the disposable Docker
