@@ -573,6 +573,32 @@ hosting_baseline=$(hosting_reply_packets)
 test "$hosting_baseline" -gt 0 || { echo 'FAIL: no positive control of foreign visitor hosting reply' >&2; exit 1; }
 echo "REAL_TUN_FOREIGN_HOSTING_BASELINE=PASS (foreign visitor request/reply, packets=$hosting_baseline)"
 if [ "${SC_QA_TUN_GUARD_LAB-}" = yes ]; then
+  # The disposable VETH may still be doing IPv6 duplicate-address detection.
+  # Its fe80:: local /128 route appears only after DAD finishes. Capturing
+  # before then produces a false rollback failure 25s later even when the
+  # real TUN and all its routing state were removed correctly. Wait for the
+  # guest's native link-local baseline to settle BEFORE the first TUN.
+  if [ -r "/proc/sys/net/ipv6/conf/$edge/disable_ipv6" ] &&
+     [ "$(cat "/proc/sys/net/ipv6/conf/$edge/disable_ipv6")" = 0 ]; then
+    dad_ready=no
+    tries=0
+    while [ "$tries" -lt 80 ]; do
+      if ip -6 route show table local dev "$edge" | grep -Eq '^local fe80:' &&
+         ! ip -6 addr show dev "$edge" | grep -Eq 'tentative|dadfailed'; then
+        dad_ready=yes
+        break
+      fi
+      tries=$((tries + 1))
+      sleep 0.1
+    done
+    if [ "$dad_ready" != yes ]; then
+      echo 'QA_TUN_GUARD_IPV6_BASELINE=FAIL (guest link-local DAD did not settle)' >&2
+      exit 1
+    fi
+    echo 'QA_TUN_GUARD_IPV6_BASELINE=PASS (native link-local DAD settled)'
+  else
+    echo 'QA_TUN_GUARD_IPV6_BASELINE=UNSUPPORTED (guest IPv6 disabled)'
+  fi
   guard_routes_before=$(ip -N -j -4 route show table all)
   guard_rules_before=$(ip -N -j -4 rule show)
   guard_v6_routes_before=$(ip -N -j -6 route show table all)
