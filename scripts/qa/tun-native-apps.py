@@ -34,9 +34,21 @@ BASE_ENV = {
 }
 
 
-def run(argv, timeout=22):
+def run(argv, timeout=22, trace_prefix=None):
     # Native APT and Git spawn helpers. A timeout must terminate the entire
     # QA-owned subprocess group, not abandon a child that can keep sockets open.
+    if trace_prefix is not None:
+        # Restricted to the generated guest's synthetic Git clone. strace is
+        # the parent of Git, so this does not need to attach to unrelated
+        # processes and cannot mutate an installed/customer host.
+        argv = [
+            "/usr/bin/strace", "-ff", "-tt", "-T", "-s", "96",
+            "-e", "trace=execve,clone,clone3,read,write,close,poll,ppoll,"
+            "pselect6,select,wait4,waitid,recvfrom,sendto,shutdown,connect,"
+            "futex,exit_group",
+            "-o", str(trace_prefix),
+            *argv,
+        ]
     proc = subprocess.Popen(
         argv, env=BASE_ENV, stdout=subprocess.PIPE,
         stderr=subprocess.PIPE, start_new_session=True,
@@ -63,6 +75,13 @@ def run(argv, timeout=22):
             capture_output=True, check=False, timeout=3,
         )
         socket_rows = sockets.stdout.decode("utf-8", errors="replace").splitlines()[-8:]
+        trace_tails = []
+        if trace_prefix is not None:
+            for path in sorted(trace_prefix.parent.glob(trace_prefix.name + ".*"))[:12]:
+                if path.is_file() and not path.is_symlink():
+                    trace_tails.append(
+                        (path.name, path.read_text(errors="replace")[-1600:])
+                    )
         server_log_path = Path("/run/sc-qa-tun-native-apps-server.log")
         server_tail = (
             server_log_path.read_text(errors="replace")[-2600:]
@@ -85,7 +104,8 @@ def run(argv, timeout=22):
             f"native client exceeded bounded timeout: {argv[0]}; "
             f"stderr_tail={detail!r}; peer_requests={witnessed!r}; "
             f"owned_processes={process_rows!r}; sockets={socket_rows!r}; "
-            f"smart_http_origin_tail={server_tail!r}"
+            f"smart_http_origin_tail={server_tail!r}; "
+            f"git_syscall_tails={trace_tails!r}"
         ) from exc
     return subprocess.CompletedProcess(argv, proc.returncode, stdout, stderr)
 
@@ -327,7 +347,7 @@ def exercise(phase):
         "/usr/bin/git",
         "-c", "http.lowSpeedLimit=1", "-c", "http.lowSpeedTime=4",
         "clone", "-q", f"{ORIGIN}/git/fixture.git", str(clone_path)
-    ], timeout=19)
+    ], timeout=19, trace_prefix=ROOT / "git-selected-strace" if phase == "selected" else None)
 
     if phase == "outage":
         # Prior phases proved both executables, fixture bytes and a live
