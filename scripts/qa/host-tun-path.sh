@@ -17,6 +17,9 @@ origin_pid=
 hosting_pid=
 udp_pid=
 dns_pid=
+tls_pid=
+tls_cert=/run/sc-qa-tun-tls.crt
+tls_key=/run/sc-qa-tun-tls.key
 edge_added=no
 peer_added=no
 default_added=no
@@ -40,6 +43,8 @@ require_guest() {
   test "$(ps -p 1 -o comm=)" = systemd
   test -f /root/qa-host-assertions.sh
   test -x /root/qa-tun-config-qa
+  test -f /root/qa-tun-sni-client.py
+  command -v openssl >/dev/null
   test -x "$core"
   if [ ! -c /dev/net/tun ]; then
     if [ -e /dev/net/tun ] || [ -L /dev/net/tun ]; then
@@ -76,7 +81,7 @@ cleanup() {
   if [ "${SC_QA_TUN_GUARD_LAB-}" = yes ] && ! qa_tun_guard_cleanup; then
     cleanup_failed=yes
   fi
-  for pid in "$client_pid" "$server_pid" "$origin_pid" "$hosting_pid" "$udp_pid" "$dns_pid"; do
+  for pid in "$client_pid" "$server_pid" "$origin_pid" "$hosting_pid" "$udp_pid" "$dns_pid" "$tls_pid"; do
     if [ -n "$pid" ]; then
       kill "$pid" 2>/dev/null || :
       wait "$pid" 2>/dev/null || :
@@ -107,7 +112,8 @@ cleanup() {
   fi
   rm -f /run/scqa-tun-guard-controller.log "$client_cfg" "$server_cfg" /run/sc-qa-tun-origin.log \
     /run/sc-qa-tun-hosting.log /run/sc-qa-tun-udp.log \
-    /run/sc-qa-tun-dns.log /run/sc-qa-tun-server.log /run/sc-qa-tun-client.log ||
+    /run/sc-qa-tun-dns.log /run/sc-qa-tun-server.log /run/sc-qa-tun-client.log \
+    /run/sc-qa-tun-tls.log /run/sc-qa-tun-cert.log "$tls_cert" "$tls_key" ||
       { echo 'REAL_TUN_LAB_CLEANUP=FAIL (temporary QA file deletion)' >&2; cleanup_failed=yes; }
   # Fail, rather than claim cleanup, if the real core leaked its TUN.
   if [ -e /sys/class/net/sctunqa0 ]; then
@@ -181,6 +187,8 @@ direct_udp_witness_packets() { peer_counter_packets direct_udp_packets; }
 direct_dns_udp_witness_packets() { peer_counter_packets direct_dns_udp_packets; }
 direct_dns_tcp_witness_packets() { peer_counter_packets direct_dns_tcp_packets; }
 hosting_reply_packets() { peer_counter_packets hosting_reply_packets; }
+domestic_tls_direct_packets() { peer_counter_packets domestic_tls_direct_packets; }
+foreign_tls_direct_packets() { peer_counter_packets foreign_tls_direct_packets; }
 
 # The fault is injected only by the disposable installed-host regression.
 # Wait for the real sing-box process to exit so its TUN policy is removed.
@@ -224,6 +232,13 @@ expect_named_source() {
     --resolve "$host:19180:$destination" --connect-timeout 3 --max-time 6 \
     "http://$host:19180/path") || return 1
   test "$response" = "SOURCE=$source"
+}
+
+# A real TLS ClientHello with operator-supplied SNI is sent to a pinned IP,
+# bypassing system DNS. The independent peer reports the actual source path.
+tls_path() {
+  env -i HOME=/root PATH=/usr/bin:/bin:/sbin:/usr/sbin \
+    /usr/bin/python3 -I -B /root/qa-tun-sni-client.py "$1" "$2" "$3" "$4"
 }
 
 # A synthetic foreign visitor makes a NEW inbound HTTP connection to the
@@ -473,6 +488,8 @@ table inet scqawitness {
   counter direct_udp_packets { }
   counter direct_dns_udp_packets { }
   counter direct_dns_tcp_packets { }
+  counter domestic_tls_direct_packets { }
+  counter foreign_tls_direct_packets { }
   counter hosting_reply_packets { }
   chain incoming {
     type filter hook input priority filter; policy accept;
@@ -480,6 +497,8 @@ table inet scqawitness {
     iifname "scqapeer0" ip daddr 8.8.8.8 udp dport 19186 counter name direct_udp_packets
     iifname "scqapeer0" ip daddr 8.8.8.8 udp dport 53 counter name direct_dns_udp_packets
     iifname "scqapeer0" ip daddr 8.8.8.8 tcp dport 53 counter name direct_dns_tcp_packets
+    iifname "scqapeer0" ip daddr 5.22.0.10 tcp dport 19181 counter name domestic_tls_direct_packets
+    iifname "scqapeer0" ip daddr 8.8.8.8 tcp dport 19181 counter name foreign_tls_direct_packets
     iifname "scqapeer0" ip saddr 10.254.72.1 ip daddr 198.51.100.42 tcp sport 19184 counter name hosting_reply_packets
   }
 }
@@ -501,6 +520,40 @@ class Handler(BaseHTTPRequestHandler):
 ThreadingHTTPServer(("0.0.0.0",19180),Handler).serve_forever()
 PYORIGIN
 origin_pid=$!
+
+# Ephemeral test certificate is generated entirely inside the disconnected
+# guest; the QA client deliberately skips public-PKI verification. Only the
+# TLS ClientHello/SNI and independently witnessed destination path matter.
+if ! openssl req -x509 -newkey rsa:2048 -nodes -sha256 -days 1 \
+  -subj '/CN=scqa.test' -keyout "$tls_key" -out "$tls_cert" \
+  >/run/sc-qa-tun-cert.log 2>&1; then
+  cat /run/sc-qa-tun-cert.log >&2
+  echo 'REAL_TUN_TLS_SETUP=FAIL (ephemeral guest certificate)' >&2
+  exit 1
+fi
+ip netns exec "$peer" python3 -u - "$tls_cert" "$tls_key" \
+  >/run/sc-qa-tun-tls.log 2>&1 <<'PYTLSSERVER' &
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import ssl
+import sys
+
+class Handler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        data = ("SOURCE=" + self.client_address[0]).encode("ascii")
+        self.send_response(200)
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+    def log_message(self, *args):
+        pass
+
+server = ThreadingHTTPServer(("0.0.0.0", 19181), Handler)
+ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+ctx.load_cert_chain(certfile=sys.argv[1], keyfile=sys.argv[2])
+server.socket = ctx.wrap_socket(server.socket, server_side=True)
+server.serve_forever()
+PYTLSSERVER
+tls_pid=$!
 
 # Peer-side independent UDP echo endpoint. The observed sender proves whether
 # a proxy-unaware UDP request reached it via native VETH or VLESS egress.
@@ -551,6 +604,8 @@ attempt=0
 while [ "$attempt" -lt 25 ]; do
   if expect_source 5.22.0.10 10.254.72.1 &&
      expect_source 8.8.8.8 10.254.72.1 &&
+     tls_path native.scqa.test 5.22.0.10 10.254.72.1 reply &&
+     tls_path native.scqa.test 8.8.8.8 10.254.72.1 reply &&
      udp_path 5.22.0.10 10.254.72.1 ready-domestic reply &&
      udp_path 8.8.8.8 10.254.72.1 ready-foreign reply &&
      dns_path 5.22.0.10 192.0.2.11 ready-domestic-udp udp reply &&
@@ -563,6 +618,7 @@ while [ "$attempt" -lt 25 ]; do
   kill -0 "$server_pid" 2>/dev/null || { echo "QA VLESS server exited" >&2; exit 1; }
   kill -0 "$hosting_pid" 2>/dev/null || { echo "QA hosting service exited" >&2; exit 1; }
   kill -0 "$udp_pid" 2>/dev/null || { echo "QA UDP service exited" >&2; exit 1; }
+  kill -0 "$tls_pid" 2>/dev/null || { echo "QA TLS service exited" >&2; cat /run/sc-qa-tun-tls.log >&2; exit 1; }
   kill -0 "$dns_pid" 2>/dev/null || { echo "QA DNS server exited" >&2; exit 1; }
   attempt=$((attempt+1))
   sleep 0.2
@@ -575,6 +631,13 @@ if [ "$witness_baseline" -le 0 ]; then
 fi
 echo "REAL_TUN_LAB_UNTUNNELED_BASELINE=PASS (two native routes)"
 echo "REAL_TUN_DIRECT_WITNESS=PASS (positive control observed $witness_baseline direct packets)"
+domestic_tls_baseline=$(domestic_tls_direct_packets)
+foreign_tls_baseline=$(foreign_tls_direct_packets)
+test "$domestic_tls_baseline" -gt 0 && test "$foreign_tls_baseline" -gt 0 || {
+  echo "REAL_TUN_TLS_SNI_BASELINE=FAIL (missing positive native TLS witnesses)" >&2
+  exit 1
+}
+echo "REAL_TUN_TLS_SNI_BASELINE=PASS (domestic/foreign positive native packet controls)"
 udp_witness_baseline=$(direct_udp_witness_packets)
 test "$udp_witness_baseline" -gt 0 || { echo 'FAIL: no positive native foreign UDP packet witness' >&2; exit 1; }
 echo "REAL_TUN_UDP_DIRECT_WITNESS=PASS (native foreign UDP packets=$udp_witness_baseline)"
@@ -683,6 +746,28 @@ test "$(direct_witness_packets)" -eq "$witness_baseline" || {
   echo 'REAL_TUN_SNIFFED_DOMAIN_EXCEPTION=FAIL (VPN-only names leaked to Direct)' >&2; exit 1;
 }
 echo 'REAL_TUN_SNIFFED_DOMAIN_EXCEPTION=PASS (VPN-only HTTP names; no Direct leak)'
+# SNI is distinct from HTTP Host; verify a *real* TLS ClientHello is sniffed.
+# Compare independent VETH counters on each path. The peer's VLESS outbound
+# accesses destination loopback and MUST NOT increment a native VETH witness.
+assert_tun_policy_active || { echo 'REAL_TUN_TLS_SNI_VPN_ONLY=FAIL (TUN unavailable)' >&2; exit 1; }
+tls_path vpn.scqa.test 5.22.0.10 5.22.0.10 reply
+tls_path only-exact.test 5.22.0.10 5.22.0.10 reply
+test "$(domestic_tls_direct_packets)" -eq "$domestic_tls_baseline" || {
+  echo 'REAL_TUN_TLS_SNI_VPN_ONLY=FAIL (matched domestic SNI leaked Direct)' >&2; exit 1;
+}
+# Exact-only must NOT match its children; no SNI must stay IP-only.
+tls_path child.only-exact.test 5.22.0.10 10.254.72.1 reply
+tls_path - 5.22.0.10 10.254.72.1 reply
+domestic_tls_active=$(domestic_tls_direct_packets)
+test "$domestic_tls_active" -gt "$domestic_tls_baseline" || {
+  echo 'REAL_TUN_TLS_SNI_VPN_ONLY=FAIL (missing positive Direct negative-control)' >&2; exit 1;
+}
+tls_path unmatched.test 8.8.8.8 8.8.8.8 reply
+test "$(foreign_tls_direct_packets)" -eq "$foreign_tls_baseline" || {
+  echo 'REAL_TUN_TLS_SNI_VPN_ONLY=FAIL (foreign TLS leaked Direct)' >&2; exit 1;
+}
+assert_tun_policy_active || { echo 'REAL_TUN_TLS_SNI_VPN_ONLY=FAIL (TUN lost)' >&2; exit 1; }
+echo 'REAL_TUN_TLS_SNI_VPN_ONLY=PASS (real suffix/exact ClientHello; positive-controlled Direct witnesses)'
 assert_tun_policy_active || { echo 'FAIL: TUN not active before selected UDP path' >&2; exit 1; }
 udp_path 5.22.0.10 10.254.72.1 tun-domestic reply
 udp_path 8.8.8.8 8.8.8.8 tun-foreign reply
@@ -755,6 +840,29 @@ if [ "$witness_after_outage" -ne "$witness_before_outage" ]; then
 fi
 echo 'REAL_TUN_POLICY_DURING_OUTAGE=PASS (live client, TUN route, installed nftables policy)'
 echo 'REAL_TUN_NO_DIRECT_PACKETS_ON_UPSTREAM_LOSS=PASS (positive-controlled independent peer witness)'
+# A domestic destination must NOT become Direct just because the upstream
+# stopped when the explicit SNI rule still requires VPN. A nonmatching SNI
+# to the SAME destination must remain Direct: independent routing proof.
+assert_tun_policy_active || { echo 'REAL_TUN_TLS_SNI_NO_DIRECT_ON_UPSTREAM_LOSS=FAIL (TUN lost)' >&2; exit 1; }
+tls_path vpn.scqa.test 5.22.0.10 - no-reply
+tls_path only-exact.test 5.22.0.10 - no-reply
+tls_path unmatched.test 8.8.8.8 - no-reply
+test "$(domestic_tls_direct_packets)" -eq "$domestic_tls_active" &&
+test "$(foreign_tls_direct_packets)" -eq "$foreign_tls_baseline" || {
+  echo 'REAL_TUN_TLS_SNI_NO_DIRECT_ON_UPSTREAM_LOSS=FAIL (native VPN-only TLS leak)' >&2; exit 1;
+}
+tls_path child.only-exact.test 5.22.0.10 10.254.72.1 reply
+test "$(domestic_tls_direct_packets)" -gt "$domestic_tls_active" || {
+  echo 'REAL_TUN_TLS_SNI_NO_DIRECT_ON_UPSTREAM_LOSS=FAIL (Direct negative control missing)' >&2; exit 1;
+}
+test "$(foreign_tls_direct_packets)" -eq "$foreign_tls_baseline" || {
+  echo 'REAL_TUN_TLS_SNI_NO_DIRECT_ON_UPSTREAM_LOSS=FAIL (foreign native TLS leak)' >&2; exit 1;
+}
+kill -0 "$tls_pid" 2>/dev/null &&
+assert_tun_policy_active || {
+  echo 'REAL_TUN_TLS_SNI_NO_DIRECT_ON_UPSTREAM_LOSS=FAIL (fixture or policy disappeared)' >&2; exit 1;
+}
+echo 'REAL_TUN_TLS_SNI_NO_DIRECT_ON_UPSTREAM_LOSS=PASS (matched domestic SNI fail-closed; unmatched Direct works)'
 assert_tun_policy_active || { echo 'FAIL: TUN lost before foreign UDP outage probe' >&2; exit 1; }
 udp_path 8.8.8.8 unused outage-foreign no-reply
 udp_witness_outage=$(direct_udp_witness_packets)
