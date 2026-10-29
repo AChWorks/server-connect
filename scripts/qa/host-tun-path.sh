@@ -661,8 +661,17 @@ test "$(direct_witness_packets)" -eq "$witness_baseline" || {
 expect_named_source vpn.scqa.test 5.22.0.10 5.22.0.10 || {
   echo 'REAL_TUN_SNIFFED_DOMAIN_EXCEPTION=FAIL (suffix VPN over domestic IP)' >&2; exit 1;
 }
-expect_named_source exact.scqa.test 5.22.0.10 5.22.0.10 || {
-  echo 'REAL_TUN_SNIFFED_DOMAIN_EXCEPTION=FAIL (exact VPN over domestic IP)' >&2; exit 1;
+# The exact name MUST be outside the suffix fixture. Otherwise the suffix
+# route would make this test falsely pass even if exact matching broke.
+expect_named_source only-exact.test 5.22.0.10 5.22.0.10 || {
+  echo 'REAL_TUN_SNIFFED_DOMAIN_EXCEPTION=FAIL (exact-only VPN over domestic IP)' >&2; exit 1;
+}
+# An exact match must NOT act as a suffix: this name uses domestic Direct.
+expect_named_source child.only-exact.test 5.22.0.10 10.254.72.1 || {
+  echo 'REAL_TUN_SNIFFED_DOMAIN_EXCEPTION=FAIL (exact-only overmatched subdomain)' >&2; exit 1;
+}
+assert_tun_policy_active || {
+  echo 'REAL_TUN_SNIFFED_DOMAIN_EXCEPTION=FAIL (TUN policy lost during name proof)' >&2; exit 1;
 }
 expect_source 8.8.8.8 8.8.8.8 || {
   echo 'REAL_TUN_SNIFFED_DOMAIN_EXCEPTION=FAIL (raw IP foreign)' >&2; exit 1;
