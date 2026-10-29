@@ -12,7 +12,8 @@ spec.loader.exec_module(checker)
 def fpm(mode="positive", source="8.8.8.8", **changes):
     fields = {
         "php_sapi": "fpm-fcgi", "wp_installed": True,
-        "proxy_enabled": False, "proxy_selected": False,
+        "proxy_enabled": False, "proxy_config_absent": True,
+        "proxy_environment_absent": True,
         "wp_error_code": "" if mode == "positive" else "http_request_failed",
         "origin_http_code": 200 if mode == "positive" else 0,
         "origin_source": source if mode == "positive" else "",
@@ -44,7 +45,8 @@ class WordPressClassifierTests(unittest.TestCase):
 
     def test_false_positive_proxy_or_wrong_path_rejected(self):
         for raw in (
-            fpm(proxy_enabled=True), fpm(proxy_selected=True),
+            fpm(proxy_enabled=True), fpm(proxy_config_absent=False),
+            fpm(proxy_environment_absent=False),
             fpm(source="10.254.72.1"), fpm(nonce_match=False),
             fpm(wp_installed=False), fpm(php_sapi="cli"),
             fpm().replace(b"Status: 200", b"Status: 502"),

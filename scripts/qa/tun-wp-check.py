@@ -43,8 +43,10 @@ def validate(raw: bytes, mode: str, expected_source: str) -> None:
         raise ValueError("invalid JSON response") from exc
     if not isinstance(state, dict) or state.get("php_sapi") != "fpm-fcgi" or state.get("wp_installed") is not True:
         raise ValueError("not a genuine installed WordPress FPM response")
-    if state.get("proxy_enabled") is not False or state.get("proxy_selected") is not False:
-        raise ValueError("WordPress enabled application proxy; not transparent TUN")
+    if (state.get("proxy_enabled") is not False or
+            state.get("proxy_config_absent") is not True or
+            state.get("proxy_environment_absent") is not True):
+        raise ValueError("WordPress has an active or configured application proxy")
     if mode == "positive":
         if (http_status != 200 or state.get("origin_http_code") != 200 or
                 state.get("origin_source") != expected_source or

@@ -74,6 +74,17 @@ if (!is_string($nonce) || !preg_match('/^[0-9a-f]{16}$/', $nonce)) {
 }
 $target = 'http://8.8.8.8:19187/wp/nonce?value=' . $nonce;
 $proxy = new WP_HTTP_Proxy();
+// send_through_proxy() is only URL eligibility; WordPress uses an actual
+// proxy if is_enabled() is true as well. A foreign URL alone can return true
+// here even with no proxy configured. Prove the true enablement state.
+$proxyConfigAbsent = !defined('WP_PROXY_HOST') && !defined('WP_PROXY_PORT') &&
+    !defined('WP_PROXY_USERNAME') && !defined('WP_PROXY_PASSWORD') &&
+    !defined('WP_PROXY_BYPASS_HOSTS');
+$proxyEnvAbsent = true;
+foreach (['http_proxy', 'https_proxy', 'all_proxy', 'HTTP_PROXY',
+          'HTTPS_PROXY', 'ALL_PROXY'] as $proxyVar) {
+    if (getenv($proxyVar) !== false) { $proxyEnvAbsent = false; }
+}
 $result = wp_remote_get($target, ['timeout' => 4, 'redirection' => 0,
                                    'headers' => ['Cache-Control' => 'no-cache']]);
 $failed = is_wp_error($result);
@@ -89,7 +100,8 @@ echo wp_json_encode([
     'php_sapi' => PHP_SAPI,
     'wp_installed' => is_blog_installed(),
     'proxy_enabled' => $proxy->is_enabled(),
-    'proxy_selected' => $proxy->send_through_proxy($target),
+    'proxy_config_absent' => $proxyConfigAbsent,
+    'proxy_environment_absent' => $proxyEnvAbsent,
     'wp_error_code' => $failed ? $result->get_error_code() : '',
     'origin_http_code' => $code,
     'origin_source' => $source,
