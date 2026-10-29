@@ -39,6 +39,7 @@ PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/qa/test-wp-proxy-prepend.py
 PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/qa/test-tun-dns-wire.py
 PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/qa/test-tun-native-apps.py
 PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/qa/test-tun-payload-wire.py
+PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/qa/test-tun-ipv6-wire.py
 PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/qa/test-tun-wp-check.py
 sh -n scripts/qa/tun-wordpress-fpm.sh
 # The guard feasibility probe must be strictly guest-local and must reject
@@ -393,6 +394,7 @@ docker cp "$root/scripts/qa/tun-dns-client.py" "$container:/root/qa-tun-dns-clie
 docker cp "$root/scripts/qa/tun-sni-client.py" "$container:/root/qa-tun-sni-client.py"
 docker cp "$root/scripts/qa/tun-native-apps.py" "$container:/root/qa-tun-native-apps.py"
 docker cp "$root/scripts/qa/tun-payload-wire.py" "$container:/root/qa-tun-payload-wire.py"
+docker cp "$root/scripts/qa/tun-ipv6-wire.py" "$container:/root/qa-tun-ipv6-wire.py"
 docker cp "$root/scripts/qa/tun-wordpress-fpm.sh" "$container:/root/qa-tun-wordpress-fpm.sh"
 docker cp "$root/scripts/qa/tun-wp-check.py" "$container:/root/qa-tun-wp-check.py"
 docker cp "$root/scripts/qa/host-tun-path.sh" "$container:/root/qa-host-tun-path.sh"
@@ -463,6 +465,22 @@ grep -Fx 'REAL_TUN_PAYLOAD_REDUCED_MTU=PASS (real VLESS TCP/UDP echo, MTU 1280, 
 grep -Fx 'REAL_TUN_PAYLOAD_OUTAGE=PASS (large TCP/UDP fail closed, no native Direct packets)' "$regular_tun_log" >/dev/null
 grep -Fx 'REAL_TUN_PAYLOAD_DF_LIMIT=PASS (oversized DF datagram rejected locally)' "$regular_tun_log" >/dev/null
 assert_tun_native_cleanup real-tun-candidate-cleanup
+# Separately opt in to the actual dual-stack candidate. Preserve every legacy
+# IPv4/default trial unchanged; only the second synthetic guest trial enables
+# IPv6 routing. Fresh peer counters and teardown evidence are mandatory.
+echo 'REAL_TUN_LAB_STAGE=disconnected-dual-stack-ipv6'
+ipv6_tun_log="$scratch/real-tun-ipv6-path.log"
+docker exec -e SC_QA_TUN_IPV6=yes "$container" /bin/sh /root/qa-host-tun-path.sh | tee "$ipv6_tun_log"
+grep -Fx 'REAL_TUN_IPV6_DIRECT_BASELINE=PASS (independent TCP/UDP source and native counters)' "$ipv6_tun_log" >/dev/null
+grep -Fx 'REAL_TUN_IPV6_OVERRIDE_UDP_DIRECT_BASELINE=PASS (native UDP positive-controlled counter)' "$ipv6_tun_log" >/dev/null
+grep -Fx 'REAL_TUN_IPV6_EXPLICIT_DIRECT_UDP_SELECTED=PASS (exact source and payload)' "$ipv6_tun_log" >/dev/null
+grep -Fx 'REAL_TUN_IPV6_OVERRIDE_UDP_SELECTED=PASS (VLESS source and unchanged native UDP counter)' "$ipv6_tun_log" >/dev/null
+grep -Fx 'REAL_TUN_IPV6_SELECTED=PASS (native domestic Direct, explicit override, foreign VLESS, no Direct leak)' "$ipv6_tun_log" >/dev/null
+grep -Fx 'REAL_TUN_IPV6_EXPLICIT_DIRECT_UDP_OUTAGE=PASS (exact source and payload)' "$ipv6_tun_log" >/dev/null
+grep -Fx 'REAL_TUN_IPV6_OVERRIDE_UDP_OUTAGE=PASS (no reply and unchanged native UDP counter)' "$ipv6_tun_log" >/dev/null
+grep -Fx 'REAL_TUN_IPV6_OUTAGE=PASS (VPN-required TCP/UDP failed closed, native Direct preserved)' "$ipv6_tun_log" >/dev/null
+grep -F 'REAL_TUN_LAB_CLEANUP=PASS' "$ipv6_tun_log" >/dev/null
+assert_tun_native_cleanup real-tun-ipv6-candidate-cleanup
 # The same genuine TUN is started again, but only after an independently
 # armed systemd timer. SIGKILL the initiating controller and prove a fresh
 # PID1 recovery executor restores native Direct without the parent doing it.
@@ -575,7 +593,7 @@ echo 'REAL_TUN_CLEANUP_FAILURE_REJECTED=PASS (guest cleanup failure != expected 
 docker exec "$container" /bin/rm -f /root/qa-tun-config-qa /root/qa-host-tun-path.sh \
   /root/qa-tun-guard-unit-lab.sh /root/qa-tun-sni-client.py /root/qa-tun-native-apps.py \
   /root/qa-tun-dns-peer.py /root/qa-tun-dns-client.py /root/qa-tun-wordpress-fpm.sh \
-  /root/qa-tun-wp-check.py /root/qa-tun-payload-wire.py
+  /root/qa-tun-wp-check.py /root/qa-tun-payload-wire.py /root/qa-tun-ipv6-wire.py
 # Product code + installed inactive-by-default independent recovery units.
 # The actual RPDB rule is added ONLY in the verified disconnected guest.
 docker cp "$root/scripts/qa/host-product-guard-trial.sh" "$container:/root/qa-product-guard-trial.sh"

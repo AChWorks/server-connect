@@ -13,7 +13,7 @@ import (
 
 func main() {
 	profile := sc.Profile{Outbound: json.RawMessage(`{"type":"vless","tag":"upstream","server":"10.254.72.2","server_port":19182,"uuid":"c2902f3a-1c25-41ef-a8dc-760b483aa247"}`)}
-	cfg, err := sc.SmartTUNCandidateConfig(profile, sc.SmartTUNCandidateOptions{
+	opts := sc.SmartTUNCandidateOptions{
 		TunnelInterface:   "sctunqa0",
 		UnderlayInterface: "scqaedge0",
 		TunnelIPv4:        "172.31.99.1/30",
@@ -25,7 +25,23 @@ func main() {
 			{Domain: "scqa.test", Suffix: true, Via: "vpn"},
 			{Domain: "only-exact.test", Via: "vpn"},
 		},
-	})
+	}
+	// Dual-stack is an isolated-guest-only explicitly opted-in proof.
+	// All addresses below are synthetic: no real Iran/foreign classification.
+	switch os.Getenv("SC_QA_TUN_IPV6") {
+	case "":
+	case "yes":
+		opts.TunnelIPv6 = "fd73:99::1/64"
+		opts.DomesticIPv6CIDRs = []string{"2001:db8:5::/64"}
+		opts.IPv6Exceptions = []sc.SmartTUNCIDRException{
+			{CIDR: "2001:db8:5::10/128", Via: "vpn"},
+			{CIDR: "2001:db8:8::9/128", Via: "direct"},
+		}
+	default:
+		fmt.Fprintln(os.Stderr, "Unsupported isolated IPv6 QA mode")
+		os.Exit(2)
+	}
+	cfg, err := sc.SmartTUNCandidateConfig(profile, opts)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "QA candidate generation failed:", err)
 		os.Exit(1)

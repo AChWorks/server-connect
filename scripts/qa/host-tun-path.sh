@@ -17,6 +17,7 @@ origin_pid=
 hosting_pid=
 udp_pid=
 payload_pid=
+ipv6_pid=
 dns_pid=
 tls_pid=
 native_apps_pid=
@@ -30,6 +31,7 @@ tls_key=/run/sc-qa-tun-tls.key
 edge_added=no
 peer_added=no
 default_added=no
+default_v6_added=no
 tun_device_created=no
 nft_before=
 guard_routes_before=
@@ -53,6 +55,7 @@ require_guest() {
   test -f /root/qa-tun-sni-client.py
   test -f /root/qa-tun-native-apps.py
   test -f /root/qa-tun-payload-wire.py
+  test -f /root/qa-tun-ipv6-wire.py
   test -f /root/qa-tun-wordpress-fpm.sh && test -f /root/qa-tun-wp-check.py
   test -x /usr/bin/apt-get && test -x /usr/bin/git
   test ! -e "$native_apps_dir" && test ! -L "$native_apps_dir"
@@ -94,12 +97,16 @@ cleanup() {
   if [ "${SC_QA_TUN_GUARD_LAB-}" = yes ] && ! qa_tun_guard_cleanup; then
     cleanup_failed=yes
   fi
-  for pid in "$client_pid" "$server_pid" "$origin_pid" "$hosting_pid" "$udp_pid" "$dns_pid" "$tls_pid" "$native_apps_pid" "$wp_pid" "$payload_pid"; do
+  for pid in "$client_pid" "$server_pid" "$origin_pid" "$hosting_pid" "$udp_pid" "$dns_pid" "$tls_pid" "$native_apps_pid" "$wp_pid" "$payload_pid" "$ipv6_pid"; do
     if [ -n "$pid" ]; then
       kill "$pid" 2>/dev/null || :
       wait "$pid" 2>/dev/null || :
     fi
   done
+  if [ "$default_v6_added" = yes ]; then
+    ip -6 route del default via fd73:1::2 dev "$edge" metric 100 2>/dev/null ||
+      { echo 'REAL_TUN_LAB_CLEANUP=FAIL (owned IPv6 default route)' >&2; cleanup_failed=yes; }
+  fi
   if [ "$default_added" = yes ]; then
     ip -4 route del default via 10.254.72.2 dev "$edge" metric 100 2>/dev/null ||
       { echo 'REAL_TUN_LAB_CLEANUP=FAIL (owned default route deletion)' >&2; cleanup_failed=yes; }
@@ -125,6 +132,7 @@ cleanup() {
   fi
   rm -f /run/scqa-tun-guard-controller.log "$client_cfg" "$server_cfg" /run/sc-qa-tun-origin.log \
     /run/sc-qa-tun-hosting.log /run/sc-qa-tun-udp.log /run/sc-qa-tun-payload.log \
+    /run/sc-qa-tun-ipv6.log \
     /run/sc-qa-tun-dns.log /run/sc-qa-tun-server.log /run/sc-qa-tun-client.log \
     /run/sc-qa-tun-tls.log /run/sc-qa-tun-cert.log /run/sc-qa-tun-native-apps-server.log "$tls_cert" "$tls_key" ||
       { echo 'REAL_TUN_LAB_CLEANUP=FAIL (temporary QA file deletion)' >&2; cleanup_failed=yes; }
@@ -167,6 +175,10 @@ cleanup() {
   fi
   observed_default=$(normalized_default_route) ||
     { echo 'REAL_TUN_LAB_CLEANUP=FAIL (default route read)' >&2; cleanup_failed=yes; observed_default=''; }
+  if [ -n "$(ip -6 route show default)" ]; then
+    echo 'REAL_TUN_LAB_CLEANUP=FAIL (IPv6 default route was not restored)' >&2
+    cleanup_failed=yes
+  fi
   if [ "$observed_default" != "default dev lo scope link metric 4242" ]; then
     echo "REAL_TUN_LAB_CLEANUP=FAIL (baseline default route changed; observed=[$observed_default])" >&2
     ip -4 route show table all >&2 || :
@@ -211,6 +223,10 @@ direct_witness_packets() { peer_counter_packets direct_packets; }
 direct_udp_witness_packets() { peer_counter_packets direct_udp_packets; }
 payload_tcp_direct_packets() { peer_counter_packets payload_tcp_direct_packets; }
 payload_udp_direct_packets() { peer_counter_packets payload_udp_direct_packets; }
+ipv6_foreign_tcp_direct_packets() { peer_counter_packets ipv6_foreign_tcp_packets; }
+ipv6_foreign_udp_direct_packets() { peer_counter_packets ipv6_foreign_udp_packets; }
+ipv6_override_direct_packets() { peer_counter_packets ipv6_override_packets; }
+ipv6_override_udp_direct_packets() { peer_counter_packets ipv6_override_udp_packets; }
 direct_dns_udp_witness_packets() { peer_counter_packets direct_dns_udp_packets; }
 direct_dns_tcp_witness_packets() { peer_counter_packets direct_dns_tcp_packets; }
 hosting_reply_packets() { peer_counter_packets hosting_reply_packets; }
@@ -340,6 +356,11 @@ else:
 PYUDPCLIENT
 }
 
+ipv6_path() {
+  env -i HOME=/root PATH=/usr/bin:/bin:/sbin:/usr/sbin \
+    /usr/bin/python3 -I -B /root/qa-tun-ipv6-wire.py "$@"
+}
+
 payload_path() {
   env -i HOME=/root PATH=/usr/bin:/bin:/sbin:/usr/sbin \
     /usr/bin/python3 -I -B /root/qa-tun-payload-wire.py "$@"
@@ -362,6 +383,21 @@ case "${SC_QA_TUN_GUARD_CLEANUP_FAULT-}" in
   masked-recovery-unit )
     [ "${SC_QA_TUN_GUARD_LAB-}" = yes ] || exit 2 ;;
   * ) echo 'Invalid real-TUN guard cleanup fault mode' >&2; exit 2 ;;
+esac
+
+# The dual-stack trial is explicitly opted in, strictly disposable and
+# excluded from manager-death/hosting/cleanup fault-injection scenarios.
+case "${SC_QA_TUN_IPV6-}" in
+  '') ipv6_trial=no ;;
+  yes)
+    if [ "${SC_QA_TUN_GUARD_LAB-}" = yes ] ||
+       [ -n "${SC_QA_TUN_OUTAGE_FAULT-}" ] ||
+       [ -n "${SC_QA_TUN_CLEANUP_FAULT-}" ]; then
+      echo 'REAL_TUN_IPV6=FAIL (dual-stack trial cannot combine with fault modes)' >&2
+      exit 2
+    fi
+    ipv6_trial=yes ;;
+  *) echo 'REAL_TUN_IPV6=FAIL (unsupported QA mode)' >&2; exit 2 ;;
 esac
 
 # Large-payload QA runs only in the normal disposable positive/outage guest.
@@ -538,12 +574,30 @@ ip -n "$peer" link set scqapeer0 up
 ip -n "$peer" addr add 5.22.0.10/32 dev lo
 ip -n "$peer" addr add 8.8.8.8/32 dev lo
 ip -n "$peer" addr add 198.51.100.42/32 dev lo
+if [ "$ipv6_trial" = yes ]; then
+  # Disconnected guest only. No claimed Iranian IPv6 geolocation or
+  # physical-host IPv6 safety. Loopback destinations are synthetic peers.
+  test "$(cat /proc/sys/net/ipv6/conf/"$edge"/disable_ipv6)" = 0 || {
+    echo 'REAL_TUN_IPV6=FAIL (guest IPv6 disabled)' >&2; exit 1;
+  }
+  ip -6 addr add fd73:1::1/64 dev "$edge"
+  ip -n "$peer" -6 addr add fd73:1::2/64 dev scqapeer0
+  for addr in 2001:db8:5::10 2001:db8:5::11 2001:db8:8::8 2001:db8:8::9; do
+    ip -n "$peer" -6 addr add "$addr"/128 dev lo
+  done
+  ip -6 route add default via fd73:1::2 dev "$edge" metric 100
+  default_v6_added=yes
+fi
 # Independent peer-side packet counter: an ordinary Direct foreign TCP flow
 # must cross this VETH; the VLESS server's local-origin flow cannot count.
 ip netns exec "$peer" nft -f - <<'NFTWITNESS'
 table inet scqawitness {
   counter direct_packets { }
   counter direct_udp_packets { }
+  counter ipv6_foreign_tcp_packets { }
+  counter ipv6_foreign_udp_packets { }
+  counter ipv6_override_packets { }
+  counter ipv6_override_udp_packets { }
   counter payload_tcp_direct_packets { }
   counter payload_udp_direct_packets { }
   counter direct_dns_udp_packets { }
@@ -556,6 +610,10 @@ table inet scqawitness {
     type filter hook input priority filter; policy accept;
     iifname "scqapeer0" ip daddr 8.8.8.8 tcp dport 19180 counter name direct_packets
     iifname "scqapeer0" ip daddr 8.8.8.8 udp dport 19186 counter name direct_udp_packets
+    iifname "scqapeer0" ip6 daddr 2001:db8:8::8 tcp dport 19192 counter name ipv6_foreign_tcp_packets
+    iifname "scqapeer0" ip6 daddr 2001:db8:8::8 udp dport 19193 counter name ipv6_foreign_udp_packets
+    iifname "scqapeer0" ip6 daddr 2001:db8:5::10 tcp dport 19192 counter name ipv6_override_packets
+    iifname "scqapeer0" ip6 daddr 2001:db8:5::10 udp dport 19193 counter name ipv6_override_udp_packets
     iifname "scqapeer0" ip daddr 8.8.8.8 tcp dport 19188 counter name payload_tcp_direct_packets
     iifname "scqapeer0" ip daddr 8.8.8.8 udp dport 19189 counter name payload_udp_direct_packets
     iifname "scqapeer0" ip daddr 8.8.8.8 udp dport 53 counter name direct_dns_udp_packets
@@ -648,6 +706,12 @@ ip netns exec "$peer" /usr/bin/python3 -I -B -u /root/qa-tun-payload-wire.py ser
   >/run/sc-qa-tun-payload.log 2>&1 &
 payload_pid=$!
 
+if [ "$ipv6_trial" = yes ]; then
+  ip netns exec "$peer" /usr/bin/python3 -I -B -u /root/qa-tun-ipv6-wire.py serve \
+    >/run/sc-qa-tun-ipv6.log 2>&1 &
+  ipv6_pid=$!
+fi
+
 # The peer answers genuine DNS UDP and TCP messages. The A record identifies
 # the request source observed by an independent authoritative server.
 ip netns exec "$peer" /usr/bin/python3 -I -B -u /root/qa-tun-dns-peer.py \
@@ -728,6 +792,42 @@ test "$native_apps_baseline" -gt "$native_apps_before" || {
   exit 1
 }
 echo 'REAL_TUN_NATIVE_APPS_WITNESS=PASS (native APT/Git baseline positive-control)'
+if [ "$ipv6_trial" = yes ]; then
+  # IPv6 DAD and the independent server must both settle before claiming a
+  # real native Direct positive-control baseline.
+  ipv6_ready=no
+  tries=0
+  while [ "$tries" -lt 60 ]; do
+    if ! ip -6 addr show dev "$edge" | grep -Eq 'tentative|dadfailed' &&
+      ipv6_path tcp 2001:db8:8::8 fd73:1::1 reply &&
+      ipv6_path udp 2001:db8:8::8 fd73:1::1 reply &&
+      ipv6_path tcp 2001:db8:5::10 fd73:1::1 reply &&
+      ipv6_path udp 2001:db8:5::10 fd73:1::1 reply; then
+      ipv6_ready=yes
+      break
+    fi
+    kill -0 "$ipv6_pid" 2>/dev/null || {
+      echo 'REAL_TUN_IPV6=FAIL (independent IPv6 origin died)' >&2; exit 1;
+    }
+    tries=$((tries+1))
+    sleep 0.2
+  done
+  test "$ipv6_ready" = yes || {
+    echo 'REAL_TUN_IPV6=FAIL (native baseline or DAD unavailable)' >&2; exit 1;
+  }
+  ipv6_foreign_tcp_baseline=$(ipv6_foreign_tcp_direct_packets)
+  ipv6_foreign_udp_baseline=$(ipv6_foreign_udp_direct_packets)
+  ipv6_override_baseline=$(ipv6_override_direct_packets)
+  ipv6_override_udp_baseline=$(ipv6_override_udp_direct_packets)
+  test "$ipv6_foreign_tcp_baseline" -gt 0 &&
+    test "$ipv6_foreign_udp_baseline" -gt 0 &&
+    test "$ipv6_override_baseline" -gt 0 &&
+    test "$ipv6_override_udp_baseline" -gt 0 || {
+      echo 'REAL_TUN_IPV6=FAIL (missing native Direct positive-control counters)' >&2; exit 1;
+    }
+  echo 'REAL_TUN_IPV6_DIRECT_BASELINE=PASS (independent TCP/UDP source and native counters)'
+  echo 'REAL_TUN_IPV6_OVERRIDE_UDP_DIRECT_BASELINE=PASS (native UDP positive-controlled counter)'
+fi
 if [ "$payload_trial" = yes ]; then
   payload_path tcp 8.8.8.8 10.254.72.1 reply
   payload_path udp 8.8.8.8 10.254.72.1 reply
@@ -842,6 +942,34 @@ if [ "$ready" != yes ]; then
   exit 1
 fi
 echo "REAL_TUN_SELECTED_TCP_PATH=PASS (domestic Direct vs foreign VLESS; no HTTP proxy)"
+if [ "$ipv6_trial" = yes ]; then
+  ip -6 route show table all | grep -F 'dev sctunqa0' >/dev/null || {
+    echo 'REAL_TUN_IPV6=FAIL (no active kernel IPv6 TUN route)' >&2; exit 1;
+  }
+  ipv6_path tcp 2001:db8:5::11 fd73:1::1 reply
+  ipv6_path udp 2001:db8:5::11 fd73:1::1 reply
+  # The explicitly VPN-only domestic host must override the /64 Direct rule.
+  ipv6_path tcp 2001:db8:5::10 2001:db8:5::10 reply
+  ipv6_path udp 2001:db8:5::10 2001:db8:5::10 reply
+  # Foreign defaults to VLESS; explicit foreign host Direct stays deliberate.
+  ipv6_path tcp 2001:db8:8::8 2001:db8:8::8 reply
+  ipv6_path udp 2001:db8:8::8 2001:db8:8::8 reply
+  ipv6_path tcp 2001:db8:8::9 fd73:1::1 reply
+  ipv6_path udp 2001:db8:8::9 fd73:1::1 reply
+  test "$(ipv6_foreign_tcp_direct_packets)" -eq "$ipv6_foreign_tcp_baseline" &&
+    test "$(ipv6_foreign_udp_direct_packets)" -eq "$ipv6_foreign_udp_baseline" &&
+    test "$(ipv6_override_direct_packets)" -eq "$ipv6_override_baseline" &&
+    test "$(ipv6_override_udp_direct_packets)" -eq "$ipv6_override_udp_baseline" || {
+      echo 'REAL_TUN_IPV6=FAIL (VPN-required IPv6 leaked native Direct)' >&2; exit 1;
+    }
+  assert_tun_policy_active || { echo 'REAL_TUN_IPV6=FAIL (TUN/IPv4 policy disappeared)' >&2; exit 1; }
+  ip -6 route show table all | grep -F 'dev sctunqa0' >/dev/null || {
+    echo 'REAL_TUN_IPV6=FAIL (IPv6 policy disappeared)' >&2; exit 1;
+  }
+  echo 'REAL_TUN_IPV6_OVERRIDE_UDP_SELECTED=PASS (VLESS source and unchanged native UDP counter)'
+  echo 'REAL_TUN_IPV6_EXPLICIT_DIRECT_UDP_SELECTED=PASS (exact source and payload)'
+  echo 'REAL_TUN_IPV6_SELECTED=PASS (native domestic Direct, explicit override, foreign VLESS, no Direct leak)'
+fi
 # Explicit, synthetic HTTP Host exceptions exercise native sing-box sniff.
 # This does not prove DNS correlation, TLS SNI or geographic classification.
 test "$(direct_witness_packets)" -eq "$witness_baseline" || {
@@ -1043,6 +1171,33 @@ assert_tun_policy_active || {
   exit 1
 }
 echo 'REAL_TUN_NATIVE_APPS_OUTAGE_WITNESS=PASS (APT/Git failed closed, independent Direct witness unchanged)'
+if [ "$ipv6_trial" = yes ]; then
+  ipv6_path tcp 2001:db8:8::8 none no-reply
+  ipv6_path udp 2001:db8:8::8 none no-reply
+  ipv6_path tcp 2001:db8:5::10 none no-reply
+  ipv6_path udp 2001:db8:5::10 none no-reply
+  kill -0 "$ipv6_pid" 2>/dev/null || {
+    echo 'REAL_TUN_IPV6=FAIL (independent peer dead during outage)' >&2; exit 1;
+  }
+  # Direct still works after upstream loss and the origin is independently alive.
+  ipv6_path tcp 2001:db8:5::11 fd73:1::1 reply
+  ipv6_path udp 2001:db8:5::11 fd73:1::1 reply
+  ipv6_path tcp 2001:db8:8::9 fd73:1::1 reply
+  ipv6_path udp 2001:db8:8::9 fd73:1::1 reply
+  test "$(ipv6_foreign_tcp_direct_packets)" -eq "$ipv6_foreign_tcp_baseline" &&
+    test "$(ipv6_foreign_udp_direct_packets)" -eq "$ipv6_foreign_udp_baseline" &&
+    test "$(ipv6_override_direct_packets)" -eq "$ipv6_override_baseline" &&
+    test "$(ipv6_override_udp_direct_packets)" -eq "$ipv6_override_udp_baseline" || {
+      echo 'REAL_TUN_IPV6=FAIL (native Direct IPv6 leak on upstream loss)' >&2; exit 1;
+    }
+  ip -6 route show table all | grep -F 'dev sctunqa0' >/dev/null &&
+    assert_tun_policy_active || {
+      echo 'REAL_TUN_IPV6=FAIL (IPv6 routing policy vanished during outage)' >&2; exit 1;
+    }
+  echo 'REAL_TUN_IPV6_OVERRIDE_UDP_OUTAGE=PASS (no reply and unchanged native UDP counter)'
+  echo 'REAL_TUN_IPV6_EXPLICIT_DIRECT_UDP_OUTAGE=PASS (exact source and payload)'
+  echo 'REAL_TUN_IPV6_OUTAGE=PASS (VPN-required TCP/UDP failed closed, native Direct preserved)'
+fi
 if [ "$payload_trial" = yes ]; then
   payload_path tcp 8.8.8.8 none no-reply
   payload_path udp 8.8.8.8 none no-reply
