@@ -46,7 +46,7 @@ func newHostDriftReport() HostDriftReport {
 		Outcome: "not_observed",
 		Limitations: []string{
 			"Both observations are non-atomic and can be stale immediately after collection.",
-			"Equality does not prove VPN endpoint reachability, firewall/conntrack ownership, SSH or HTTP(S) reply safety.",
+			"Equality does not prove VPN endpoint reachability, nftables/conntrack ownership, SSH or HTTP(S) reply safety.",
 			"Baseline files are operator-supplied and are not authenticated; a matching observation never authorizes route mutation.",
 			"Semantic JSON comparison does not attest host state between observations or preserve a recoverable network journal.",
 		},
@@ -112,8 +112,22 @@ func readHostDriftBaseline(path string) (HostPreflight, error) {
 // This only validates shape and asserted mode, not authenticity or freshness.
 func validateHostDriftSnapshot(snapshot HostPreflight) error {
 	bad := func() error { return errors.New("missing or unsupported host-preflight evidence") }
-	if snapshot.Mode != "observation_only" || !snapshot.ReadOnly ||
-		snapshot.SnapshotAtomic || snapshot.ActivationReady {
+	if !snapshot.ReadOnly || snapshot.SnapshotAtomic || snapshot.ActivationReady {
+		return bad()
+	}
+	// Preserve the caller's explicit coverage choice in the baseline schema:
+	// dropping the firewall fingerprint must not silently downgrade a
+	// previously requested firewall-inclusive comparison.
+	switch snapshot.Mode {
+	case "observation_only":
+		if snapshot.Firewall != nil {
+			return bad()
+		}
+	case "observation_with_nftables":
+		if snapshot.Firewall == nil {
+			return bad()
+		}
+	default:
 		return bad()
 	}
 	// A successful Linux link inventory cannot be empty: even a private
@@ -126,6 +140,13 @@ func validateHostDriftSnapshot(snapshot HostPreflight) error {
 	}
 	if !validHostDriftPolicyRules(snapshot.IPv4Rules) ||
 		!validHostDriftPolicyRules(snapshot.IPv6Rules) {
+		return bad()
+	}
+	if snapshot.Firewall != nil &&
+		(!snapshot.Firewall.Observed ||
+			!firewallDigest.MatchString(snapshot.Firewall.RulesetSHA256) ||
+			snapshot.Firewall.ObjectCount < 0 ||
+			snapshot.Firewall.ObjectCount > firewallMaxObjects) {
 		return bad()
 	}
 	for _, lookup := range []*HostRouteLookup{snapshot.Endpoint, snapshot.ManagementPeer} {
@@ -424,6 +445,9 @@ func compareHostDriftSnapshots(baseline, observed HostPreflight) (HostDriftRepor
 		{"ipv4_rules", baseline.IPv4Rules, observed.IPv4Rules, false},
 		{"ipv6_rules", baseline.IPv6Rules, observed.IPv6Rules, false},
 	}
+	if baseline.Mode != observed.Mode || (baseline.Firewall == nil) != (observed.Firewall == nil) {
+		return report, Fault("host_drift_unavailable", "firewall observation coverage differs from baseline")
+	}
 	for _, lookup := range []struct {
 		name string
 		old  *HostRouteLookup
@@ -458,9 +482,20 @@ func compareHostDriftSnapshots(baseline, observed HostPreflight) (HostDriftRepor
 			Name: c.name, BaselineSHA256: before, ObservedSHA256: now, Changed: changed,
 		})
 	}
+	if baseline.Firewall != nil {
+		// A digest-only comparison prevents private firewall rules from
+		// appearing in status, logs or the operator's drift report.
+		changed := baseline.Firewall.RulesetSHA256 != observed.Firewall.RulesetSHA256 ||
+			baseline.Firewall.ObjectCount != observed.Firewall.ObjectCount
+		report.Changed = report.Changed || changed
+		report.Components = append(report.Components, HostDriftComponent{
+			Name: "nftables_ruleset", BaselineSHA256: baseline.Firewall.RulesetSHA256,
+			ObservedSHA256: observed.Firewall.RulesetSHA256, Changed: changed,
+		})
+	}
 	if report.Changed {
 		report.Outcome = "observations_changed"
-		return report, Fault("host_drift_detected", "host routes, rules or links differ from recorded baseline")
+		return report, Fault("host_drift_detected", "host routes, rules, links or nftables differ from recorded baseline")
 	}
 	report.Outcome = "matching_observations"
 	return report, nil
@@ -483,7 +518,12 @@ func InspectHostDrift(baselineFile string) (HostDriftReport, error) {
 	if baseline.ManagementPeer != nil {
 		managementPeer = baseline.ManagementPeer.Target
 	}
-	observed, err := InspectHostRoutes(endpoint, managementPeer)
+	var observed HostPreflight
+	if baseline.Firewall != nil {
+		observed, err = InspectHostRoutesAndFirewall(endpoint, managementPeer)
+	} else {
+		observed, err = InspectHostRoutes(endpoint, managementPeer)
+	}
 	if err != nil {
 		report.Outcome = "observation_failed"
 		return report, err
