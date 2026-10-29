@@ -438,7 +438,9 @@ accept_tun_guard_rejection() {
   done
 }
 echo 'REAL_TUN_LAB_STAGE=execute-guest-path'
-docker exec "$container" /bin/sh /root/qa-host-tun-path.sh
+regular_tun_log="$scratch/real-tun-domain-path.log"
+docker exec "$container" /bin/sh /root/qa-host-tun-path.sh | tee "$regular_tun_log"
+grep -Fx 'REAL_TUN_SNIFFED_DOMAIN_EXCEPTION=PASS (manual HTTP name rules, raw IP intact)' "$regular_tun_log" >/dev/null
 assert_tun_native_cleanup real-tun-candidate-cleanup
 # The same genuine TUN is started again, but only after an independently
 # armed systemd timer. SIGKILL the initiating controller and prove a fresh

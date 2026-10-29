@@ -21,6 +21,10 @@ func main() {
 		// Test prefix denotes the simulated domestic endpoint in the guest.
 		// This is NOT an authenticated or complete Iran-prefix database.
 		DomesticCIDRs: []string{"5.22.0.10/32"},
+		DomainExceptions: []sc.SmartTUNDomainException{
+			{Domain: "scqa.test", Suffix: true, Via: "vpn"},
+			{Domain: "bypass.scqa.test", Via: "direct"},
+		},
 	})
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "QA candidate generation failed:", err)
