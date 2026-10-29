@@ -34,6 +34,8 @@ BASE_ENV = {
     # Diagnostic only; the fake repository never contains operator secrets.
     "GIT_TRACE_CURL": "1",
     "GIT_TRACE_CURL_NO_DATA": "1",
+    "GIT_TRACE": "1",
+    "GIT_TRACE_PERFORMANCE": "1",
 }
 
 
@@ -47,7 +49,29 @@ def run(argv, timeout=22):
     try:
         stdout, stderr = proc.communicate(timeout=timeout)
     except subprocess.TimeoutExpired as exc:
-        os.killpg(proc.pid, signal.SIGKILL)
+        # The Git trace showed successful HTTP object responses but no clone
+        # completion. Inspect only QA-owned processes in this exact session
+        # BEFORE terminating them; do not infer a packet fault from a timeout.
+        process_rows = []
+        ps = subprocess.run(
+            ["/usr/bin/ps", "-e", "-o", "pid=,ppid=,pgid=,stat=,wchan=,comm="],
+            capture_output=True, check=False, timeout=3,
+        )
+        if ps.returncode == 0:
+            for line in ps.stdout.decode("ascii", errors="replace").splitlines():
+                fields = line.split()
+                if len(fields) >= 6 and fields[2] == str(proc.pid):
+                    process_rows.append(line.strip())
+        sockets = subprocess.run(
+            ["/usr/bin/ss", "-tnp", "(", "dport", "=", ":19187",
+             "or", "sport", "=", ":19187", ")"],
+            capture_output=True, check=False, timeout=3,
+        )
+        socket_rows = sockets.stdout.decode("utf-8", errors="replace").splitlines()[-8:]
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
         stdout, stderr = proc.communicate(timeout=5)
         witnessed = (
             WITNESS.read_text(encoding="ascii").splitlines()[-14:]
@@ -59,7 +83,8 @@ def run(argv, timeout=22):
         detail = stderr.decode("utf-8", errors="replace")[-2600:]
         raise RuntimeError(
             f"native client exceeded bounded timeout: {argv[0]}; "
-            f"stderr_tail={detail!r}; peer_requests={witnessed!r}"
+            f"stderr_tail={detail!r}; peer_requests={witnessed!r}; "
+            f"owned_processes={process_rows!r}; sockets={socket_rows!r}"
         ) from exc
     return subprocess.CompletedProcess(argv, proc.returncode, stdout, stderr)
 
