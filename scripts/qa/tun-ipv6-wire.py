@@ -19,7 +19,11 @@ TCP_BYTES = 128 * 1024
 UDP_BYTES = 900
 TCP_PORT = 19192
 UDP_PORT = 19193
-ADDRESS_WIDTH = 40
+# Explicitly bind one independent UDP socket per loopback destination.
+# Linux wildcard UDP replies may otherwise select the primary interface
+# address, giving a false source identity on a genuine IPv6 Direct request.
+UDP_BIND_ADDRESSES = ("2001:db8:5::10", "2001:db8:5::11",
+                      "2001:db8:8::8", "2001:db8:8::9")
 ALLOWED = {
     errno.ENETUNREACH, errno.EHOSTUNREACH, errno.ECONNREFUSED,
     errno.ECONNRESET, errno.EPIPE, errno.ETIMEDOUT
@@ -105,8 +109,14 @@ class UDPHandler(socketserver.BaseRequestHandler):
 def serve():
     with ExitStack() as stack:
         tcp = stack.enter_context(TCP6(("::", TCP_PORT), TCPHandler))
-        udp = stack.enter_context(UDP6(("::", UDP_PORT), UDPHandler))
-        threads = [threading.Thread(target=x.serve_forever, daemon=True) for x in (tcp, udp)]
+        # Same destination, same reply source for native Direct and VLESS
+        # regardless of which source/interface Linux would pick for ::.
+        udp_servers = [
+            stack.enter_context(UDP6((address, UDP_PORT), UDPHandler))
+            for address in UDP_BIND_ADDRESSES
+        ]
+        servers = [tcp, *udp_servers]
+        threads = [threading.Thread(target=x.serve_forever, daemon=True) for x in servers]
         for thread in threads:
             thread.start()
         threads[0].join()
@@ -132,11 +142,10 @@ def udp_probe(destination, token):
 def probe(transport, destination, expected_source, mode):
     if transport not in ("tcp", "udp") or mode not in ("reply", "no-reply"):
         raise ValueError("invalid IPv6 QA mode")
-    destinations = ("2001:db8:5::10", "2001:db8:5::11", "2001:db8:8::8", "2001:db8:8::9")
-    if destination not in destinations:
+    if destination not in UDP_BIND_ADDRESSES:
         raise ValueError("not a controlled synthetic IPv6 fixture")
     if mode == "reply":
-        if expected_source not in ("fd73:1::1", *destinations):
+        if expected_source not in ("fd73:1::1", *UDP_BIND_ADDRESSES):
             raise ValueError("invalid IPv6 positive source expectation")
     elif expected_source != "none":
         raise ValueError("negative IPv6 expectation requires no source")

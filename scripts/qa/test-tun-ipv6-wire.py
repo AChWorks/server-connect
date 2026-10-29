@@ -60,6 +60,13 @@ class IPv6WireTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 m.probe(*args)
 
+    def test_udp_origin_bindings_cannot_fall_back_to_wildcard(self):
+        self.assertEqual(set(m.UDP_BIND_ADDRESSES), {
+            "2001:db8:5::10", "2001:db8:5::11",
+            "2001:db8:8::8", "2001:db8:8::9",
+        })
+        self.assertNotIn("::", m.UDP_BIND_ADDRESSES)
+
     def test_address_is_binary_canonicalized(self):
         token = b"0123456789abcdef"
         answer = m.response(m.request(token, m.UDP_BYTES), "2001:db8:5:0:0:0:0:10", m.UDP_BYTES)
