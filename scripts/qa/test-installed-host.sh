@@ -386,6 +386,7 @@ test -x "$scratch/tun-config-qa"
 docker cp "$scratch/tun-config-qa" "$container:/root/qa-tun-config-qa"
 docker cp "$root/scripts/qa/tun-dns-peer.py" "$container:/root/qa-tun-dns-peer.py"
 docker cp "$root/scripts/qa/tun-dns-client.py" "$container:/root/qa-tun-dns-client.py"
+docker cp "$root/scripts/qa/tun-sni-client.py" "$container:/root/qa-tun-sni-client.py"
 docker cp "$root/scripts/qa/host-tun-path.sh" "$container:/root/qa-host-tun-path.sh"
 docker cp "$root/scripts/qa/tun-guard-unit-lab.sh" "$container:/root/qa-tun-guard-unit-lab.sh"
 # Independently check resources omitted from the standard route/rule/link
@@ -441,6 +442,9 @@ echo 'REAL_TUN_LAB_STAGE=execute-guest-path'
 regular_tun_log="$scratch/real-tun-domain-path.log"
 docker exec "$container" /bin/sh /root/qa-host-tun-path.sh | tee "$regular_tun_log"
 grep -Fx 'REAL_TUN_SNIFFED_DOMAIN_EXCEPTION=PASS (VPN-only HTTP names; no Direct leak)' "$regular_tun_log" >/dev/null
+grep -F 'REAL_TUN_TLS_SNI_BASELINE=PASS' "$regular_tun_log" >/dev/null
+grep -F 'REAL_TUN_TLS_SNI_VPN_ONLY=PASS' "$regular_tun_log" >/dev/null
+grep -F 'REAL_TUN_TLS_SNI_NO_DIRECT_ON_UPSTREAM_LOSS=PASS' "$regular_tun_log" >/dev/null
 assert_tun_native_cleanup real-tun-candidate-cleanup
 # The same genuine TUN is started again, but only after an independently
 # armed systemd timer. SIGKILL the initiating controller and prove a fresh
@@ -549,7 +553,7 @@ fi
 docker exec "$container" /sbin/ip netns del scqapeer
 assert_tun_native_cleanup real-tun-injected-cleanup-recovery
 echo 'REAL_TUN_CLEANUP_FAILURE_REJECTED=PASS (guest cleanup failure != expected TUN rejection)'
-docker exec "$container" /bin/rm -f /root/qa-tun-config-qa /root/qa-host-tun-path.sh /root/qa-tun-guard-unit-lab.sh
+docker exec "$container" /bin/rm -f /root/qa-tun-config-qa /root/qa-host-tun-path.sh /root/qa-tun-guard-unit-lab.sh /root/qa-tun-sni-client.py
 # Product code + installed inactive-by-default independent recovery units.
 # The actual RPDB rule is added ONLY in the verified disconnected guest.
 docker cp "$root/scripts/qa/host-product-guard-trial.sh" "$container:/root/qa-product-guard-trial.sh"
