@@ -23,7 +23,7 @@ func main() {
 		DomesticCIDRs: []string{"5.22.0.10/32"},
 		DomainExceptions: []sc.SmartTUNDomainException{
 			{Domain: "scqa.test", Suffix: true, Via: "vpn"},
-			{Domain: "bypass.scqa.test", Via: "direct"},
+			{Domain: "exact.scqa.test", Via: "vpn"},
 		},
 	})
 	if err != nil {

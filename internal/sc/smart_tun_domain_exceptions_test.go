@@ -11,7 +11,7 @@ import (
 func TestSmartTUNDomainExceptionOrdering(t *testing.T) {
 	p, o := smartTUNFixture()
 	o.DomainExceptions = []SmartTUNDomainException{
-		{Domain: "example.test", Suffix: true, Via: "direct"},
+		{Domain: "example.test", Suffix: true, Via: "vpn"},
 		{Domain: "sub.example.test", Via: "vpn"},
 		{Domain: "EXAMPLE.TEST", Via: "vpn"},
 	}
@@ -36,7 +36,7 @@ func TestSmartTUNDomainExceptionOrdering(t *testing.T) {
 	if len(r) != 7 || r[0].Action != "bypass" || r[2].Action != "sniff" ||
 		r[3].Domain[0] != "sub.example.test" || r[3].Outbound != "upstream" ||
 		r[4].Domain[0] != "example.test" || r[4].Outbound != "upstream" ||
-		r[5].DomainSuffix[0] != ".example.test" || r[5].Outbound != "direct" {
+		r[5].DomainSuffix[0] != ".example.test" || r[5].Outbound != "upstream" {
 		t.Fatalf("unexpected rule ordering: %+v", r)
 	}
 	o.DomainExceptions[0], o.DomainExceptions[2] = o.DomainExceptions[2], o.DomainExceptions[0]
@@ -61,9 +61,13 @@ func TestSmartTUNDomainExceptionAdmission(t *testing.T) {
 		}
 	}
 	p, o := smartTUNFixture()
-	o.DomainExceptions = []SmartTUNDomainException{{Domain: "example.test", Via: "vpn"}, {Domain: "EXAMPLE.TEST", Via: "direct"}}
+	o.DomainExceptions = []SmartTUNDomainException{{Domain: "example.test", Via: "vpn"}, {Domain: "EXAMPLE.TEST", Via: "vpn"}}
 	if _, err := SmartTUNCandidateConfig(p, o); err == nil {
 		t.Fatal("accepted duplicate canonical exception")
+	}
+	o.DomainExceptions = []SmartTUNDomainException{{Domain: "example.test", Via: "direct"}}
+	if _, err := SmartTUNCandidateConfig(p, o); err == nil {
+		t.Fatal("accepted spoofable Direct policy based only on Host/SNI")
 	}
 	o.DomainExceptions = []SmartTUNDomainException{{Domain: "example.test", Via: "auto"}}
 	if _, err := SmartTUNCandidateConfig(p, o); err == nil {
