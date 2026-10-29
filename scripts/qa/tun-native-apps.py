@@ -31,11 +31,6 @@ BASE_ENV = {
     "GIT_CONFIG_NOSYSTEM": "1",
     "GIT_CONFIG_GLOBAL": "/dev/null",
     "GIT_TERMINAL_PROMPT": "0",
-    # Diagnostic only; the fake repository never contains operator secrets.
-    "GIT_TRACE_CURL": "1",
-    "GIT_TRACE_CURL_NO_DATA": "1",
-    "GIT_TRACE": "1",
-    "GIT_TRACE_PERFORMANCE": "1",
 }
 
 
@@ -151,32 +146,110 @@ def prepare():
     if len(sha) != 40 or any(c not in "0123456789abcdef" for c in sha):
         raise RuntimeError("invalid synthetic Git commit identity")
     checked(["/usr/bin/git", "clone", "--bare", "-q", str(source), str(bare)])
-    checked(["/usr/bin/git", "-C", str(bare), "update-server-info"])
+    # Intentionally omit update-server-info: this origin supports local
+    # *smart* HTTP transfer, not the legacy dumb-HTTP fallback that stalled
+    # after every loose object was fetched in the selected-path trial.
     (ROOT / "expected-git-sha").write_text(sha + "\n", encoding="ascii")
     WITNESS.touch(mode=0o600)
     print("REAL_TUN_NATIVE_APP_FIXTURES=PASS (isolated APT index and Git objects)")
 
 
 class OriginHandler(SimpleHTTPRequestHandler):
+    # A real, local git-http-backend serves the ordinary smart HTTP fetch
+    # protocol. Pure SimpleHTTPRequestHandler exposed legacy dumb HTTP;
+    # the selected TUN trial stalled after fetching all loose objects,
+    # without native Direct packets or active Git TCP sockets. The precise
+    # helper cause is unproven; use standard smart Git transport instead.
+    # The smart endpoint exercises real Git, not curl/mock Git data.
     def __init__(self, *args, **kwargs):
         super().__init__(*args, directory=str(PUBLIC), **kwargs)
 
+    def witness(self, path):
+        with WITNESS.open("a", encoding="ascii") as fp:
+            fp.write(f"{self.client_address[0]}\t{path}\n")
+
+    def serve_git(self, path, query, body):
+        if not (path == "/git/fixture.git/info/refs" and
+                query == "service=git-upload-pack") and not (
+                path == "/git/fixture.git/git-upload-pack" and
+                self.command == "POST" and not query
+        ):
+            self.send_error(404, "unrecognized synthetic Git endpoint")
+            return
+        env = {
+            **BASE_ENV,
+            "GIT_HTTP_EXPORT_ALL": "1",
+            "GIT_PROJECT_ROOT": str(PUBLIC / "git"),
+            "PATH_INFO": path[len("/git"):],
+            "REQUEST_METHOD": self.command,
+            "QUERY_STRING": query,
+            "CONTENT_TYPE": self.headers.get("Content-Type", ""),
+            "CONTENT_LENGTH": str(len(body)),
+            "REMOTE_ADDR": self.client_address[0],
+        }
+        response = subprocess.run(
+            ["/usr/lib/git-core/git-http-backend"], input=body,
+            env=env, capture_output=True, check=False, timeout=10,
+        )
+        header, sep, payload = response.stdout.partition(b"\r\n\r\n")
+        if not sep:
+            header, sep, payload = response.stdout.partition(b"\n\n")
+        if response.returncode or not sep:
+            self.send_error(502, "synthetic Git backend rejected the request")
+            return
+        parsed = []
+        for line in header.splitlines():
+            key, delim, value = line.partition(b":")
+            if delim:
+                parsed.append((key.decode("ascii").lower(), value.strip().decode("ascii")))
+        status = next((v for k, v in parsed if k == "status"), "200 OK")
+        self.send_response(int(status.split(" ", 1)[0]))
+        for key, value in parsed:
+            if key in ("content-type", "cache-control", "pragma", "expires"):
+                self.send_header(key, value)
+        self.send_header("Content-Length", str(len(payload)))
+        self.send_header("Connection", "close")
+        self.end_headers()
+        self.wfile.write(payload)
+
     def do_GET(self):
-        path = self.path.split("?", 1)[0]
-        if path.startswith("/apt/") or path.startswith("/git/fixture.git/"):
-            # Shared guest filesystem, different independently controlled
-            # network namespace. Append each observed TCP sender, never a
-            # claimed route inferred from a client's exit code.
-            with WITNESS.open("a", encoding="ascii") as fp:
-                fp.write(f"{self.client_address[0]}\t{path}\n")
-        super().do_GET()
+        path, _, query = self.path.partition("?")
+        if path.startswith("/apt/"):
+            self.witness(path)
+            super().do_GET()
+            return
+        if path.startswith("/git/fixture.git/"):
+            self.witness(path)
+            self.serve_git(path, query, b"")
+            return
+        self.send_error(404)
+
+    def do_POST(self):
+        path, _, query = self.path.partition("?")
+        if path != "/git/fixture.git/git-upload-pack" or query:
+            self.send_error(404)
+            return
+        try:
+            size = int(self.headers.get("Content-Length", "-1"))
+        except ValueError:
+            size = -1
+        if not 0 <= size <= 65536:
+            self.send_error(413, "invalid synthetic Git request length")
+            return
+        self.witness(path)
+        self.serve_git(path, query, self.rfile.read(size))
 
     def log_message(self, *args):
         pass
 
 
 def serve():
-    if not (PUBLIC / "apt/dists/qa/Release").is_file() or not WITNESS.is_file():
+    if not (
+        (PUBLIC / "apt/dists/qa/Release").is_file()
+        and (PUBLIC / "git/fixture.git/HEAD").is_file()
+        and Path("/usr/lib/git-core/git-http-backend").is_file()
+        and WITNESS.is_file()
+    ):
         raise RuntimeError("native-app fixture not prepared")
     ThreadingHTTPServer(("0.0.0.0", PORT), OriginHandler).serve_forever()
 
@@ -269,7 +342,11 @@ def exercise(phase):
     ).read_text(encoding="ascii") != "Server Connect TUN native Git route proof\n":
         raise RuntimeError("Git data or revision differs from independently prepared fixture")
     observed_source = "10.254.72.1" if phase == "baseline" else "8.8.8.8"
-    check_witness(observed_source, ["/apt/dists/qa/Release", "/git/fixture.git/info/refs"])
+    check_witness(
+        observed_source,
+        ["/apt/dists/qa/Release", "/git/fixture.git/info/refs",
+         "/git/fixture.git/git-upload-pack"],
+    )
     print(f"REAL_TUN_NATIVE_APPS_{phase.upper()}=PASS (real APT/Git, independently witnessed source)")
 
 

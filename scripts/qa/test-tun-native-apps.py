@@ -3,7 +3,9 @@
 
 import importlib.util
 from pathlib import Path
+import socket
 import tempfile
+import threading
 import unittest
 from unittest.mock import patch
 
@@ -29,14 +31,23 @@ class WitnessTests(unittest.TestCase):
         self.write(
             "8.8.8.8\t/apt/dists/qa/Release",
             "8.8.8.8\t/git/fixture.git/info/refs",
+            "8.8.8.8\t/git/fixture.git/git-upload-pack",
         )
-        apps.check_witness("8.8.8.8", ["/apt/dists/qa/Release", "/git/fixture.git/info/refs"])
+        apps.check_witness(
+            "8.8.8.8",
+            ["/apt/dists/qa/Release", "/git/fixture.git/info/refs",
+             "/git/fixture.git/git-upload-pack"],
+        )
 
     def test_wrong_source_or_missing_app_fails(self):
         cases = [
-            ("10.254.72.1\t/apt/dists/qa/Release", "8.8.8.8\t/git/fixture.git/info/refs"),
+            ("10.254.72.1\t/apt/dists/qa/Release",
+             "8.8.8.8\t/git/fixture.git/info/refs",
+             "8.8.8.8\t/git/fixture.git/git-upload-pack"),
             ("8.8.8.8\t/apt/dists/qa/Release",),
             ("8.8.8.8\t/git/fixture.git/info/refs",),
+            ("8.8.8.8\t/apt/dists/qa/Release",
+             "8.8.8.8\t/git/fixture.git/info/refs"),
             (),
         ]
         for records in cases:
@@ -44,7 +55,9 @@ class WitnessTests(unittest.TestCase):
                 self.write(*records)
                 with self.assertRaises(RuntimeError):
                     apps.check_witness(
-                        "8.8.8.8", ["/apt/dists/qa/Release", "/git/fixture.git/info/refs"]
+                        "8.8.8.8",
+                        ["/apt/dists/qa/Release", "/git/fixture.git/info/refs",
+                         "/git/fixture.git/git-upload-pack"],
                     )
 
     def test_outage_requires_empty_independent_origin_witness(self):
@@ -81,10 +94,53 @@ class FixtureTests(unittest.TestCase):
                     b"Package: sc-qa-tun-route-proof",
                     (root / "public/apt/dists/qa/main/binary-amd64/Packages").read_bytes(),
                 )
-                self.assertTrue((root / "public/git/fixture.git/info/refs").is_file())
+                self.assertTrue((root / "public/git/fixture.git/HEAD").is_file())
+                # No static info/refs means the guest must prove real smart
+                # Git HTTP upload-pack, not silently revert to dumb HTTP.
+                self.assertFalse((root / "public/git/fixture.git/info/refs").exists())
                 self.assertIn("8.8.8.8:19187", (root / "sources.list").read_text())
                 with self.assertRaisesRegex(RuntimeError, "already exists"):
                     apps.prepare()
+
+    def test_genuine_loopback_smart_http_clone(self):
+        # No privileged namespace or production socket. Exercise the actual
+        # CGI-backed smart HTTP fixture and verify a real cloned commit.
+        with tempfile.TemporaryDirectory(prefix="scqa-smart-git-") as temp:
+            root = Path(temp) / "native"
+            with patch.object(apps, "ROOT", root), \
+                 patch.object(apps, "PUBLIC", root / "public"), \
+                 patch.object(apps, "WITNESS", root / "witness"):
+                listener = socket.socket()
+                listener.bind(("127.0.0.1", 0))
+                port = listener.getsockname()[1]
+                listener.close()
+                with patch.object(apps, "ORIGIN", f"http://127.0.0.1:{port}"):
+                    apps.prepare()
+                    server = apps.ThreadingHTTPServer(("127.0.0.1", port), apps.OriginHandler)
+                    thread = threading.Thread(target=server.serve_forever, daemon=True)
+                    thread.start()
+                    try:
+                        result = apps.run(
+                            ["/usr/bin/git", "clone", "-q",
+                             f"{apps.ORIGIN}/git/fixture.git",
+                             str(root / "smart-clone")],
+                            timeout=7,
+                        )
+                        self.assertEqual(result.returncode, 0, result.stderr[-1500:])
+                        actual = apps.checked(
+                            ["/usr/bin/git", "-C", str(root / "smart-clone"),
+                             "rev-parse", "HEAD"]
+                        ).decode().strip()
+                        expected = (root / "expected-git-sha").read_text().strip()
+                        self.assertEqual(actual, expected)
+                        entries = (root / "witness").read_text()
+                        self.assertIn("/git/fixture.git/info/refs", entries)
+                        self.assertIn("/git/fixture.git/git-upload-pack", entries)
+                        self.assertNotIn("/git/fixture.git/objects/", entries)
+                    finally:
+                        server.shutdown()
+                        server.server_close()
+                        thread.join(timeout=3)
 
 
 if __name__ == "__main__":
