@@ -37,6 +37,7 @@ bash scripts/qa/test-host-apt-only.sh
 PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/qa/test-wp-fcgi-check.py
 PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/qa/test-wp-proxy-prepend.py
 PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/qa/test-tun-dns-wire.py
+PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/qa/test-tun-native-apps.py
 # The guard feasibility probe must be strictly guest-local and must reject
 # ambiguous kernel identities before the privileged disconnected guest runs.
 sh -n scripts/qa/host-activation-guard.sh
@@ -387,6 +388,7 @@ docker cp "$scratch/tun-config-qa" "$container:/root/qa-tun-config-qa"
 docker cp "$root/scripts/qa/tun-dns-peer.py" "$container:/root/qa-tun-dns-peer.py"
 docker cp "$root/scripts/qa/tun-dns-client.py" "$container:/root/qa-tun-dns-client.py"
 docker cp "$root/scripts/qa/tun-sni-client.py" "$container:/root/qa-tun-sni-client.py"
+docker cp "$root/scripts/qa/tun-native-apps.py" "$container:/root/qa-tun-native-apps.py"
 docker cp "$root/scripts/qa/host-tun-path.sh" "$container:/root/qa-host-tun-path.sh"
 docker cp "$root/scripts/qa/tun-guard-unit-lab.sh" "$container:/root/qa-tun-guard-unit-lab.sh"
 # Independently check resources omitted from the standard route/rule/link
@@ -445,6 +447,9 @@ grep -Fx 'REAL_TUN_SNIFFED_DOMAIN_EXCEPTION=PASS (VPN-only HTTP names; no Direct
 grep -F 'REAL_TUN_TLS_SNI_BASELINE=PASS' "$regular_tun_log" >/dev/null
 grep -F 'REAL_TUN_TLS_SNI_VPN_ONLY=PASS' "$regular_tun_log" >/dev/null
 grep -F 'REAL_TUN_TLS_SNI_NO_DIRECT_ON_UPSTREAM_LOSS=PASS' "$regular_tun_log" >/dev/null
+grep -F 'REAL_TUN_NATIVE_APPS_BASELINE=PASS' "$regular_tun_log" >/dev/null
+grep -F 'REAL_TUN_NATIVE_APPS_SELECTED_WITNESS=PASS' "$regular_tun_log" >/dev/null
+grep -F 'REAL_TUN_NATIVE_APPS_OUTAGE_WITNESS=PASS' "$regular_tun_log" >/dev/null
 assert_tun_native_cleanup real-tun-candidate-cleanup
 # The same genuine TUN is started again, but only after an independently
 # armed systemd timer. SIGKILL the initiating controller and prove a fresh
@@ -553,7 +558,7 @@ fi
 docker exec "$container" /sbin/ip netns del scqapeer
 assert_tun_native_cleanup real-tun-injected-cleanup-recovery
 echo 'REAL_TUN_CLEANUP_FAILURE_REJECTED=PASS (guest cleanup failure != expected TUN rejection)'
-docker exec "$container" /bin/rm -f /root/qa-tun-config-qa /root/qa-host-tun-path.sh /root/qa-tun-guard-unit-lab.sh /root/qa-tun-sni-client.py
+docker exec "$container" /bin/rm -f /root/qa-tun-config-qa /root/qa-host-tun-path.sh /root/qa-tun-guard-unit-lab.sh /root/qa-tun-sni-client.py /root/qa-tun-native-apps.py
 # Product code + installed inactive-by-default independent recovery units.
 # The actual RPDB rule is added ONLY in the verified disconnected guest.
 docker cp "$root/scripts/qa/host-product-guard-trial.sh" "$container:/root/qa-product-guard-trial.sh"

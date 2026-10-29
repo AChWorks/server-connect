@@ -18,6 +18,9 @@ hosting_pid=
 udp_pid=
 dns_pid=
 tls_pid=
+native_apps_pid=
+native_apps_created=no
+native_apps_dir=/run/sc-qa-tun-native-apps
 tls_cert=/run/sc-qa-tun-tls.crt
 tls_key=/run/sc-qa-tun-tls.key
 edge_added=no
@@ -44,6 +47,9 @@ require_guest() {
   test -f /root/qa-host-assertions.sh
   test -x /root/qa-tun-config-qa
   test -f /root/qa-tun-sni-client.py
+  test -f /root/qa-tun-native-apps.py
+  test -x /usr/bin/apt-get && test -x /usr/bin/git
+  test ! -e "$native_apps_dir" && test ! -L "$native_apps_dir"
   command -v openssl >/dev/null
   test -x "$core"
   if [ ! -c /dev/net/tun ]; then
@@ -81,7 +87,7 @@ cleanup() {
   if [ "${SC_QA_TUN_GUARD_LAB-}" = yes ] && ! qa_tun_guard_cleanup; then
     cleanup_failed=yes
   fi
-  for pid in "$client_pid" "$server_pid" "$origin_pid" "$hosting_pid" "$udp_pid" "$dns_pid" "$tls_pid"; do
+  for pid in "$client_pid" "$server_pid" "$origin_pid" "$hosting_pid" "$udp_pid" "$dns_pid" "$tls_pid" "$native_apps_pid"; do
     if [ -n "$pid" ]; then
       kill "$pid" 2>/dev/null || :
       wait "$pid" 2>/dev/null || :
@@ -113,8 +119,14 @@ cleanup() {
   rm -f /run/scqa-tun-guard-controller.log "$client_cfg" "$server_cfg" /run/sc-qa-tun-origin.log \
     /run/sc-qa-tun-hosting.log /run/sc-qa-tun-udp.log \
     /run/sc-qa-tun-dns.log /run/sc-qa-tun-server.log /run/sc-qa-tun-client.log \
-    /run/sc-qa-tun-tls.log /run/sc-qa-tun-cert.log "$tls_cert" "$tls_key" ||
+    /run/sc-qa-tun-tls.log /run/sc-qa-tun-cert.log /run/sc-qa-tun-native-apps-server.log "$tls_cert" "$tls_key" ||
       { echo 'REAL_TUN_LAB_CLEANUP=FAIL (temporary QA file deletion)' >&2; cleanup_failed=yes; }
+  if [ "$native_apps_created" = yes ]; then
+    if ! rm -rf -- "$native_apps_dir" || [ -e "$native_apps_dir" ] || [ -L "$native_apps_dir" ]; then
+      echo 'REAL_TUN_LAB_CLEANUP=FAIL (owned native-app fixture)' >&2
+      cleanup_failed=yes
+    fi
+  fi
   # Fail, rather than claim cleanup, if the real core leaked its TUN.
   if [ -e /sys/class/net/sctunqa0 ]; then
     echo 'REAL_TUN_LAB_CLEANUP=FAIL (TUN still present)' >&2
@@ -189,6 +201,7 @@ direct_dns_tcp_witness_packets() { peer_counter_packets direct_dns_tcp_packets; 
 hosting_reply_packets() { peer_counter_packets hosting_reply_packets; }
 domestic_tls_direct_packets() { peer_counter_packets domestic_tls_direct_packets; }
 foreign_tls_direct_packets() { peer_counter_packets foreign_tls_direct_packets; }
+native_app_direct_packets() { peer_counter_packets native_app_direct_packets; }
 
 # The fault is injected only by the disposable installed-host regression.
 # Wait for the real sing-box process to exit so its TUN policy is removed.
@@ -239,6 +252,14 @@ expect_named_source() {
 tls_path() {
   env -i HOME=/root PATH=/usr/bin:/bin:/sbin:/usr/sbin \
     /usr/bin/python3 -I -B /root/qa-tun-sni-client.py "$1" "$2" "$3" "$4"
+}
+
+# Actual APT and Git clients run with empty environments, isolated private
+# sources/cache and no application proxy. The peer-namespace HTTP origin
+# independently records source addresses; nftables records native leaks.
+native_apps() {
+  env -i HOME=/root PATH=/usr/bin:/bin:/sbin:/usr/sbin \
+    /usr/bin/python3 -I -B /root/qa-tun-native-apps.py "$1"
 }
 
 # A synthetic foreign visitor makes a NEW inbound HTTP connection to the
@@ -490,6 +511,7 @@ table inet scqawitness {
   counter direct_dns_tcp_packets { }
   counter domestic_tls_direct_packets { }
   counter foreign_tls_direct_packets { }
+  counter native_app_direct_packets { }
   counter hosting_reply_packets { }
   chain incoming {
     type filter hook input priority filter; policy accept;
@@ -499,12 +521,21 @@ table inet scqawitness {
     iifname "scqapeer0" ip daddr 8.8.8.8 tcp dport 53 counter name direct_dns_tcp_packets
     iifname "scqapeer0" ip daddr 5.22.0.10 tcp dport 19181 counter name domestic_tls_direct_packets
     iifname "scqapeer0" ip daddr 8.8.8.8 tcp dport 19181 counter name foreign_tls_direct_packets
+    iifname "scqapeer0" ip daddr 8.8.8.8 tcp dport 19187 counter name native_app_direct_packets
     iifname "scqapeer0" ip saddr 10.254.72.1 ip daddr 198.51.100.42 tcp sport 19184 counter name hosting_reply_packets
   }
 }
 NFTWITNESS
 ip -4 route add default via 10.254.72.2 dev "$edge" metric 100
 default_added=yes
+
+# No public repository, package installation or host APT source edits:
+# generate disposable index/Git objects in the guest before networking.
+native_apps_created=yes
+native_apps prepare
+ip netns exec "$peer" /usr/bin/python3 -I -B -u /root/qa-tun-native-apps.py serve \
+  >/run/sc-qa-tun-native-apps-server.log 2>&1 &
+native_apps_pid=$!
 
 ip netns exec "$peer" python3 -u - >/run/sc-qa-tun-origin.log 2>&1 <<'PYORIGIN' &
 from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer
@@ -611,7 +642,8 @@ while [ "$attempt" -lt 25 ]; do
      dns_path 5.22.0.10 192.0.2.11 ready-domestic-udp udp reply &&
      dns_path 8.8.8.8 192.0.2.11 ready-foreign-udp udp reply &&
      dns_path 8.8.8.8 192.0.2.11 ready-foreign-tcp tcp reply &&
-     expect_foreign_hosted_reply; then
+     expect_foreign_hosted_reply &&
+     without_proxy http://8.8.8.8:19187/apt/dists/qa/Release | grep -Fq "Origin: Server Connect isolated TUN QA"; then
     ready=yes
     break
   fi
@@ -619,6 +651,7 @@ while [ "$attempt" -lt 25 ]; do
   kill -0 "$hosting_pid" 2>/dev/null || { echo "QA hosting service exited" >&2; exit 1; }
   kill -0 "$udp_pid" 2>/dev/null || { echo "QA UDP service exited" >&2; exit 1; }
   kill -0 "$tls_pid" 2>/dev/null || { echo "QA TLS service exited" >&2; cat /run/sc-qa-tun-tls.log >&2; exit 1; }
+  kill -0 "$native_apps_pid" 2>/dev/null || { echo "QA APT/Git origin exited" >&2; cat /run/sc-qa-tun-native-apps-server.log >&2; exit 1; }
   kill -0 "$dns_pid" 2>/dev/null || { echo "QA DNS server exited" >&2; exit 1; }
   attempt=$((attempt+1))
   sleep 0.2
@@ -638,6 +671,14 @@ test "$domestic_tls_baseline" -gt 0 && test "$foreign_tls_baseline" -gt 0 || {
   exit 1
 }
 echo "REAL_TUN_TLS_SNI_BASELINE=PASS (domestic/foreign positive native packet controls)"
+native_apps_before=$(native_app_direct_packets)
+native_apps baseline
+native_apps_baseline=$(native_app_direct_packets)
+test "$native_apps_baseline" -gt "$native_apps_before" || {
+  echo 'REAL_TUN_NATIVE_APPS_BASELINE=FAIL (no native packet positive-control)' >&2
+  exit 1
+}
+echo 'REAL_TUN_NATIVE_APPS_WITNESS=PASS (native APT/Git baseline positive-control)'
 udp_witness_baseline=$(direct_udp_witness_packets)
 test "$udp_witness_baseline" -gt 0 || { echo 'FAIL: no positive native foreign UDP packet witness' >&2; exit 1; }
 echo "REAL_TUN_UDP_DIRECT_WITNESS=PASS (native foreign UDP packets=$udp_witness_baseline)"
@@ -803,6 +844,21 @@ wget_result=$(env -i HOME=/root PATH=/usr/bin:/bin:/sbin:/usr/sbin \
 test "$wget_result" = SOURCE=8.8.8.8
 echo "REAL_TUN_PROXY_UNAWARE_WGET=PASS"
 
+# Genuine native apt-get update + HTTP Git clone, not curl posing as apps.
+# An independent origin and native packet counter distinguish VPN from Direct.
+assert_tun_policy_active || { echo 'REAL_TUN_NATIVE_APPS_SELECTED=FAIL (TUN disappeared)' >&2; exit 1; }
+native_apps selected
+test "$(native_app_direct_packets)" -eq "$native_apps_baseline" || {
+  echo 'REAL_TUN_NATIVE_APPS_SELECTED=FAIL (APT/Git escaped native Direct)' >&2
+  exit 1
+}
+kill -0 "$native_apps_pid" 2>/dev/null &&
+assert_tun_policy_active || {
+  echo 'REAL_TUN_NATIVE_APPS_SELECTED=FAIL (fixture or TUN unavailable)' >&2
+  exit 1
+}
+echo 'REAL_TUN_NATIVE_APPS_SELECTED_WITNESS=PASS (APT/Git VLESS, no native Direct leak)'
+
 if [ "${SC_QA_TUN_GUARD_LAB-}" = yes ]; then
   guarded_real_tun_deadline_trial
   exit 0
@@ -840,6 +896,19 @@ if [ "$witness_after_outage" -ne "$witness_before_outage" ]; then
 fi
 echo 'REAL_TUN_POLICY_DURING_OUTAGE=PASS (live client, TUN route, installed nftables policy)'
 echo 'REAL_TUN_NO_DIRECT_PACKETS_ON_UPSTREAM_LOSS=PASS (positive-controlled independent peer witness)'
+# Native apt-get and Git must also fail closed without silently escaping
+# via Direct while the TUN policy is still active and the HTTP peer is alive.
+native_apps outage
+test "$(native_app_direct_packets)" -eq "$native_apps_baseline" || {
+  echo 'REAL_TUN_NATIVE_APPS_OUTAGE=FAIL (native Direct packets after upstream loss)' >&2
+  exit 1
+}
+kill -0 "$native_apps_pid" 2>/dev/null &&
+assert_tun_policy_active || {
+  echo 'REAL_TUN_NATIVE_APPS_OUTAGE=FAIL (fixture or TUN unavailable)' >&2
+  exit 1
+}
+echo 'REAL_TUN_NATIVE_APPS_OUTAGE_WITNESS=PASS (APT/Git failed closed, independent Direct witness unchanged)'
 # A domestic destination must NOT become Direct just because the upstream
 # stopped when the explicit SNI rule still requires VPN. A nonmatching SNI
 # to the SAME destination must remain Direct: independent routing proof.
