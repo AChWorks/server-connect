@@ -53,6 +53,107 @@ func normalizeNftVolatile(value any) {
 	}
 }
 
+// validNftObject checks the documented libnftables JSON envelope and the
+// minimum identity of each supported ruleset object. It is NOT an nftables
+// rule interpreter: opaque rule/set expressions are still hashed exactly.
+// Unknown output kinds or incomplete object identities fail closed.
+func validNftObject(kind string, value any) bool {
+	fields, ok := value.(map[string]any)
+	if !ok || len(fields) == 0 {
+		return false
+	}
+	presentString := func(name string) bool {
+		text, ok := fields[name].(string)
+		return ok && text != "" && strings.TrimSpace(text) == text
+	}
+	// Native rules are identified by their table/chain/handle rather than
+	// a name. Other listed objects are named. Only tables have no parent.
+	if !presentString("family") ||
+		(kind != "rule" && !presentString("name")) ||
+		(kind != "table" && !presentString("table")) {
+		return false
+	}
+	switch kind {
+	case "table", "chain", "counter", "quota", "ct helper", "limit",
+		"ct timeout", "ct expectation":
+	case "rule":
+		if !presentString("chain") {
+			return false
+		}
+		expressions, ok := fields["expr"].([]any)
+		if !ok || len(expressions) == 0 {
+			return false
+		}
+		for _, expression := range expressions {
+			statement, ok := expression.(map[string]any)
+			if !ok || len(statement) != 1 {
+				return false
+			}
+			for name := range statement {
+				if name == "" || strings.TrimSpace(name) != name {
+					return false
+				}
+			}
+		}
+	case "set", "map":
+		// Datatypes may be a string, concatenated list or typeof object.
+		switch datatype := fields["type"].(type) {
+		case string:
+			if datatype == "" {
+				return false
+			}
+		case []any:
+			if len(datatype) == 0 {
+				return false
+			}
+			for _, part := range datatype {
+				value, ok := part.(string)
+				if !ok || value == "" {
+					return false
+				}
+			}
+		case map[string]any:
+			if len(datatype) != 1 || datatype["typeof"] == nil {
+				return false
+			}
+		default:
+			return false
+		}
+		if kind == "map" && !presentString("map") {
+			return false
+		}
+	case "element":
+		if fields["elem"] == nil {
+			return false
+		}
+	case "flowtable":
+		if !presentString("hook") || fields["prio"] == nil || fields["dev"] == nil {
+			return false
+		}
+	default:
+		return false
+	}
+	return true
+}
+
+// A genuine -j list ruleset always begins with libnftables metadata, even
+// when the ruleset has no tables. Only schema version 1 is recognized here;
+// newer output must be reviewed before its fingerprint may be trusted.
+func validNftMetainfo(value any) bool {
+	metadata, ok := value.(map[string]any)
+	if !ok {
+		return false
+	}
+	for _, key := range []string{"version", "release_name"} {
+		text, ok := metadata[key].(string)
+		if !ok || text == "" || strings.TrimSpace(text) != text {
+			return false
+		}
+	}
+	schema, ok := metadata["json_schema_version"].(json.Number)
+	return ok && schema.String() == "1"
+}
+
 // decodeNFTSnapshot accepts only the actual nft -j list ruleset envelope.
 // Its fingerprint preserves ordered rules and precise large integer values,
 // without exposing potentially sensitive firewall/hosting addresses.
@@ -74,16 +175,20 @@ func decodeNFTSnapshot(raw []byte) (HostFirewallObservation, error) {
 		return HostFirewallObservation{}, bad()
 	}
 	entries, ok := top["nftables"].([]any)
-	if !ok || len(entries) > firewallMaxObjects {
+	if !ok || len(entries) == 0 || len(entries) > firewallMaxObjects {
 		return HostFirewallObservation{}, bad()
 	}
-	for _, entry := range entries {
+	first, ok := entries[0].(map[string]any)
+	if !ok || len(first) != 1 || !validNftMetainfo(first["metainfo"]) {
+		return HostFirewallObservation{}, bad()
+	}
+	for _, entry := range entries[1:] {
 		item, ok := entry.(map[string]any)
 		if !ok || len(item) != 1 {
 			return HostFirewallObservation{}, bad()
 		}
-		for key, value := range item {
-			if strings.TrimSpace(key) == "" || value == nil {
+		for kind, value := range item {
+			if !validNftObject(kind, value) {
 				return HostFirewallObservation{}, bad()
 			}
 		}

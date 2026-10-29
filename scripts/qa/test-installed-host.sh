@@ -386,6 +386,7 @@ assert snapshot['activation_ready'] is False
 assert snapshot['firewall']['observed'] is True
 assert re.fullmatch('[0-9a-f]{64}',snapshot['firewall']['ruleset_sha256'])
 assert isinstance(snapshot['firewall']['object_count'],int)
+assert snapshot['firewall']['object_count'] >= 1  # Native output always begins with metainfo.
 assert 'nftables' not in snapshot['firewall']   # No raw ruleset disclosure
 PYNFTBASE
 docker cp "$scratch/qa-nft-baseline.json" "$container:/root/qa-nft-baseline.json"
