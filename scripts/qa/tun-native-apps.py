@@ -43,21 +43,9 @@ BASE_ENV = {
 }
 
 
-def run(argv, timeout=22, trace_prefix=None):
-    # Native APT and Git spawn helpers. A timeout must terminate the entire
-    # QA-owned subprocess group, not abandon a child that can keep sockets open.
-    if trace_prefix is not None:
-        # Restricted to the generated guest's synthetic Git clone. strace is
-        # the parent of Git, so this does not need to attach to unrelated
-        # processes and cannot mutate an installed/customer host.
-        argv = [
-            "/usr/bin/strace", "-ff", "-tt", "-T", "-s", "96",
-            "-e", "trace=execve,clone,clone3,read,write,close,poll,ppoll,"
-            "pselect6,select,wait4,waitid,recvfrom,sendto,shutdown,connect,"
-            "futex,exit_group",
-            "-o", str(trace_prefix),
-            *argv,
-        ]
+def run(argv, timeout=22):
+    # Native APT and Git spawn helpers. Kill the entire QA-owned process
+    # group on timeout so no child can retain an unobserved network socket.
     proc = subprocess.Popen(
         argv, env=BASE_ENV, stdout=subprocess.PIPE,
         stderr=subprocess.PIPE, start_new_session=True,
@@ -65,56 +53,21 @@ def run(argv, timeout=22, trace_prefix=None):
     try:
         stdout, stderr = proc.communicate(timeout=timeout)
     except subprocess.TimeoutExpired as exc:
-        # The Git trace showed successful HTTP object responses but no clone
-        # completion. Inspect only QA-owned processes in this exact session
-        # BEFORE terminating them; do not infer a packet fault from a timeout.
-        process_rows = []
-        ps = subprocess.run(
-            ["/usr/bin/ps", "-e", "-o", "pid=,ppid=,pgid=,stat=,wchan=,comm="],
-            capture_output=True, check=False, timeout=3,
-        )
-        if ps.returncode == 0:
-            for line in ps.stdout.decode("ascii", errors="replace").splitlines():
-                fields = line.split()
-                if len(fields) >= 6 and fields[2] == str(proc.pid):
-                    process_rows.append(line.strip())
-        sockets = subprocess.run(
-            ["/usr/bin/ss", "-tnp", "(", "dport", "=", ":19187",
-             "or", "sport", "=", ":19187", ")"],
-            capture_output=True, check=False, timeout=3,
-        )
-        socket_rows = sockets.stdout.decode("utf-8", errors="replace").splitlines()[-8:]
-        trace_tails = []
-        if trace_prefix is not None:
-            for path in sorted(trace_prefix.parent.glob(trace_prefix.name + ".*"))[:12]:
-                if path.is_file() and not path.is_symlink():
-                    trace_tails.append(
-                        (path.name, path.read_text(errors="replace")[-1600:])
-                    )
-        server_log_path = Path("/run/sc-qa-tun-native-apps-server.log")
-        server_tail = (
-            server_log_path.read_text(errors="replace")[-2600:]
-            if server_log_path.is_file() else "NOT_AVAILABLE"
-        )
         try:
             os.killpg(proc.pid, signal.SIGKILL)
         except ProcessLookupError:
             pass
         stdout, stderr = proc.communicate(timeout=5)
         witnessed = (
-            WITNESS.read_text(encoding="ascii").splitlines()[-14:]
+            WITNESS.read_text(encoding="ascii").splitlines()[-12:]
             if WITNESS.is_file() else []
         )
-        # All URLs and credentials here are generated inside the disposable
-        # guest. Failure-only bounded output helps distinguish stalled Git
-        # object transport from a missing fixture or wrong native path.
-        detail = stderr.decode("utf-8", errors="replace")[-2600:]
+        # No secrets: only the isolated synthetic HTTP origin and child
+        # output. Never accept an APT/Git timeout as the outage PASS case.
+        detail = stderr.decode("utf-8", errors="replace")[-1500:]
         raise RuntimeError(
-            f"native client exceeded bounded timeout: {argv[0]}; "
-            f"stderr_tail={detail!r}; peer_requests={witnessed!r}; "
-            f"owned_processes={process_rows!r}; sockets={socket_rows!r}; "
-            f"smart_http_origin_tail={server_tail!r}; "
-            f"git_syscall_tails={trace_tails!r}"
+            f"native client timed out: {argv[0]}; "
+            f"stderr_tail={detail!r}; peer_requests={witnessed!r}"
         ) from exc
     return subprocess.CompletedProcess(argv, proc.returncode, stdout, stderr)
 
@@ -222,17 +175,9 @@ class OriginHandler(SimpleHTTPRequestHandler):
             "CONTENT_LENGTH": str(len(body)),
             "REMOTE_ADDR": self.client_address[0],
         }
-        print(
-            f"SMART_HTTP_BACKEND_START method={self.command} path={path} "
-            f"request_bytes={len(body)}", flush=True,
-        )
         response = subprocess.run(
             ["/usr/lib/git-core/git-http-backend"], input=body,
             env=env, capture_output=True, check=False, timeout=10,
-        )
-        print(
-            f"SMART_HTTP_BACKEND_EXIT method={self.command} path={path} "
-            f"rc={response.returncode} stdout_bytes={len(response.stdout)}", flush=True,
         )
         header, sep, payload = response.stdout.partition(b"\r\n\r\n")
         if not sep:
@@ -254,10 +199,6 @@ class OriginHandler(SimpleHTTPRequestHandler):
         self.send_header("Connection", "close")
         self.end_headers()
         self.wfile.write(payload)
-        print(
-            f"SMART_HTTP_BACKEND_SENT method={self.command} path={path} "
-            f"payload_bytes={len(payload)}", flush=True,
-        )
 
     def do_GET(self):
         path, _, query = self.path.partition("?")
@@ -284,10 +225,7 @@ class OriginHandler(SimpleHTTPRequestHandler):
             self.send_error(413, "invalid synthetic Git request length")
             return
         self.witness(path)
-        print(f"SMART_HTTP_POST_BEGIN expected_bytes={size}", flush=True)
-        body = self.rfile.read(size)
-        print(f"SMART_HTTP_POST_READ bytes={len(body)}", flush=True)
-        self.serve_git(path, query, body)
+        self.serve_git(path, query, self.rfile.read(size))
 
     def log_message(self, *args):
         pass
@@ -356,7 +294,7 @@ def exercise(phase):
         "/usr/bin/git",
         "-c", "http.lowSpeedLimit=1", "-c", "http.lowSpeedTime=4",
         "clone", "-q", f"{ORIGIN}/git/fixture.git", str(clone_path)
-    ], timeout=19, trace_prefix=ROOT / "git-selected-strace" if phase == "selected" else None)
+    ], timeout=19)
 
     if phase == "outage":
         # Prior phases proved both executables, fixture bytes and a live
