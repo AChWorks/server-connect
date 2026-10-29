@@ -155,6 +155,8 @@ func TestFirewallFlowtableNativeFieldTypes(t *testing.T) {
 		{"zero-single-device", `0`, `"eth0"`},
 		{"negative-multiple-devices", `-200`, `["eth0","eth1"]`},
 		{"positive-single-device", `10`, `"eth1"`},
+		{"minimum-int32-priority", `-2147483648`, `"eth0"`},
+		{"maximum-int32-priority", `2147483647`, `"eth0"`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			report, err := decodeNFTSnapshot([]byte(makeSnapshot(tc.priority, tc.devices)))
@@ -173,6 +175,8 @@ func TestFirewallFlowtableNativeFieldTypes(t *testing.T) {
 		{"fractional-priority", `1.5`, `"eth0"`},
 		{"exponent-priority", `1e3`, `"eth0"`},
 		{"overflow-priority", `9223372036854775808`, `"eth0"`},
+		{"above-int32-priority", `2147483648`, `"eth0"`},
+		{"below-int32-priority", `-2147483649`, `"eth0"`},
 		{"boolean-device", `0`, `false`},
 		{"object-device", `0`, `{}`},
 		{"null-device", `0`, `null`},
@@ -266,6 +270,62 @@ func TestFirewallCounterTypesValidatedBeforeNormalization(t *testing.T) {
 	report, err = decodeNFTSnapshot([]byte(malformedRef))
 	if ErrorCode(err) != "host_preflight_unavailable" || report != (HostFirewallObservation{}) {
 		t.Fatalf("invalid counter reference yielded evidence: %+v err=%v", report, err)
+	}
+}
+
+func TestFirewallNativeCountersRequireBothObservedFields(t *testing.T) {
+	// -j list ruleset reports both fields for named and anonymous counters.
+	// Optional initial values in JSON input are NOT valid missing output.
+	for _, fixture := range []struct {
+		name string
+		wrap func(string) string
+	}{
+		{
+			"named",
+			func(members string) string {
+				prefix := `"family":"inet","table":"t","name":"count"`
+				if members != "" {
+					prefix += "," + members
+				}
+				return `{"nftables":[` + nftMeta + `,{"counter":{` + prefix + `}}]}`
+			},
+		},
+		{
+			"anonymous-rule-statement",
+			func(members string) string {
+				return `{"nftables":[` + nftMeta +
+					`,{"rule":{"family":"inet","table":"t","chain":"c","expr":[{"counter":{` +
+					members + `}}]}}]}`
+			},
+		},
+	} {
+		t.Run(fixture.name, func(t *testing.T) {
+			valid, err := decodeNFTSnapshot([]byte(fixture.wrap(`"packets":0,"bytes":0`)))
+			if err != nil || !valid.Observed || !firewallDigest.MatchString(valid.RulesetSHA256) {
+				t.Fatalf("genuine native counter rejected: %+v err=%v", valid, err)
+			}
+			// Numeric counter increments must not change the fingerprint.
+			changed, err := decodeNFTSnapshot([]byte(fixture.wrap(`"packets":18446744073709551615,"bytes":9007199254740993`)))
+			if err != nil || !changed.Observed || changed.RulesetSHA256 != valid.RulesetSHA256 {
+				t.Fatalf("genuine counter increments caused drift: %+v err=%v", changed, err)
+			}
+			for _, test := range []struct {
+				name, fields string
+			}{
+				{"missing-packets", `"bytes":0`},
+				{"missing-bytes", `"packets":0`},
+				{"missing-both", ""},
+			} {
+				t.Run(test.name, func(t *testing.T) {
+					observed, err := decodeNFTSnapshot([]byte(fixture.wrap(test.fields)))
+					if ErrorCode(err) != "host_preflight_unavailable" ||
+						observed != (HostFirewallObservation{}) ||
+						observed.RulesetSHA256 == valid.RulesetSHA256 {
+						t.Fatalf("incomplete native counter accepted or matched real fingerprint: %+v err=%v", observed, err)
+					}
+				})
+			}
+		})
 	}
 }
 

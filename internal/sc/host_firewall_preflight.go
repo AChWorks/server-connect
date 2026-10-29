@@ -32,13 +32,14 @@ type HostFirewallObservation struct {
 	ObjectCount   int    `json:"object_count"`
 }
 
-// Native counters are unsigned 64-bit integers. Validate exactly the
-// representation emitted by nft -j, before volatile values are discarded.
+// Native -j list ruleset counter output contains both packet and byte counts,
+// each a uint64 JSON integer. Optional initial values are valid for nft JSON
+// input only. Validate complete output before removing volatile fields.
 func validNftCounterValues(counter map[string]any) bool {
 	for _, field := range []string{"packets", "bytes"} {
 		value, present := counter[field]
 		if !present {
-			continue
+			return false
 		}
 		number, ok := value.(json.Number)
 		if !ok {
@@ -170,9 +171,9 @@ func validNftObject(kind string, value any) bool {
 		if !ok {
 			return false
 		}
-		// Signed integer priorities are native; strings, fractions and
-		// numbers outside the supported signed range are not.
-		if _, err := strconv.ParseInt(priority.String(), 10, 64); err != nil {
+		// The Linux flowtable hook priority is a signed 32-bit int.
+		// Reject values the native kernel cannot represent, before hashing.
+		if _, err := strconv.ParseInt(priority.String(), 10, 32); err != nil {
 			return false
 		}
 		validDevice := func(value any) bool {

@@ -430,12 +430,42 @@ assert 'data' not in doc
 PYNFTREJECT
 
 # Exact absence prevents hijacking a table installed by any pre-existing
-# network owner. The new table has no hooks/rules and cannot filter traffic.
+# network owner. The guest-only chain is deliberately UNHOOKED: these named
+# and anonymous counters cannot change packet filtering or host networking.
 if docker exec "$container" /usr/sbin/nft list table inet sc_qa_foreign_fp >/dev/null 2>&1; then
   echo 'HOST_NFTABLES_PREFLIGHT=FAIL (foreign fixture table exists)' >&2
   exit 1
 fi
 docker exec "$container" /usr/sbin/nft add table inet sc_qa_foreign_fp
+docker exec "$container" /usr/sbin/nft add counter inet sc_qa_foreign_fp sc_qa_named_fp
+docker exec "$container" /usr/sbin/nft add chain inet sc_qa_foreign_fp sc_qa_unhooked
+docker exec "$container" /usr/sbin/nft add rule inet sc_qa_foreign_fp sc_qa_unhooked counter
+# The native exporter, unlike JSON rule-creation INPUT, must provide BOTH
+# uint64 counter members. This tests real named/anonymous Debian 13 output,
+# not only our synthetic Go fixtures, without touching any packet path.
+docker exec "$container" /usr/sbin/nft -j list ruleset | python3 -c '
+import json,sys
+objects=json.load(sys.stdin)["nftables"]
+named=[entry["counter"] for entry in objects if "counter" in entry
+       and entry["counter"].get("table") == "sc_qa_foreign_fp"]
+anonymous=[expr["counter"] for entry in objects if "rule" in entry
+           and entry["rule"].get("table") == "sc_qa_foreign_fp"
+           for expr in entry["rule"].get("expr",[]) if "counter" in expr]
+assert len(named)==1 and len(anonymous)==1,(len(named),len(anonymous))
+for record in named+anonymous:
+    assert all(type(record.get(field)) is int and 0 <= record[field] <= 2**64-1
+               for field in ("packets","bytes")),record
+'
+docker exec "$container" /usr/local/bin/server-connect --json host-preflight \
+  --endpoint 127.0.0.1 --management-peer 127.0.0.2 --with-nftables |
+  python3 -c '
+import json,sys
+result=json.load(sys.stdin)
+assert result["ok"] is True
+assert result["data"]["firewall"]["observed"] is True
+assert result["data"]["firewall"]["object_count"] >= 5
+'
+echo 'HOST_NFTABLES_NATIVE_COUNTER_OUTPUT=PASS (real named/anonymous counters accepted by installed CLI)'
 if docker exec "$container" /usr/local/bin/server-connect --json host-drift \
     --baseline /root/qa-nft-baseline.json >"$scratch/qa-nft-drift-result.json"; then
   echo 'HOST_NFTABLES_PREFLIGHT=FAIL (foreign nftables table was not detected)' >&2
