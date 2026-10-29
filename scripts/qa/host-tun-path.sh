@@ -22,6 +22,10 @@ peer_added=no
 default_added=no
 tun_device_created=no
 nft_before=
+guard_routes_before=
+guard_rules_before=
+guard_v6_routes_before=
+guard_v6_rules_before=
 
 # iproute2 can emit an inconsequential trailing space after link deletion;
 # retain strict route semantics while excluding display-only whitespace.
@@ -69,6 +73,9 @@ cleanup() {
   original_rc=$?
   cleanup_failed=no
   trap - EXIT INT TERM
+  if [ "${SC_QA_TUN_GUARD_LAB-}" = yes ] && ! qa_tun_guard_cleanup; then
+    cleanup_failed=yes
+  fi
   for pid in "$client_pid" "$server_pid" "$origin_pid" "$hosting_pid" "$udp_pid" "$dns_pid"; do
     if [ -n "$pid" ]; then
       kill "$pid" 2>/dev/null || :
@@ -98,7 +105,7 @@ cleanup() {
     rm -f /dev/net/tun ||
       { echo 'REAL_TUN_LAB_CLEANUP=FAIL (owned TUN device file deletion)' >&2; cleanup_failed=yes; }
   fi
-  rm -f "$client_cfg" "$server_cfg" /run/sc-qa-tun-origin.log \
+  rm -f /run/scqa-tun-guard-controller.log "$client_cfg" "$server_cfg" /run/sc-qa-tun-origin.log \
     /run/sc-qa-tun-hosting.log /run/sc-qa-tun-udp.log \
     /run/sc-qa-tun-dns.log /run/sc-qa-tun-server.log /run/sc-qa-tun-client.log ||
       { echo 'REAL_TUN_LAB_CLEANUP=FAIL (temporary QA file deletion)' >&2; cleanup_failed=yes; }
@@ -271,6 +278,128 @@ dns_path() {
     /usr/bin/python3 -I -B /root/qa-tun-dns-client.py "$1" "$2" "$3" "$4" "$5"
 }
 
+case "${SC_QA_TUN_GUARD_LAB-}" in
+  '' ) ;;
+  yes ) . /root/qa-tun-guard-unit-lab.sh ;;
+  * ) echo 'Invalid real-TUN guard laboratory mode' >&2; exit 2 ;;
+esac
+
+guarded_real_tun_deadline_trial() {
+  # Stop the original shell-owned test TUN first. The second activation is
+  # from a different manager/controller, and PID1 must stop it independently.
+  stop_tun_client_for_qa_fault
+  test "$(nft -j list ruleset)" = "$nft_before" &&
+    test "$(ip -N -j -4 route show table all)" = "$guard_routes_before" &&
+    test "$(ip -N -j -4 rule show)" = "$guard_rules_before" &&
+    test "$(ip -N -j -6 route show table all)" = "$guard_v6_routes_before" &&
+    test "$(ip -N -j -6 rule show)" = "$guard_v6_rules_before" || {
+      echo 'QA_TUN_GUARD_BASELINE=FAIL (initial TUN did not restore)' >&2
+      return 1
+    }
+  qa_tun_guard_prepare
+  # Discriminating negative: a loaded but INACTIVE timer is not an armed
+  # recovery executor and must never be accepted before starting real TUN.
+  if qa_tun_guard_prearmed || [ -e /sys/class/net/sctunqa0 ]; then
+    echo 'QA_TUN_GUARD_UNARMED_FALSE_PASS=FAIL' >&2
+    return 1
+  fi
+  echo 'QA_TUN_GUARD_UNARMED_FALSE_PASS_REJECTED=PASS'
+
+  # The child must die from actual SIGKILL after starting a deadline timer
+  # and a real TUN via separate systemd units. No parent-driven stop is used
+  # before the deadline. The recovery service runs in PID1's unit lifecycle.
+  controller_rc=0
+  /bin/sh /root/qa-tun-guard-unit-lab.sh controller \
+    >/run/scqa-tun-guard-controller.log 2>&1 || controller_rc=$?
+  test "$controller_rc" -eq 137 &&
+    grep -Fx 'QA_TUN_GUARD_TIMER_PREARMED=PASS' /run/scqa-tun-guard-controller.log >/dev/null &&
+    grep -Fx 'QA_TUN_GUARD_CLIENT_STARTED=PASS' /run/scqa-tun-guard-controller.log >/dev/null || {
+      echo "QA_TUN_GUARD_CONTROLLER=FAIL (rc=$controller_rc)" >&2
+      cat /run/scqa-tun-guard-controller.log >&2
+      return 1
+    }
+  echo 'QA_TUN_GUARD_CONTROLLER_SIGKILL=PASS'
+
+  managed_pid=$(qa_tun_unit_state "$qa_tun_client_unit" MainPID)
+  case "$managed_pid" in ''|0|*[!0-9]*)
+    echo 'QA_TUN_GUARD_CLIENT_IDENTITY=FAIL (no fresh PID)' >&2; return 1 ;;
+  esac
+  test "$(readlink -f "/proc/$managed_pid/exe")" = "$core" &&
+    test "$(qa_tun_unit_state "$qa_tun_client_unit" ActiveState)" = active &&
+    test "$(qa_tun_unit_state "$qa_tun_recover_timer" ActiveState)" = active &&
+    test "$(qa_tun_unit_state "$qa_tun_recover_unit" ExecMainStartTimestampMonotonic)" = 0 || {
+      echo 'QA_TUN_GUARD_CLIENT_IDENTITY=FAIL (wrong managed process, fired timer or dead timer)' >&2
+      return 1
+    }
+
+  managed_ready=no
+  tries=0
+  while [ "$tries" -lt 40 ]; do
+    if [ -e /sys/class/net/sctunqa0 ] &&
+      expect_source 5.22.0.10 10.254.72.1 &&
+      expect_source 8.8.8.8 8.8.8.8; then
+      managed_ready=yes
+      break
+    fi
+    tries=$((tries + 1))
+    sleep 0.2
+  done
+  test "$managed_ready" = yes || {
+    echo 'QA_TUN_GUARD_SELECTED_PATH=FAIL (no live managed TUN)' >&2
+    return 1
+  }
+  udp_path 8.8.8.8 8.8.8.8 guard-foreign-udp reply
+  dns_path 8.8.8.8 192.0.2.22 guard-foreign-dns udp reply
+  expect_foreign_hosted_reply
+  test "$(direct_witness_packets)" -eq "$witness_baseline" &&
+    test "$(direct_udp_witness_packets)" -eq "$udp_witness_baseline" &&
+    test "$(direct_dns_udp_witness_packets)" -eq "$dns_udp_baseline" &&
+    test "$(qa_tun_unit_state "$qa_tun_client_unit" ActiveState)" = active &&
+    test "$(qa_tun_unit_state "$qa_tun_recover_timer" ActiveState)" = active || {
+      echo 'QA_TUN_GUARD_SELECTED_PATH=FAIL (Direct leak/guard gone)' >&2
+      return 1
+    }
+  echo 'QA_TUN_GUARD_SELECTED_PATH=PASS (real VLESS while controller dead)'
+
+  # The original controller is dead. ONLY the prearmed systemd timer can
+  # trigger its independent oneshot. A stale/default Result=success without
+  # a fresh ExecMain timestamp cannot pass this assertion.
+  recovered=no
+  tries=0
+  while [ "$tries" -lt 90 ]; do
+    triggered=$(qa_tun_unit_state "$qa_tun_recover_unit" ExecMainStartTimestampMonotonic)
+    case "$triggered" in ''|0|*[!0-9]*) triggered=0 ;; esac
+    if [ "$triggered" -gt 0 ] &&
+      [ "$(qa_tun_unit_state "$qa_tun_recover_unit" Result)" = success ] &&
+      [ "$(qa_tun_unit_state "$qa_tun_recover_unit" ExecMainStatus)" = 0 ] &&
+      [ "$(qa_tun_unit_state "$qa_tun_client_unit" ActiveState)" = inactive ] &&
+      [ ! -e /sys/class/net/sctunqa0 ]; then
+      recovered=yes
+      break
+    fi
+    tries=$((tries + 1))
+    sleep 0.5
+  done
+  test "$recovered" = yes || {
+    echo 'QA_TUN_GUARD_DEADLINE=FAIL (no fresh independent stop)' >&2
+    return 1
+  }
+  test "$(nft -j list ruleset)" = "$nft_before" &&
+    test "$(ip -N -j -4 route show table all)" = "$guard_routes_before" &&
+    test "$(ip -N -j -4 rule show)" = "$guard_rules_before" &&
+    test "$(ip -N -j -6 route show table all)" = "$guard_v6_routes_before" &&
+    test "$(ip -N -j -6 rule show)" = "$guard_v6_rules_before" || {
+      echo 'QA_TUN_GUARD_RECOVERY=FAIL (native kernel did not restore)' >&2
+      return 1
+    }
+  expect_source 5.22.0.10 10.254.72.1
+  expect_source 8.8.8.8 10.254.72.1
+  dns_path 8.8.8.8 192.0.2.11 guard-restored-direct udp reply
+  expect_foreign_hosted_reply
+  echo 'QA_TUN_GUARD_DEADLINE_RECOVERY=PASS (PID1 stop, exact guest baseline)'
+  echo 'QA_TUN_GUARD_DIRECT_OFF=PASS (new Direct paths, no VPN-only block)'
+}
+
 trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
@@ -421,6 +550,12 @@ echo "REAL_TUN_DNS_DIRECT_WITNESS=PASS (native DNS UDP/TCP positive controls)"
 hosting_baseline=$(hosting_reply_packets)
 test "$hosting_baseline" -gt 0 || { echo 'FAIL: no positive control of foreign visitor hosting reply' >&2; exit 1; }
 echo "REAL_TUN_FOREIGN_HOSTING_BASELINE=PASS (foreign visitor request/reply, packets=$hosting_baseline)"
+if [ "${SC_QA_TUN_GUARD_LAB-}" = yes ]; then
+  guard_routes_before=$(ip -N -j -4 route show table all)
+  guard_rules_before=$(ip -N -j -4 rule show)
+  guard_v6_routes_before=$(ip -N -j -6 route show table all)
+  guard_v6_rules_before=$(ip -N -j -6 rule show)
+fi
 
 # Generate the candidate via the actual manager compiler, not a manually
 # duplicated sing-box config. The fixed lab credentials are not user secrets.
@@ -488,6 +623,11 @@ wget_result=$(env -i HOME=/root PATH=/usr/bin:/bin:/sbin:/usr/sbin \
   /usr/bin/wget -q -T 6 -t 1 -O - http://8.8.8.8:19180/wget)
 test "$wget_result" = SOURCE=8.8.8.8
 echo "REAL_TUN_PROXY_UNAWARE_WGET=PASS"
+
+if [ "${SC_QA_TUN_GUARD_LAB-}" = yes ]; then
+  guarded_real_tun_deadline_trial
+  exit 0
+fi
 
 assert_tun_policy_active || { echo 'FAIL: TUN and kernel policy not active before outage' >&2; exit 1; }
 witness_before_outage=$(direct_witness_packets)
