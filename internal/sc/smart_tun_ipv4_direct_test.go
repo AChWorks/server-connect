@@ -72,9 +72,20 @@ func TestSmartTUNIPv4OperatorDirectBreadthAndAggregate(t *testing.T) {
 			CIDR: fmt.Sprintf("20.0.0.%d/32", i), Via: "direct",
 		})
 	}
+	allowedMax := tooMany
+	allowedMax.Exceptions = tooMany.Exceptions[:128]
+	assertIPv4DirectCandidate(t, allowedMax, true)
 	assertIPv4DirectCandidate(t, tooMany, false)
 	_, tooManyProtected := smartTUNFixture()
+	// Every entry is a valid, redundant host already covered by private
+	// underlay protections. The old compiler would have accepted all 65.
 	tooManyProtected.ProtectedCIDRs = make([]string, 65)
+	for i := range tooManyProtected.ProtectedCIDRs {
+		tooManyProtected.ProtectedCIDRs[i] = "10.0.0.1/32"
+	}
+	allowedProtected := tooManyProtected
+	allowedProtected.ProtectedCIDRs = tooManyProtected.ProtectedCIDRs[:64]
+	assertIPv4DirectCandidate(t, allowedProtected, true)
 	assertIPv4DirectCandidate(t, tooManyProtected, false)
 }
 
@@ -121,7 +132,17 @@ func TestSmartTUNIPv4DomesticDirectCoverage(t *testing.T) {
 		})
 	}
 	_, huge := smartTUNFixture()
-	huge.DomesticCIDRs = make([]string, 10001)
+	// 10,001 unique, valid public /32s total only 10,001 addresses.
+	// Rejecting them is specific to the collection-size limit, not invalid
+	// CIDRs, overlaps, special-purpose blocks, or aggregate address coverage.
+	huge.DomesticCIDRs = make([]string, 0, 10001)
+	for i := 0; i <= 10000; i++ {
+		addr := netip.AddrFrom4([4]byte{20, 0, byte(i / 256), byte(i % 256)})
+		huge.DomesticCIDRs = append(huge.DomesticCIDRs, netip.PrefixFrom(addr, 32).String())
+	}
+	allowedMax := huge
+	allowedMax.DomesticCIDRs = huge.DomesticCIDRs[:10000]
+	assertIPv4DirectCandidate(t, allowedMax, true)
 	assertIPv4DirectCandidate(t, huge, false)
 }
 
