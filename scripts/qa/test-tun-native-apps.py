@@ -83,6 +83,16 @@ class WitnessTests(unittest.TestCase):
 
 
 class FixtureTests(unittest.TestCase):
+    def test_disconnected_git_identity_never_needs_host_resolver(self):
+        # The strace-proven source of the selected-path stall was Git's
+        # fallback hostname DNS during identity generation after pack fetch.
+        # Verify a process-local QA identity works without changing ~/.gitconfig.
+        for kind in ("GIT_COMMITTER_IDENT", "GIT_AUTHOR_IDENT"):
+            with self.subTest(kind=kind):
+                ident = apps.checked(["/usr/bin/git", "var", kind]).decode("ascii")
+                self.assertIn("Disposable TUN QA <qa@invalid.test>", ident)
+                self.assertNotIn("@localhost", ident)
+
     def test_isolated_index_and_real_local_git_objects(self):
         with tempfile.TemporaryDirectory(prefix="scqa-app-fixture-") as temp:
             root = Path(temp) / "native"

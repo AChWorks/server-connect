@@ -31,6 +31,15 @@ BASE_ENV = {
     "GIT_CONFIG_NOSYSTEM": "1",
     "GIT_CONFIG_GLOBAL": "/dev/null",
     "GIT_TERMINAL_PROMPT": "0",
+    # The disconnected guest has no usable external DNS. A Git clone may
+    # synthesize an identity for local reflogs; without an explicit identity,
+    # Git reverse-resolves the system hostname and stalls on the guest's
+    # unreachable inherited resolver (proved by selected-path strace).
+    # This is disposable QA identity, not a user configuration or proxy.
+    "GIT_COMMITTER_NAME": "Disposable TUN QA",
+    "GIT_COMMITTER_EMAIL": "qa@invalid.test",
+    "GIT_AUTHOR_NAME": "Disposable TUN QA",
+    "GIT_AUTHOR_EMAIL": "qa@invalid.test",
 }
 
 
