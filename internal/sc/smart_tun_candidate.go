@@ -5,6 +5,8 @@ import (
 	"errors"
 	"net/netip"
 	"regexp"
+	"sort"
+	"strings"
 )
 
 // SmartTUNCandidateOptions only compiles configuration. It never authorizes
@@ -16,6 +18,7 @@ type SmartTUNCandidateOptions struct {
 	ProtectedCIDRs    []string
 	DomesticCIDRs     []string
 	Exceptions        []SmartTUNCIDRException
+	DomainExceptions  []SmartTUNDomainException
 }
 
 type SmartTUNCIDRException struct {
@@ -23,7 +26,39 @@ type SmartTUNCIDRException struct {
 	Via  string // "direct" or "vpn"
 }
 
+// SmartTUNDomainException is an explicit VPN-only developer policy, NOT
+// inferred geolocation. Suffix covers its apex and subdomains. The sniffed
+// HTTP Host / TLS SNI is untrusted client-supplied text, so it can only send
+// traffic into the VPN, never exempt it into Direct. Direct-domain decisions
+// require trusted DNS/IP correlation and are deliberately not implemented.
+type SmartTUNDomainException struct {
+	Domain string
+	Suffix bool
+	Via    string // "vpn"; direct requires trusted DNS/IP correlation
+}
+
 var smartTUNDeviceName = regexp.MustCompile("^[a-zA-Z0-9_.-]{1,15}$")
+var smartTUNDomainLabel = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$`)
+
+func canonicalSmartTUNDomain(raw string, suffix bool) (string, error) {
+	name := strings.ToLower(raw)
+	if name == "" || len(name) > 253 || strings.ContainsAny(name, "/:*\\ ") {
+		return "", errors.New("invalid operator domain")
+	}
+	if _, err := netip.ParseAddr(name); err == nil {
+		return "", errors.New("IP address cannot be a domain exception")
+	}
+	labels := strings.Split(name, ".")
+	if !suffix && len(labels) < 2 {
+		return "", errors.New("exact domain exception requires a fully qualified name")
+	}
+	for _, label := range labels {
+		if !smartTUNDomainLabel.MatchString(label) {
+			return "", errors.New("invalid operator domain label")
+		}
+	}
+	return name, nil
+}
 
 func canonicalRoutePrefix(raw string) (netip.Prefix, error) {
 	p, err := netip.ParsePrefix(raw)
@@ -38,8 +73,9 @@ func routePrefixesOverlap(a, b netip.Prefix) bool {
 }
 
 // SmartTUNCandidateConfig compiles a real Linux sing-box TUN configuration.
-// No production Apply path exists. IPv6, DNS/domain rules, protected foreign
-// client replies, resource ownership, guards and verified rollback remain
+// No production Apply path exists. IPv6, trustworthy DNS/domain correlation,
+// imported rule-list validation, protected foreign-client replies, resource
+// ownership, guards and verified rollback remain
 // unimplemented and must block production activation.
 func SmartTUNCandidateConfig(profile Profile, o SmartTUNCandidateOptions) ([]byte, error) {
 	if !smartTUNDeviceName.MatchString(o.TunnelInterface) ||
@@ -150,6 +186,57 @@ func SmartTUNCandidateConfig(profile Profile, o SmartTUNCandidateOptions) ([]byt
 	for _, raw := range o.DomesticCIDRs {
 		if _, err := canonicalRoutePrefix(raw); err != nil {
 			return nil, errors.New("invalid domestic CIDR")
+		}
+	}
+	// Only explicit VPN-only operator domain exceptions are admitted. Sniffed
+	// names cannot permit Direct, since an application can forge Host/SNI.
+	// More specific exact names precede longer suffixes; IP exceptions have
+	// higher precedence. No destination or system DNS is rewritten.
+	if len(o.DomainExceptions) > 128 {
+		return nil, errors.New("too many operator domain exceptions")
+	}
+	type domainRule struct {
+		name   string
+		suffix bool
+	}
+	domainRules := make([]domainRule, 0, len(o.DomainExceptions))
+	seenDomains := make(map[string]bool, len(o.DomainExceptions))
+	for _, candidate := range o.DomainExceptions {
+		name, err := canonicalSmartTUNDomain(candidate.Domain, candidate.Suffix)
+		if err != nil || candidate.Via != "vpn" {
+			return nil, errors.New("domain Direct is unsafe without authenticated DNS/IP correlation; only VPN is supported")
+		}
+		key := name
+		if candidate.Suffix {
+			key = "." + name
+		}
+		if seenDomains[key] {
+			return nil, errors.New("duplicate operator domain exception")
+		}
+		seenDomains[key] = true
+		domainRules = append(domainRules, domainRule{name: name, suffix: candidate.Suffix})
+	}
+	if len(domainRules) != 0 {
+		sort.Slice(domainRules, func(i, j int) bool {
+			a, b := domainRules[i], domainRules[j]
+			if a.suffix != b.suffix {
+				return !a.suffix
+			}
+			if len(a.name) != len(b.name) {
+				return len(a.name) > len(b.name)
+			}
+			return a.name < b.name
+		})
+		rules = append(rules, map[string]any{
+			"network": []string{"tcp"}, "action": "sniff",
+			"sniffer": []string{"http", "tls"}, "timeout": "200ms",
+		})
+		for _, candidate := range domainRules {
+			rule := map[string]any{"network": []string{"tcp"}, "domain": []string{candidate.name}, "action": "route", "outbound": "upstream"}
+			if candidate.suffix {
+				rule["domain_suffix"] = []string{"." + candidate.name}
+			}
+			rules = append(rules, rule)
 		}
 	}
 	rules = append(rules, map[string]any{"ip_cidr": o.DomesticCIDRs, "action": "route", "outbound": "direct"})

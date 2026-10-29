@@ -216,6 +216,16 @@ expect_source() {
   test "$response" = "SOURCE=$source"
 }
 
+# Pin the destination locally without resolver traffic; inspect actual Host.
+expect_named_source() {
+  host=$1 destination=$2 source=$3
+  response=$(env -i HOME=/root PATH=/usr/bin:/bin:/sbin:/usr/sbin \
+    /usr/bin/curl -q --fail --silent --show-error --noproxy '*' \
+    --resolve "$host:19180:$destination" --connect-timeout 3 --max-time 6 \
+    "http://$host:19180/path") || return 1
+  test "$response" = "SOURCE=$source"
+}
+
 # A synthetic foreign visitor makes a NEW inbound HTTP connection to the
 # hosting-side address, without going through the VPN. The reply destination
 # is a foreign public IP, so a response mistakenly captured by TUN would
@@ -643,6 +653,36 @@ if [ "$ready" != yes ]; then
   exit 1
 fi
 echo "REAL_TUN_SELECTED_TCP_PATH=PASS (domestic Direct vs foreign VLESS; no HTTP proxy)"
+# Explicit, synthetic HTTP Host exceptions exercise native sing-box sniff.
+# This does not prove DNS correlation, TLS SNI or geographic classification.
+test "$(direct_witness_packets)" -eq "$witness_baseline" || {
+  echo 'REAL_TUN_SNIFFED_DOMAIN_EXCEPTION=FAIL (pre-existing foreign leak)' >&2; exit 1;
+}
+expect_named_source vpn.scqa.test 5.22.0.10 5.22.0.10 || {
+  echo 'REAL_TUN_SNIFFED_DOMAIN_EXCEPTION=FAIL (suffix VPN over domestic IP)' >&2; exit 1;
+}
+# The exact name MUST be outside the suffix fixture. Otherwise the suffix
+# route would make this test falsely pass even if exact matching broke.
+expect_named_source only-exact.test 5.22.0.10 5.22.0.10 || {
+  echo 'REAL_TUN_SNIFFED_DOMAIN_EXCEPTION=FAIL (exact-only VPN over domestic IP)' >&2; exit 1;
+}
+# An exact match must NOT act as a suffix: this name uses domestic Direct.
+expect_named_source child.only-exact.test 5.22.0.10 10.254.72.1 || {
+  echo 'REAL_TUN_SNIFFED_DOMAIN_EXCEPTION=FAIL (exact-only overmatched subdomain)' >&2; exit 1;
+}
+assert_tun_policy_active || {
+  echo 'REAL_TUN_SNIFFED_DOMAIN_EXCEPTION=FAIL (TUN policy lost during name proof)' >&2; exit 1;
+}
+expect_source 8.8.8.8 8.8.8.8 || {
+  echo 'REAL_TUN_SNIFFED_DOMAIN_EXCEPTION=FAIL (raw IP foreign)' >&2; exit 1;
+}
+expect_source 5.22.0.10 10.254.72.1 || {
+  echo 'REAL_TUN_SNIFFED_DOMAIN_EXCEPTION=FAIL (raw IP domestic)' >&2; exit 1;
+}
+test "$(direct_witness_packets)" -eq "$witness_baseline" || {
+  echo 'REAL_TUN_SNIFFED_DOMAIN_EXCEPTION=FAIL (VPN-only names leaked to Direct)' >&2; exit 1;
+}
+echo 'REAL_TUN_SNIFFED_DOMAIN_EXCEPTION=PASS (VPN-only HTTP names; no Direct leak)'
 assert_tun_policy_active || { echo 'FAIL: TUN not active before selected UDP path' >&2; exit 1; }
 udp_path 5.22.0.10 10.254.72.1 tun-domestic reply
 udp_path 8.8.8.8 8.8.8.8 tun-foreign reply
