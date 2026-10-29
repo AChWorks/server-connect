@@ -8,12 +8,13 @@ metadata:
 
 spec:
   type: linux-server-utility
-  lifecycle: planned
+  lifecycle: development
   system: server-connect
   ownership: AChWorks
 
   technology:
-    languages: []
+    languages:
+      - Go
     frameworks: []
     runtimes:
       - Linux
@@ -21,16 +22,16 @@ spec:
 
   capabilities:
     provides:
-      - offline-first-connectivity-management
-      - managed-outbound-routing
-      - safe-activation-and-network-recovery
+      - offline-connectivity-bundles
+      - local-http-socks-proxy
+      - offline-iran-ip-geolocation
     consumes:
       - sing-box
 
   interfaces:
     - type: cli
       name: server-connect
-      contract: docs/PROJECT-SPEC.md
+      contract: cmd/server-connect/main.go
 
   dependencies: []
 
