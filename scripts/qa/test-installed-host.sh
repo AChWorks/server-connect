@@ -426,8 +426,51 @@ assert_tun_native_cleanup real-tun-candidate-cleanup
 # PID1 recovery executor restores native Direct without the parent doing it.
 # This is a QA-only feasibility proof, NOT the product Activation Guard.
 echo 'REAL_TUN_LAB_STAGE=prearmed-guard-controller-death'
-docker exec -e SC_QA_TUN_GUARD_LAB=yes "$container" /bin/sh /root/qa-host-tun-path.sh
+clean_guard_log="$scratch/real-tun-guard-cleanup.log"
+docker exec -e SC_QA_TUN_GUARD_LAB=yes "$container" /bin/sh /root/qa-host-tun-path.sh | tee "$clean_guard_log"
+grep -Fx 'QA_TUN_GUARD_UNIT_FINAL_STATE=PASS' "$clean_guard_log" >/dev/null
 assert_tun_native_cleanup real-tun-independent-deadline-cleanup
+# The real timer can restore Direct while a stale systemd unit persists.
+# Deliberately mask only the QA recovery unit after its file is removed and
+# require a distinct cleanup failure, not an overall PASS for the real TUN.
+echo 'REAL_TUN_LAB_STAGE=guard-stale-unit-cleanup-negative'
+unit_fault_log="$scratch/real-tun-guard-stale-unit-negative.log"
+if docker exec -e SC_QA_TUN_GUARD_LAB=yes \
+    -e SC_QA_TUN_GUARD_CLEANUP_FAULT=masked-recovery-unit \
+    "$container" /bin/sh /root/qa-host-tun-path.sh >"$unit_fault_log" 2>&1; then
+  unit_fault_rc=0
+else
+  unit_fault_rc=$?
+fi
+if [[ $unit_fault_rc != 97 ]] ||
+   ! grep -Fx 'QA_TUN_GUARD_DEADLINE_RECOVERY=PASS (PID1 stop, exact guest baseline)' "$unit_fault_log" >/dev/null ||
+   ! grep -Fx 'QA_TUN_GUARD_UNIT_FINAL_STATE=FAIL' "$unit_fault_log" >/dev/null ||
+   ! grep -Fx 'QA_TUN_GUARD_UNIT_CLEANUP=FAIL' "$unit_fault_log" >/dev/null ||
+   ! grep -F 'REAL_TUN_LAB_CLEANUP=FAIL (restoration incomplete;' "$unit_fault_log" >/dev/null ||
+   grep -F 'QA_TUN_GUARD_UNIT_FINAL_STATE=PASS' "$unit_fault_log" >/dev/null ||
+   grep -F 'QA_TUN_GUARD_UNIT_CLEANUP=PASS' "$unit_fault_log" >/dev/null ||
+   grep -F 'REAL_TUN_LAB_CLEANUP=PASS' "$unit_fault_log" >/dev/null; then
+  echo "QA_TUN_GUARD_STALE_UNIT_REJECTION=FAIL (rc=$unit_fault_rc)" >&2
+  cat "$unit_fault_log" >&2
+  exit 1
+fi
+# Release only the fixed fixture-injected symlink, then verify all three
+# systemd names are absent, independently of the guest cleanup assertions.
+docker exec "$container" /bin/sh -c '
+  set -eu
+  path=/run/systemd/system/scqa-tun-lab-recover.service
+  test -L "$path" && test "$(readlink "$path")" = /dev/null
+  rm -- "$path"
+  systemctl daemon-reload
+  for unit in scqa-tun-lab-client.service scqa-tun-lab-recover.service scqa-tun-lab-recover.timer; do
+    test ! -e "/run/systemd/system/$unit" && test ! -L "/run/systemd/system/$unit"
+    test "$(systemctl show "$unit" -p LoadState --value)" = not-found
+    test "$(systemctl show "$unit" -p ActiveState --value)" = inactive
+    test -z "$(systemctl show "$unit" -p FragmentPath --value)"
+  done
+'
+assert_tun_native_cleanup real-tun-guard-stale-unit-negative-cleanup
+echo 'QA_TUN_GUARD_STALE_UNIT_FALSE_PASS_REJECTED=PASS'
 # Real sing-box faults must preserve native Direct HTTP and reject the
 # hosting-outage PASS; the guest must prove COMPLETE cleanup independently
 # of its intentional test exit 1, and the outer host independently verifies.

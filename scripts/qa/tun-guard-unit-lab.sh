@@ -101,7 +101,36 @@ qa_tun_guard_cleanup() {
       rm -f -- "$path" || cleanup_error=yes
     fi
   done
-  /usr/bin/systemctl daemon-reload || cleanup_error=yes
+  # Only a disposable-guest negative fixture deliberately masks one owned
+  # recovery unit after deleting its file; final PID1 state must reject it.
+  if [ "${SC_QA_TUN_GUARD_CLEANUP_FAULT-}" = masked-recovery-unit ]; then
+    ln -s /dev/null "$qa_tun_unit_root/$qa_tun_recover_unit" || cleanup_error=yes
+  fi
+  final_units_ok=yes
+  /usr/bin/systemctl daemon-reload || { cleanup_error=yes; final_units_ok=no; }
+  # Stop/removal command success is not proof that PID1 released each unit.
+  # Inspect the three exact names, paths and manager state after reload.
+  for unit in "$qa_tun_client_unit" "$qa_tun_recover_unit" "$qa_tun_recover_timer"; do
+    path="$qa_tun_unit_root/$unit"
+    if [ -e "$path" ] || [ -L "$path" ]; then
+      final_units_ok=no
+    fi
+    if load=$(qa_tun_unit_state "$unit" LoadState) &&
+       active=$(qa_tun_unit_state "$unit" ActiveState) &&
+       fragment=$(qa_tun_unit_state "$unit" FragmentPath); then
+      if [ "$load" != not-found ] || [ "$active" != inactive ] || [ -n "$fragment" ]; then
+        final_units_ok=no
+      fi
+    else
+      final_units_ok=no
+    fi
+  done
+  if [ "$final_units_ok" = yes ]; then
+    echo 'QA_TUN_GUARD_UNIT_FINAL_STATE=PASS'
+  else
+    echo 'QA_TUN_GUARD_UNIT_FINAL_STATE=FAIL' >&2
+    cleanup_error=yes
+  fi
   if [ -e /sys/class/net/sctunqa0 ]; then
     cleanup_error=yes
   fi

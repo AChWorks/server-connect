@@ -283,6 +283,12 @@ case "${SC_QA_TUN_GUARD_LAB-}" in
   yes ) . /root/qa-tun-guard-unit-lab.sh ;;
   * ) echo 'Invalid real-TUN guard laboratory mode' >&2; exit 2 ;;
 esac
+case "${SC_QA_TUN_GUARD_CLEANUP_FAULT-}" in
+  '' ) ;;
+  masked-recovery-unit )
+    [ "${SC_QA_TUN_GUARD_LAB-}" = yes ] || exit 2 ;;
+  * ) echo 'Invalid real-TUN guard cleanup fault mode' >&2; exit 2 ;;
+esac
 
 guarded_real_tun_deadline_trial() {
   # Stop the original shell-owned test TUN first. The second activation is
