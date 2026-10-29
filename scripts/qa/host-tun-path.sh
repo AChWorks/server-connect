@@ -390,6 +390,28 @@ guarded_real_tun_deadline_trial() {
     test "$(ip -N -j -6 route show table all)" = "$guard_v6_routes_before" &&
     test "$(ip -N -j -6 rule show)" = "$guard_v6_rules_before" || {
       echo 'QA_TUN_GUARD_RECOVERY=FAIL (native kernel did not restore)' >&2
+      # Failure-only evidence: identify the exact native resource that drifted.
+      # The guest contains fixed QA fixtures, never operator credentials.
+      observed=$(nft -j list ruleset) || observed='INSPECTION_FAILED'
+      if [ "$observed" != "$nft_before" ]; then
+        printf 'QA_TUN_GUARD_DRIFT=nftables expected=%s observed=%s\n' "$nft_before" "$observed" >&2
+      fi
+      observed=$(ip -N -j -4 route show table all) || observed='INSPECTION_FAILED'
+      if [ "$observed" != "$guard_routes_before" ]; then
+        printf 'QA_TUN_GUARD_DRIFT=ipv4-routes expected=%s observed=%s\n' "$guard_routes_before" "$observed" >&2
+      fi
+      observed=$(ip -N -j -4 rule show) || observed='INSPECTION_FAILED'
+      if [ "$observed" != "$guard_rules_before" ]; then
+        printf 'QA_TUN_GUARD_DRIFT=ipv4-rules expected=%s observed=%s\n' "$guard_rules_before" "$observed" >&2
+      fi
+      observed=$(ip -N -j -6 route show table all) || observed='INSPECTION_FAILED'
+      if [ "$observed" != "$guard_v6_routes_before" ]; then
+        printf 'QA_TUN_GUARD_DRIFT=ipv6-routes expected=%s observed=%s\n' "$guard_v6_routes_before" "$observed" >&2
+      fi
+      observed=$(ip -N -j -6 rule show) || observed='INSPECTION_FAILED'
+      if [ "$observed" != "$guard_v6_rules_before" ]; then
+        printf 'QA_TUN_GUARD_DRIFT=ipv6-rules expected=%s observed=%s\n' "$guard_v6_rules_before" "$observed" >&2
+      fi
       return 1
     }
   expect_source 5.22.0.10 10.254.72.1
