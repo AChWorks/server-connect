@@ -12,24 +12,24 @@ import (
 // SmartTUNCandidateOptions only compiles configuration. It never authorizes
 // or applies privileged Linux routing changes.
 type SmartTUNCandidateOptions struct {
-	TunnelInterface   string
-	UnderlayInterface string
-	TunnelIPv4        string
+	TunnelInterface   string `json:"tunnel_interface"`
+	UnderlayInterface string `json:"underlay_interface"`
+	TunnelIPv4        string `json:"tunnel_ipv4"`
 	// Optional, explicitly selected dual-stack development candidate.
 	// This does not authorize privileged routing or production activation.
-	TunnelIPv6         string
-	ProtectedCIDRs     []string
-	ProtectedIPv6CIDRs []string
-	DomesticCIDRs      []string
-	DomesticIPv6CIDRs  []string
-	Exceptions         []SmartTUNCIDRException
-	IPv6Exceptions     []SmartTUNCIDRException
-	DomainExceptions   []SmartTUNDomainException
+	TunnelIPv6         string                    `json:"tunnel_ipv6"`
+	ProtectedCIDRs     []string                  `json:"protected_cidrs"`
+	ProtectedIPv6CIDRs []string                  `json:"protected_ipv6_cidrs"`
+	DomesticCIDRs      []string                  `json:"domestic_cidrs"`
+	DomesticIPv6CIDRs  []string                  `json:"domestic_ipv6_cidrs"`
+	Exceptions         []SmartTUNCIDRException   `json:"exceptions"`
+	IPv6Exceptions     []SmartTUNCIDRException   `json:"ipv6_exceptions"`
+	DomainExceptions   []SmartTUNDomainException `json:"domain_exceptions"`
 }
 
 type SmartTUNCIDRException struct {
-	CIDR string
-	Via  string // "direct" or "vpn"
+	CIDR string `json:"cidr"`
+	Via  string `json:"via"` // "direct" or "vpn"
 }
 
 // SmartTUNDomainException is an explicit VPN-only developer policy, NOT
@@ -38,9 +38,9 @@ type SmartTUNCIDRException struct {
 // traffic into the VPN, never exempt it into Direct. Direct-domain decisions
 // require trusted DNS/IP correlation and are deliberately not implemented.
 type SmartTUNDomainException struct {
-	Domain string
-	Suffix bool
-	Via    string // "vpn"; direct requires trusted DNS/IP correlation
+	Domain string `json:"domain"`
+	Suffix bool   `json:"suffix"`
+	Via    string `json:"via"` // "vpn"; direct requires trusted DNS/IP correlation
 }
 
 var smartTUNDeviceName = regexp.MustCompile("^[a-zA-Z0-9_.-]{1,15}$")

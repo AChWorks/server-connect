@@ -102,13 +102,21 @@ cleanup() {
   if [ "${SC_QA_TUN_PRODUCT_LAB-}" = yes ] && [ "$original_rc" -ne 0 ] &&
      [ -f /var/lib/server-connect/route-activation-journal.json ]; then
     product_recovered=no
+    product_receipt=
     tries=0
     while [ "$tries" -lt 65 ]; do
-      if /usr/local/bin/server-connect --json smart-tun-trial-status |
+      if [ ! -e /var/lib/server-connect/route-activation-journal.json ]; then
+        product_recovered=finalized
+        break
+      fi
+      if product_receipt=$(/usr/local/bin/server-connect --json smart-tun-trial-status |
          /usr/bin/python3 -c '
 import json,sys
 r=json.load(sys.stdin)
-assert r["ok"] and r["data"]["phase"]=="trial_recovered" and r["data"]["recovery_verified"],r' 2>/dev/null; then
+assert r["ok"],r
+d=r["data"]
+assert (d["phase"]=="trial_recovered" and d["revision"] in (2,3) and d["recovery_verified"]) or (d["phase"]=="trial_cleanup_pending" and d["revision"]==4),r
+print(d["operation_id"],d["revision"])' 2>/dev/null); then
         product_recovered=yes
         break
       fi
@@ -116,17 +124,35 @@ assert r["ok"] and r["data"]["phase"]=="trial_recovered" and r["data"]["recovery
       sleep 1
     done
     if [ "$product_recovered" = yes ]; then
-      product_op=$(/usr/local/bin/server-connect --json smart-tun-trial-status |
-         /usr/bin/python3 -c 'import json,sys;print(json.load(sys.stdin)["data"]["operation_id"])') || product_op=
+      product_op=${product_receipt% *}
+      product_revision=${product_receipt#* }
       if [ -n "$product_op" ] &&
-         /usr/local/bin/server-connect --json smart-tun-trial-clear --operation-id "$product_op" --revision 2 |
+         /usr/local/bin/server-connect --json smart-tun-trial-clear --operation-id "$product_op" --revision "$product_revision" |
            /usr/bin/python3 -c 'import json,sys;r=json.load(sys.stdin);assert r["ok"] and r["data"]["cleared"],r'; then
-        echo 'PRODUCT_TUN_FAILURE_CLEANUP=PASS (independent deadline and exact operation clearance; QA remains failed)'
+        product_recovered=finalized
+      elif [ ! -e /var/lib/server-connect/route-activation-journal.json ]; then
+        # The independent executor can finish between inspection and the
+        # exact-operation retry. Verify the completed effects below.
+        product_recovered=finalized
       else
         echo 'PRODUCT_TUN_FAILURE_CLEANUP=FAIL (exact recovered operation clearance unavailable)' >&2
         cleanup_failed=yes
       fi
-    else
+    fi
+    if [ "$product_recovered" = finalized ]; then
+      if [ ! -e /var/lib/server-connect/route-activation-journal.json ] &&
+         [ ! -e /var/lib/server-connect/smart-tun-trial.json ] &&
+         [ ! -e /sys/class/net/sctunqa0 ] &&
+         [ "$(systemctl show server-connect-smart-tun.service -p ActiveState --value)" = inactive ] &&
+         [ "$(systemctl show server-connect-activation-recover.timer -p ActiveState --value)" = inactive ] &&
+         [ "$(systemctl is-enabled server-connect-activation-recover.timer)" = disabled ] &&
+         command -v require_native_baseline >/dev/null && require_native_baseline; then
+        echo 'PRODUCT_TUN_FAILURE_CLEANUP=PASS (verified finalization; QA remains failed)'
+      else
+        echo 'PRODUCT_TUN_FAILURE_CLEANUP=FAIL (finalization left product resources)' >&2
+        cleanup_failed=yes
+      fi
+    elif [ "$product_recovered" = no ]; then
       echo 'PRODUCT_TUN_FAILURE_CLEANUP=FAIL (independent recovery not verified before guest teardown)' >&2
       cleanup_failed=yes
     fi

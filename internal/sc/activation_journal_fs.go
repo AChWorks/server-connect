@@ -313,8 +313,17 @@ func (store *activationJournalDir) checkTarget(expected *activationJournalFileId
 // Temp file fsync precedes rename; directory fsync follows it. A post-rename
 // sync failure returns an error and intentionally retains uncertain evidence.
 func (store *activationJournalDir) writeJournal(data []byte, expected *activationJournalFileIdentity) error {
+	return store.writeJournalWithDirSync(data, expected, syscall.Fsync)
+}
+
+// The directory-only sync argument is a narrow failure seam, like the
+// parent sync in openActivationJournalDir; production always uses Fsync.
+func (store *activationJournalDir) writeJournalWithDirSync(data []byte, expected *activationJournalFileIdentity, directorySync func(int) error) error {
 	if len(data) == 0 || len(data) > activationJournalMaxBytes {
 		return activationJournalError("activation journal record exceeds size bound")
+	}
+	if directorySync == nil {
+		return journalFSUnavailable("activation journal directory sync is unavailable")
 	}
 	if err := store.ensureLockIdentity(); err != nil {
 		return err
@@ -355,7 +364,7 @@ func (store *activationJournalDir) writeJournal(data []byte, expected *activatio
 	if err := syscall.Renameat(int(store.dir.Fd()), name, int(store.dir.Fd()), activationJournalFilename); err != nil {
 		return journalFSUnavailable("cannot atomically publish activation journal")
 	}
-	if err := syscall.Fsync(int(store.dir.Fd())); err != nil {
+	if err := directorySync(int(store.dir.Fd())); err != nil {
 		return journalFSUnavailable("activation journal directory fsync failed; persisted state is uncertain")
 	}
 	return nil

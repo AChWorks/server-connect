@@ -312,6 +312,7 @@ func run(j bool, m *sc.Manager, args []string) int {
 		ipv6Direct := opts.String("ipv6-direct-cidr", "", "synthetic IPv6 Direct exception")
 		peer := opts.String("management-peer", "", "synthetic guest management peer")
 		deadline := opts.Int("deadline-seconds", 600, "independent mandatory rollback deadline")
+		saved := opts.Bool("saved", false, "revalidate and apply the saved disposable trial policy")
 		qaKill := opts.String("qa-kill-at", "", "isolated guest SIGKILL after-journal or after-start")
 		var domestic, protected, domesticIPv6 destinationFlags
 		opts.Var(&domestic, "domestic-cidr", "synthetic domestic CIDR; repeat")
@@ -319,6 +320,21 @@ func run(j bool, m *sc.Manager, args []string) int {
 		opts.Var(&domesticIPv6, "domestic-ipv6-cidr", "synthetic IPv6 domestic CIDR; repeat")
 		if e := opts.Parse(args); e != nil || len(opts.Args()) != 0 {
 			return output(j, nil, sc.Fault("invalid_arguments", "invalid guarded TUN trial options"))
+		}
+		if *saved {
+			mixedPolicy := false
+			opts.Visit(func(option *flag.Flag) {
+				switch option.Name {
+				case "saved", "deadline-seconds", "qa-kill-at":
+				default:
+					mixedPolicy = true
+				}
+			})
+			if mixedPolicy {
+				return output(j, nil, sc.Fault("invalid_arguments", "--saved cannot be combined with explicit routing or management options"))
+			}
+			result, err := m.BeginSavedSmartTUNTrial(*deadline, *qaKill)
+			return output(j, result, err)
 		}
 		var ipv6Exceptions []sc.SmartTUNCIDRException
 		if *ipv6VPN != "" {
@@ -334,6 +350,23 @@ func run(j bool, m *sc.Manager, args []string) int {
 			DomesticIPv6CIDRs: domesticIPv6, IPv6Exceptions: ipv6Exceptions,
 		}, *peer, *deadline, *qaKill)
 		return output(j, result, err)
+	case "smart-tun-trial-policy":
+		if len(args) != 0 {
+			return output(j, nil, sc.Fault("invalid_arguments", "saved trial policy inspection accepts no options"))
+		}
+		result, err := m.InspectSavedSmartTUNTrialPolicy()
+		return output(j, result, err)
+	case "smart-tun-trial-disconnect":
+		opts := flag.NewFlagSet(name, flag.ContinueOnError)
+		opts.SetOutput(io.Discard)
+		id := opts.String("operation-id", "", "exact current trial operation ID")
+		revision := opts.Uint64("revision", 0, "exact current trial revision")
+		qaKill := opts.String("qa-kill-at", "", "disposable-only stop or cleanup interruption point")
+		if e := opts.Parse(args); e != nil || len(opts.Args()) != 0 {
+			return output(j, nil, sc.Fault("invalid_arguments", "invalid guarded TUN disconnect options"))
+		}
+		result, err := m.DisconnectSmartTUNTrial(*id, *revision, *qaKill)
+		return output(j, result, err)
 	case "smart-tun-trial-status":
 		if len(args) != 0 {
 			return output(j, nil, sc.Fault("invalid_arguments", "guarded TUN status accepts no options"))
@@ -345,10 +378,11 @@ func run(j bool, m *sc.Manager, args []string) int {
 		opts.SetOutput(io.Discard)
 		id := opts.String("operation-id", "", "exact recovered trial operation ID")
 		revision := opts.Uint64("revision", 0, "exact recovered revision")
+		qaKill := opts.String("qa-kill-at", "", "disposable-only cleanup interruption point")
 		if e := opts.Parse(args); e != nil || len(opts.Args()) != 0 {
 			return output(j, nil, sc.Fault("invalid_arguments", "invalid guarded TUN clearance options"))
 		}
-		err := m.ClearSmartTUNTrial(*id, *revision)
+		err := m.ClearSmartTUNTrialWithQAKill(*id, *revision, *qaKill)
 		return output(j, map[string]any{"cleared": err == nil}, err)
 	case "activation-trial-recover", "activation-trial-status":
 		qaPoint, qaFaultPoint := "", ""
@@ -598,9 +632,14 @@ Commands:
                               DISPOSABLE DOCKER GUEST ONLY: pending genuine sing-box
                               TUN with mandatory independent timeout recovery.
                               Not confirmed, no Runtime Guard, NOT production Apply
-  smart-tun-trial-status      Pending/recovered experimental TUN receipt
-  smart-tun-trial-clear --operation-id HEX32 --revision 2
-                              Clear only verified recovered v4 trial
+  smart-tun-trial-apply --saved [--deadline-seconds 600]
+                              Revalidate saved trial settings; always a new guarded operation
+  smart-tun-trial-policy      Inspect saved non-secret trial policy; never activates routing
+  smart-tun-trial-status      Experimental TUN operation/recovery receipt
+  smart-tun-trial-disconnect --operation-id HEX32 --revision N
+                              Stop exactly this trial, verify native rollback and finalize
+  smart-tun-trial-clear --operation-id HEX32 --revision N
+                              Finalize only the exact verified recovered trial
   activation-trial-status     Inspect v2 rule-only or v3 loopback route+rule trial
   activation-trial-recover    Independent systemd timeout/reboot recovery (v2/v3/v4)
   activation-trial-clear --operation-id HEX32 --revision 3
@@ -647,9 +686,12 @@ initialize a private state directory/lock but never change host routes.
 The guarded TUN trial runs the installed pinned sing-box on the synthetic
 disconnected 2-interface Docker guest, using an inert separate CAP_NET_ADMIN
 service, a private operation journal and an independently prearmed systemd
-deadline. It can only EXPIRE into verified Direct; it never confirms permanent
-activation. Synthetic CIDRs, absence of genuine SSH confirmation, and no
-Runtime Health Guard prohibit use on any physical/production host.
+deadline. Exact-operation Disconnect or expiry restores the native baseline;
+interrupted stop/cleanup retains recovery evidence. Saved trial settings and
+the selected profile survive Off. --saved performs fresh admission/prearm
+and creates a new operation; it never resumes an old activation. The trial
+never confirms permanent activation. Synthetic CIDRs, absence of genuine SSH
+confirmation, and no Runtime Health Guard prohibit use on physical/production hosts.
 An explicit underlay-tcp probe binds a TCP socket to the kernel-selected
 interface and sends no application data. With --hostname, current host name
 resolution must include the explicit pinned --endpoint IP before TCP probing.

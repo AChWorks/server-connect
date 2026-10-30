@@ -126,6 +126,187 @@ assert r["ok"] and r["data"]["desired"]=="direct" and r["data"]["observed"]=="in
     observed=$(nft -j list ruleset) || return 1
     [ "$observed" != "$before_nft" ] || return 1
   }
+  require_native_baseline() {
+    # Explicit returns also protect callers inside a shell conditional,
+    # where POSIX shells suppress errexit for the whole function body.
+    [ "$(systemctl show server-connect-smart-tun.service -p ActiveState --value)" = inactive ] ||
+      { echo 'PRODUCT_TUN_NATIVE_BASELINE=FAIL (TUN service not inactive)' >&2; return 1; }
+    [ ! -e /sys/class/net/sctunqa0 ] ||
+      { echo 'PRODUCT_TUN_NATIVE_BASELINE=FAIL (TUN link remains)' >&2; return 1; }
+    [ "$(ip -N -j -4 route show table all)" = "$before_routes" ] ||
+      { echo 'PRODUCT_TUN_NATIVE_BASELINE=FAIL (IPv4 routes)' >&2; return 1; }
+    [ "$(ip -N -j -4 rule show)" = "$before_rules" ] ||
+      { echo 'PRODUCT_TUN_NATIVE_BASELINE=FAIL (IPv4 rules)' >&2; return 1; }
+    [ "$(ip -N -j -6 route show table all)" = "$before_v6_routes" ] ||
+      { echo 'PRODUCT_TUN_NATIVE_BASELINE=FAIL (IPv6 routes)' >&2; return 1; }
+    [ "$(ip -N -j -6 rule show)" = "$before_v6_rules" ] ||
+      { echo 'PRODUCT_TUN_NATIVE_BASELINE=FAIL (IPv6 rules)' >&2; return 1; }
+    [ "$(nft -j list ruleset)" = "$before_nft" ] ||
+      { echo 'PRODUCT_TUN_NATIVE_BASELINE=FAIL (nftables)' >&2; return 1; }
+  }
+  require_finalized() {
+    require_native_baseline || return 1
+    [ ! -e /var/lib/server-connect/route-activation-journal.json ] || return 1
+    [ ! -e /var/lib/server-connect/smart-tun-trial.json ] || return 1
+    [ "$(systemctl show server-connect-activation-recover.timer -p ActiveState --value)" = inactive ] || return 1
+    [ "$(systemctl is-enabled server-connect-activation-recover.timer)" = disabled ] || return 1
+    "$sc" --json status | python3 -c '
+import json,sys
+r=json.load(sys.stdin)
+assert r["ok"] and r["data"]["desired"]=="direct" and r["data"]["observed"]=="inactive",r'
+  }
+  recovery_proof_diagnostic() {
+    echo "PRODUCT_TUN_INDEPENDENT_FINALIZATION=FAIL ($1; operation=$op)" >&2
+    systemctl show server-connect-activation-recover.service -p ActiveState -p Result \
+      -p ExecMainStatus -p ExecMainStartTimestampMonotonic -p InvocationID >&2 || :
+    systemctl show server-connect-activation-recover.timer -p ActiveState -p UnitFileState >&2 || :
+    journalctl -b -u server-connect-activation-recover.service --no-pager -n 30 -o json \
+      --output-fields=MESSAGE,_SYSTEMD_UNIT,_SYSTEMD_INVOCATION_ID,_STREAM_ID,_TRANSPORT,_PID >&2 || :
+    return 1
+  }
+  require_executor_idle() {
+    # A disarmed timer may already have queued one last recovery process.
+    # Drain that bounded work before a no-new-invocation proof or retry.
+    for idle_try in $(seq 1 50); do
+      executor_state=$(systemctl show server-connect-activation-recover.service -p ActiveState --value) || return 1
+      executor_job=$(systemctl show server-connect-activation-recover.service -p Job --value) || return 1
+      if [ "$executor_state" = inactive ]; then
+        case "$executor_job" in ''|0) return 0;; esac
+      fi
+      sleep 0.1
+    done
+    return 1
+  }
+  capture_executor_proof() {
+    journalctl --sync || { recovery_proof_diagnostic journal-sync; return 1; }
+    executor_before=$(systemctl show server-connect-activation-recover.service -p ExecMainStartTimestampMonotonic --value) ||
+      { recovery_proof_diagnostic executor-history-read; return 1; }
+    cursor_file=$(mktemp /run/sc-qa-product-tun-cursor.XXXXXXXX) ||
+      { recovery_proof_diagnostic journal-cursor-staging; return 1; }
+    journalctl -b --no-pager -n 1 -o json >"$cursor_file" || {
+      rm -f -- "$cursor_file"
+      recovery_proof_diagnostic journal-cursor-read
+      return 1
+    }
+    executor_cursor=$(python3 - "$cursor_file" <<'PYCAPTURECURSOR'
+import json,sys
+with open(sys.argv[1],'rb') as f:payload=f.read(1024*1024+1)
+assert len(payload)<=1024*1024, "oversized cursor entry"
+rows=[json.loads(line) for line in payload.decode('utf-8').splitlines() if line.strip()]
+assert len(rows)==1 and isinstance(rows[0].get("__CURSOR"),str) and rows[0]["__CURSOR"], "missing journal cursor"
+print(rows[0]["__CURSOR"])
+PYCAPTURECURSOR
+    ) || {
+      rm -f -- "$cursor_file"
+      recovery_proof_diagnostic journal-cursor
+      return 1
+    }
+    rm -f -- "$cursor_file"
+  }
+  require_independent_finalization() {
+    # Poll files only: status must never secretly finish cleanup and turn
+    # this into a false claim that the independent systemd executor ran.
+    for cleanup_try in $(seq 1 25); do
+      if [ ! -e /var/lib/server-connect/route-activation-journal.json ] &&
+         [ "$(systemctl show server-connect-activation-recover.service -p ActiveState --value)" = inactive ]; then
+        break
+      fi
+      sleep 1
+    done
+    require_finalized || { recovery_proof_diagnostic native-finalization; return 1; }
+    journalctl --sync || { recovery_proof_diagnostic receipt-sync; return 1; }
+    proof_file=/run/sc-qa-product-tun-recovery.jsonl
+    journalctl -b --after-cursor="$executor_cursor" -u server-connect-activation-recover.service \
+      --no-pager -n 2049 -o json >"$proof_file" ||
+      { recovery_proof_diagnostic journal-read; return 1; }
+    proven_invocation=$(/bin/sh /root/qa-host-assertions.sh recovery-receipt "$proof_file" "$op") ||
+      { recovery_proof_diagnostic exact-operation-receipt; return 1; }
+    # Disarming the last timer can unload the inactive oneshot and reset
+    # systemctl's execution statistics. Journal stream identity supplies
+    # freshness; volatile properties remain diagnostics, not history proof.
+    current_invocation=$(systemctl show server-connect-activation-recover.service -p InvocationID --value) ||
+      { recovery_proof_diagnostic executor-invocation-read; return 1; }
+    case "$current_invocation" in
+      ''|0|00000000000000000000000000000000) :;;
+      "$proven_invocation") :;;
+      *) recovery_proof_diagnostic conflicting-retained-invocation; return 1;;
+    esac
+    [ "$(systemctl show server-connect-activation-recover.service -p ActiveState --value)" = inactive ] &&
+    [ "$(systemctl show server-connect-activation-recover.service -p Result --value)" = success ] &&
+    [ "$(systemctl show server-connect-activation-recover.service -p ExecMainStatus --value)" = 0 ] ||
+      { recovery_proof_diagnostic executor-current-state; return 1; }
+    echo "PRODUCT_TUN_RECOVERY_RECEIPT=PASS (operation=$op invocation=$proven_invocation; exact successful receipt and native baseline)"
+    echo "PRODUCT_TUN_RECOVERY_VOLATILE_HISTORY(previous_start=$executor_before; historical exit status may be unavailable after unit collection)"
+    systemctl show server-connect-activation-recover.service -p ExecMainStartTimestampMonotonic \
+      -p InvocationID -p Result -p ExecMainStatus
+    rm -f -- "$proof_file"
+  }
+  require_selected_ready() {
+    lifecycle_ready=no
+    for ready_try in $(seq 1 35); do
+      if assert_product_tun_policy_active &&
+         expect_source 5.22.0.10 10.254.72.1 &&
+         expect_source 8.8.8.8 8.8.8.8; then
+        if [ "$ipv6_trial" != yes ] ||
+           ip -6 route show table all | grep -F 'dev sctunqa0' >/dev/null; then
+          lifecycle_ready=yes
+          break
+        fi
+      fi
+      sleep 0.2
+    done
+    [ "$lifecycle_ready" = yes ]
+  }
+  saved_policy_hashes() {
+    # Hash actual durable bytes, including the selected profile, without
+    # logging any credential or accepting metadata as persistence proof.
+    sha256sum "/var/lib/server-connect/profiles/$profile.json" \
+      /var/lib/server-connect/smart-tun-policy.json \
+      /var/lib/server-connect/state.json
+  }
+  capture_saved_policy() {
+    "$sc" --json smart-tun-trial-policy | python3 -c '
+import json,sys
+r=json.load(sys.stdin)
+assert r["ok"] and r["data"]["present"] and r["data"]["experiment_only"],r
+assert r["data"]["management_peer_ip"]=="10.254.72.2",r'
+    saved_policy_before=$(saved_policy_hashes)
+  }
+  disconnect_now() {
+    "$sc" --json smart-tun-trial-disconnect --operation-id "$1" --revision "$2" |
+      python3 -c '
+import json,sys
+r=json.load(sys.stdin); d=r.get("data",{})
+assert r["ok"] and d["phase"]=="trial_cleared" and d["revision"]==5,r
+assert d["recovery_verified"] and not d["guard_scheduled"] and not d["activation_ready"],r'
+    require_finalized
+    [ "$(saved_policy_hashes)" = "$saved_policy_before" ]
+  }
+  reject_disconnect_unchanged() {
+    # Verify the current operation bytes and live native policy as well as
+    # the error. A nonzero exit alone cannot prove another trial survived.
+    stale_before=$(sha256sum /var/lib/server-connect/route-activation-journal.json /var/lib/server-connect/smart-tun-trial.json)
+    stale_routes=$(ip -N -j -4 route show table all)
+    stale_rules=$(ip -N -j -4 rule show)
+    stale_v6_routes=$(ip -N -j -6 route show table all)
+    stale_v6_rules=$(ip -N -j -6 rule show)
+    stale_nft=$(nft -j list ruleset)
+    if "$sc" --json smart-tun-trial-disconnect --operation-id "$1" --revision "$2" > /run/sc-qa-product-tun-conflict.json; then
+      echo 'Stale Disconnect unexpectedly accepted' >&2; return 1
+    fi
+    python3 - <<'PYSTALEDISCONNECT'
+import json
+with open('/run/sc-qa-product-tun-conflict.json') as f:r=json.load(f)
+assert not r['ok'] and r['error']['code']=='activation_journal_conflict',r
+PYSTALEDISCONNECT
+    [ "$(sha256sum /var/lib/server-connect/route-activation-journal.json /var/lib/server-connect/smart-tun-trial.json)" = "$stale_before" ]
+    [ "$(ip -N -j -4 route show table all)" = "$stale_routes" ]
+    [ "$(ip -N -j -4 rule show)" = "$stale_rules" ]
+    [ "$(ip -N -j -6 route show table all)" = "$stale_v6_routes" ]
+    [ "$(ip -N -j -6 rule show)" = "$stale_v6_rules" ]
+    [ "$(nft -j list ruleset)" = "$stale_nft" ]
+    require_selected_ready
+  }
 
   if [ "$ipv6_trial" = yes ]; then
     # No arbitrary IPv6 Apply. Refuse a partial/modified dual-stack
@@ -210,6 +391,40 @@ PYV6REFUSED
     /bin/sh /root/qa-host-coexistence.sh probe
     assert_product_tun_policy_active
     echo PRODUCT_TUN_IPV6_REAL_SELECTED=PASS
+
+    # Real dual-stack Off/on lifecycle using the installed commands. The
+    # peer witnesses must see native Direct after Off and selected VLESS
+    # again under a NEW guarded operation using the same saved bytes.
+    capture_saved_policy
+    previous_op=$op
+    disconnect_now "$op" 1
+    expect_source 8.8.8.8 10.254.72.1
+    ipv6_path tcp 2001:db8:8::8 fd73:1::1 reply
+    ipv6_path udp 2001:db8:8::8 fd73:1::1 reply
+    ipv6_path tcp 2001:db8:5::10 fd73:1::1 reply
+    ipv6_path udp 2001:db8:5::10 fd73:1::1 reply
+    test "$(ipv6_foreign_tcp_direct_packets)" -gt "$ipv6_foreign_tcp_baseline"
+    test "$(ipv6_foreign_udp_direct_packets)" -gt "$ipv6_foreign_udp_baseline"
+    test "$(ipv6_override_direct_packets)" -gt "$ipv6_override_baseline"
+    test "$(ipv6_override_udp_direct_packets)" -gt "$ipv6_override_udp_baseline"
+    ipv6_foreign_tcp_baseline=$(ipv6_foreign_tcp_direct_packets)
+    ipv6_foreign_udp_baseline=$(ipv6_foreign_udp_direct_packets)
+    ipv6_override_baseline=$(ipv6_override_direct_packets)
+    ipv6_override_udp_baseline=$(ipv6_override_udp_direct_packets)
+    "$sc" --json smart-tun-trial-apply --saved --deadline-seconds 55 >/run/sc-qa-product-tun-apply.json
+    op=$(pending_receipt)
+    test "$op" != "$previous_op"
+    require_selected_ready
+    test "$(saved_policy_hashes)" = "$saved_policy_before"
+    ipv6_path tcp 2001:db8:8::8 2001:db8:8::8 reply
+    ipv6_path udp 2001:db8:8::8 2001:db8:8::8 reply
+    ipv6_path tcp 2001:db8:5::10 2001:db8:5::10 reply
+    ipv6_path udp 2001:db8:5::10 2001:db8:5::10 reply
+    test "$(ipv6_foreign_tcp_direct_packets)" -eq "$ipv6_foreign_tcp_baseline"
+    test "$(ipv6_foreign_udp_direct_packets)" -eq "$ipv6_foreign_udp_baseline"
+    test "$(ipv6_override_direct_packets)" -eq "$ipv6_override_baseline"
+    test "$(ipv6_override_udp_direct_packets)" -eq "$ipv6_override_udp_baseline"
+    echo PRODUCT_TUN_IPV6_EXPLICIT_OFF_SAVED_REAPPLY=PASS
 
     # The selected VLESS upstream is genuinely killed. The product TUN
     # remains active until its independent deadline, and all VPN-required
@@ -325,7 +540,16 @@ PYSTATUS
   echo PRODUCT_TUN_INSTALLED_APT_GIT_WORDPRESS=PASS
   require_recovered "$op"
   echo PRODUCT_TUN_SYSTEMD_DEADLINE_EXACT_BASELINE=PASS
-  clear_recovered "$op"
+  # Exercise Clear's cleanup path too, not only explicit Disconnect. A
+  # persisted cleanup intent distinguishes this legitimate credential
+  # removal from the tampered pending-credential negative case below.
+  capture_executor_proof
+  killed=0
+  "$sc" --json smart-tun-trial-clear --operation-id "$op" --revision 2 \
+    --qa-kill-at after-credential-remove >/dev/null 2>&1 || killed=$?
+  [ "$killed" = 137 ]
+  require_independent_finalization
+  echo PRODUCT_TUN_CLEAR_SIGKILL_INDEPENDENT_FINALIZATION=PASS
   rm -f /run/sc-qa-product-tun-apply.json /run/sc-qa-product-tun-conflict.json
   echo PRODUCT_TUN_RECOVERED_CLEARED_DIRECT=PASS
 
@@ -590,4 +814,212 @@ PYCLEARREFUSED
   clear_recovered "$op"
   rm -f /run/sc-qa-product-tun-apply.json /run/sc-qa-product-tun-conflict.json
   echo PRODUCT_TUN_CREDENTIAL_CONFLICT_RECONCILED=PASS
+
+  # The practical off/on path: immediate explicit deactivation rather
+  # than waiting for the pending deadline, while retaining operator state.
+  apply 60 >/run/sc-qa-product-tun-apply.json
+  op=$(pending_receipt)
+  require_selected_ready
+  capture_saved_policy
+  reject_disconnect_unchanged 00000000000000000000000000000000 1
+  reject_disconnect_unchanged "$op" 2
+  previous_op=$op
+  direct_before_off=$(direct_witness_packets)
+  disconnect_now "$op" 1
+  expect_source 8.8.8.8 10.254.72.1
+  udp_path 8.8.8.8 10.254.72.1 product-off-native-udp reply
+  test "$(direct_witness_packets)" -gt "$direct_before_off"
+  /bin/sh /root/qa-host-coexistence.sh probe
+  expect_foreign_hosted_reply
+  echo PRODUCT_TUN_EXPLICIT_OFF_EXACT_BASELINE=PASS
+
+  # Reject corrupt saved inputs before prearming or touching the network.
+  # Preserve the evidence bytes until this QA owner restores its backup.
+  policy=/var/lib/server-connect/smart-tun-policy.json
+  policy_backup=/run/sc-qa-product-tun-policy.saved
+  test ! -e "$policy_backup"
+  cp -- "$policy" "$policy_backup"
+  python3 - "$policy" <<'PYCORRUPTPOLICY'
+import json,sys
+with open(sys.argv[1]) as f:policy=json.load(f)
+policy['unrecognized_qa_key']=True
+with open(sys.argv[1],'w') as f:json.dump(policy,f)
+PYCORRUPTPOLICY
+  corrupt_policy_hash=$(sha256sum "$policy")
+  profile_state_before=$(sha256sum "/var/lib/server-connect/profiles/$profile.json" /var/lib/server-connect/state.json)
+  require_executor_idle || { recovery_proof_diagnostic invalid-policy-prior-executor; return 1; }
+  capture_executor_proof
+  invalid_policy_cursor=$executor_cursor
+  if "$sc" --json smart-tun-trial-apply --saved --deadline-seconds 60 >/run/sc-qa-product-tun-conflict.json; then
+    echo 'Saved policy with unknown schema key was accepted' >&2; return 1
+  fi
+  python3 - <<'PYINVALIDPOLICY'
+import json
+with open('/run/sc-qa-product-tun-conflict.json') as f:r=json.load(f)
+assert not r['ok'] and r['error']['code']=='saved_policy_invalid',r
+PYINVALIDPOLICY
+  require_finalized
+  test "$(sha256sum "$policy")" = "$corrupt_policy_hash"
+  test "$(sha256sum "/var/lib/server-connect/profiles/$profile.json" /var/lib/server-connect/state.json)" = "$profile_state_before"
+  journalctl --sync || { recovery_proof_diagnostic invalid-policy-journal-sync; return 1; }
+  proof_file=/run/sc-qa-product-tun-no-prearm.jsonl
+  journalctl -b --after-cursor="$invalid_policy_cursor" --no-pager -n 2049 -o json \
+    -u server-connect-activation-recover.service -u server-connect-smart-tun.service >"$proof_file" ||
+    { recovery_proof_diagnostic invalid-policy-journal-read; return 1; }
+  # Product prearm runs the recovery command, which prints a receipt.
+  # This is evidence for this implementation, not arbitrary silent units.
+  python3 - "$proof_file" <<'PYNOPREARM'
+import json,sys
+with open(sys.argv[1],'rb') as f:payload=f.read(1024*1024+1)
+assert len(payload)<=1024*1024, 'oversized no-prearm evidence'
+rows=payload.decode('utf-8').splitlines()
+assert len(rows)<=2048, 'excessive no-prearm records'
+for line in rows:
+    row=json.loads(line)
+    assert isinstance(row,dict), 'malformed no-prearm journal entry'
+    assert not (row.get('_TRANSPORT')=='stdout' and row.get('_SYSTEMD_UNIT') in (
+        'server-connect-activation-recover.service','server-connect-smart-tun.service')), 'invalid saved policy invoked a guarded unit'
+PYNOPREARM
+  rm -f -- "$proof_file"
+  mv -- "$policy_backup" "$policy"
+  test "$(saved_policy_hashes)" = "$saved_policy_before"
+  echo PRODUCT_TUN_INVALID_SAVED_POLICY_NO_PREARM=PASS
+
+  "$sc" --json smart-tun-trial-apply --saved --deadline-seconds 60 >/run/sc-qa-product-tun-apply.json
+  op=$(pending_receipt)
+  test "$op" != "$previous_op"
+  require_selected_ready
+  test "$(saved_policy_hashes)" = "$saved_policy_before"
+  # Replay a real previous operation identity against the new operation,
+  # then mismatch only its revision; neither may interrupt the new TUN.
+  reject_disconnect_unchanged "$previous_op" 1
+  reject_disconnect_unchanged "$op" 2
+  echo PRODUCT_TUN_STALE_DISCONNECT_NO_MUTATION=PASS
+  echo PRODUCT_TUN_SAVED_REAPPLY_NEW_OPERATION=PASS
+
+  # Another network owner appearing after Apply is retained, even though
+  # this product can stop its own TUN. Cleanup resumes only after the QA
+  # owner removes its exact fixture; no broad nftables reset is allowed.
+  nft add table inet scqa_disconnect_foreign
+  foreign_table=$(nft -j list table inet scqa_disconnect_foreign)
+  capture_executor_proof
+  if "$sc" --json smart-tun-trial-disconnect --operation-id "$op" --revision 1 >/run/sc-qa-product-tun-conflict.json; then
+    echo 'Disconnect ignored foreign native policy drift' >&2; return 1
+  fi
+  python3 - "$op" <<'PYOFFCONFLICT'
+import json,sys
+with open('/run/sc-qa-product-tun-conflict.json') as f:r=json.load(f)
+assert not r['ok'] and r['error']['code']=='trial_recovery_uncertain',r
+with open('/var/lib/server-connect/route-activation-journal.json') as f:j=json.load(f)
+assert j['operation_id']==sys.argv[1] and j['phase']=='trial_stop_requested' and j['revision']==2,j
+PYOFFCONFLICT
+  test "$(systemctl show server-connect-smart-tun.service -p ActiveState --value)" = inactive
+  test ! -e /sys/class/net/sctunqa0
+  test -f /var/lib/server-connect/smart-tun-trial.json
+  test "$(nft -j list table inet scqa_disconnect_foreign)" = "$foreign_table"
+  systemctl is-active --quiet server-connect-activation-recover.timer
+  if "$sc" --json status >/run/sc-qa-product-tun-conflict.json; then
+    echo 'Unresolved explicit Off incorrectly reported verified Direct' >&2; return 1
+  fi
+  test "$(saved_policy_hashes)" = "$saved_policy_before"
+  nft delete table inet scqa_disconnect_foreign
+  require_independent_finalization
+  /bin/sh /root/qa-host-coexistence.sh probe
+  expect_foreign_hosted_reply
+  echo PRODUCT_TUN_OFF_FOREIGN_CONFLICT_RETAINED=PASS
+
+  # An untrusted special-file credential must not block inspection or
+  # prevent containment of the independently identified product TUN.
+  # Preserve that foreign file and the operation instead of claiming Off.
+  "$sc" --json smart-tun-trial-apply --saved --deadline-seconds 60 >/run/sc-qa-product-tun-apply.json
+  op=$(pending_receipt)
+  require_selected_ready
+  credential=/var/lib/server-connect/smart-tun-trial.json
+  saved=/run/sc-qa-product-tun-credential.saved
+  test -f "$credential" && test ! -e "$saved"
+  mv -- "$credential" "$saved"
+  mkfifo -m 600 "$credential"
+  foreign_fifo=$(stat -c '%d:%i:%f' "$credential")
+  fifo_rc=0
+  timeout --signal=KILL 15 "$sc" --json smart-tun-trial-disconnect \
+    --operation-id "$op" --revision 1 >/run/sc-qa-product-tun-conflict.json || fifo_rc=$?
+  test "$fifo_rc" -ne 0 && test "$fifo_rc" -ne 124 && test "$fifo_rc" -ne 137
+  python3 - "$op" <<'PYFIFOCONFLICT'
+import json,sys
+with open('/run/sc-qa-product-tun-conflict.json') as f:r=json.load(f)
+assert not r['ok'] and r['error']['code']=='trial_resource_conflict',r
+with open('/var/lib/server-connect/route-activation-journal.json') as f:j=json.load(f)
+assert j['operation_id']==sys.argv[1] and j['phase']=='trial_stop_requested' and j['revision']==2,j
+PYFIFOCONFLICT
+  require_native_baseline
+  test -p "$credential"
+  test "$(stat -c '%d:%i:%f' "$credential")" = "$foreign_fifo"
+  systemctl is-active --quiet server-connect-activation-recover.timer
+  if "$sc" --json status >/run/sc-qa-product-tun-conflict.json; then
+    echo 'Credential FIFO conflict incorrectly reported verified Direct' >&2; return 1
+  fi
+  test "$(saved_policy_hashes)" = "$saved_policy_before"
+  capture_executor_proof
+  # Only the QA owner may remove the exact FIFO it created and restore
+  # the original credential bytes; product recovery never adopts it.
+  rm -- "$credential"
+  mv -- "$saved" "$credential"
+  require_independent_finalization
+  echo PRODUCT_TUN_OFF_FIFO_CONTAINMENT_RETAINED=PASS
+
+  # Bounded crash cuts in the shared stop/finalization transaction. The
+  # CLI really dies with SIGKILL, and only a fresh independent executor
+  # invocation may remove the journal/credential and restore native paths.
+  for kill_point in after-stop-request after-stop after-cleanup-intent after-credential-remove; do
+    "$sc" --json smart-tun-trial-apply --saved --deadline-seconds 60 >/run/sc-qa-product-tun-apply.json
+    op=$(pending_receipt)
+    require_selected_ready
+    capture_executor_proof
+    killed=0
+    "$sc" --json smart-tun-trial-disconnect --operation-id "$op" --revision 1 \
+      --qa-kill-at "$kill_point" >/dev/null 2>&1 || killed=$?
+    test "$killed" = 137
+    require_independent_finalization
+    test "$(saved_policy_hashes)" = "$saved_policy_before"
+    expect_source 8.8.8.8 10.254.72.1
+    echo "PRODUCT_TUN_OFF_KILL_BOUNDARY($kill_point)=PASS"
+  done
+  echo PRODUCT_TUN_OFF_SIGKILL_INDEPENDENT_FINALIZATION=PASS
+
+  # A crash after timer disarm is already network-safe but can retain its
+  # cleanup receipt. A queued executor may finish it; otherwise the exact
+  # operation/revision retry is explicit and is not called autonomous QA.
+  "$sc" --json smart-tun-trial-apply --saved --deadline-seconds 60 >/run/sc-qa-product-tun-apply.json
+  op=$(pending_receipt)
+  require_selected_ready
+  capture_executor_proof
+  killed=0
+  "$sc" --json smart-tun-trial-disconnect --operation-id "$op" --revision 1 \
+    --qa-kill-at after-guard-disarm >/dev/null 2>&1 || killed=$?
+  test "$killed" = 137
+  require_native_baseline
+  test ! -e /var/lib/server-connect/smart-tun-trial.json
+  test "$(systemctl show server-connect-activation-recover.timer -p ActiveState --value)" = inactive
+  # Wait for any invocation already queued by the timer before deciding
+  # whether an exact retry is needed. Do not race its journal unlink.
+  require_executor_idle || { recovery_proof_diagnostic post-disarm-queued-executor; return 1; }
+  if [ -e /var/lib/server-connect/route-activation-journal.json ]; then
+    python3 - "$op" <<'PYDISARMED'
+import json,sys
+with open('/var/lib/server-connect/route-activation-journal.json') as f:j=json.load(f)
+assert j['operation_id']==sys.argv[1] and j['phase']=='trial_cleanup_pending' and j['revision']==4,j
+PYDISARMED
+    disconnect_now "$op" 4
+    echo PRODUCT_TUN_POST_DISARM_COMPLETION=explicit-exact-operation-retry
+  else
+    require_independent_finalization
+    echo PRODUCT_TUN_POST_DISARM_COMPLETION=already-queued-independent-executor
+  fi
+  require_finalized
+  test "$(saved_policy_hashes)" = "$saved_policy_before"
+  expect_source 8.8.8.8 10.254.72.1
+  /bin/sh /root/qa-host-coexistence.sh probe
+  expect_foreign_hosted_reply
+  rm -f /run/sc-qa-product-tun-apply.json /run/sc-qa-product-tun-conflict.json
+  echo PRODUCT_TUN_OFF_POST_DISARM_RECONCILIATION=PASS
 }

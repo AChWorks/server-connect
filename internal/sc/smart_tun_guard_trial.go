@@ -10,7 +10,6 @@ package sc
 import (
 	"bytes"
 	"context"
-	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"io"
@@ -92,8 +91,7 @@ func validateSmartTUNTrial(record smartTUNTrialJournal) error {
 		record.TunnelInterface == "lo" || record.UnderlayInterface == "lo" {
 		return activationJournalError("invalid guarded Smart Routing trial identity or resource")
 	}
-	if (record.Phase != "trial_pending" || record.Revision != 1) &&
-		(record.Phase != "trial_recovered" || record.Revision != 2) {
+	if !smartTUNTrialPhaseRevisionValid(record.Phase, record.Revision) {
 		return activationJournalError("unsupported guarded Smart Routing trial phase/revision")
 	}
 	for _, ip := range []string{record.EndpointIP, record.ManagementPeerIP} {
@@ -145,6 +143,24 @@ func loadSmartTUNTrialLocked(store *activationJournalDir) (smartTUNTrialJournal,
 	}
 	record, err := decodeSmartTUNTrial(data)
 	return record, identity, err
+}
+
+// Atomic journal writes legitimately change the inode. Refresh that identity
+// only if the ENTIRE expected operation still matches, not merely its schema
+// or operation ID. Otherwise a valid substituted record could be adopted and
+// later overwritten/removed using another operation's recovery evidence.
+func reloadSmartTUNTrialLocked(store *activationJournalDir, expected smartTUNTrialJournal) (activationJournalFileIdentity, error) {
+	record, identity, err := loadSmartTUNTrialLocked(store)
+	if errors.Is(err, os.ErrNotExist) {
+		return activationJournalFileIdentity{}, Fault("activation_journal_conflict", "expected TUN operation disappeared during transition")
+	}
+	if err != nil {
+		return activationJournalFileIdentity{}, err
+	}
+	if record != expected {
+		return activationJournalFileIdentity{}, Fault("activation_journal_conflict", "TUN operation contents changed during transition")
+	}
+	return identity, nil
 }
 
 func writeSmartTUNTrialLocked(store *activationJournalDir, record smartTUNTrialJournal, old *activationJournalFileIdentity) error {
@@ -387,8 +403,7 @@ func (m *Manager) admitSmartTUNTrialLocked(store *activationJournalDir, opts Sma
 	if unitState, err := smartTUNTrialUnitState(); err != nil || unitState != "inactive" {
 		return smartTUNTrialAdmission{}, Fault("guard_unavailable", "owned TUN unit is not inactive or trustworthy")
 	}
-	cfgPath := filepath.Join(m.Dir, smartTUNTrialConfigFile)
-	if _, err := os.Lstat(cfgPath); err == nil {
+	if _, _, err := store.readSmartTUNFile(smartTUNTrialConfigFile); err == nil {
 		return smartTUNTrialAdmission{}, Fault("activation_journal_conflict", "unreconciled TUN trial config exists")
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return smartTUNTrialAdmission{}, Fault("activation_journal_unavailable", "cannot inspect private TUN config absence")
@@ -397,12 +412,13 @@ func (m *Manager) admitSmartTUNTrialLocked(store *activationJournalDir, opts Sma
 	if err != nil {
 		return smartTUNTrialAdmission{}, err
 	}
-	// The disposable guest can contain preexisting nftables owners. A
-	// strict empty-ruleset admission would incorrectly reject exactly the
-	// interoperability case we must test. Never adopt/delete any of their
-	// resources: retain the full normalized native firewall fingerprint and
-	// demand exact equality after stopping only our trusted TUN service.
-	// This is *not* authorization to run on physical/production hosts.
+	// Retain the full native firewall fingerprint for the controlled guest.
+	// Current foreign-object QA uses a separate table outside the core's
+	// automatic cleanup targets; this admission does not exclude every
+	// overlap. Core teardown may delete an overlapping foreign object before
+	// the baseline comparison, so equality is not ownership/preservation
+	// proof. Such collisions/replacements remain unsupported and unaccepted;
+	// this is not authorization for physical/production hosts.
 	if host.Firewall == nil || !host.Firewall.Observed {
 		return smartTUNTrialAdmission{}, Fault("trial_observation_uncertain", "complete native nftables observation required before guarded guest trial")
 	}
@@ -438,6 +454,10 @@ func smartTUNTrialFixturePolicySupported(opts SmartTUNCandidateOptions) bool {
 }
 
 func (m *Manager) BeginSmartTUNTrial(opts SmartTUNCandidateOptions, managementPeer string, deadlineSeconds int, qaKillPoint string) (SmartTUNTrialReceipt, error) {
+	return m.beginSmartTUNTrial(opts, managementPeer, deadlineSeconds, qaKillPoint, nil)
+}
+
+func (m *Manager) beginSmartTUNTrial(opts SmartTUNCandidateOptions, managementPeer string, deadlineSeconds int, qaKillPoint string, saved *smartTUNSavedPolicyBinding) (SmartTUNTrialReceipt, error) {
 	if qaKillPoint != "" && qaKillPoint != "after-journal" && qaKillPoint != "after-start" {
 		return SmartTUNTrialReceipt{}, Fault("invalid_arguments", "unsupported disposable TUN SIGKILL boundary")
 	}
@@ -457,6 +477,9 @@ func (m *Manager) BeginSmartTUNTrial(opts SmartTUNCandidateOptions, managementPe
 	var planned smartTUNTrialAdmission
 	if err := m.withActivationJournalLock(syscall.Fsync, func(store *activationJournalDir) error {
 		var err error
+		if err := checkSavedSmartTUNPolicyLocked(store, saved); err != nil {
+			return err
+		}
 		planned, err = m.admitSmartTUNTrialLocked(store, opts, managementPeer)
 		return err
 	}); err != nil {
@@ -486,6 +509,9 @@ func (m *Manager) BeginSmartTUNTrial(opts SmartTUNCandidateOptions, managementPe
 	var receipt SmartTUNTrialReceipt
 	journalPersisted := false
 	err := m.withActivationJournalLock(syscall.Fsync, func(store *activationJournalDir) error {
+		if err := checkSavedSmartTUNPolicyLocked(store, saved); err != nil {
+			return err
+		}
 		admission, err := m.admitSmartTUNTrialLocked(store, opts, managementPeer)
 		if err != nil {
 			return err
@@ -497,7 +523,6 @@ func (m *Manager) BeginSmartTUNTrial(opts SmartTUNCandidateOptions, managementPe
 			return Fault("trial_observation_uncertain", "selected profile or kernel baseline changed while arming guard")
 		}
 		profile, endpoint, policy, baseline := admission.profile, admission.endpoint, admission.policy, admission.baseline
-		cfgPath := filepath.Join(m.Dir, smartTUNTrialConfigFile)
 		boot, err := trialBootIdentity()
 		if err != nil {
 			return err
@@ -531,6 +556,11 @@ func (m *Manager) BeginSmartTUNTrial(opts SmartTUNCandidateOptions, managementPe
 		if err != nil || now != baseline {
 			return Fault("trial_observation_uncertain", "network changed before guarded TUN mutation")
 		}
+		// Save only validated non-secret routing settings. Saving configuration
+		// never authorizes an activation; every reapply repeats full admission.
+		if err := saveSmartTUNPolicyLocked(store, opts, managementPeer); err != nil {
+			return err
+		}
 		// Write the durable guarded operation BEFORE writing its credential.
 		// A crash between these operations leaves a recoverable journal with
 		// a missing credential and NO possible TUN start; the independent
@@ -543,7 +573,7 @@ func (m *Manager) BeginSmartTUNTrial(opts SmartTUNCandidateOptions, managementPe
 			_ = syscall.Kill(os.Getpid(), syscall.SIGKILL)
 			return Fault("trial_pending_recovery", "disposable precredential SIGKILL unexpectedly returned")
 		}
-		if err := put(cfgPath, policy); err != nil {
+		if err := store.writeSmartTUNFile(smartTUNTrialConfigFile, policy, nil); err != nil {
 			return Fault("trial_pending_recovery", "guarded journal durable but TUN credential staging failed; independent recovery required")
 		}
 		// Record the *durable* intention to start before invoking systemd.
@@ -551,9 +581,9 @@ func (m *Manager) BeginSmartTUNTrial(opts SmartTUNCandidateOptions, managementPe
 		// a legitimate precredential crash, even on the NEXT guard tick
 		// after the service has been stopped. No sensitive policy is stored
 		// in this journal: only immutable operation and hash evidence.
-		_, identity, err := store.readJournal()
+		identity, err := reloadSmartTUNTrialLocked(store, record)
 		if err != nil {
-			return Fault("trial_pending_recovery", "cannot reidentify persisted TUN journal before core start")
+			return err
 		}
 		record.CoreStartAttempted = true
 		if err := writeSmartTUNTrialLocked(store, record, &identity); err != nil {
@@ -626,6 +656,21 @@ func (m *Manager) tryRecoverSmartTUNTrial() (TrialReceipt, bool, error) {
 		if err != nil {
 			return err
 		}
+		// A durable operator stop/cleanup request authorizes completion of
+		// that exact operation by this already-independent executor. Ordinary
+		// deadline recovery retains its historical recovered receipt.
+		if result.Phase == "trial_cleanup_pending" ||
+			(result.Phase == "trial_recovered" && result.Revision == 3) {
+			record.Phase, record.Revision = result.Phase, result.Revision
+			identity, err = reloadSmartTUNTrialLocked(store, record)
+			if err != nil {
+				return err
+			}
+			result, err = finalizeSmartTUNTrialLocked(store, identity, record, "")
+			if err != nil {
+				return err
+			}
+		}
 		receipt = TrialReceipt{
 			OperationID: result.OperationID, Revision: result.Revision,
 			Phase: result.Phase, ExperimentOnly: true,
@@ -675,8 +720,9 @@ func recoverSmartTUNTrialLocked(store *activationJournalDir, identity activation
 		return SmartTUNTrialReceipt{}, err
 	}
 	credentialPresent, credentialValid := false, false
-	if record.Phase == "trial_pending" {
-		cfg, checkErr := readRegular(filepath.Join(DefaultDir, smartTUNTrialConfigFile))
+	var credentialReadErr error
+	if record.Phase == "trial_pending" || record.Phase == "trial_stop_requested" {
+		cfg, _, checkErr := store.readSmartTUNFile(smartTUNTrialConfigFile)
 		switch {
 		case checkErr == nil:
 			credentialPresent, credentialValid = true, sha256Hex(cfg) == record.ConfigSHA256
@@ -684,10 +730,13 @@ func recoverSmartTUNTrialLocked(store *activationJournalDir, identity activation
 			// Journal-first interrupted operation; no core could have
 			// started through the trusted LoadCredential unit without it.
 		default:
-			return SmartTUNTrialReceipt{}, Fault("trial_resource_conflict", "pending TUN credential cannot be inspected")
+			// Untrusted bytes must never authorize continued routing. Still
+			// contain the exact proven-owned core before returning a conflict;
+			// retain both journal and credential evidence for reconciliation.
+			credentialReadErr = Fault("trial_resource_conflict", "pending TUN credential cannot be inspected")
 		}
 	}
-	if record.Phase == "trial_recovered" {
+	if record.Phase == "trial_recovered" || record.Phase == "trial_cleanup_pending" {
 		if status != "inactive" {
 			return SmartTUNTrialReceipt{}, Fault("trial_recovery_uncertain", "recovered journal has an active TUN unit")
 		}
@@ -697,24 +746,24 @@ func recoverSmartTUNTrialLocked(store *activationJournalDir, identity activation
 		}
 		return smartTUNReceipt(record, false, true), nil
 	}
-	boot, err := trialBootIdentity()
-	if err != nil {
-		return SmartTUNTrialReceipt{}, err
-	}
-	uptime, err := trialUptime()
-	if err != nil {
-		return SmartTUNTrialReceipt{}, err
-	}
-	if smartTUNTrialMayRemainPending(record, status, credentialValid, boot == record.BootID, uptime) {
-		if trialGuardScheduled() == nil {
-			return smartTUNReceipt(record, true, false), nil
+	if record.Phase == "trial_pending" {
+		boot, err := trialBootIdentity()
+		if err != nil {
+			return SmartTUNTrialReceipt{}, err
 		}
-		// A valid deadline is not sufficient once the independent guard is
-		// observed unavailable. Contain the exact trusted TUN now rather
-		// than allowing it to run past a deadline no executor can enforce.
-		// If stopping or native restoration fails, the pending journal
-		// remains and the caller must report uncertainty, never Direct.
+		uptime, err := trialUptime()
+		if err != nil {
+			return SmartTUNTrialReceipt{}, err
+		}
+		if smartTUNTrialMayRemainPending(record, status, credentialValid, boot == record.BootID, uptime) {
+			if trialGuardScheduled() == nil {
+				return smartTUNReceipt(record, true, false), nil
+			}
+			// A valid deadline cannot preserve active TUN after guard loss.
+		}
 	}
+	// A durable explicit stop does not depend on the old boot clock or
+	// deadline: it is an unconditional request to contain the owned core.
 	// Expired, rebooted, stopped, failed, or unguarded: stop ONLY the
 	// trusted, pinned systemd service and demand EXACT baseline restoration.
 	originalUnitState := status
@@ -729,6 +778,9 @@ func recoverSmartTUNTrialLocked(store *activationJournalDir, identity activation
 	if err != nil || current != record.BaselineSHA256 {
 		return SmartTUNTrialReceipt{}, Fault("trial_recovery_uncertain", "host routing or firewall baseline differs after TUN stop")
 	}
+	if credentialReadErr != nil {
+		return SmartTUNTrialReceipt{}, credentialReadErr
+	}
 	// Stopping a service changes ActiveState to inactive. Do not use its
 	// *post-stop* state to decide whether a missing credential was ever
 	// trusted. The journal's prior durable start intent is authoritative
@@ -736,7 +788,11 @@ func recoverSmartTUNTrialLocked(store *activationJournalDir, identity activation
 	if err := smartTUNTrialCredentialRecoveryCheck(record, originalUnitState, credentialPresent, credentialValid); err != nil {
 		return SmartTUNTrialReceipt{}, err
 	}
+	requestedStop := record.Phase == "trial_stop_requested"
 	record.Phase, record.Revision = "trial_recovered", 2
+	if requestedStop {
+		record.Revision = 3
+	}
 	if err := writeSmartTUNTrialLocked(store, record, &identity); err != nil {
 		return SmartTUNTrialReceipt{}, err
 	}
@@ -757,7 +813,9 @@ func (m *Manager) InspectSmartTUNTrial() (SmartTUNTrialReceipt, error) {
 		if err != nil {
 			return err
 		}
-		if record.Phase == "trial_recovered" {
+		if record.Phase == "trial_recovered" || record.Phase == "trial_cleanup_pending" {
+			// These phases only reobserve the inactive unit/native baseline.
+			// Status MUST NOT finish stop/cleanup or manufacture watchdog proof.
 			result, err := recoverSmartTUNTrialLocked(store, activationJournalFileIdentity{}, record)
 			if err != nil {
 				return err
@@ -772,67 +830,4 @@ func (m *Manager) InspectSmartTUNTrial() (SmartTUNTrialReceipt, error) {
 		return nil
 	})
 	return receipt, err
-}
-
-// Inspect the exact private credential before disarming the final recovery
-// supervisor. Clearing a recovered operation cannot silently discard altered
-// bytes, or a vanished credential after a durable core-start attempt.
-func smartTUNTrialCredentialForClear(record smartTUNTrialJournal, path string) error {
-	data, err := readRegular(path)
-	if errors.Is(err, os.ErrNotExist) {
-		if record.CoreStartAttempted {
-			return Fault("trial_resource_conflict", "guarded TUN credential disappeared after core start intent")
-		}
-		return nil // journal-before-credential crash: no secret was staged
-	}
-	if err != nil || sha256Hex(data) != record.ConfigSHA256 {
-		return Fault("trial_resource_conflict", "guarded TUN credential was replaced or cannot be read")
-	}
-	return nil
-}
-
-func (m *Manager) ClearSmartTUNTrial(operationID string, revision uint64) error {
-	if m.Dir != DefaultDir || !journalHex32.MatchString(operationID) || revision != 2 {
-		return Fault("invalid_arguments", "exact recovered TUN trial operation and revision 2 required")
-	}
-	return m.withActivationJournalLock(syscall.Fsync, func(store *activationJournalDir) error {
-		record, identity, err := loadSmartTUNTrialLocked(store)
-		if err != nil {
-			return err
-		}
-		if record.Phase != "trial_recovered" || record.Revision != revision ||
-			subtle.ConstantTimeCompare([]byte(record.OperationID), []byte(operationID)) != 1 {
-			return Fault("activation_journal_conflict", "cannot clear pending or nonmatching TUN operation")
-		}
-		if _, err := recoverSmartTUNTrialLocked(store, identity, record); err != nil {
-			return err
-		}
-		if err := trialDisposableContext(); err != nil {
-			return err
-		}
-		path := filepath.Join(m.Dir, smartTUNTrialConfigFile)
-		if err := smartTUNTrialCredentialForClear(record, path); err != nil {
-			return err
-		}
-		// All conflicts are rejected while the independent guard is still
-		// armed. Only a fully recovered, exact operation may disarm it.
-		if err := smartTUNTrialSystemctl("disable", "--now", trialRecoveryTimer); err != nil {
-			return err
-		}
-		configuration, err := readRegular(path)
-		if err == nil {
-			if sha256Hex(configuration) != record.ConfigSHA256 {
-				return Fault("activation_journal_conflict", "pending TUN trial configuration was replaced")
-			}
-			if err := os.Remove(path); err != nil {
-				return err
-			}
-			if err := store.dir.Sync(); err != nil {
-				return err
-			}
-		} else if !errors.Is(err, os.ErrNotExist) {
-			return err
-		}
-		return store.removeJournal(identity)
-	})
 }
