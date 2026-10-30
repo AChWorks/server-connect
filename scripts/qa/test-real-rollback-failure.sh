@@ -46,7 +46,7 @@ docker exec "$container" /bin/sh -c '
  printf "\n# QA-only changed recovery service bytes (not a release)\n" >> server-connect-activation-recover.service
  sha256sum bin/server-connect bin/sing-box bin/libcronet.so \
    server-connect.service server-connect-activation-recover.service \
-   server-connect-activation-recover.timer install.sh \
+   server-connect-activation-recover.timer server-connect-smart-tun.service install.sh \
    THIRD-PARTY-LICENSES/sing-box-LICENSE manifest.json > checksums.sha256
  sha256sum --quiet --check checksums.sha256
 '

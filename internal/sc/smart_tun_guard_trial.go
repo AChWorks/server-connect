@@ -403,7 +403,11 @@ func (m *Manager) BeginSmartTUNTrial(opts SmartTUNCandidateOptions, managementPe
 		deadlineSeconds < 4 || deadlineSeconds > 600 {
 		return SmartTUNTrialReceipt{}, Fault("trial_unsupported", "installed paths and deadline 4-600s required")
 	}
-	if len(opts.DomesticCIDRs) == 0 || opts.TunnelIPv6 != "" ||
+	if len(opts.DomesticCIDRs) != 1 || opts.DomesticCIDRs[0] != "5.22.0.10/32" ||
+		len(opts.ProtectedCIDRs) != 1 || opts.ProtectedCIDRs[0] != "10.254.72.0/30" ||
+		opts.TunnelIPv4 != "172.31.99.1/30" || opts.TunnelIPv6 != "" ||
+		len(opts.Exceptions) != 0 || len(opts.IPv6Exceptions) != 0 || len(opts.DomainExceptions) != 0 ||
+		len(opts.ProtectedIPv6CIDRs) != 0 || len(opts.DomesticIPv6CIDRs) != 0 ||
 		opts.TunnelInterface != "sctunqa0" || opts.UnderlayInterface != "scqaedge0" {
 		return SmartTUNTrialReceipt{}, Fault("trial_unsupported", "this disposable trial supports IPv4 candidate policy only")
 	}
@@ -419,6 +423,9 @@ func (m *Manager) BeginSmartTUNTrial(opts SmartTUNCandidateOptions, managementPe
 		planned, err = m.admitSmartTUNTrialLocked(store, opts, managementPeer)
 		return err
 	}); err != nil {
+		return SmartTUNTrialReceipt{}, err
+	}
+	if err := trialGuardUnits(false); err != nil {
 		return SmartTUNTrialReceipt{}, err
 	}
 	// Do not start the independent oneshot while holding its SAME journal

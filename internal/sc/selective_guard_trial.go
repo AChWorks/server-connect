@@ -322,7 +322,12 @@ func trialGuardUnitReady(name string, fields map[string]string) error {
 
 // This verifies both installed unit provenance and the live independent timer
 // rather than trusting a cached service result or a PATH-selected systemctl.
-func trialGuardScheduled() error {
+func trialGuardScheduled() error { return trialGuardUnits(true) }
+
+// Prearm admission validates the exact installed executor and timer BEFORE
+// starting/enabling either unit. Never execute an untrusted same-name systemd
+// service merely because a later observation would detect the replacement.
+func trialGuardUnits(armed bool) error {
 	for _, name := range []string{trialRecoveryUnit, trialRecoveryTimer} {
 		if err := trialNoRuntimeUnitOverride(trialRuntimeUnitDir, name); err != nil {
 			return err
@@ -358,8 +363,20 @@ func trialGuardScheduled() error {
 			fields["DropInPaths"] != "" || fields["Transient"] != "no" {
 			return Fault("guard_unavailable", "independent recovery unit identity mismatch")
 		}
-		if err := trialGuardUnitReady(name, fields); err != nil {
-			return err
+		if armed {
+			if err := trialGuardUnitReady(name, fields); err != nil {
+				return err
+			}
+		} else {
+			if fields["Result"] != "success" || fields["ActiveState"] != "inactive" {
+				return Fault("guard_unavailable", "independent recovery unit not idle before prearm")
+			}
+			if name == trialRecoveryUnit && fields["UnitFileState"] != "static" {
+				return Fault("guard_unavailable", "independent recovery executor not static")
+			}
+			if name == trialRecoveryTimer && (fields["UnitFileState"] != "disabled" || fields["Unit"] != trialRecoveryUnit) {
+				return Fault("guard_unavailable", "recovery timer already enabled or owns wrong executor")
+			}
 		}
 	}
 	return nil

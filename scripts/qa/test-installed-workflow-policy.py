@@ -38,12 +38,14 @@ patterns = [line[9:-1] for line in path_lines]
 require("bundle/server-connect.service" in patterns, "service-unit-only change ignored")
 require("bundle/server-connect-activation-recover.service" in patterns, "independent guard service-only change ignored")
 require("bundle/server-connect-activation-recover.timer" in patterns, "independent guard timer-only change ignored")
+require("bundle/server-connect-smart-tun.service" in patterns, "separate TUN unit-only change ignored")
 require(".github/workflows/installed-host-qa.yml" in patterns, "policy changes ignored")
 
 for candidate, expected in (
     ("bundle/server-connect.service", True),
     ("bundle/server-connect-activation-recover.service", True),
     ("bundle/server-connect-activation-recover.timer", True),
+    ("bundle/server-connect-smart-tun.service", True),
     ("scripts/qa/host-proxy-only.sh", True),
     (".github/workflows/installed-host-qa.yml", True),
     ("docs/general-overview.md", False),
