@@ -8,6 +8,82 @@ native_fixture_receipt=
 native_executor_masked=no
 native_trace_dir=
 
+native_apply_failure_diagnostic() {
+  # Failure-only observations, before cleanup can erase the failed attach.
+  # The caller preserves the failed Apply even if this bounded observer fails.
+  timeout --signal=KILL 20s python3 - <<'PYNATIVEAPPLYDIAG'
+import json,os,re,resource,stat,subprocess,tempfile
+def unavailable(label,reason):
+    print('PRODUCT_NATIVE_APPLY_DIAGNOSTIC '+label+' unavailable='+reason,flush=True)
+def show(label,value):
+    print('PRODUCT_NATIVE_APPLY_DIAGNOSTIC '+label+' '+json.dumps(value,separators=(',',':')),flush=True)
+def read(path,limit=4096):
+    with open(path) as f:return f.read(limit)
+def capture(argv):
+    # A regular-file size limit bounds capture itself, not just printed output.
+    def limit():resource.setrlimit(resource.RLIMIT_FSIZE,(16384,16384))
+    with tempfile.TemporaryFile(dir='/run') as out:
+        try:r=subprocess.run(argv,stdout=out,stderr=subprocess.DEVNULL,timeout=2,preexec_fn=limit)
+        except subprocess.TimeoutExpired:raise ValueError('timeout')
+        if r.returncode:raise ValueError('command-exit-'+str(r.returncode))
+        if out.tell()>=16384:raise ValueError('output-limit')
+        out.seek(0)
+        try:return json.loads(out.read(16384))
+        except (ValueError,UnicodeError):raise ValueError('invalid-json')
+def observe(label,argv,check):
+    try:
+        value=capture(argv)
+        if not check(value):raise ValueError('identity')
+        show(label,value)
+    except ValueError as e:unavailable(label,str(e))
+    except Exception:unavailable(label,'observation-error')
+try:
+    assert os.geteuid()==0 and os.environ.get('SC_QA_TUN_PRODUCT_LAB')=='yes'
+    assert os.path.isfile('/.dockerenv') and read('/proc/1/comm',64).strip()=='systemd'
+    assert read('/proc/sys/kernel/hostname',128).strip()=='sc-qa'
+    os_release=dict(line.split('=',1) for line in read('/etc/os-release').splitlines() if '=' in line)
+    assert os_release.get('ID','').strip('"')=='debian' and os_release.get('VERSION_ID','').strip('"')=='13'
+    ns=os.stat('/proc/self/ns/net');pid1=os.stat('/proc/1/ns/net')
+    assert (ns.st_dev,ns.st_ino)==(pid1.st_dev,pid1.st_ino)
+    fd=os.open('/var/lib/server-connect/route-activation-journal.json',os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
+    with os.fdopen(fd,'rb') as f:
+        st=os.fstat(f.fileno())
+        assert stat.S_ISREG(st.st_mode) and st.st_uid==0 and not st.st_mode&0o022 and st.st_size<=131072
+        j=json.loads(f.read(131073))
+    assert j['version']==4 and j['intent_type']=='smart_tun_native_pending_trial_v1'
+    op=j['operation_id'];assert isinstance(op,str) and re.fullmatch('[0-9a-f]{32}',op)
+    assert j['tunnel_interface']=='sctunqa0' and j['underlay_interface']=='scqaedge0'
+    n=j['native'];assert n['version']==1 and (n['namespace_dev'],n['namespace_ino'])==(ns.st_dev,ns.st_ino)
+    assert n['nft_name']=='scnt_'+op and n['ipv4']['table']==42424 and n['ipv6']['table']==42426
+    assert type(n['link_index']) is int and 0<=n['link_index']<2**31
+    assert type(n['underlay_index']) is int and 0<n['underlay_index']<2**31
+    assert int(read('/sys/class/net/scqaedge0/ifindex',64))==n['underlay_index']
+except Exception:
+    unavailable('scope','fixture-or-operation-identity');raise SystemExit(0)
+ip=['/usr/bin/ip','-N','-j']
+try:
+    assert n['link_index']>0 and int(read('/sys/class/net/sctunqa0/ifindex',64))==n['link_index']
+    assert read('/sys/class/net/sctunqa0/ifalias',128).strip()=='server-connect:'+op
+except Exception:unavailable('tun','operation-link-absent-or-mismatched')
+else:
+    def link(rows):return isinstance(rows,list) and len(rows)==1 and rows[0].get('ifindex')==n['link_index'] and rows[0].get('ifname')=='sctunqa0'
+    observe('tun-detail',ip+['-d','link','show','dev','sctunqa0'],lambda rows:link(rows) and rows[0].get('ifalias')=='server-connect:'+op)
+    observe('tun-addresses',ip+['addr','show','dev','sctunqa0'],link)
+for family,table in (('-4',42424),('-6',42426)):
+    observe('routes-'+str(table),ip+[family,'route','show','table',str(table)],lambda rows:isinstance(rows,list) and all(str(r.get('table',table))==str(table) for r in rows))
+    observe('rules-'+family[1:],ip+[family,'rule','show','priority','10400'],lambda rows:isinstance(rows,list) and all(r.get('priority')==10400 for r in rows))
+def nft_table(value):
+    if not isinstance(value,dict) or not isinstance(value.get('nftables'),list):return False
+    for item in value['nftables']:
+        if 'metainfo' in item:continue
+        if len(item)!=1:return False
+        kind,fields=next(iter(item.items()))
+        if fields.get('family')!='inet' or fields.get('name' if kind=='table' else 'table')!=n['nft_name']:return False
+    return True
+observe('nft-'+n['nft_name'],['/usr/sbin/nft','-n','-j','-a','list','table','inet',n['nft_name']],nft_table)
+PYNATIVEAPPLYDIAG
+}
+
 native_product_detect() {
   native_product=$(python3 - <<'PYNATIVEDETECT'
 import json

@@ -487,6 +487,7 @@ PYV6REFUSED
   # First: live normal product Apply and actual synthetic foreign/domestic
   # packet paths. Do not mistake TUN device creation for installed policy.
   if ! apply 32 > /run/sc-qa-product-tun-apply.json; then
+    native_apply_failure_diagnostic || :
     python3 - <<'PYAPPLYFAIL'
 import json
 with open('/run/sc-qa-product-tun-apply.json') as f:
