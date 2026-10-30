@@ -62,16 +62,25 @@ type trialJournal struct {
 }
 
 type TrialReceipt struct {
-	OperationID         string `json:"operation_id"`
-	Revision            uint64 `json:"revision"`
-	Phase               string `json:"phase"`
-	ExperimentOnly      bool   `json:"experiment_only"`
-	GuardScheduled      bool   `json:"guard_scheduled"`
-	ActivationReady     bool   `json:"activation_ready"`
-	VPNVerified         bool   `json:"vpn_verified"`
-	RecoveryVerified    bool   `json:"recovery_verified"`
-	TrialRuleRecovered  bool   `json:"trial_rule_recovered"`
-	TrialRouteRecovered bool   `json:"trial_route_recovered,omitempty"`
+	OperationID              string                  `json:"operation_id"`
+	Revision                 uint64                  `json:"revision"`
+	Phase                    string                  `json:"phase"`
+	ExperimentOnly           bool                    `json:"experiment_only"`
+	GuardScheduled           bool                    `json:"guard_scheduled"`
+	ActivationReady          bool                    `json:"activation_ready"`
+	VPNVerified              bool                    `json:"vpn_verified"`
+	RecoveryVerified         bool                    `json:"recovery_verified"`
+	TrialRuleRecovered       bool                    `json:"trial_rule_recovered"`
+	TrialRouteRecovered      bool                    `json:"trial_route_recovered,omitempty"`
+	SupervisionState         string                  `json:"supervision_state,omitempty"`
+	ManagementConfirmed      bool                    `json:"management_confirmed,omitempty"`
+	HealthReason             string                  `json:"health_reason,omitempty"`
+	HealthRound              uint64                  `json:"health_round,omitempty"`
+	HealthLastUptimeMS       int64                   `json:"health_last_uptime_ms,omitempty"`
+	HealthFailures           int                     `json:"health_failures,omitempty"`
+	ReconnectAttempts        int                     `json:"reconnect_attempts,omitempty"`
+	RecoveryDeadlineUptimeMS int64                   `json:"recovery_deadline_uptime_ms,omitempty"`
+	HealthEvidence           *SmartTUNHealthEvidence `json:"health_evidence,omitempty"`
 }
 
 func trialReceipt(record trialJournal, scheduled, recovered bool) TrialReceipt {

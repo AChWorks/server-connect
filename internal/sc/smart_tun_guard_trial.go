@@ -1,11 +1,12 @@
 package sc
 
-// This is a deliberately narrow, DISPOSABLE-GUEST-ONLY first product TUN
+// This is a deliberately narrow, DISPOSABLE-GUEST-ONLY product TUN
 // transaction. It starts the official core from an installed, separately
 // privilege-bounded systemd unit, and reuses the installed independent
 // recovery timer and the descriptor-pinned activation journal. It cannot
-// commit Smart Routing or run on a physical/production host. A future
-// confirmed ACTIVE transition must also have the independent Runtime Guard.
+// claim production Smart Routing or run on a physical/production host. The
+// distinct supervised intent adds confirmed synthetic operation with a
+// separately bounded health executor; legacy trials keep their expiry rules.
 
 import (
 	"bytes"
@@ -47,6 +48,7 @@ type smartTUNTrialJournal struct {
 	CoreStartAttempted bool                  `json:"core_start_attempted"`
 	BaselineSHA256     string                `json:"baseline_sha256"`
 	Native             *smartTUNNativeLedger `json:"native,omitempty"`
+	Supervised         *smartTUNSupervision  `json:"supervised,omitempty"`
 }
 
 var smartTUNTrialFields = map[string]bool{
@@ -57,32 +59,58 @@ var smartTUNTrialFields = map[string]bool{
 	"config_sha256": true, "core_start_attempted": true, "baseline_sha256": true,
 }
 
-// This receipt is a *pending, unconfirmed trial*, NEVER production readiness
-// or a statement that a real selected VPN path has passed packet validation.
+// Transaction and optional supervision metadata for an experimental fixture,
+// NEVER production readiness. Health evidence has explicit timestamps and
+// does not promote a synthetic confirmed operation to ACTIVE_VERIFIED.
 type SmartTUNTrialReceipt struct {
-	OperationID      string `json:"operation_id,omitempty"`
-	Revision         uint64 `json:"revision,omitempty"`
-	Phase            string `json:"phase"`
-	ExperimentOnly   bool   `json:"experiment_only"`
-	GuardScheduled   bool   `json:"guard_scheduled"`
-	ActivationReady  bool   `json:"activation_ready"`
-	VPNVerified      bool   `json:"vpn_verified"`
-	RecoveryVerified bool   `json:"recovery_verified"`
+	OperationID                  string                  `json:"operation_id,omitempty"`
+	Revision                     uint64                  `json:"revision,omitempty"`
+	Phase                        string                  `json:"phase"`
+	ExperimentOnly               bool                    `json:"experiment_only"`
+	GuardScheduled               bool                    `json:"guard_scheduled"`
+	ActivationReady              bool                    `json:"activation_ready"`
+	VPNVerified                  bool                    `json:"vpn_verified"`
+	RecoveryVerified             bool                    `json:"recovery_verified"`
+	ConfirmationChallenge        string                  `json:"confirmation_challenge,omitempty"`
+	SupervisionState             string                  `json:"supervision_state,omitempty"`
+	ManagementConfirmed          bool                    `json:"management_confirmed"`
+	ConfirmationDeadlineUptimeMS int64                   `json:"confirmation_deadline_uptime_ms,omitempty"`
+	SupervisorDeadlineUptimeMS   int64                   `json:"supervisor_deadline_uptime_ms,omitempty"`
+	HealthRound                  uint64                  `json:"health_round,omitempty"`
+	HealthLastUptimeMS           int64                   `json:"health_last_uptime_ms,omitempty"`
+	HealthNextUptimeMS           int64                   `json:"health_next_uptime_ms,omitempty"`
+	HealthFailures               int                     `json:"health_failures,omitempty"`
+	ReconnectAttempts            int                     `json:"reconnect_attempts,omitempty"`
+	RecoveryDeadlineUptimeMS     int64                   `json:"recovery_deadline_uptime_ms,omitempty"`
+	HealthReason                 string                  `json:"health_reason,omitempty"`
+	HealthEvidence               *SmartTUNHealthEvidence `json:"health_evidence,omitempty"`
 }
 
 func smartTUNReceipt(record smartTUNTrialJournal, scheduled, recovered bool) SmartTUNTrialReceipt {
-	return SmartTUNTrialReceipt{
+	receipt := SmartTUNTrialReceipt{
 		OperationID: record.OperationID, Revision: record.Revision,
 		Phase: record.Phase, ExperimentOnly: true, GuardScheduled: scheduled,
 		RecoveryVerified: recovered,
 	}
+	if s := record.Supervised; s != nil {
+		receipt.SupervisionState, receipt.ManagementConfirmed = s.State, s.Confirmed
+		receipt.ConfirmationDeadlineUptimeMS = record.DeadlineUptimeSec * 1000
+		receipt.SupervisorDeadlineUptimeMS = s.LeaseDeadlineMS
+		receipt.HealthRound, receipt.HealthLastUptimeMS, receipt.HealthNextUptimeMS = s.Rounds, s.LastProbeMS, s.NextProbeMS
+		receipt.HealthFailures, receipt.ReconnectAttempts = s.Failures, s.Attempts
+		receipt.RecoveryDeadlineUptimeMS, receipt.HealthReason = s.RecoveryDeadlineMS, s.Reason
+		evidence := s.Evidence
+		receipt.HealthEvidence = &evidence
+	}
+	return receipt
 }
 
 func validateSmartTUNTrial(record smartTUNTrialJournal) error {
 	if record.Version != smartTUNTrialVersion ||
-		(record.IntentType != smartTUNTrialIntent && record.IntentType != smartTUNNativeIntent) ||
+		(record.IntentType != smartTUNTrialIntent && record.IntentType != smartTUNNativeIntent && record.IntentType != smartTUNSupervisedIntent) ||
 		(record.IntentType == smartTUNTrialIntent && record.Native != nil) ||
-		(record.IntentType == smartTUNNativeIntent && record.Native == nil) ||
+		((record.IntentType == smartTUNNativeIntent || record.IntentType == smartTUNSupervisedIntent) && record.Native == nil) ||
+		((record.IntentType == smartTUNSupervisedIntent) != (record.Supervised != nil)) ||
 		!journalHex32.MatchString(record.OperationID) ||
 		!trialBootIDPattern.MatchString(record.BootID) ||
 		!idPattern.MatchString(record.ProfileID) ||
@@ -106,7 +134,12 @@ func validateSmartTUNTrial(record smartTUNTrialJournal) error {
 		}
 	}
 	if record.Native != nil {
-		return validateSmartTUNNative(record)
+		if err := validateSmartTUNNative(record); err != nil {
+			return err
+		}
+	}
+	if record.Supervised != nil {
+		return validateSmartTUNSupervision(record)
 	}
 	return nil
 }
@@ -123,12 +156,15 @@ func decodeSmartTUNTrial(data []byte) (smartTUNTrialJournal, error) {
 		return record, activationJournalError("guarded TUN intent invalid")
 	}
 	keys := smartTUNTrialFields
-	if discriminator.Intent == smartTUNNativeIntent {
+	if discriminator.Intent == smartTUNNativeIntent || discriminator.Intent == smartTUNSupervisedIntent {
 		keys = make(map[string]bool, len(smartTUNTrialFields)+1)
 		for key, required := range smartTUNTrialFields {
 			keys[key] = required
 		}
 		keys["native"] = true
+		if discriminator.Intent == smartTUNSupervisedIntent {
+			keys["supervised"] = true
+		}
 	}
 	if err := requireExactJournalKeys(data, keys); err != nil {
 		return record, err
@@ -142,8 +178,13 @@ func decodeSmartTUNTrial(data []byte) (smartTUNTrialJournal, error) {
 		(string(fields["core_start_attempted"]) != "true" && string(fields["core_start_attempted"]) != "false") {
 		return record, activationJournalError("guarded Smart Routing start-intent type invalid")
 	}
-	if discriminator.Intent == smartTUNNativeIntent {
+	if discriminator.Intent == smartTUNNativeIntent || discriminator.Intent == smartTUNSupervisedIntent {
 		if err := strictSmartTUNNativeJSON(fields["native"]); err != nil {
+			return record, err
+		}
+	}
+	if discriminator.Intent == smartTUNSupervisedIntent {
+		if err := strictSmartTUNSupervisionJSON(fields["supervised"]); err != nil {
 			return record, err
 		}
 	}
@@ -558,7 +599,7 @@ func (m *Manager) pendingSmartTUNTrial() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return record.Phase, nil
+	return smartTUNSupervisedStatusLabel(record), nil
 }
 
 type smartTUNTrialAdmission struct {
@@ -674,11 +715,11 @@ func smartTUNTrialFixturePolicySupported(opts SmartTUNCandidateOptions) bool {
 }
 
 func (m *Manager) BeginSmartTUNTrial(opts SmartTUNCandidateOptions, managementPeer string, deadlineSeconds int, qaKillPoint string) (SmartTUNTrialReceipt, error) {
-	return m.beginSmartTUNTrial(opts, managementPeer, deadlineSeconds, qaKillPoint, nil)
+	return m.beginSmartTUNTrial(opts, managementPeer, deadlineSeconds, qaKillPoint, nil, nil)
 }
 
-func (m *Manager) beginSmartTUNTrial(opts SmartTUNCandidateOptions, managementPeer string, deadlineSeconds int, qaKillPoint string, saved *smartTUNSavedPolicyBinding) (SmartTUNTrialReceipt, error) {
-	if qaKillPoint != "" && qaKillPoint != "after-journal" && qaKillPoint != "after-start" && !nativeTUNQAKillValid(qaKillPoint, true) {
+func (m *Manager) beginSmartTUNTrial(opts SmartTUNCandidateOptions, managementPeer string, deadlineSeconds int, qaKillPoint string, saved *smartTUNSavedPolicyBinding, health *SmartTUNHealthOptions) (SmartTUNTrialReceipt, error) {
+	if qaKillPoint != "" && qaKillPoint != "after-journal" && qaKillPoint != "after-start" && !nativeTUNQAKillValid(qaKillPoint, true) && !(health != nil && qaKillPoint == "after-supervised-ready") {
 		return SmartTUNTrialReceipt{}, Fault("invalid_arguments", "unsupported disposable TUN SIGKILL boundary")
 	}
 	if m.Dir != DefaultDir || m.Core != DefaultCore ||
@@ -705,6 +746,17 @@ func (m *Manager) beginSmartTUNTrial(opts SmartTUNCandidateOptions, managementPe
 	}); err != nil {
 		return SmartTUNTrialReceipt{}, err
 	}
+	var roles [2]smartTUNHealthUnitIdentity
+	if health != nil {
+		if err := validateSmartTUNHealthOptions(*health); err != nil {
+			return SmartTUNTrialReceipt{}, err
+		}
+		var err error
+		roles, err = smartTUNHealthUnits(false, nil)
+		if err != nil {
+			return SmartTUNTrialReceipt{}, err
+		}
+	}
 	if err := trialGuardUnits(false); err != nil {
 		return SmartTUNTrialReceipt{}, err
 	}
@@ -725,6 +777,25 @@ func (m *Manager) beginSmartTUNTrial(opts SmartTUNCandidateOptions, managementPe
 		// operation or claim a recovery after a conflicted observation.
 		m.disarmUncommittedSmartTUNGuard()
 		return SmartTUNTrialReceipt{}, err
+	}
+	if health != nil {
+		if err := smartTUNTrialSystemctl("start", smartTUNHealthUnit); err != nil {
+			m.disarmUncommittedSmartTUNHealth(roles)
+			m.disarmUncommittedSmartTUNGuard()
+			return SmartTUNTrialReceipt{}, err
+		}
+		if err := smartTUNTrialSystemctl("enable", "--now", smartTUNHealthTimer); err != nil {
+			m.disarmUncommittedSmartTUNHealth(roles)
+			m.disarmUncommittedSmartTUNGuard()
+			return SmartTUNTrialReceipt{}, err
+		}
+		var err error
+		_, err = smartTUNHealthUnits(true, &roles)
+		if err != nil {
+			m.disarmUncommittedSmartTUNHealth(roles)
+			m.disarmUncommittedSmartTUNGuard()
+			return SmartTUNTrialReceipt{}, err
+		}
 	}
 	var receipt SmartTUNTrialReceipt
 	journalPersisted := false
@@ -765,6 +836,14 @@ func (m *Manager) beginSmartTUNTrial(opts SmartTUNCandidateOptions, managementPe
 			Native: &admission.native,
 		}
 		record.Native.NFTName = "scnt_" + op
+		if health != nil {
+			nowMS, err := smartTUNUptimeMillis()
+			if err != nil {
+				return err
+			}
+			record.IntentType = smartTUNSupervisedIntent
+			record.Supervised = &smartTUNSupervision{Version: 1, Generation: 1, State: "initializing", Options: *health, Roles: roles, HeartbeatMS: nowMS, LeaseDeadlineMS: nowMS + smartTUNHealthLeaseMS, ReconnectStage: "none"}
+		}
 		if err := validateSmartTUNTrial(record); err != nil {
 			return err
 		}
@@ -845,10 +924,45 @@ func (m *Manager) beginSmartTUNTrial(opts SmartTUNCandidateOptions, managementPe
 			_ = syscall.Kill(os.Getpid(), syscall.SIGKILL)
 			return Fault("trial_pending_recovery", "disposable SIGKILL injection unexpectedly returned")
 		}
+		challenge := ""
+		if record.Supervised != nil {
+			nowMS, err := smartTUNUptimeMillis()
+			if err != nil {
+				return err
+			}
+			unit, err := observeSmartTUNTrialUnit(context.Background())
+			if err != nil || unit.activeState != "active" || unit.mainPID == 0 {
+				return Fault("trial_pending_recovery", "native core identity unavailable after capture")
+			}
+			process, err := readManagementProcess(int(unit.mainPID))
+			if err != nil {
+				return err
+			}
+			challenge, err = randomHex(32)
+			if err != nil {
+				return err
+			}
+			next := cloneSmartTUNTrial(record)
+			next.Supervised.CorePID, next.Supervised.CoreStartTicks = unit.mainPID, process.StartTicks
+			next.Supervised.State, next.Supervised.ReadyAfterMS = "awaiting_confirmation", nowMS
+			next.Supervised.HeartbeatMS, next.Supervised.LeaseDeadlineMS = nowMS, nowMS+smartTUNHealthLeaseMS
+			next.Supervised.ChallengeSHA256 = smartTUNChallengeDigest(next, challenge)
+			next.Supervised.Generation++
+			if err := nativeTUNAdvance(store, &record, next); err != nil {
+				return err
+			}
+			if err := trialQAKillAt("after-supervised-ready", qaKillPoint); err != nil {
+				return err
+			}
+		}
 		receipt = smartTUNReceipt(record, true, false)
+		receipt.ConfirmationChallenge = challenge
 		return nil
 	})
 	if err != nil && !journalPersisted {
+		if health != nil {
+			m.disarmUncommittedSmartTUNHealth(roles)
+		}
 		m.disarmUncommittedSmartTUNGuard()
 	}
 	return receipt, err
@@ -881,7 +995,7 @@ func recoverSmartTUNTrialJournalLocked(store *activationJournalDir, identity act
 	// that exact operation by this already-independent executor. Ordinary
 	// deadline recovery retains its historical recovered receipt.
 	if result.Phase == "trial_cleanup_pending" ||
-		(result.Phase == "trial_recovered" && result.Revision == 3) {
+		(result.Phase == "trial_recovered" && (result.Revision == 3 || record.Supervised != nil)) {
 		record.Phase, record.Revision = result.Phase, result.Revision
 		identity, err = reloadSmartTUNTrialLocked(store, record)
 		if err != nil {
@@ -892,12 +1006,22 @@ func recoverSmartTUNTrialJournalLocked(store *activationJournalDir, identity act
 			return TrialReceipt{}, err
 		}
 	}
+	return smartTUNRecoveryReceipt(result), nil
+}
+
+// The independent executor logs this value before returning to systemd. Keep
+// the supervised decision here even when successful Off removed its journal.
+func smartTUNRecoveryReceipt(result SmartTUNTrialReceipt) TrialReceipt {
 	return TrialReceipt{
 		OperationID: result.OperationID, Revision: result.Revision,
 		Phase: result.Phase, ExperimentOnly: true,
 		GuardScheduled:   result.GuardScheduled,
 		RecoveryVerified: result.RecoveryVerified,
-	}, nil
+		SupervisionState: result.SupervisionState, ManagementConfirmed: result.ManagementConfirmed,
+		HealthReason: result.HealthReason, HealthRound: result.HealthRound, HealthLastUptimeMS: result.HealthLastUptimeMS,
+		HealthFailures: result.HealthFailures, ReconnectAttempts: result.ReconnectAttempts,
+		RecoveryDeadlineUptimeMS: result.RecoveryDeadlineUptimeMS, HealthEvidence: result.HealthEvidence,
+	}
 }
 
 // An absent credential is legitimate ONLY for journal-first failure before
@@ -1050,10 +1174,31 @@ func (m *Manager) InspectSmartTUNTrial() (SmartTUNTrialReceipt, error) {
 			receipt = result
 			return nil
 		}
+		receipt = smartTUNReceipt(record, false, false)
+		if record.Supervised != nil && record.Phase == "trial_pending" {
+			// Pure observation: no probes, lease renewal or cleanup. Historical
+			// healthy evidence cannot hide a dead supervisor, changed core,
+			// expired lease or substituted native resource at inspection time.
+			if reason := inspectSupervisedRuntime(store, record, true); reason != "" {
+				receipt.SupervisionState, receipt.HealthReason = "uncertain", reason
+				return Fault("trial_observation_uncertain", reason)
+			}
+			receipt.GuardScheduled = true
+			return nil
+		}
 		if err := trialGuardScheduled(); err != nil {
+			if record.Supervised != nil {
+				receipt.SupervisionState, receipt.HealthReason = "uncertain", "recovery_executor_unavailable"
+			}
 			return err
 		}
-		receipt = smartTUNReceipt(record, true, false)
+		if record.Supervised != nil {
+			if _, err := smartTUNHealthUnits(true, &record.Supervised.Roles); err != nil {
+				receipt.SupervisionState, receipt.HealthReason = "uncertain", "supervisor_unavailable"
+				return err
+			}
+		}
+		receipt.GuardScheduled = true
 		return nil
 	})
 	return receipt, err

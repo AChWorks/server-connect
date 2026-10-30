@@ -71,14 +71,21 @@ type smartTUNNativeLedger struct {
 
 func sameSmartTUNTrial(a, b smartTUNTrialJournal) bool {
 	an, bn := a.Native, b.Native
+	as, bs := a.Supervised, b.Supervised
 	a.Native, b.Native = nil, nil
-	return a == b && ((an == nil && bn == nil) || (an != nil && bn != nil && *an == *bn))
+	a.Supervised, b.Supervised = nil, nil
+	return a == b && ((an == nil && bn == nil) || (an != nil && bn != nil && *an == *bn)) &&
+		((as == nil && bs == nil) || (as != nil && bs != nil && *as == *bs))
 }
 
 func cloneSmartTUNTrial(record smartTUNTrialJournal) smartTUNTrialJournal {
 	if record.Native != nil {
 		native := *record.Native
 		record.Native = &native
+	}
+	if record.Supervised != nil {
+		supervised := *record.Supervised
+		record.Supervised = &supervised
 	}
 	return record
 }
