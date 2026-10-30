@@ -192,10 +192,10 @@ func TestRealAptConfigPreflightWithAnonymousFD(t *testing.T) {
 func TestStrictAPTUpdateModesAndOptionOrdering(t *testing.T) {
 	for _, args := range [][]string{
 		{"update"},
-		{"-t", "testing", "update"},
-		{"-a", "amd64", "update"},
-		{"--target-release", "testing", "update"},
-		{"-o", "Dir::Etc::sourcelist=/tmp/qa", "update"},
+		{"update", "-t", "testing"},
+		{"update", "-a", "amd64"},
+		{"update", "--target-release", "testing"},
+		{"update", "-o", "Dir::Etc::sourcelist=/tmp/qa"},
 	} {
 		_, action, err := validateAptArgs(args)
 		if err != nil || action != "update" {
@@ -220,20 +220,20 @@ func TestStrictAPTUpdateModesAndOptionOrdering(t *testing.T) {
 func TestCombinedAPTUpdateNeverForwardsToPackageOperation(t *testing.T) {
 	requireNativeAPT(t)
 	for _, args := range [][]string{
-		{"-U", "install", "safe-test-package"},
-		{"--update", "install", "safe-test-package"},
-		{"--update=true", "install", "safe-test-package"},
+		{"install", "safe-test-package", "-U"},
+		{"install", "safe-test-package", "--update"},
+		{"install", "--update=true", "safe-test-package"},
 		{"install", "--update", "safe-test-package"},
 		{"install", "-U", "safe-test-package"},
-		{"-qqU", "install", "safe-test-package"},
-		{"-Uq", "install", "safe-test-package"},
-		{"-yU", "install", "safe-test-package"},
-		{"--option=APT::Get::Update=true", "install", "safe-test-package"},
-		{"-o", "APT::Update::Error-Mode=persistent", "install", "safe-test-package"},
-		{"--error-on=none", "update"},
-		{"--error-on", "none", "update"},
-		{"-eany", "update"},
-		{"-e", "none", "update"},
+		{"install", "-qqU", "safe-test-package"},
+		{"install", "-Uq", "safe-test-package"},
+		{"install", "-yU", "safe-test-package"},
+		{"install", "--option=APT::Get::Update=true", "safe-test-package"},
+		{"install", "-o", "APT::Update::Error-Mode=persistent", "safe-test-package"},
+		{"update", "--error-on=none"},
+		{"update", "--error-on", "none"},
+		{"update", "-eany"},
+		{"update", "-e", "none"},
 	} {
 		_, _, err := validateAptArgs(args)
 		if err == nil {
@@ -265,8 +265,8 @@ func TestCombinedAPTUpdateNeverForwardsToPackageOperation(t *testing.T) {
 func TestStandaloneUpdateAndOrdinaryPackageOpsRemainSupported(t *testing.T) {
 	for _, args := range [][]string{
 		{"update"},
-		{"-q", "update"},
-		{"-o", "Dir::Etc::sourcelist=/tmp/test-repo", "update"},
+		{"update", "-q"},
+		{"update", "-o", "Dir::Etc::sourcelist=/tmp/test-repo"},
 	} {
 		_, action, err := validateAptArgs(args)
 		if err != nil || action != "update" {
@@ -279,7 +279,7 @@ func TestStandaloneUpdateAndOrdinaryPackageOpsRemainSupported(t *testing.T) {
 	}
 	for _, args := range [][]string{
 		{"install", "safe-test-package"}, {"download", "safe-test-package"},
-		{"--assume-yes", "install", "safe-test-package"},
+		{"install", "--assume-yes", "safe-test-package"},
 	} {
 		_, action, err := validateAptArgs(args)
 		if err != nil {
@@ -313,8 +313,8 @@ func TestAptExecutionMethodRedirectionCallerPolicy(t *testing.T) {
 		t.Run(strings.SplitN(argument, "=", 2)[0], func(t *testing.T) {
 			for _, args := range [][]string{
 				{"update", "-o", argument},
-				{"-o" + argument, "update"},
-				{"--option=" + argument, "update"},
+				{"update", "-o" + argument},
+				{"update", "--option=" + argument},
 			} {
 				_, _, err := validateAptArgs(args)
 				if ErrorCode(err) != "apt_policy_conflict" {
@@ -603,7 +603,7 @@ func TestAPTOwnedDisabledPolicyMustBeExactAndComplete(t *testing.T) {
 
 func TestAPTOwnedDisabledArgumentsFollowValidatedCallerOptions(t *testing.T) {
 	for _, args := range [][]string{
-		{"update"}, {"-t", "testing", "update"},
+		{"update"}, {"update", "-t", "testing"},
 		{"update", "-o", "Dir::Etc::sourcelist=/tmp/qa.list"},
 		{"install", "safe-test-package"}, {"download", "safe-test-package"},
 	} {
@@ -653,5 +653,150 @@ func TestRealAPTTwoStageDisabledMethodPolicy(t *testing.T) {
 	}
 	if err := verifyEffectiveAptProxyWithCompatibility(fd, proxy.String(), aptOwnedDisabledOpts(nil), compatibility); ErrorCode(err) != "apt_policy_conflict" {
 		t.Fatal("baseline phase accepted inherited per-method overrides")
+	}
+}
+
+// These are native parser ambiguities, not merely unusual text. Each refusal
+// must occur before Manager.Apt can load private state or create credentials.
+func TestAPTActionAndShortOptionBoundaryBeforeCredentials(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		args []string
+		code string
+	}{
+		{"missing action", nil, "invalid_arguments"},
+		{"empty action", []string{""}, "invalid_arguments"},
+		{"pre-action quiet", []string{"-q", "update"}, "invalid_arguments"},
+		{"pre-action quiet value", []string{"-q", "2", "update"}, "invalid_arguments"},
+		{"pre-action boolean value", []string{"-y", "false", "update"}, "invalid_arguments"},
+		{"pre-action long quiet value", []string{"--quiet", "2", "update"}, "invalid_arguments"},
+		{"pre-action target release", []string{"-t", "stable", "update"}, "invalid_arguments"},
+		{"pre-action architecture", []string{"-a", "amd64", "update"}, "invalid_arguments"},
+		{"pre-action configuration", []string{"-o", "Dir::Etc::sourcelist=/tmp/qa.list", "update"}, "invalid_arguments"},
+		{"pre-action default release alias", []string{"--default-release", "stable", "update"}, "invalid_arguments"},
+		{"pre-action operand resembling command", []string{"--with-source", "install", "update"}, "invalid_arguments"},
+		{"grouped HTTP Direct", []string{"update", "-qoAcquire::http::Proxy=DIRECT"}, "apt_policy_conflict"},
+		{"grouped HTTPS Direct", []string{"update", "-qqoAcquire::https::Proxy=DIRECT"}, "apt_policy_conflict"},
+		{"grouped binary policy", []string{"install", "-yoBinary::apt::Acquire::http::Proxy=DIRECT"}, "apt_policy_conflict"},
+		{"grouped legacy enabler", []string{"update", "-qoDir::Bin::Methods::ftp=ftp"}, "apt_policy_conflict"},
+		{"grouped empty legacy enabler", []string{"update", "-qoDir::Bin::Methods::ssh="}, "apt_policy_conflict"},
+		{"grouped separate enabler", []string{"update", "-qo", "Dir::Bin::Methods::rsh=rsh"}, "apt_policy_conflict"},
+		{"grouped config include", []string{"update", "-qc/tmp/untrusted.conf"}, "apt_policy_conflict"},
+		{"grouped separate include", []string{"update", "-qc", "/tmp/untrusted.conf"}, "apt_policy_conflict"},
+		{"grouped strictness override", []string{"update", "-qenone"}, "apt_policy_conflict"},
+		{"grouped target release", []string{"update", "-qt", "stable"}, "apt_policy_conflict"},
+		{"grouped architecture", []string{"build-dep", "-qa", "amd64", "safe-test-package"}, "apt_policy_conflict"},
+		{"boolean a hides Direct", []string{"show", "-aoAcquire::http::Proxy=DIRECT", "safe-test-package"}, "apt_policy_conflict"},
+		{"boolean a hides include", []string{"list", "-ac/tmp/untrusted.conf"}, "apt_policy_conflict"},
+		{"bare boolean a cannot skip override", []string{"show", "-a", "-oAcquire::http::Proxy=DIRECT"}, "apt_policy_conflict"},
+		{"bare boolean a cannot skip long override", []string{"list", "-a", "--option", "Dir::Bin::Methods::ftp=ftp"}, "apt_policy_conflict"},
+		{"bare t cannot skip override", []string{"update", "-t", "-oAcquire::http::Proxy=DIRECT"}, "apt_policy_conflict"},
+		{"attached target release requires separate operand", []string{"update", "-tstable"}, "apt_policy_conflict"},
+		{"attached architecture requires separate operand", []string{"build-dep", "-aamd64"}, "apt_policy_conflict"},
+		{"other short group requires separation", []string{"install", "-yq", "safe-test-package"}, "apt_policy_conflict"},
+		{"numeric quiet with hidden tail", []string{"update", "-q2oAcquire::http::Proxy=DIRECT"}, "apt_policy_conflict"},
+		{"explicit quiet with hidden tail", []string{"update", "-q=2oAcquire::http::Proxy=DIRECT"}, "apt_policy_conflict"},
+		{"empty attached quiet level", []string{"update", "-q="}, "apt_policy_conflict"},
+		{"missing option assignment", []string{"update", "-o"}, "invalid_arguments"},
+		{"empty option assignment", []string{"update", "--option", ""}, "invalid_arguments"},
+		{"option cannot swallow a later flag", []string{"update", "-o", "-qoAcquire::http::Proxy=DIRECT"}, "invalid_arguments"},
+		{"mixed-case error policy", []string{"update", "--ErRoR-On=none"}, "apt_policy_conflict"},
+		{"mixed-case separate error policy", []string{"update", "--ERROR-ON", "none"}, "apt_policy_conflict"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, _, err := validateAptArgs(tc.args); ErrorCode(err) != tc.code {
+				t.Fatalf("ambiguous native arguments were not refused precisely: %v", err)
+			}
+			t.Run("public entrypoint", func(t *testing.T) {
+				requireNativeAPT(t)
+				for _, binary := range []string{"apt", "apt-get"} {
+					dir := filepath.Join(t.TempDir(), "state-must-not-exist")
+					args := append([]string{binary}, tc.args...)
+					code, err := New(dir, "", 0).Apt(args)
+					if code != 1 || ErrorCode(err) != tc.code {
+						t.Fatalf("ambiguous arguments crossed private-state boundary: exit=%d error=%v", code, err)
+					}
+					if _, err := os.Stat(dir); !os.IsNotExist(err) {
+						t.Fatal("refused arguments created product state")
+					}
+				}
+			})
+		})
+	}
+}
+
+func TestAPTCombinedUpdateNativeLongAliasesAreRefused(t *testing.T) {
+	for _, flag := range []string{
+		"--UPDATE", "--uPdAtE=true", "--yes-update", "--no-update=true",
+		"--anything-update=true", "--YeS-UpDaTe=false", "--yes-U", "--no-U=true",
+		"---update", "---UPDATE=true", "---U", "---U=true",
+	} {
+		t.Run(flag, func(t *testing.T) {
+			args := []string{"install", "safe-test-package", flag}
+			if _, _, err := validateAptArgs(args); ErrorCode(err) != "apt_combined_update_unsupported" {
+				t.Fatalf("native Boolean update alias was not refused: %v", err)
+			}
+			t.Run("public entrypoint", func(t *testing.T) {
+				requireNativeAPT(t)
+				for _, binary := range []string{"apt", "apt-get"} {
+					dir := filepath.Join(t.TempDir(), "state-must-not-exist")
+					code, err := New(dir, "", 0).Apt(append([]string{binary}, args...))
+					if code != 1 || ErrorCode(err) != "apt_combined_update_unsupported" {
+						t.Fatalf("native update alias crossed credential boundary: exit=%d error=%v", code, err)
+					}
+					if _, err := os.Stat(dir); !os.IsNotExist(err) {
+						t.Fatal("refused native update alias created product state")
+					}
+				}
+			})
+		})
+	}
+}
+
+func TestAPTActionFirstKeepsOptionalOperandsAndSeparateFlags(t *testing.T) {
+	for _, args := range [][]string{
+		{"update", "-q", "2"}, {"update", "--quiet", "2"},
+		{"update", "-y", "false"}, {"update", "--assume-yes", "false"},
+		{"update", "-t", "stable"}, {"update", "--default-release", "stable"},
+		{"update", "--with-source", "install"},
+		{"update", "-oDir::Etc::sourcelist=/tmp/qa.list"},
+		{"update", "--OPTION=Dir::Etc::sourcelist=/tmp/qa.list"},
+		{"build-dep", "-a", "amd64", "safe-test-package"},
+		{"install", "-q", "-y", "safe-test-package"},
+		{"install", "--yes-u", "safe-test-package"},
+		{"install", "--default-release", "update", "safe-test-package"},
+		{"install", "update"}, {"show", "-a", "safe-test-package"},
+		{"list", "-a", "safe-test-package"},
+	} {
+		_, action, err := validateAptArgs(args)
+		if err != nil || action != args[0] {
+			t.Fatalf("canonical action-first arguments rejected or reclassified: %v", err)
+		}
+		argv := aptExecArgs(args, action)
+		strict := argv[len(argv)-1] == "--error-on=any"
+		if strict != (args[0] == "update") {
+			t.Fatal("optional native operands changed strict update classification")
+		}
+	}
+	for _, flag := range []string{"-q", "-qq", "-qqq", "-q0", "-q2", "-q=2", "-qq2", "-qq=10"} {
+		args := []string{"update", flag}
+		_, action, err := validateAptArgs(args)
+		if err != nil || action != "update" {
+			t.Fatalf("canonical quiet spelling rejected: %s (%v)", flag, err)
+		}
+		argv := aptExecArgs(args, action)
+		if argv[len(argv)-1] != "--error-on=any" {
+			t.Fatal("canonical quiet spelling lost strict update policy")
+		}
+	}
+	for _, args := range [][]string{
+		{"update", "-oDir::Etc::sourcelist=/tmp/qa.list"},
+		{"update", "-o", "Dir::Etc::sourcelist=/tmp/qa.list"},
+		{"update", "--OPTION", "Dir::Etc::sourcelist=/tmp/qa.list"},
+	} {
+		opts, _, err := validateAptArgs(args)
+		if err != nil || len(opts) != 2 || opts[0] != "-o" || opts[1] != "Dir::Etc::sourcelist=/tmp/qa.list" {
+			t.Fatal("admitted configuration assignment was not included in effective inspection")
+		}
 	}
 }

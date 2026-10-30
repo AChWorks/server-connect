@@ -721,8 +721,11 @@ Commands:
 Import VLESS links from stdin or a mode-0600 file, not shell argv. 'exec'
 sets proxy variables for only the selected child process. 'apt' passes
 an anonymous private APT config to a verified native APT child, with no
-/etc/apt edits. Combined -U/--update package operations are unsupported;
-run an explicit strict update first. Neither mode routes unrelated host
+/etc/apt edits. Put the APT action first, then options, for example:
+  apt -- apt-get install -y package
+Options before the action and ambiguous short-option groups are refused.
+Combined -U/--update package operations are unsupported; run an explicit
+strict update first. Neither mode routes unrelated host
 traffic globally. Path diagnostics never fall back to Direct, do not echo
 targets in results, and do not establish tunnel health or start recovery.
 Host preflight is observational: a route lookup does not

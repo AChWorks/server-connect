@@ -136,12 +136,18 @@ func aptOwnedDisabledOpts(opts []string) []string {
 // Validate caller overrides before forwarding them to apt-get. Proxy
 // overrides, extra config files, and wire-debugging are not supported.
 func validateAptArgs(args []string) ([]string, string, error) {
+	// Native APT keeps the first ordinary token as FileList[0]. Requiring the
+	// action here avoids guessing which later boolean/integer/HasArg option
+	// consumes a separate value and accidentally losing strict update handling.
+	if len(args) == 0 || args[0] == "" || strings.HasPrefix(args[0], "-") {
+		return nil, "", Fault("invalid_arguments", "put the APT action first, followed by its options and package arguments")
+	}
 	var opts []string
-	action := ""
-	for i := 0; i < len(args); i++ {
+	action := args[0]
+	for i := 1; i < len(args); i++ {
 		a := args[i]
 		lower := strings.ToLower(a)
-		if a == "--update" || strings.HasPrefix(a, "--update=") ||
+		if isCombinedAPTUpdateLongFlag(a) ||
 			isCombinedAPTUpdateShortFlag(a) {
 			return nil, "", Fault("apt_combined_update_unsupported",
 				"APT -U/--update is unsupported in Proxy Only; run a separate strict apt-get update before the package command")
@@ -149,12 +155,15 @@ func validateAptArgs(args []string) ([]string, string, error) {
 		// The wrapper, not caller input, owns the update error policy.
 		// Accepting -e/--error-on risks ambiguous APT precedence.
 		if a == "-e" || strings.HasPrefix(a, "-e") ||
-			a == "--error-on" || strings.HasPrefix(a, "--error-on=") {
+			lower == "--error-on" || strings.HasPrefix(lower, "--error-on=") {
 			return nil, "", Fault("apt_policy_conflict",
 				"APT update error policy is managed by Server Connect")
 		}
 		if a == "--" {
 			return nil, "", Fault("invalid_arguments", "APT argument separator not supported")
+		}
+		if !supportedAPTShortToken(a) {
+			return nil, "", Fault("apt_policy_conflict", "APT short options must be separate; only quiet forms and validated attached -o values are supported")
 		}
 		if lower == "-c" || lower == "--config-file" || strings.HasPrefix(lower, "--config-file=") ||
 			(strings.HasPrefix(lower, "-c") && len(a) > 2) {
@@ -164,7 +173,7 @@ func validateAptArgs(args []string) ([]string, string, error) {
 		switch {
 		case a == "-o" || lower == "--option":
 			i++
-			if i == len(args) {
+			if i == len(args) || args[i] == "" || strings.HasPrefix(args[i], "-") {
 				return nil, "", Fault("invalid_arguments", "APT configuration option value missing")
 			}
 			opt = args[i]
@@ -199,35 +208,67 @@ func validateAptArgs(args []string) ([]string, string, error) {
 			opts = append(opts, "-o", opt)
 			continue
 		}
-		// APT accepts options that consume separate arguments before its
-		// subcommand. Never misclassify an update as a different action:
-		// that would drop mandatory --error-on=any on a partial failure.
-		if lower == "-t" || lower == "-a" ||
-			lower == "--target-release" || lower == "--host-architecture" {
-			i++
-			if i == len(args) {
-				return nil, "", Fault("invalid_arguments", "APT option value missing")
-			}
-			continue
-		}
-		if !strings.HasPrefix(a, "-") && action == "" {
-			action = a
-		}
+		// Scan every other token. Native meanings depend on the command (e.g.
+		// -a is boolean for apt show/list but takes a value for build-dep).
+		// Only the validated -o assignment above may consume another token.
 	}
 	return opts, action, nil
 }
 
+// Native short options are parsed letter by letter: -qoX=Y hides an arbitrary
+// setting and -qcFILE hides a config include. Admit a small unambiguous grammar
+// instead of duplicating APT's optional boolean/integer argument parser.
+func supportedAPTShortToken(a string) bool {
+	if len(a) < 3 || !strings.HasPrefix(a, "-") || strings.HasPrefix(a, "--") {
+		return true
+	}
+	if strings.HasPrefix(a, "-o") {
+		return true // The complete assignment is separately validated.
+	}
+	if a[1] != 'q' {
+		return false
+	}
+	level := strings.TrimLeft(a[1:], "q")
+	if level == "" {
+		return true
+	}
+	level = strings.TrimPrefix(level, "=")
+	if level == "" {
+		return false
+	}
+	for _, digit := range level {
+		if digit < '0' || digit > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// Native long matching ignores case and permits one Boolean prefix, including
+// an empty prefix (---update) and the short alias (--yes-U). An explicit value
+// such as --no-update=true overrides the prefix, so reject every such spelling.
+// https://github.com/Debian/apt/blob/a626a66fece0a7d680e40b9e35b66e29fe9ae12c/apt-pkg/contrib/cmndline.cc
+func isCombinedAPTUpdateLongFlag(a string) bool {
+	if !strings.HasPrefix(a, "--") {
+		return false
+	}
+	name, _, _ := strings.Cut(a[2:], "=")
+	if strings.EqualFold(name, "update") {
+		return true
+	}
+	_, suffix, prefixed := strings.Cut(name, "-")
+	return prefixed && (strings.EqualFold(suffix, "update") || suffix == "U")
+}
+
 // APT permits short flag groups (e.g. -qU); never allow a combined update
-// phase to escape the strict standalone-update contract. Other options
-// taking attached values (-o, -t, -a, -e) are not groups.
+// phase to escape the strict standalone-update contract. The only admitted
+// arbitrary attached value is -o's separately validated assignment.
 func isCombinedAPTUpdateShortFlag(a string) bool {
 	if len(a) < 2 || !strings.HasPrefix(a, "-") || strings.HasPrefix(a, "--") {
 		return false
 	}
-	for _, prefix := range []string{"-o", "-t", "-a", "-e", "-c"} {
-		if strings.HasPrefix(a, prefix) {
-			return false
-		}
+	if strings.HasPrefix(a, "-o") {
+		return false
 	}
 	return strings.Contains(a[1:], "U")
 }
