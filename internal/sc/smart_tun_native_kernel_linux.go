@@ -828,7 +828,10 @@ func nativeTUNRouteMatches(row map[string]json.RawMessage, record smartTUNTrialJ
 				return false
 			}
 		}
-		return selectiveText(row["src"]) == "all" || selectiveText(row["src"]) == ""
+		if source, present := row["src"]; present {
+			return selectiveText(source) == "all"
+		}
+		return true
 	}
 	if selectiveText(row["dst"]) != "default" {
 		return false
@@ -848,8 +851,23 @@ func nativeTUNRouteMatches(row map[string]json.RawMessage, record smartTUNTrialJ
 		if metric != nativeTUNMetric || selectiveText(row["dev"]) != record.TunnelInterface || selectiveText(row["prefsrc"]) != netip.MustParsePrefix(f.Address).Addr().String() {
 			return false
 		}
-		if scope := selectiveText(row["scope"]); scope != "253" && scope != "link" {
-			return false
+		// Linux IPv6 rt6_fill_node always reports RT_SCOPE_UNIVERSE,
+		// including a device route requested with "scope link". IPv4
+		// preserves RT_SCOPE_LINK. Do not mistake that family-specific
+		// kernel representation for a foreign route or accept another scope.
+		scope, present := row["scope"]
+		if family == 6 {
+			if present {
+				number, ok := selectiveInt(scope)
+				if (!ok || number != 0) && selectiveText(scope) != "global" {
+					return false
+				}
+			}
+		} else {
+			number, ok := selectiveInt(scope)
+			if (!ok || number != 253) && selectiveText(scope) != "link" {
+				return false
+			}
 		}
 	}
 	for key := range row {
@@ -863,8 +881,11 @@ func nativeTUNRouteMatches(row map[string]json.RawMessage, record smartTUNTrialJ
 			return false
 		}
 	}
-	if pref := selectiveText(row["pref"]); pref != "" && pref != "medium" {
-		return false
+	if pref, present := row["pref"]; present {
+		number, ok := selectiveInt(pref)
+		if (!ok || number != 0) && selectiveText(pref) != "medium" {
+			return false
+		}
 	}
 	var flags []string
 	if raw, ok := row["flags"]; ok {

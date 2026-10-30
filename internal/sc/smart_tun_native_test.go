@@ -309,6 +309,73 @@ func TestSmartTUNNativeRouteSelectorsAndForeignDependencies(t *testing.T) {
 	}
 }
 
+func TestSmartTUNNativeIPv6RouteUsesKernelUniverseScope(t *testing.T) {
+	record := nativeTrialExample(true)
+	// IPv6 rt6_fill_node emits RT_SCOPE_UNIVERSE even for our requested
+	// device/link route. Numeric iproute2 output omits the default scope.
+	base := `{"dst":"default","dev":"sctunqa0","table":"42426","protocol":"247","prefsrc":"fd73:99::1","metric":100,"flags":[],"pref":"medium"}`
+	for _, scope := range []string{"", `,"scope":0`, `,"scope":"0"`, `,"scope":"global"`} {
+		raw := strings.TrimSuffix(base, "}") + scope + "}"
+		rows, err := selectiveRows(json.RawMessage("[" + raw + "]"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		present, _, err := nativeTUNResourceRows(rows, record, 6, "route")
+		if err != nil || !present {
+			t.Fatalf("kernel IPv6 universe scope rejected (%s): %v", scope, err)
+		}
+	}
+	for _, scope := range []string{`253`, `"253"`, `"link"`, `254`, `"host"`, `null`, `""`, `0.0`, `false`} {
+		raw := strings.TrimSuffix(base, "}") + `,"scope":` + scope + "}"
+		rows, _ := selectiveRows(json.RawMessage("[" + raw + "]"))
+		if _, _, err := nativeTUNResourceRows(rows, record, 6, "route"); ErrorCode(err) != "trial_resource_conflict" {
+			t.Fatalf("foreign/invalid IPv6 scope %s accepted: %v", scope, err)
+		}
+	}
+	for _, tc := range []struct {
+		pref    string
+		allowed bool
+	}{
+		{"", true}, {`"medium"`, true}, {`0`, true}, {`"0"`, true}, {`1`, false}, {`"high"`, false}, {`3`, false}, {`"low"`, false}, {`null`, false}, {`""`, false}, {`0.0`, false},
+	} {
+		raw := strings.Replace(base, `"pref":"medium"`, `"pref":`+tc.pref, 1)
+		if tc.pref == "" {
+			raw = strings.Replace(base, `,"pref":"medium"`, "", 1)
+		}
+		rows, _ := selectiveRows(json.RawMessage("[" + raw + "]"))
+		_, _, err := nativeTUNResourceRows(rows, record, 6, "route")
+		if (err == nil) != tc.allowed {
+			t.Fatalf("route preference %s allowed=%v: %v", tc.pref, tc.allowed, err)
+		}
+	}
+	// Scope differences do not relax the other operation-bound selectors.
+	for _, bad := range []string{strings.Replace(base, `"metric":100`, `"metric":101`, 1), strings.Replace(base, `"prefsrc":"fd73:99::1"`, `"prefsrc":"fd73:99::2"`, 1), strings.Replace(base, `"protocol":"247"`, `"protocol":"246"`, 1), strings.Replace(base, `"dev":"sctunqa0"`, `"dev":"foreign0"`, 1)} {
+		rows, _ := selectiveRows(json.RawMessage("[" + bad + "]"))
+		if _, _, err := nativeTUNResourceRows(rows, record, 6, "route"); err == nil {
+			t.Fatal("unrelated IPv6 selector was relaxed")
+		}
+	}
+	// IPv4 must still require link scope; universe is not its equivalent.
+	v4 := strings.Replace(strings.Replace(base, `"table":"42426"`, `"table":"42424"`, 1), `"prefsrc":"fd73:99::1"`, `"prefsrc":"172.31.99.1"`, 1)
+	rows, _ := selectiveRows(json.RawMessage("[" + v4 + "]"))
+	if _, _, err := nativeTUNResourceRows(rows, record, 4, "route"); err == nil {
+		t.Fatal("IPv6 scope semantics leaked into IPv4")
+	}
+	// No family-specific RPDB relaxation: exact numeric protocol/table and
+	// masked mark remain mandatory for the IPv6 rule as for IPv4.
+	rule := `{"priority":10400,"src":"all","table":"42426","protocol":"247","fwmark":"0x530000","fwmask":"0xff0000"}`
+	rows, _ = selectiveRows(json.RawMessage("[" + rule + "]"))
+	if present, _, err := nativeTUNResourceRows(rows, record, 6, "rule"); err != nil || !present {
+		t.Fatalf("numeric IPv6 rule rejected: %v", err)
+	}
+	for _, source := range []string{`"fd73:99::/64"`, `null`, `0`, `""`} {
+		rows, _ = selectiveRows(json.RawMessage("[" + strings.Replace(rule, `"src":"all"`, `"src":`+source, 1) + "]"))
+		if _, _, err := nativeTUNResourceRows(rows, record, 6, "rule"); err == nil {
+			t.Fatal("foreign or invalid IPv6 rule source selector accepted")
+		}
+	}
+}
+
 func TestSmartTUNNativeForeignNFTMasksAndIndirectInterfaces(t *testing.T) {
 	record := nativeTrialExample(true)
 	for _, tc := range []struct {
