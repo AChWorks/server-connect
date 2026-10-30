@@ -68,6 +68,10 @@ Older v4 automatic-policy records retain their original recovery semantics;
 the two intents cannot substitute for each other. Neither intent can be
 confirmed or left permanently active.
 
+The independent executor selects the journal version and runs its recovery
+handler under one continuous manager lock. Concurrent Apply cannot publish
+a new journal between version selection and legacy interpretation.
+
 The manager validates the selected profile, pinned core, native baseline and
 reserved resource absence, then independently prearms the installed recovery
 oneshot/timer outside the shared journal lock. It repeats admission under the

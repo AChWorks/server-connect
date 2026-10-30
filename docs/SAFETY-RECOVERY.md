@@ -46,6 +46,10 @@ owned resource to discard simply because the kernel returned to baseline.
 The recovery oneshot and 5-second systemd timer are independently prearmed
 and verified before starting the TUN. The default expiry
 is 600 seconds, configurable from 4 to 600 seconds in disconnected QA only.
+Journal version selection and recovery share one uninterrupted manager lock;
+an absent or legacy observation cannot be reused after a concurrent Apply.
+A failed executor cannot be reported as an available guard. New Apply does
+not clear or ignore its failed result.
 A failed/uncertain restoration retains the journal, never presents Direct
 as safely verified and blocks installer/update/profile/Proxy Only transitions.
 The native fingerprint includes preexisting guest nftables objects. Native
