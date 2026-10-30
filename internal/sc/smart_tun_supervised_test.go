@@ -105,6 +105,24 @@ func TestSupervisedChallengeBoundToOperationBootConfigRevisionAndFreshness(t *te
 			t.Fatal("old or expired challenge/lease accepted")
 		}
 	}
+	// Isolate activation expiry while the supervisor lease is still valid.
+	activationBound := cloneSmartTUNTrial(r)
+	activationBound.DeadlineUptimeSec = 110
+	if !smartTUNConfirmMatches(activationBound, r.OperationID, 1, challenge, r.BootID, 109999) {
+		t.Fatal("valid confirmation immediately before activation expiry rejected")
+	}
+	for _, now := range []int64{110000, 110001} {
+		if smartTUNConfirmMatches(activationBound, r.OperationID, 1, challenge, r.BootID, now) {
+			t.Fatal("expired activation accepted while supervisor lease remained valid")
+		}
+	}
+	// Isolate lease expiry while the original activation deadline is later.
+	if !smartTUNConfirmMatches(r, r.OperationID, 1, challenge, r.BootID, 134999) {
+		t.Fatal("valid confirmation immediately before supervisor lease expiry rejected")
+	}
+	if smartTUNConfirmMatches(r, r.OperationID, 1, challenge, r.BootID, 135000) {
+		t.Fatal("expired supervisor lease accepted while activation remained valid")
+	}
 	receipt := smartTUNReceipt(r, true, false)
 	wire, _ := json.Marshal(receipt)
 	if strings.Contains(string(wire), challenge) || strings.Contains(string(wire), r.Supervised.ChallengeSHA256) || receipt.VPNVerified || receipt.ActivationReady {
