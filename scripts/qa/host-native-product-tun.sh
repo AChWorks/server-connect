@@ -145,19 +145,30 @@ PYNATIVEPENDINGFAIL
 native_failure_observation() {
   # Sample silently before a probe; report only its first failure, before
   # recovery erases evidence. Neither diagnostics nor timeouts change QA status.
-  case "$1" in sample) native_observer_limit=2;; apply|readiness) native_observer_limit=6;; *) return 2;; esac
+  case "$1" in sample|loss-sample) native_observer_limit=2;; apply|readiness|loss) native_observer_limit=6;; *) return 2;; esac
   timeout --signal=KILL "${native_observer_limit}s" python3 - "$@" <<'PYNATIVEAPPLYDIAG'
 import json,os,re,resource,stat,subprocess,sys,tempfile
 mode=sys.argv[1]
-assert (mode=='apply' and len(sys.argv)==2) or (mode=='sample' and len(sys.argv)==3) or (mode=='readiness' and len(sys.argv)==7)
+assert (mode=='apply' and len(sys.argv)==2) or (mode in ('sample','loss-sample') and len(sys.argv)==3) or (mode=='readiness' and len(sys.argv)==7) or (mode=='loss' and len(sys.argv)==8)
 if mode=='readiness':
     stage,destination,expected,before=sys.argv[3:]
     assert (stage,destination,expected) in (('domestic','5.22.0.10','10.254.72.1'),('vpn','8.8.8.8','8.8.8.8'))
-prefix='PRODUCT_NATIVE_APPLY_DIAGNOSTIC' if mode=='apply' else 'PRODUCT_NATIVE_READINESS_DIAGNOSTIC'
+if mode=='loss':
+    stage,transport,before,tcp_before,udp_before=sys.argv[3:]
+    assert stage in ('route','rule','capture','core','containment') and transport in ('tcp','udp')
+    assert all(re.fullmatch('[0-9]{1,20}',x) and 0<int(x)<2**64 for x in (tcp_before,udp_before))
+    destination='2001:db8:8::8';expected='no-response'
+silent=mode in ('sample','loss-sample')
+prefix=('PRODUCT_NATIVE_APPLY_DIAGNOSTIC' if mode=='apply' else
+        'PRODUCT_NATIVE_LOSS_DIAGNOSTIC' if mode=='loss' else 'PRODUCT_NATIVE_READINESS_DIAGNOSTIC')
+pending=[]
+def output(line):
+    if mode=='loss':pending.append(line)
+    else:print(line,flush=True)
 def unavailable(label,reason):
-    if mode!='sample':print(prefix+' '+label+' unavailable='+reason,flush=True)
+    if not silent:output(prefix+' '+label+' unavailable='+reason)
 def show(label,value):
-    print(prefix+' '+label+' '+json.dumps(value,separators=(',',':')),flush=True)
+    output(prefix+' '+label+' '+json.dumps(value,separators=(',',':')))
 def read(path,limit=4096):
     with open(path) as f:return f.read(limit)
 def native_readiness_delta(before,after):
@@ -172,7 +183,19 @@ def native_readiness_delta(before,after):
     assert all(before[k]==after[k] for k in identity), 'counter owner changed'
     assert all(after[k]>=before[k] for k in metrics), 'counter reset'
     return {k:after[k]-before[k] for k in metrics}
-def capture(argv):
+def native_loss_delta(before,after):
+    for sample in (before,after):assert isinstance(sample,dict) and set(sample)=={'native','peer'}
+    native=native_readiness_delta(before['native'],after['native'])
+    identity=('namespace_dev','namespace_ino','link_index','underlay_index','tcp_handle','udp_handle')
+    metrics=('tcp_packets','tcp_bytes','udp_packets','udp_bytes')
+    for sample in (before['peer'],after['peer']):
+        assert isinstance(sample,dict) and set(sample)==set(identity+metrics)
+        assert all(type(sample[k]) is int and 0<sample[k]<2**64 for k in identity)
+        assert all(type(sample[k]) is int and 0<=sample[k]<2**64 for k in metrics)
+    assert all(before['peer'][k]==after['peer'][k] for k in identity), 'peer counter owner changed'
+    assert all(after['peer'][k]>=before['peer'][k] for k in metrics), 'peer counter reset'
+    return {'native':native,'peer':{k:after['peer'][k]-before['peer'][k] for k in metrics}}
+def capture(argv,as_json=True):
     # A regular-file size limit bounds capture itself, not just printed output.
     def limit():resource.setrlimit(resource.RLIMIT_FSIZE,(16384,16384))
     with tempfile.TemporaryFile(dir='/run') as out:
@@ -181,7 +204,9 @@ def capture(argv):
         if r.returncode:raise ValueError('command-exit-'+str(r.returncode))
         if out.tell()>=16384:raise ValueError('output-limit')
         out.seek(0)
-        try:return json.loads(out.read(16384))
+        try:
+            raw=out.read(16384)
+            return json.loads(raw) if as_json else raw.decode('utf-8')
         except (ValueError,UnicodeError):raise ValueError('invalid-json')
 def observe(label,argv,check):
     try:
@@ -190,6 +215,33 @@ def observe(label,argv,check):
         show(label,value)
     except ValueError as e:unavailable(label,str(e))
     except Exception:unavailable(label,'observation-error')
+def journal():
+    fd=os.open('/var/lib/server-connect/route-activation-journal.json',os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
+    with os.fdopen(fd,'rb') as f:
+        st=os.fstat(f.fileno())
+        assert stat.S_ISREG(st.st_mode) and st.st_uid==0 and not st.st_mode&0o022 and st.st_size<=131072
+        raw=f.read(131073);after=os.fstat(f.fileno())
+        assert len(raw)<=131072 and (st.st_size,st.st_mtime_ns)==(after.st_size,after.st_mtime_ns)
+    return json.loads(raw)
+def operation_summary(record):
+    assert record['operation_id']==op and record['version']==4 and record['intent_type']=='smart_tun_native_pending_trial_v1'
+    revisions={'trial_pending':(1,),'trial_stop_requested':(2,),'trial_recovered':(2,3),'trial_cleanup_pending':(4,)}
+    assert record['phase'] in revisions and type(record['revision']) is int and record['revision'] in revisions[record['phase']]
+    assert type(record['deadline_uptime_sec']) is int and 0<record['deadline_uptime_sec']<2**63
+    assert record['boot_id']==read('/proc/sys/kernel/random/boot_id',64).strip()
+    ledger=record['native']
+    assert ledger['link_stage'] in ('planned','create_possible','bound','persist_possible','observed','remove_requested','removed')
+    stages={'link':ledger['link_stage']}
+    for family in ('ipv4','ipv6'):
+        for key in ('route','fallback','rule'):
+            value=ledger[family][key]['stage']
+            assert value in ('planned','effect_possible','observed','remove_requested','removed')
+            stages[family+'_'+key]=value
+    assert ledger['nft']['stage'] in ('planned','effect_possible','observed','remove_requested','removed')
+    stages['nft']=ledger['nft']['stage']
+    uptime=float(read('/proc/uptime',128).split()[0]);assert 0<=uptime<2**63
+    return {'operation_id':op,'phase':record['phase'],'revision':record['revision'],
+            'deadline_uptime_sec':record['deadline_uptime_sec'],'uptime_sec':uptime,'receipt_stages':stages}
 try:
     assert os.geteuid()==0 and os.environ.get('SC_QA_TUN_PRODUCT_LAB')=='yes'
     assert os.path.isfile('/.dockerenv') and read('/proc/1/comm',64).strip()=='systemd'
@@ -198,11 +250,7 @@ try:
     assert os_release.get('ID','').strip('"')=='debian' and os_release.get('VERSION_ID','').strip('"')=='13'
     ns=os.stat('/proc/self/ns/net');pid1=os.stat('/proc/1/ns/net')
     assert (ns.st_dev,ns.st_ino)==(pid1.st_dev,pid1.st_ino)
-    fd=os.open('/var/lib/server-connect/route-activation-journal.json',os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
-    with os.fdopen(fd,'rb') as f:
-        st=os.fstat(f.fileno())
-        assert stat.S_ISREG(st.st_mode) and st.st_uid==0 and not st.st_mode&0o022 and st.st_size<=131072
-        j=json.loads(f.read(131073))
+    j=journal()
     assert j['version']==4 and j['intent_type']=='smart_tun_native_pending_trial_v1'
     op=j['operation_id'];assert isinstance(op,str) and re.fullmatch('[0-9a-f]{32}',op)
     if mode!='apply':assert op==sys.argv[2]
@@ -210,12 +258,69 @@ try:
     assert j['tunnel_interface']=='sctunqa0' and j['underlay_interface']=='scqaedge0'
     n=j['native'];assert n['version']==1 and (n['namespace_dev'],n['namespace_ino'])==(ns.st_dev,ns.st_ino)
     assert n['nft_name']=='scnt_'+op and n['ipv4']['table']==42424 and n['ipv6']['table']==42426
+    if mode in ('loss-sample','loss'):
+        assert n['ipv4']['address']=='172.31.99.1/30' and n['ipv6']['address']=='fd73:99::1/64'
     assert type(n['link_index']) is int and 0<=n['link_index']<2**31
     assert type(n['underlay_index']) is int and 0<n['underlay_index']<2**31
     assert int(read('/sys/class/net/scqaedge0/ifindex',64))==n['underlay_index']
 except Exception:
-    unavailable('scope','fixture-or-operation-identity');raise SystemExit(1)
+    if mode=='loss':print(prefix+' scope unavailable=fixture-or-operation-identity',flush=True)
+    else:unavailable('scope','fixture-or-operation-identity')
+    raise SystemExit(1)
 ip=['/usr/bin/ip','-N','-j']
+def peer_sample():
+    peer_ns=os.stat('/run/netns/scqapeer')
+    links=capture(ip+['-n','scqapeer','link','show','dev','scqapeer0'])
+    assert isinstance(links,list) and len(links)==1
+    link=links[0]
+    assert link.get('ifname')=='scqapeer0' and type(link.get('ifindex')) is int and link['ifindex']>1
+    assert link.get('link_index')==n['underlay_index']
+    assert int(read('/sys/class/net/scqaedge0/iflink',64))==link['ifindex']
+    result={'namespace_dev':peer_ns.st_dev,'namespace_ino':peer_ns.st_ino,
+            'link_index':link['ifindex'],'underlay_index':n['underlay_index']}
+    for transport in ('tcp','udp'):
+        name='ipv6_foreign_'+transport+'_packets'
+        value=capture(['/usr/bin/ip','netns','exec','scqapeer','/usr/sbin/nft','-n','-j','-a',
+                       'list','counter','inet','scqawitness',name])
+        objects=[x for x in value['nftables'] if 'metainfo' not in x]
+        assert len(objects)==1 and set(objects[0])=={'counter'}
+        counter=objects[0]['counter']
+        assert counter['family']=='inet' and counter['table']=='scqawitness' and counter['name']==name
+        for key in ('handle','packets','bytes'):
+            assert type(counter[key]) is int and 0<=counter[key]<2**64
+            result[transport+'_'+key]=counter[key]
+        assert counter['handle']>0
+    after=os.stat('/run/netns/scqapeer')
+    assert (peer_ns.st_dev,peer_ns.st_ino)==(after.st_dev,after.st_ino)
+    return result
+def service_snapshot(unit):
+    properties=('Id','LoadState','ActiveState','SubState','Result','ExecMainStatus','InvocationID','Job')
+    argv=['/usr/bin/systemctl','show',unit]
+    for key in properties:argv+=['-p',key]
+    fields={}
+    for line in capture(argv,False).splitlines():
+        key,separator,value=line.partition('=');assert separator and key in properties and key not in fields
+        if key=='Id':assert value==unit
+        elif key in ('ExecMainStatus','Job'):assert (key=='Job' and value=='') or re.fullmatch('[0-9]{1,20}',value)
+        elif key=='InvocationID':assert value=='' or re.fullmatch('[0-9a-f]{32}',value)
+        else:assert re.fullmatch('[a-z][a-z0-9-]{0,31}',value)
+        fields[key]=value
+    assert set(fields)==set(properties)
+    return fields
+if mode=='loss':
+    try:show('operation-before',operation_summary(j))
+    except Exception:unavailable('operation-before','invalid-safe-metadata')
+    for unit in ('server-connect-smart-tun.service','server-connect-activation-recover.service'):
+        try:show('service',service_snapshot(unit))
+        except Exception:unavailable(unit,'bounded-service-observation')
+    mask='/run/systemd/system/server-connect-activation-recover.service'
+    try:
+        masked='absent'
+        if os.path.lexists(mask):
+            assert os.path.islink(mask) and os.readlink(mask)=='/dev/null'
+            masked='runtime-dev-null'
+        show('executor-mask',{'state':masked})
+    except Exception:unavailable('executor-mask','unexpected-mask-identity')
 def nft_table(value):
     if not isinstance(value,dict) or not isinstance(value.get('nftables'),list):return False
     for item in value['nftables']:
@@ -230,9 +335,21 @@ try:
     assert nft_table(table_now)
 except Exception:
     table_now=None;unavailable('nft-'+n['nft_name'],'observation-or-identity')
-if mode!='sample' and table_now is not None:show('nft-'+n['nft_name'],table_now)
+if not silent and table_now is not None:show('nft-'+n['nft_name'],table_now)
+peer_now=None
+if mode in ('loss-sample','loss'):
+    try:
+        peer_now=peer_sample()
+        if mode=='loss':
+            show('peer-direct-counters',{'before':{'tcp_packets':int(tcp_before),'udp_packets':int(udp_before)},'after':peer_now})
+    except Exception:
+        unavailable('peer-direct-counters','bounded-peer-owner-observation')
+        if silent:raise SystemExit(1)
 if mode!='apply':
-    if mode=='readiness':show('probe',{'stage':stage,'destination':destination,'expected_source':expected,'operation_id':op})
+    if mode in ('readiness','loss'):
+        probe={'stage':stage,'destination':destination,'expected_source':expected,'operation_id':op}
+        if mode=='loss':probe['transport']=transport
+        show('probe',probe)
     try:
         assert n['link_index']>0 and int(read('/sys/class/net/sctunqa0/ifindex',64))==n['link_index']
         assert read('/sys/class/net/sctunqa0/ifalias',128).strip()=='server-connect:'+op
@@ -253,18 +370,33 @@ if mode!='apply':
         assert int(read('/sys/class/net/sctunqa0/ifindex',64))==n['link_index']
         native_readiness_delta(current,current)
         if mode=='sample':print(json.dumps(current,separators=(',',':')));raise SystemExit(0)
-        show('counters-after',current)
-        assert len(before)<=1024
-        previous=json.loads(before);delta=native_readiness_delta(previous,current)
+        if mode in ('loss-sample','loss'):
+            loss_current={'native':current,'peer':peer_now}
+            native_loss_delta(loss_current,loss_current)
+            if mode=='loss-sample':
+                # No route-get or packet query in a pre-probe sample.
+                same=journal()
+                assert same['operation_id']==op and same['native']==n
+                assert int(read('/sys/class/net/sctunqa0/ifindex',64))==n['link_index']
+                print(json.dumps(loss_current,separators=(',',':')));raise SystemExit(0)
+            show('counters-after',loss_current)
+            assert len(before)<=4096
+            previous=json.loads(before);delta=native_loss_delta(previous,loss_current)
+            assert previous['peer']['tcp_packets']==int(tcp_before) and previous['peer']['udp_packets']==int(udp_before)
+        else:
+            show('counters-after',current)
+            assert len(before)<=1024
+            previous=json.loads(before);delta=native_readiness_delta(previous,current)
         show('counters-before',previous);show('counter-delta',delta)
     except Exception:
         unavailable('counters','missing-or-changed-owner-or-counter')
-        if mode=='sample':raise SystemExit(1)
+        if silent:raise SystemExit(1)
     # These lookups do not simulate OUTPUT hooks. They expose the exact
     # selected destination's initial, captured and core-bypass route choices.
     for label,mark in (('initial','0'),('capture','0x530000'),('bypass','0x540000')):
-        observe('route-get-'+label,ip+['-4','route','get',destination,'from','10.254.72.1','mark',mark],
-                lambda rows:isinstance(rows,list) and len(rows)==1 and rows[0].get('dst') in (destination,destination+'/32'))
+        family,source,suffix=('-6','fd73:1::1','/128') if mode=='loss' else ('-4','10.254.72.1','/32')
+        observe('route-get-'+label,ip+[family,'route','get',destination,'from',source,'mark',mark],
+                lambda rows:isinstance(rows,list) and len(rows)==1 and rows[0].get('dst') in (destination,destination+suffix))
 try:
     assert n['link_index']>0 and int(read('/sys/class/net/sctunqa0/ifindex',64))==n['link_index']
     assert read('/sys/class/net/sctunqa0/ifalias',128).strip()=='server-connect:'+op
@@ -276,6 +408,34 @@ else:
 for family,table in (('-4',42424),('-6',42426)):
     observe('routes-'+str(table),ip+[family,'route','show','table',str(table)],lambda rows:isinstance(rows,list) and all(str(r.get('table',table))==str(table) for r in rows))
     observe('rules-'+family[1:],ip+[family,'rule','show','priority','10400'],lambda rows:isinstance(rows,list) and all(r.get('priority')==10400 for r in rows))
+if mode=='loss':
+    # Do not publish captured native rows under an operation that changed
+    # while observing. A diagnostic failure still preserves the packet failure.
+    try:
+        after=journal();summary=operation_summary(after)
+        assert after['tunnel_interface']=='sctunqa0' and after['underlay_interface']=='scqaedge0'
+        keys=('namespace_dev','namespace_ino','link_index','underlay_index','nft_name','nft_handle')
+        assert all(after['native'][key]==n[key] for key in keys)
+        assert after['native']['version']==1
+        assert after['native']['ipv4']['table']==42424 and after['native']['ipv6']['table']==42426
+        assert after['native']['ipv4']['address']=='172.31.99.1/30' and after['native']['ipv6']['address']=='fd73:99::1/64'
+        assert after['deadline_uptime_sec']==j['deadline_uptime_sec']
+        assert int(read('/sys/class/net/sctunqa0/ifindex',64))==n['link_index']
+        assert read('/sys/class/net/sctunqa0/ifalias',128).strip()=='server-connect:'+op
+        assert int(read('/sys/class/net/scqaedge0/ifindex',64))==n['underlay_index']
+        table_after=capture(['/usr/sbin/nft','-n','-j','-a','list','table','inet',n['nft_name']])
+        assert nft_table(table_after)
+        tables=[x['table'] for x in table_after['nftables'] if 'table' in x]
+        assert len(tables)==1 and tables[0]['handle']==n['nft_handle']>0
+        if peer_now is not None:
+            peer_ns=os.stat('/run/netns/scqapeer')
+            assert (peer_ns.st_dev,peer_ns.st_ino)==(peer_now['namespace_dev'],peer_now['namespace_ino'])
+            assert int(read('/sys/class/net/scqaedge0/iflink',64))==peer_now['link_index']
+        show('operation-after',summary)
+    except Exception:
+        print(prefix+' attribution unavailable=operation-or-native-owner-changed',flush=True)
+        raise SystemExit(1)
+    for line in pending:print(line,flush=True)
 PYNATIVEAPPLYDIAG
 }
 
@@ -647,6 +807,8 @@ PYNATIVERETAINED
 native_no_direct_leak() {
   # Earlier positive controls reached these same origins directly. A failed
   # request alone is insufficient; peer ingress must remain unchanged too.
+  native_probe_fault=${1-containment}
+  case "$native_probe_fault" in route|rule|capture|core|containment) :;; *) return 2;; esac
   native_tcp4_before=$(direct_witness_packets)
   native_udp4_before=$(direct_udp_witness_packets)
   test "$native_tcp4_before" -gt 0 && test "$native_udp4_before" -gt 0
@@ -660,8 +822,21 @@ native_no_direct_leak() {
     native_tcp6_before=$(ipv6_foreign_tcp_direct_packets)
     native_udp6_before=$(ipv6_foreign_udp_direct_packets)
     test "$native_tcp6_before" -gt 0 && test "$native_udp6_before" -gt 0
-    ipv6_path tcp 2001:db8:8::8 none no-reply
-    ipv6_path udp 2001:db8:8::8 none no-reply
+    # Read identity/counters only before traffic; route-get is deliberately
+    # confined to failure reporting so it cannot prime the probe's route cache.
+    native_loss_before=$(native_failure_observation loss-sample "$op") || native_loss_before=null
+    if ipv6_path tcp 2001:db8:8::8 none no-reply; then :; else
+      native_probe_rc=$?
+      native_failure_observation loss "$op" "$native_probe_fault" tcp "$native_loss_before" "$native_tcp6_before" "$native_udp6_before" >&2 ||
+        echo 'PRODUCT_NATIVE_LOSS_DIAGNOSTIC observer unavailable=bounded-observer-failed' >&2
+      return "$native_probe_rc"
+    fi
+    if ipv6_path udp 2001:db8:8::8 none no-reply; then :; else
+      native_probe_rc=$?
+      native_failure_observation loss "$op" "$native_probe_fault" udp "$native_loss_before" "$native_tcp6_before" "$native_udp6_before" >&2 ||
+        echo 'PRODUCT_NATIVE_LOSS_DIAGNOSTIC observer unavailable=bounded-observer-failed' >&2
+      return "$native_probe_rc"
+    fi
     test "$(ipv6_foreign_tcp_direct_packets)" = "$native_tcp6_before"
     test "$(ipv6_foreign_udp_direct_packets)" = "$native_udp6_before"
   fi
@@ -768,7 +943,7 @@ native_loss_cases() {
       core)
         systemctl kill --kill-who=main --signal=KILL server-connect-smart-tun.service ;;
     esac
-    native_no_direct_leak
+    native_no_direct_leak "$native_loss"
     test "$(saved_policy_hashes)" = "$saved_policy_before"
     capture_executor_proof
     killed=0

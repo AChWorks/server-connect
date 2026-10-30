@@ -313,6 +313,56 @@ for key,value in (('operation_id','b'*32),('link_index',23),('nft_handle',17),('
     reject_counter(dict(after,**{key:value}))
 changed=dict(after);del changed['guard_bytes'];reject_counter(changed)
 reject_counter(dict(after,unexpected=0));reject_counter(None)
+loss_delta=functions('PYNATIVEAPPLYDIAG',('native_loss_delta',),{'native_readiness_delta':delta})['native_loss_delta']
+peer={'namespace_dev':4,'namespace_ino':4026532000,'link_index':9,'underlay_index':8,
+      'tcp_handle':3,'udp_handle':4,'tcp_packets':7,'tcp_bytes':700,'udp_packets':5,'udp_bytes':500}
+loss_before={'native':before,'peer':peer}
+loss_after={'native':after,'peer':dict(peer,tcp_packets=9,tcp_bytes=950)}
+assert loss_delta(loss_before,loss_after)=={'native':delta(before,after),
+       'peer':{'tcp_packets':2,'tcp_bytes':250,'udp_packets':0,'udp_bytes':0}}
+assert all(value==0 for value in loss_delta(loss_before,loss_before)['peer'].values())
+cases+=2
+def reject_loss(value):
+    global cases
+    original=copy.deepcopy(value)
+    try:loss_delta(loss_before,value)
+    except (AssertionError,KeyError,TypeError):pass
+    else:raise AssertionError('unsafe peer attribution accepted')
+    assert value==original
+    cases+=1
+for key in ('namespace_dev','namespace_ino','link_index','underlay_index','tcp_handle','udp_handle'):
+    changed=copy.deepcopy(loss_after);changed['peer'][key]+=1;reject_loss(changed)
+for key,value in (('tcp_packets',6),('udp_bytes',-1),('tcp_handle',True),('udp_packets',5.0),('tcp_bytes',2**64)):
+    changed=copy.deepcopy(loss_after);changed['peer'][key]=value;reject_loss(changed)
+changed=copy.deepcopy(loss_after);changed['native']['operation_id']='b'*32;reject_loss(changed)
+changed=copy.deepcopy(loss_after);changed['peer']['unknown']='secret';reject_loss(changed)
+changed=copy.deepcopy(loss_after);del changed['peer']['tcp_handle'];reject_loss(changed)
+reject_loss(dict(loss_after,unknown='secret'));reject_loss(None)
+boot='11111111-2222-3333-4444-555555555555'
+summary=functions('PYNATIVEAPPLYDIAG',('operation_summary',),
+                  {'op':'a'*32,'read':lambda path,limit:boot if path.endswith('boot_id') else '100.25 90.0'})['operation_summary']
+record={'operation_id':'a'*32,'version':4,'intent_type':'smart_tun_native_pending_trial_v1',
+        'phase':'trial_pending','revision':1,'deadline_uptime_sec':160,'boot_id':boot,
+        'profile_id':'REDACTED_SECRET','native':{'link_stage':'observed','nft':{'stage':'observed'}}}
+for family in ('ipv4','ipv6'):
+    record['native'][family]={key:{'stage':'observed','sha256':'REDACTED_SECRET'} for key in ('route','fallback','rule')}
+safe=summary(record)
+assert safe['operation_id']=='a'*32 and safe['uptime_sec']==100.25 and safe['deadline_uptime_sec']==160
+assert 'REDACTED_SECRET' not in repr(safe) and set(safe)=={'operation_id','phase','revision','deadline_uptime_sec','uptime_sec','receipt_stages'}
+for phase,revision in (('trial_pending',1),('trial_stop_requested',2),('trial_recovered',2),('trial_recovered',3),('trial_cleanup_pending',4)):
+    assert summary(dict(record,phase=phase,revision=revision))['revision']==revision
+for change in ({'operation_id':'b'*32},{'phase':'trial_cleared'},{'revision':2},{'revision':True},
+               {'deadline_uptime_sec':0},{'deadline_uptime_sec':True},{'deadline_uptime_sec':2**63},
+               {'boot_id':'different'}):
+    try:summary(dict(record,**change))
+    except AssertionError:pass
+    else:raise AssertionError('unsafe operation summary accepted')
+    cases+=1
+changed=copy.deepcopy(record);changed['native']['ipv6']['fallback']['stage']='REDACTED_SECRET'
+try:summary(changed)
+except AssertionError:pass
+else:raise AssertionError('unknown receipt stage exposed')
+cases+=1
 namespace=functions('PYNATIVEFORWARD',('checksum','transit_frame','forwarded_frame_matches'),{'socket':socket,'struct':struct})
 build=namespace['transit_frame'];matches=namespace['forwarded_frame_matches']
 host=bytes.fromhex('020000000001');peer=bytes.fromhex('020000000002');token=bytes(range(16));identity=0x1234
