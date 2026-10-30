@@ -427,17 +427,40 @@ jobs:
           # This fixture modifies ONLY the disposable Debian job container.
           # Any unintended APT attempt hits the inert witness instead of
           # changing OS packages, and makes the negative assertion fail.
+          os_restore_pending=no
+          restore_os_metadata() {
+            test "$os_restore_pending" = yes || return 0
+            if test ! -f "$os_metadata_path" || test -L "$os_metadata_path" || \
+              test "$(stat -c '%d:%i' "$os_metadata_path")" != "$os_metadata_inode"; then
+              echo 'OS metadata identity changed; refusing to chmod a replacement' >&2
+              return 1
+            fi
+            chmod "$os_metadata_mode" "$os_metadata_path" || return 1
+            test "$(stat -c %a "$os_metadata_path")" = "$os_metadata_mode" || return 1
+            os_restore_pending=no
+            test "$(stat -c '%d:%i:%u:%g:%h:%s' "$os_metadata_path")" = "$os_metadata_identity" || return 1
+            test "$(sha256sum "$os_metadata_path")" = "$os_metadata_digest" || return 1
+          }
           restore_native_tools() {
+            local restore_failed=0
             for tool in mktemp rm wc cut head readlink; do
               if test -e "/usr/bin/${tool}.sc-native-qa-held"; then
-                /usr/bin/mv -f "/usr/bin/${tool}.sc-native-qa-held" "/usr/bin/$tool"
+                /usr/bin/mv -f "/usr/bin/${tool}.sc-native-qa-held" "/usr/bin/$tool" || restore_failed=1
               fi
             done
+            restore_os_metadata || restore_failed=1
             if test -e "$apt_held"; then
-              /usr/bin/mv -f "$apt_held" /usr/bin/apt-get
+              /usr/bin/mv -f "$apt_held" /usr/bin/apt-get || restore_failed=1
             fi
+            return "$restore_failed"
           }
-          trap restore_native_tools EXIT
+          cleanup_native_fixture() {
+            local native_exit_code=$?
+            trap - EXIT
+            if ! restore_native_tools; then native_exit_code=1; fi
+            exit "$native_exit_code"
+          }
+          trap cleanup_native_fixture EXIT
           /usr/bin/mv /usr/bin/apt-get "$apt_held"
           cat > /usr/bin/apt-get <<'SHAPT'
           #!/bin/sh
@@ -465,6 +488,44 @@ jobs:
             test -z "$(find /root -maxdepth 1 -name '.server-connect-bootstrap.*' -print)"
             /usr/bin/mv "$held" "/usr/bin/$tool"
           done
+          # Every held helper is restored, but APT is still the inert witness.
+          # Change only the group-write mode bit on the actual fixed OS file;
+          # never edit its bytes, ownership, or /etc/os-release symlink.
+          for tool in mktemp rm wc cut head readlink; do test -x "/usr/bin/$tool"; done
+          ! command -v python3
+          ! command -v curl
+          os_metadata_path=$(readlink -e /etc/os-release)
+          case "$os_metadata_path" in /etc/os-release|/usr/lib/os-release) ;; *) exit 1 ;; esac
+          test -f "$os_metadata_path" && test ! -L "$os_metadata_path"
+          test "$(stat -c %u "$os_metadata_path")" = 0
+          os_metadata_inode=$(stat -c '%d:%i' "$os_metadata_path")
+          os_metadata_identity=$(stat -c '%d:%i:%u:%g:%h:%s' "$os_metadata_path")
+          os_metadata_mode=$(stat -c %a "$os_metadata_path")
+          os_metadata_digest=$(sha256sum "$os_metadata_path")
+          test "$((0$os_metadata_mode & 022))" -eq 0
+          os_writable_mode=$(printf '%o' "$((0$os_metadata_mode | 020))")
+          # Register restoration before the mutation, including chmod failure.
+          os_restore_pending=yes
+          chmod g+w "$os_metadata_path"
+          test "$(stat -c %a "$os_metadata_path")" = "$os_writable_mode"
+          if /usr/bin/env -i HOME=/root PATH=/usr/sbin:/usr/bin:/sbin:/bin LC_ALL=C \
+            /bin/sh scripts/bootstrap-online.sh --archive-url "$archive" --sha256 "$digest" \
+            > /tmp/sc-native-qa-os-mode.log 2>&1; then
+            echo 'Writable native OS metadata unexpectedly accepted' >&2; exit 1
+          else
+            os_refusal_exit=$?
+          fi
+          test "$os_refusal_exit" -eq 1
+          grep -Fx 'Verified Debian 12 or Debian 13 OS identity is required for automatic online prerequisites' \
+            /tmp/sc-native-qa-os-mode.log
+          test ! -e "$apt_marker"
+          for path in /opt/server-connect /var/lib/server-connect /usr/local/bin/server-connect \
+            /etc/systemd/system/server-connect.service; do
+            test ! -e "$path" && test ! -L "$path"
+          done
+          test -z "$(find /root -maxdepth 1 -name '.server-connect-bootstrap.*' -print)"
+          restore_os_metadata
+          printf 'DEBIAN%s_UNTRUSTED_OS_METADATA_PRE_APT=PASS (zero APT attempts, exact mode/inode/bytes restored)\n' "$SC_QA_DEBIAN_VERSION"
           restore_native_tools
           trap - EXIT
           test -x /usr/bin/apt-get
