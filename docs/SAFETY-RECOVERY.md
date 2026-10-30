@@ -106,6 +106,20 @@ priorities and intended configuration identify the scope to inspect; they do
 not authenticate ownership by themselves. Whole-host equality is not used to
 remove objects added by another owner after admission.
 
+Nftables JSON is a compiler representation, not a byte-for-byte echo of the
+submitted commands. The native policy emits the supported canonical chain,
+prefix and expression shape; observed rules keep their full fields and order.
+Numeric-output flags do not force numeric interface indices in nftables 1.1.3:
+its [interface printer](https://sources.debian.org/src/nftables/1.1.3-1/src/meta.c/)
+and [JSON serializer](https://sources.debian.org/src/nftables/1.1.3-1/src/json.c/)
+render an existing index as a name and an absent index as a decimal string.
+Only typed `iif`/`oif` operands receive index normalization, using complete
+name/index observations before and after the nft dump and the pinned underlay
+and any present TUN identity. Ambiguous names or changed mappings are refused;
+`iifname`/`oifname` retain their distinct name semantics. Nft generation checks
+remain separate from link identity checks, and original handles remain part of
+the ownership receipt after the owned link disappears.
+
 TUN creation is exclusive and initially scoped to an open nonpersistent FD.
 The manager disables IPv6 address autogeneration before bringing up the link,
 records the complete observed identity durably, and only then makes it
