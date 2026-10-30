@@ -2,12 +2,240 @@ package sc
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"syscall"
 	"testing"
 )
+
+func smartTUNCoreObservationExample(state string) smartTUNTrialUnitObservation {
+	result := smartTUNTrialUnitObservation{
+		identity: smartTUNTrialUnitIdentity{
+			unitFile:   activationJournalFileIdentity{dev: 1, ino: 2},
+			digestFile: activationJournalFileIdentity{dev: 1, ino: 3},
+			unitSHA256: strings.Repeat("a", 64), digestSHA256: strings.Repeat("b", 64),
+		},
+		activeState: state, subState: "dead", result: "success",
+	}
+	if state == "active" {
+		result.subState, result.mainPID, result.controlGroup = "running", 123, "/system.slice/"+smartTUNTrialUnit
+	}
+	if state == "failed" {
+		result.subState, result.result = "failed", "signal"
+	}
+	return result
+}
+
+func TestSmartTUNCoreObservationRequiresCompleteOwnedQuiescenceEvidence(t *testing.T) {
+	identity := smartTUNCoreObservationExample("inactive").identity
+	raw := "Id=" + smartTUNTrialUnit + "\nLoadState=loaded\nFragmentPath=" +
+		filepath.Join(trialGuardUnitDir, smartTUNTrialUnit) + "\nDropInPaths=\nTransient=no\nUnitFileState=static\n" +
+		"ActiveState=inactive\nSubState=dead\nResult=success\nMainPID=0\nControlPID=0\nJob=\nControlGroup=\n"
+	state, err := parseSmartTUNTrialUnitObservation([]byte(raw), identity)
+	if err != nil || !state.stopped() || state.identity != identity {
+		t.Fatalf("complete inactive evidence rejected: %+v %v", state, err)
+	}
+	for name, bad := range map[string]string{
+		"missing cgroup":      strings.Replace(raw, "ControlGroup=\n", "", 1),
+		"missing control PID": strings.Replace(raw, "ControlPID=0\n", "", 1),
+		"missing job":         strings.Replace(raw, "Job=\n", "", 1),
+		"duplicate state":     raw + "ActiveState=inactive\n",
+		"unknown field":       raw + "Other=0\n",
+		"malformed line":      raw + "unknown\n",
+		"different unit":      strings.Replace(raw, "Id="+smartTUNTrialUnit, "Id=foreign.service", 1),
+		"different fragment":  strings.Replace(raw, "FragmentPath=/etc/", "FragmentPath=/run/", 1),
+		"drop-in":             strings.Replace(raw, "DropInPaths=\n", "DropInPaths=/run/override.conf\n", 1),
+		"transient":           strings.Replace(raw, "Transient=no", "Transient=yes", 1),
+		"autostart":           strings.Replace(raw, "UnitFileState=static", "UnitFileState=enabled", 1),
+		"unknown state":       strings.Replace(raw, "ActiveState=inactive", "ActiveState=reloading", 1),
+		"empty substate":      strings.Replace(raw, "SubState=dead", "SubState=", 1),
+		"empty result":        strings.Replace(raw, "Result=success", "Result=", 1),
+		"noncanonical PID":    strings.Replace(raw, "MainPID=0", "MainPID=00", 1),
+		"negative PID":        strings.Replace(raw, "ControlPID=0", "ControlPID=-1", 1),
+		"oversized PID":       strings.Replace(raw, "MainPID=0", "MainPID=4294967296", 1),
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := parseSmartTUNTrialUnitObservation([]byte(bad), identity); err == nil {
+				t.Fatal("ambiguous ownership/work evidence accepted")
+			}
+		})
+	}
+	for name, changed := range map[string]string{
+		"tracked main":                           strings.Replace(raw, "MainPID=0", "MainPID=123", 1),
+		"tracked control":                        strings.Replace(raw, "ControlPID=0", "ControlPID=456", 1),
+		"queued job":                             strings.Replace(raw, "Job=\n", "Job=42\n", 1),
+		"zero tracked PIDs with residual cgroup": strings.Replace(raw, "ControlGroup=\n", "ControlGroup=/system.slice/"+smartTUNTrialUnit+"\n", 1),
+		"pinned dead resources":                  strings.Replace(raw, "SubState=dead", "SubState=dead-resources-pinned", 1),
+	} {
+		t.Run(name, func(t *testing.T) {
+			observed, err := parseSmartTUNTrialUnitObservation([]byte(changed), identity)
+			if err != nil || observed.stopped() {
+				t.Fatalf("live/uncertain work treated as stopped: %+v %v", observed, err)
+			}
+		})
+	}
+}
+
+func TestSmartTUNCoreStopNormalizesOnlyTheSameQuiescentFailedUnit(t *testing.T) {
+	active := smartTUNCoreObservationExample("active")
+	failed := smartTUNCoreObservationExample("failed")
+	inactive := smartTUNCoreObservationExample("inactive")
+	change := func(base smartTUNTrialUnitObservation, edit func(*smartTUNTrialUnitObservation)) smartTUNTrialUnitObservation {
+		edit(&base)
+		return base
+	}
+	cases := []struct {
+		name         string
+		original     smartTUNTrialUnitObservation
+		observations []smartTUNTrialUnitObservation
+		commands     string
+		wantOK       bool
+	}{
+		{"ordinary stop", active, []smartTUNTrialUnitObservation{active, inactive}, "stop", true},
+		{"already inactive", inactive, []smartTUNTrialUnitObservation{inactive, inactive}, "stop", true},
+		{"SIGKILL failure survives stop ACK", failed, []smartTUNTrialUnitObservation{failed, failed, inactive}, "stop,reset-failed", true},
+		{"dies during stop", active, []smartTUNTrialUnitObservation{active, failed, inactive}, "stop,reset-failed", true},
+		{"failed retained after reset", failed, []smartTUNTrialUnitObservation{failed, failed, failed}, "stop,reset-failed", false},
+		{"core still active", active, []smartTUNTrialUnitObservation{active, active}, "stop", false},
+		{"unexpected new start", inactive, []smartTUNTrialUnitObservation{active}, "", false},
+		{"queued start before stop", active, []smartTUNTrialUnitObservation{change(active, func(s *smartTUNTrialUnitObservation) { s.job = "17" })}, "", false},
+		{"failed main PID", failed, []smartTUNTrialUnitObservation{failed, change(failed, func(s *smartTUNTrialUnitObservation) { s.mainPID = 123 })}, "stop", false},
+		{"failed control PID", failed, []smartTUNTrialUnitObservation{failed, change(failed, func(s *smartTUNTrialUnitObservation) { s.controlPID = 456 })}, "stop", false},
+		{"failed queued job", failed, []smartTUNTrialUnitObservation{failed, change(failed, func(s *smartTUNTrialUnitObservation) { s.job = "18" })}, "stop", false},
+		{"failed zero PIDs residual cgroup", failed, []smartTUNTrialUnitObservation{failed, change(failed, func(s *smartTUNTrialUnitObservation) { s.controlGroup = "/system.slice/" + smartTUNTrialUnit })}, "stop", false},
+		{"failed wrong substate", failed, []smartTUNTrialUnitObservation{failed, change(failed, func(s *smartTUNTrialUnitObservation) { s.subState = "stop-sigkill" })}, "stop", false},
+		{"failed contradictory result", failed, []smartTUNTrialUnitObservation{failed, change(failed, func(s *smartTUNTrialUnitObservation) { s.result = "success" })}, "stop", false},
+		{"inactive residual cgroup", active, []smartTUNTrialUnitObservation{active, change(inactive, func(s *smartTUNTrialUnitObservation) { s.controlGroup = "/system.slice/" + smartTUNTrialUnit })}, "stop", false},
+		{"unit replaced before stop", failed, []smartTUNTrialUnitObservation{change(failed, func(s *smartTUNTrialUnitObservation) { s.identity.unitFile.ino++ })}, "", false},
+		{"identical bytes replacement after stop", failed, []smartTUNTrialUnitObservation{failed, change(failed, func(s *smartTUNTrialUnitObservation) { s.identity.unitFile.ino++ })}, "stop", false},
+		{"digest replacement after stop", failed, []smartTUNTrialUnitObservation{failed, change(failed, func(s *smartTUNTrialUnitObservation) { s.identity.digestFile.ino++ })}, "stop", false},
+		{"content changed after stop", failed, []smartTUNTrialUnitObservation{failed, change(failed, func(s *smartTUNTrialUnitObservation) { s.identity.unitSHA256 = strings.Repeat("c", 64) })}, "stop", false},
+		{"replacement after reset", failed, []smartTUNTrialUnitObservation{failed, failed, change(inactive, func(s *smartTUNTrialUnitObservation) { s.identity.unitFile.ino++ })}, "stop,reset-failed", false},
+		{"new work after reset", failed, []smartTUNTrialUnitObservation{failed, failed, active}, "stop,reset-failed", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			original := tc.original
+			reads := 0
+			var commands []string
+			err := stopSmartTUNTrialCoreWith(original, true, func() (smartTUNTrialUnitObservation, error) {
+				if reads >= len(tc.observations) {
+					t.Fatal("unexpected extra state observation")
+				}
+				observed := tc.observations[reads]
+				reads++
+				return observed, nil
+			}, func(action string) error { commands = append(commands, action); return nil })
+			if (err == nil) != tc.wantOK || strings.Join(commands, ",") != tc.commands || reads != len(tc.observations) || original != tc.original {
+				t.Fatalf("incorrect stop authority: commands=%v reads=%d err=%v", commands, reads, err)
+			}
+		})
+	}
+}
+
+func TestSmartTUNCoreStopPreservesUncertaintyAfterPartialCommandOrQueryFailure(t *testing.T) {
+	for _, failure := range []string{"pre-query", "stop", "post-stop-query", "reset-failed", "post-reset-query"} {
+		t.Run(failure, func(t *testing.T) {
+			original := smartTUNCoreObservationExample("failed")
+			current := original
+			reads := 0
+			var commands []string
+			injected := errors.New("lost acknowledgement or query")
+			err := stopSmartTUNTrialCoreWith(original, true, func() (smartTUNTrialUnitObservation, error) {
+				reads++
+				if (reads == 1 && failure == "pre-query") || (reads == 2 && failure == "post-stop-query") || (reads == 3 && failure == "post-reset-query") {
+					return smartTUNTrialUnitObservation{}, injected
+				}
+				return current, nil
+			}, func(action string) error {
+				commands = append(commands, action)
+				if action == "reset-failed" {
+					current = smartTUNCoreObservationExample("inactive")
+				}
+				if failure == action {
+					// A command may have taken effect despite lost acknowledgement.
+					current = smartTUNCoreObservationExample("inactive")
+					return injected
+				}
+				return nil
+			})
+			if !errors.Is(err, injected) {
+				t.Fatalf("partial outcome incorrectly cleared: commands=%v err=%v", commands, err)
+			}
+			want := "stop,reset-failed"
+			if failure == "pre-query" {
+				want = ""
+			}
+			if failure == "stop" || failure == "post-stop-query" {
+				want = "stop"
+			}
+			if strings.Join(commands, ",") != want {
+				t.Fatalf("mutation continued after uncertainty: %v", commands)
+			}
+		})
+	}
+}
+
+func TestSmartTUNCoreNormalizationDoesNotLaunderOriginalCredentialState(t *testing.T) {
+	original := smartTUNCoreObservationExample("failed")
+	current := original
+	if err := stopSmartTUNTrialCoreWith(original, true,
+		func() (smartTUNTrialUnitObservation, error) { return current, nil },
+		func(action string) error {
+			if action == "reset-failed" {
+				current = smartTUNCoreObservationExample("inactive")
+			}
+			return nil
+		}); err != nil {
+		t.Fatal(err)
+	}
+	if original.activeState != "failed" || !current.stopped() {
+		t.Fatal("normalization rewrote the original credential evidence")
+	}
+	for name, record := range map[string]smartTUNTrialJournal{"legacy": trialV4Example(), "native": nativeTrialExample(false)} {
+		t.Run(name, func(t *testing.T) {
+			record.CoreStartAttempted = false
+			if err := smartTUNTrialCredentialRecoveryCheck(record, original.activeState, false, false); err == nil {
+				t.Fatal("unexpected failed core without start intent became a clean pre-start operation")
+			}
+			record.CoreStartAttempted = true
+			if err := smartTUNTrialCredentialRecoveryCheck(record, original.activeState, false, false); err == nil {
+				t.Fatal("failed core normalization authorized a missing started credential")
+			}
+			if err := smartTUNTrialCredentialRecoveryCheck(record, original.activeState, true, true); err != nil {
+				t.Fatalf("valid started credential refused solely because original core failed: %v", err)
+			}
+		})
+	}
+}
+
+func TestSmartTUNCoreFailedEvidenceSurvivesRepeatedUntrustedNormalization(t *testing.T) {
+	for _, started := range []bool{false, true} {
+		for _, credentialValid := range []bool{false, true} {
+			if started && credentialValid {
+				continue
+			}
+			current := smartTUNCoreObservationExample("failed")
+			for tick := 0; tick < 2; tick++ {
+				var commands []string
+				err := stopSmartTUNTrialCoreWith(current, started && credentialValid,
+					func() (smartTUNTrialUnitObservation, error) { return current, nil },
+					func(action string) error {
+						commands = append(commands, action)
+						if action == "reset-failed" {
+							current = smartTUNCoreObservationExample("inactive")
+						}
+						return nil
+					})
+				if err == nil || current.activeState != "failed" || strings.Join(commands, ",") != "stop" {
+					t.Fatalf("failed evidence laundered on tick %d (start=%v credential=%v): commands=%v state=%+v err=%v", tick, started, credentialValid, commands, current, err)
+				}
+			}
+		}
+	}
+}
 
 func trialV4Example() smartTUNTrialJournal {
 	return smartTUNTrialJournal{

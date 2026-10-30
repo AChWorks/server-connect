@@ -1,6 +1,7 @@
 package sc
 
 import (
+	"context"
 	"errors"
 	"net/netip"
 	"os"
@@ -596,13 +597,14 @@ func recoverSmartTUNNativeLocked(store *activationJournalDir, record *smartTUNTr
 	if err := trialDisposableContext(); err != nil {
 		return SmartTUNTrialReceipt{}, err
 	}
-	status, err := smartTUNTrialUnitState()
+	unit, err := observeSmartTUNTrialUnit(context.Background())
 	if err != nil {
 		return SmartTUNTrialReceipt{}, err
 	}
+	status := unit.activeState
 	if record.Phase == "trial_recovered" || record.Phase == "trial_cleanup_pending" {
-		if status != "inactive" {
-			return SmartTUNTrialReceipt{}, nativeTUNUncertain("recovered native operation has active core")
+		if !unit.stopped() {
+			return SmartTUNTrialReceipt{}, nativeTUNUncertain("recovered native operation lacks inactive and empty core proof")
 		}
 		if err := nativeTUNVerifyRestored(*record); err != nil {
 			return SmartTUNTrialReceipt{}, err
@@ -635,12 +637,8 @@ func recoverSmartTUNNativeLocked(store *activationJournalDir, record *smartTUNTr
 		}
 	}
 	previousStatus := status
-	if err := smartTUNTrialSystemctl("stop", smartTUNTrialUnit); err != nil {
+	if err := stopSmartTUNTrialCore(unit, record.CoreStartAttempted && valid); err != nil {
 		return SmartTUNTrialReceipt{}, err
-	}
-	status, err = smartTUNTrialUnitState()
-	if err != nil || status != "inactive" {
-		return SmartTUNTrialReceipt{}, nativeTUNUncertain("native core did not stop")
 	}
 	if credentialErr != nil && !errors.Is(credentialErr, os.ErrNotExist) {
 		return SmartTUNTrialReceipt{}, nativeTUNConflict("native credential cannot be inspected; containment retained")
