@@ -387,6 +387,90 @@ for frame in frames:assert not matches(frame,host,peer,token,identity), 'invalid
 print(f'HOST_QA_NATIVE_PACKET_OBSERVER_REGRESSIONS=PASS ({cases} counter cases, {len(frames)+1} frame cases)')
 PYNATIVEPACKETFIXTURES
 
+# Pure admission/ownership predicates only; never acquire a lock or control a unit.
+python3 - "$root/scripts/qa/host-native-product-tun.sh" <<'PYNATIVEPAUSEFIXTURES'
+import ast,copy,json,re,stat,sys
+from pathlib import Path
+from types import SimpleNamespace
+source=Path(sys.argv[1]).read_text().split("<<'PYNATIVEPAUSE'\n",1)[1].split('\nPYNATIVEPAUSE\n',1)[0]
+names={'pause_unit_valid','pause_journal_valid','canonical','private_file','pause_receipt_valid'}
+nodes=[x for x in ast.parse(source).body if isinstance(x,ast.FunctionDef) and x.name in names]
+assert {x.name for x in nodes}==names
+timer='server-connect-activation-recover.timer';executor='server-connect-activation-recover.service';core='server-connect-smart-tun.service'
+operation='a'*32;boot='11111111-2222-3333-4444-555555555555';ns=SimpleNamespace(st_dev=4,st_ino=4026532000)
+lock=SimpleNamespace(st_dev=8,st_ino=101)
+namespace={'json':json,'re':re,'stat':stat,'timer':timer,'executor':executor,'core':core,
+           'units':(timer,executor,core),'operation':operation,'boot':boot,'ns':ns,'lock_identity':lambda:lock}
+exec(compile(ast.Module(body=nodes,type_ignores=[]),'<native recovery pause predicates>','exec'),namespace)
+unit=namespace['pause_unit_valid'];journal=namespace['pause_journal_valid'];receipt_valid=namespace['pause_receipt_valid'];canonical=namespace['canonical']
+cases=0
+def check(label,call,valid=False):
+    global cases
+    try:call()
+    except (AssertionError,KeyError,TypeError,ValueError):assert not valid,label
+    else:assert valid,label
+    cases+=1
+timer_fields={'Id':timer,'LoadState':'loaded','FragmentPath':'/etc/systemd/system/'+timer,
+              'DropInPaths':'','Transient':'no','UnitFileState':'enabled','ActiveState':'active',
+              'SubState':'waiting','Job':'0','Unit':executor}
+idle_timer=dict(timer_fields,ActiveState='inactive',SubState='dead')
+executor_fields={'Id':executor,'LoadState':'loaded','FragmentPath':'/etc/systemd/system/'+executor,
+                 'DropInPaths':'','Transient':'no','UnitFileState':'static','ActiveState':'inactive',
+                 'SubState':'dead','Job':'0','MainPID':'0','ControlPID':'0'}
+check('original active enabled timer',lambda:unit(timer_fields,timer,'active'),True)
+check('idle timer',lambda:unit(idle_timer,timer,'idle'),True)
+check('idle executor',lambda:unit(executor_fields,executor,'idle'),True)
+check('initially paused is not owned rearm obligation',lambda:unit(idle_timer,timer,'active'))
+for field,value in (('FragmentPath','/run/systemd/system/'+timer),('LoadState','masked'),
+                    ('DropInPaths','/run/untrusted.conf'),('Transient','yes'),('UnitFileState','disabled'),
+                    ('Job','42'),('Unit',core)):
+    check('timer rejects '+field,lambda field=field,value=value:unit(dict(timer_fields,**{field:value}),timer,'active'))
+for field,value in (('ActiveState','activating'),('ActiveState','failed'),('Job','42'),('MainPID','123'),('ControlPID','456')):
+    check('executor not positively idle '+field,lambda field=field,value=value:unit(dict(executor_fields,**{field:value}),executor,'idle'))
+check('empty job is idle',lambda:unit(dict(executor_fields,Job=''),executor,'idle'),True)
+record={'version':4,'intent_type':'smart_tun_native_pending_trial_v1','operation_id':operation,
+        'phase':'trial_pending','revision':1,'deadline_uptime_sec':160,'boot_id':boot,
+        'tunnel_interface':'sctunqa0','underlay_interface':'scqaedge0','core_start_attempted':True,
+        'native':{'version':1,'startup_verified':True,'namespace_dev':ns.st_dev,'namespace_ino':ns.st_ino,
+                  'link_index':22,'underlay_index':8,'nft_handle':16,'nft_name':'scnt_'+operation,'stop_reason':'',
+                  'ipv4':{'address':'172.31.99.1/30','table':42424},'ipv6':{'address':'fd73:99::1/64','table':42426}}}
+check('original pending',lambda:journal(record,operation,'pending',100),True)
+check('exact deadline rejected',lambda:journal(record,operation,'pending',160))
+check('different operation',lambda:journal(record,'b'*32,'pending',100))
+for field,value in (('revision',2),('revision',True),('deadline_uptime_sec',True),('core_start_attempted',False)):
+    check('journal rejects '+field,lambda field=field,value=value:journal(dict(record,**{field:value}),operation,'pending',100))
+guard=copy.deepcopy(record);guard.update(phase='trial_stop_requested',revision=2);guard['native']['stop_reason']='guard'
+off=copy.deepcopy(guard);off['native']['stop_reason']='off'
+check('guard stop',lambda:journal(guard,operation,'guard',200),True)
+check('operator removed still exact guard stop',lambda:journal(guard,operation,'removed',200),True)
+check('durable Off before after-stop-request kill',lambda:journal(off,operation,'off',100),True)
+empty_reason=copy.deepcopy(off);empty_reason['native']['stop_reason']=''
+check('Off boundary requires native off intent',lambda:journal(empty_reason,operation,'off',100))
+check('guard cannot impersonate Off',lambda:journal(guard,operation,'off',100))
+for field,value in (('startup_verified',False),('link_index',True),('nft_handle',0),('nft_name','foreign')):
+    changed=copy.deepcopy(record);changed['native'][field]=value
+    check('native identity rejects '+field,lambda changed=changed:journal(changed,operation,'pending',100))
+info=SimpleNamespace(st_dev=9,st_ino=102,st_mode=stat.S_IFREG|0o600,st_uid=0,st_nlink=1)
+receipt={'version':1,'operation_id':operation,'kind':'pending','boot_id':boot,'namespace_dev':ns.st_dev,'namespace_ino':ns.st_ino,
+         'lock_dev':lock.st_dev,'lock_ino':lock.st_ino,'receipt_dev':info.st_dev,'receipt_ino':info.st_ino,
+         'deadline_uptime_sec':160,'journal_sha256':'b'*64,'unit_sha256':{name:'c'*64 for name in (timer,executor,core)},
+         'link_index':22,'underlay_index':8,'nft_handle':16}
+check('exact private receipt',lambda:receipt_valid(receipt,info,canonical(receipt)),True)
+for field,value in (('operation_id','d'*32),('kind','unknown'),('boot_id','different'),('namespace_ino',ns.st_ino+1),
+                    ('lock_ino',lock.st_ino+1),('receipt_ino',info.st_ino+1),('version',True),('deadline_uptime_sec',0),
+                    ('journal_sha256','malformed')):
+    changed=dict(receipt,**{field:value})
+    check('receipt rejects '+field,lambda changed=changed:receipt_valid(changed,info,canonical(changed)))
+for field,value in (('st_ino',info.st_ino+1),('st_mode',stat.S_IFREG|0o644),('st_uid',1000),('st_nlink',2)):
+    changed=SimpleNamespace(**dict(vars(info),**{field:value}))
+    check('receipt file identity '+field,lambda changed=changed:receipt_valid(receipt,changed,canonical(receipt)))
+check('partial receipt bytes',lambda:receipt_valid(receipt,info,canonical(receipt)[:-2]))
+check('extra raw data',lambda:receipt_valid(receipt,info,canonical(receipt)+b'secret'))
+changed=dict(receipt,journal={'private':'must not be persisted'})
+check('no copied product journal',lambda:receipt_valid(changed,info,canonical(changed)))
+print(f'HOST_QA_NATIVE_RECOVERY_PAUSE_REGRESSIONS=PASS ({cases} ownership/state cases)')
+PYNATIVEPAUSEFIXTURES
+
 # The recovery unit has plain-text errors and pretty JSON success receipts.
 # Extract only pure parsing functions; never run its observer/service calls.
 python3 - "$root/scripts/qa/host-native-product-tun.sh" <<'PYPENDINGINVOCATIONFIXTURES'

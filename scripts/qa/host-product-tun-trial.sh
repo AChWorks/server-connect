@@ -702,10 +702,10 @@ PYCONTAINED
   echo PRODUCT_TUN_GUARD_TIMER_LOSS_IMMEDIATE_CONTAINMENT=PASS
   clear_recovered "$op"
 
-  # Separate executor-loss test: a guest-owned *runtime* mask and a
-  # synthetic foreign nftables owner. The Manager must stop its TUN even
-  # when the executor cannot run, but it must retain the pending journal
-  # and not delete a foreign table or falsely claim exact recovery.
+  # Runtime executor-ownership conflict plus a synthetic foreign nft owner.
+  # The installed /etc unit outranks this /run mask and may still execute.
+  # The Manager must reject the conflicted guard identity, contain its TUN
+  # and preserve unrelated owners according to this intent's recovery rules.
   apply 60 >/run/sc-qa-product-tun-apply.json
   op=$(pending_receipt)
   assert_product_tun_policy_active
@@ -716,7 +716,7 @@ PYCONTAINED
   test "$(readlink /run/systemd/system/server-connect-activation-recover.service)" = /dev/null
   assert_product_tun_policy_active
   if "$sc" --json smart-tun-trial-status >/run/sc-qa-product-tun-conflict.json; then
-    echo 'Masked executor incorrectly reported an armed TUN guard' >&2;return 1
+    echo 'Runtime executor ownership conflict incorrectly reported an armed TUN guard' >&2;return 1
   fi
   python3 - <<'PYEXECUTORLOST'
 import json

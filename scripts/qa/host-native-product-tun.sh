@@ -6,6 +6,7 @@ native_product=no
 native_fixture_kind=
 native_fixture_receipt=
 native_executor_masked=no
+native_pause_file=/run/sc-qa-native-recovery-pause.json
 native_trace_dir=
 native_readiness_reported=no
 native_transit_receipt=
@@ -308,7 +309,9 @@ def service_snapshot(unit):
     assert set(fields)==set(properties)
     return fields
 if mode=='loss':
-    try:show('operation-before',operation_summary(j))
+    # Journal-only facts have their own exact-operation/boot proof. Native
+    # rows remain buffered if legitimate recovery has already removed them.
+    try:print(prefix+' journal-only-operation-before '+json.dumps(operation_summary(j),separators=(',',':')),flush=True)
     except Exception:unavailable('operation-before','invalid-safe-metadata')
     for unit in ('server-connect-smart-tun.service','server-connect-activation-recover.service'):
         try:show('service',service_snapshot(unit))
@@ -411,8 +414,11 @@ for family,table in (('-4',42424),('-6',42426)):
 if mode=='loss':
     # Do not publish captured native rows under an operation that changed
     # while observing. A diagnostic failure still preserves the packet failure.
+    attribution_step='journal-recheck'
     try:
         after=journal();summary=operation_summary(after)
+        print(prefix+' journal-only-operation-after '+json.dumps(summary,separators=(',',':')),flush=True)
+        attribution_step='ledger-identity'
         assert after['tunnel_interface']=='sctunqa0' and after['underlay_interface']=='scqaedge0'
         keys=('namespace_dev','namespace_ino','link_index','underlay_index','nft_name','nft_handle')
         assert all(after['native'][key]==n[key] for key in keys)
@@ -420,20 +426,25 @@ if mode=='loss':
         assert after['native']['ipv4']['table']==42424 and after['native']['ipv6']['table']==42426
         assert after['native']['ipv4']['address']=='172.31.99.1/30' and after['native']['ipv6']['address']=='fd73:99::1/64'
         assert after['deadline_uptime_sec']==j['deadline_uptime_sec']
+        attribution_step='tun-index'
         assert int(read('/sys/class/net/sctunqa0/ifindex',64))==n['link_index']
+        attribution_step='tun-alias'
         assert read('/sys/class/net/sctunqa0/ifalias',128).strip()=='server-connect:'+op
+        attribution_step='underlay-index'
         assert int(read('/sys/class/net/scqaedge0/ifindex',64))==n['underlay_index']
+        attribution_step='nft-observe'
         table_after=capture(['/usr/sbin/nft','-n','-j','-a','list','table','inet',n['nft_name']])
         assert nft_table(table_after)
+        attribution_step='nft-handle'
         tables=[x['table'] for x in table_after['nftables'] if 'table' in x]
         assert len(tables)==1 and tables[0]['handle']==n['nft_handle']>0
         if peer_now is not None:
+            attribution_step='peer-identity'
             peer_ns=os.stat('/run/netns/scqapeer')
             assert (peer_ns.st_dev,peer_ns.st_ino)==(peer_now['namespace_dev'],peer_now['namespace_ino'])
             assert int(read('/sys/class/net/scqaedge0/iflink',64))==peer_now['link_index']
-        show('operation-after',summary)
     except Exception:
-        print(prefix+' attribution unavailable=operation-or-native-owner-changed',flush=True)
+        print(prefix+' attribution step='+attribution_step+' unavailable=operation-or-native-owner-changed',flush=True)
         raise SystemExit(1)
     for line in pending:print(line,flush=True)
 PYNATIVEAPPLYDIAG
@@ -686,11 +697,252 @@ native_executor_unmask() {
   native_executor_masked=no
 }
 
+native_recovery_control() {
+  # Test isolation, not guard-loss injection. The installed /etc unit outranks
+  # a /run mask. Hold its existing manager lock while pausing timer/executor,
+  # then release it before any product CLI or packet operation.
+  /usr/bin/timeout --signal=KILL 12s /usr/bin/python3 - "$1" "$2" "$op" <<'PYNATIVEPAUSE'
+import fcntl,hashlib,json,os,re,resource,stat,subprocess,sys,tempfile,time
+action,expected,operation=sys.argv[1:]
+assert action in ('pause','check','resume') and re.fullmatch('[0-9a-f]{32}',operation)
+timer='server-connect-activation-recover.timer';executor='server-connect-activation-recover.service'
+core='server-connect-smart-tun.service';units=(timer,executor,core)
+receipt_name='sc-qa-native-recovery-pause.json'
+def pause_unit_valid(fields,name,state):
+    assert name in (timer,executor,core) and state in ('owned','active','idle','stopped')
+    assert fields['Id']==name and fields['LoadState']=='loaded' and fields['FragmentPath']=='/etc/systemd/system/'+name
+    assert fields['DropInPaths']=='' and fields['Transient']=='no'
+    assert fields['UnitFileState']==('enabled' if name==timer else 'static')
+    assert fields['Job']=='' or re.fullmatch('[0-9]{1,20}',fields['Job'])
+    if name==timer:assert fields['Unit']==executor
+    else:
+        assert all(re.fullmatch('[0-9]{1,20}',fields[key]) for key in ('MainPID','ControlPID'))
+    if state!='owned':assert fields['Job'] in ('','0')
+    if state=='active':
+        assert fields['ActiveState']=='active'
+        if name==timer:assert fields['SubState'] in ('waiting','elapsed')
+        else:assert fields['SubState']=='running' and int(fields['MainPID'])>1 and fields['ControlPID']=='0'
+    if state in ('idle','stopped'):
+        assert fields['ActiveState'] in (('inactive','failed') if state=='stopped' else ('inactive',))
+        assert fields['SubState'] in (('dead','failed') if state=='stopped' else ('dead',))
+        if name!=timer:assert fields['MainPID']==fields['ControlPID']=='0'
+def pause_journal_valid(record,operation,expected,uptime):
+    assert record['version']==4 and record['intent_type']=='smart_tun_native_pending_trial_v1' and record['operation_id']==operation
+    phases={'trial_pending':(1,),'trial_stop_requested':(2,),'trial_recovered':(2,3),'trial_cleanup_pending':(4,)}
+    assert record['phase'] in phases and type(record['revision']) is int and record['revision'] in phases[record['phase']]
+    assert type(record['deadline_uptime_sec']) is int and 0<record['deadline_uptime_sec']<2**63
+    assert record['tunnel_interface']=='sctunqa0' and record['underlay_interface']=='scqaedge0'
+    assert record['core_start_attempted'] is True
+    n=record['native'];assert n['version']==1 and n['startup_verified'] is True
+    for key in ('namespace_dev','namespace_ino','link_index','underlay_index','nft_handle'):
+        assert type(n[key]) is int and 0<n[key]<2**64
+    assert n['link_index']>1 and n['underlay_index']>1 and n['link_index']!=n['underlay_index']
+    assert n['nft_name']=='scnt_'+operation
+    assert (n['ipv4']['address'],n['ipv4']['table'])==('172.31.99.1/30',42424)
+    assert (n['ipv6']['address'],n['ipv6']['table'])==('fd73:99::1/64',42426)
+    if record['phase']=='trial_pending':assert n['stop_reason']==''
+    elif record['phase']=='trial_recovered':assert n['stop_reason']==('guard' if record['revision']==2 else 'off')
+    else:assert n['stop_reason'] in ('guard','off')
+    if expected in ('pending','route','rule','capture','core'):
+        assert record['phase']=='trial_pending' and record['revision']==1 and n['stop_reason']==''
+        assert 0<=uptime<record['deadline_uptime_sec']
+    elif expected in ('guard','removed'):
+        assert record['phase']=='trial_stop_requested' and record['revision']==2 and n['stop_reason']=='guard'
+    elif expected=='off':
+        assert record['phase']=='trial_stop_requested' and record['revision']==2 and n['stop_reason']=='off'
+    else:
+        assert expected=='cleanup' and n['stop_reason'] in ('','guard','off')
+def canonical(value):return (json.dumps(value,sort_keys=True,separators=(',',':'))+'\n').encode('ascii')
+def private_file(info):
+    return stat.S_ISREG(info.st_mode) and info.st_uid==0 and stat.S_IMODE(info.st_mode)==0o600 and info.st_nlink==1
+fds=[];links=[];lock_fd=None;step='scope'
+def directory(path,private=False):
+    current=os.open('/',os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW|os.O_CLOEXEC);fds.append(current)
+    for name in path.strip('/').split('/'):
+        child=os.open(name,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW|os.O_CLOEXEC,dir_fd=current)
+        fds.append(child);info=os.fstat(child)
+        assert info.st_uid==0 and not info.st_mode&0o022
+        links.append((current,name,child));current=child
+    if private:assert stat.S_IMODE(os.fstat(current).st_mode)==0o700
+    return current
+def linked():
+    for parent,name,child in links:
+        actual=os.stat(name,dir_fd=parent,follow_symlinks=False);pinned=os.fstat(child)
+        assert stat.S_ISDIR(actual.st_mode) and (actual.st_dev,actual.st_ino)==(pinned.st_dev,pinned.st_ino)
+        assert actual.st_uid==0 and not actual.st_mode&0o022
+def read_at(parent,name,limit,private=False):
+    fd=os.open(name,os.O_RDONLY|os.O_NONBLOCK|os.O_NOFOLLOW|os.O_CLOEXEC,dir_fd=parent)
+    with os.fdopen(fd,'rb') as stream:
+        initial=os.fstat(stream.fileno())
+        assert stat.S_ISREG(initial.st_mode) and initial.st_uid==0 and not initial.st_mode&0o022 and initial.st_nlink==1
+        if private:assert private_file(initial)
+        assert initial.st_size<=limit
+        raw=stream.read(limit+1);after=os.fstat(stream.fileno())
+        assert len(raw)<=limit and (initial.st_size,initial.st_mtime_ns)==(after.st_size,after.st_mtime_ns)
+        current=os.stat(name,dir_fd=parent,follow_symlinks=False)
+        assert (current.st_dev,current.st_ino)==(initial.st_dev,initial.st_ino)
+        return raw,initial
+def capture(argv):
+    def bound():resource.setrlimit(resource.RLIMIT_FSIZE,(16384,16384))
+    with tempfile.TemporaryFile(dir='/run') as out:
+        subprocess.run(argv,stdout=out,stderr=subprocess.DEVNULL,timeout=2,check=True,close_fds=True,
+                       preexec_fn=bound,env={'PATH':'/usr/sbin:/usr/bin:/sbin:/bin','LC_ALL':'C'})
+        assert out.tell()<16384;out.seek(0);return out.read(16384)
+def snapshot(name):
+    properties=['Id','LoadState','FragmentPath','DropInPaths','Transient','UnitFileState','ActiveState','SubState','Job']
+    properties+=['Unit'] if name==timer else ['MainPID','ControlPID']
+    argv=['/usr/bin/systemctl','show',name]
+    for key in properties:argv+=['-p',key]
+    fields={}
+    for line in capture(argv).decode('utf-8').splitlines():
+        key,separator,value=line.partition('=');assert separator and key in properties and key not in fields
+        fields[key]=value
+    assert set(fields)==set(properties);pause_unit_valid(fields,name,'owned');return fields
+def owned_units():
+    digests={}
+    for name in units:
+        try:os.stat(name,dir_fd=runtime_fd,follow_symlinks=False)
+        except FileNotFoundError:pass
+        else:raise AssertionError('runtime unit conflict')
+        body,_=read_at(unit_fd,name,16384);digest,_=read_at(prefix_fd,name+'.sha256',128)
+        text=digest.decode('ascii').strip();assert re.fullmatch('[0-9a-f]{64}',text)
+        assert hashlib.sha256(body).hexdigest()==text;digests[name]=text
+    return digests
+def current_journal(expect):
+    raw,_=read_at(state_fd,'route-activation-journal.json',131072,True);record=json.loads(raw)
+    pause_journal_valid(record,operation,expect,float(open('/proc/uptime').read(128).split()[0]))
+    assert record['boot_id']==boot
+    assert (record['native']['namespace_dev'],record['native']['namespace_ino'])==(ns.st_dev,ns.st_ino)
+    return raw,record
+def native_identity(record):
+    n=record['native']
+    assert int(open('/sys/class/net/scqaedge0/ifindex').read(64))==n['underlay_index']
+    assert int(open('/sys/class/net/sctunqa0/ifindex').read(64))==n['link_index']
+    assert open('/sys/class/net/sctunqa0/ifalias').read(128).strip()=='server-connect:'+operation
+    graph=json.loads(capture(['/usr/sbin/nft','-n','-j','-a','list','table','inet',n['nft_name']]))
+    tables=[x['table'] for x in graph['nftables'] if 'table' in x]
+    assert len(tables)==1 and tables[0]['family']=='inet' and tables[0]['name']==n['nft_name'] and tables[0]['handle']==n['nft_handle']
+def lock_identity():
+    linked();now=os.stat('.lock',dir_fd=state_fd,follow_symlinks=False);pinned=os.fstat(lock_fd)
+    assert stat.S_IMODE(os.fstat(state_fd).st_mode)==0o700
+    assert private_file(now) and (now.st_dev,now.st_ino)==(pinned.st_dev,pinned.st_ino)
+    return pinned
+def pause_receipt_valid(receipt,info,raw):
+    keys={'version','operation_id','kind','boot_id','namespace_dev','namespace_ino','lock_dev','lock_ino',
+          'receipt_dev','receipt_ino','deadline_uptime_sec','journal_sha256','unit_sha256','link_index','underlay_index','nft_handle'}
+    assert isinstance(receipt,dict) and set(receipt)==keys and canonical(receipt)==raw
+    assert type(receipt['version']) is int and receipt['version']==1
+    assert receipt['operation_id']==operation and receipt['kind'] in ('pending','guard') and receipt['boot_id']==boot
+    for key in ('namespace_dev','namespace_ino','lock_dev','lock_ino','receipt_dev','receipt_ino','link_index','underlay_index','nft_handle'):
+        assert type(receipt[key]) is int and 0<receipt[key]<2**64
+    assert type(receipt['deadline_uptime_sec']) is int and 0<receipt['deadline_uptime_sec']<2**63
+    assert re.fullmatch('[0-9a-f]{64}',receipt['journal_sha256'])
+    assert set(receipt['unit_sha256'])==set(units) and all(re.fullmatch('[0-9a-f]{64}',v) for v in receipt['unit_sha256'].values())
+    assert private_file(info) and (receipt['receipt_dev'],receipt['receipt_ino'])==(info.st_dev,info.st_ino)
+    assert (receipt['namespace_dev'],receipt['namespace_ino'])==(ns.st_dev,ns.st_ino)
+    pinned=lock_identity();assert (receipt['lock_dev'],receipt['lock_ino'])==(pinned.st_dev,pinned.st_ino)
+def idle():
+    pause_unit_valid(snapshot(timer),timer,'idle');pause_unit_valid(snapshot(executor),executor,'idle')
+def core_expected(expect):
+    state='active' if expect in ('pending','route','rule','capture') else 'stopped' if expect=='core' else 'idle'
+    pause_unit_valid(snapshot(core),core,state)
+try:
+    assert os.geteuid()==0 and os.environ.get('SC_QA_TUN_PRODUCT_LAB')=='yes'
+    assert os.path.isfile('/.dockerenv') and open('/proc/1/comm').read(64).strip()=='systemd'
+    assert open('/proc/sys/kernel/hostname').read(128).strip()=='sc-qa'
+    release=open('/etc/os-release').read(4096).splitlines()
+    assert 'ID=debian' in release and any(x in release for x in ('VERSION_ID=13','VERSION_ID="13"'))
+    ns=os.stat('/proc/self/ns/net');pid1=os.stat('/proc/1/ns/net')
+    assert (ns.st_dev,ns.st_ino)==(pid1.st_dev,pid1.st_ino)
+    boot=open('/proc/sys/kernel/random/boot_id').read(64).strip()
+    assert re.fullmatch('[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}',boot)
+    state_fd=directory('/var/lib/server-connect',True);run_fd=directory('/run')
+    runtime_fd=directory('/run/systemd/system');unit_fd=directory('/etc/systemd/system');prefix_fd=directory('/opt/server-connect')
+    step='existing-lock'
+    lock_fd=os.open('.lock',os.O_RDONLY|os.O_NONBLOCK|os.O_NOFOLLOW|os.O_CLOEXEC,dir_fd=state_fd);fds.append(lock_fd)
+    assert private_file(os.fstat(lock_fd)) and not os.get_inheritable(lock_fd)
+    until=time.monotonic()+2
+    while True:
+        try:fcntl.flock(lock_fd,fcntl.LOCK_EX|fcntl.LOCK_NB);break
+        except BlockingIOError:
+            assert time.monotonic()<until,'lock unavailable';time.sleep(0.02)
+    pinned=lock_identity();step='owned-units';digests=owned_units()
+    for name in units:snapshot(name)
+    if action=='pause':
+        assert expected in ('pending','guard')
+        try:os.stat(receipt_name,dir_fd=run_fd,follow_symlinks=False)
+        except FileNotFoundError:pass
+        else:raise AssertionError('pause receipt already exists')
+        step='original-active-timer';pause_unit_valid(snapshot(timer),timer,'active')
+        raw,record=current_journal(expected);core_expected(expected);native_identity(record)
+        n=record['native'];step='pause-receipt'
+        receipt={'version':1,'operation_id':operation,'kind':expected,'boot_id':boot,
+                 'namespace_dev':ns.st_dev,'namespace_ino':ns.st_ino,'lock_dev':pinned.st_dev,'lock_ino':pinned.st_ino,
+                 'deadline_uptime_sec':record['deadline_uptime_sec'],'journal_sha256':hashlib.sha256(raw).hexdigest(),
+                 'unit_sha256':digests,'link_index':n['link_index'],'underlay_index':n['underlay_index'],'nft_handle':n['nft_handle']}
+        created=os.open(receipt_name,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW|os.O_CLOEXEC,0o600,dir_fd=run_fd)
+        info=os.fstat(created);receipt.update(receipt_dev=info.st_dev,receipt_ino=info.st_ino)
+        try:
+            data=memoryview(canonical(receipt))
+            while data:
+                written=os.write(created,data);assert written>0;data=data[written:]
+            os.fsync(created);os.fsync(run_fd)
+        except Exception:
+            now=os.stat(receipt_name,dir_fd=run_fd,follow_symlinks=False)
+            if (now.st_dev,now.st_ino)==(info.st_dev,info.st_ino):os.unlink(receipt_name,dir_fd=run_fd);os.fsync(run_fd)
+            raise
+        finally:os.close(created)
+        saved,info=read_at(run_fd,receipt_name,4096,True);pause_receipt_valid(receipt,info,saved)
+        # A valid durable receipt is the rearm obligation, before either stop.
+        step='stop-timer';capture(['/usr/bin/systemctl','stop',timer])
+        step='stop-executor';capture(['/usr/bin/systemctl','stop',executor])
+        step='paused-proof';idle();core_expected(expected)
+        after,record=current_journal(expected);assert after==raw and owned_units()==digests
+        native_identity(record);lock_identity()
+    else:
+        step='pause-receipt';saved,info=read_at(run_fd,receipt_name,4096,True)
+        receipt=json.loads(saved);pause_receipt_valid(receipt,info,saved);assert receipt['unit_sha256']==digests
+        assert (receipt['kind']=='pending' and expected in ('route','rule','capture','core','off','cleanup')) or (receipt['kind']=='guard' and expected in ('guard','removed','cleanup'))
+        raw,record=current_journal(expected);n=record['native']
+        assert record['deadline_uptime_sec']==receipt['deadline_uptime_sec']
+        assert all(n[key]==receipt[key] for key in ('link_index','underlay_index','nft_handle'))
+        if action=='check':
+            step='paused-proof';idle();core_expected(expected)
+            assert hashlib.sha256(raw).hexdigest()==receipt['journal_sha256']
+            if expected!='removed':native_identity(record)
+        else:
+            assert action=='resume' and expected in ('off','guard','cleanup')
+            if expected=='cleanup':
+                # Finish draining a partially acknowledged pause before
+                # rearming; every stop remains under the original lock.
+                step='resume-drain-timer';capture(['/usr/bin/systemctl','stop',timer])
+                step='resume-drain-executor';capture(['/usr/bin/systemctl','stop',executor])
+            step='resume-idle-proof';idle()
+            step='rearm-timer';capture(['/usr/bin/systemctl','start',timer])
+            step='rearmed-proof';pause_unit_valid(snapshot(timer),timer,'active')
+            assert owned_units()==digests;lock_identity()
+            current,again=read_at(run_fd,receipt_name,4096,True)
+            assert current==saved and (again.st_dev,again.st_ino)==(info.st_dev,info.st_ino)
+            os.unlink(receipt_name,dir_fd=run_fd);os.fsync(run_fd)
+    lock_identity()
+except Exception:
+    print('PRODUCT_NATIVE_RECOVERY_PAUSE=FAIL (step='+step+'; ownership or bounded state proof unavailable)',file=sys.stderr)
+    raise SystemExit(1)
+finally:
+    # No product CLI runs under this lock; subprocesses close all inherited FDs.
+    for fd in reversed(fds):os.close(fd)
+PYNATIVEPAUSE
+}
+
 native_product_cleanup() {
   # Restore only this QA owner's fixtures/mask; product recovery belongs
   # to the independently installed systemd executor.
   native_cleanup_rc=0
   if [ -n "$native_fixture_kind" ]; then native_foreign_remove || native_cleanup_rc=1; fi
+  if [ -e "$native_pause_file" ] || [ -L "$native_pause_file" ]; then
+    native_recovery_control resume cleanup || native_cleanup_rc=1
+  fi
+  test ! -e "$native_pause_file" && test ! -L "$native_pause_file" || native_cleanup_rc=1
   native_executor_unmask || native_cleanup_rc=1
   if [ -n "$native_trace_dir" ]; then rm -rf -- "$native_trace_dir" || native_cleanup_rc=1; native_trace_dir=; fi
   return "$native_cleanup_rc"
@@ -923,13 +1175,7 @@ PYNATIVEOVERLAP
 native_loss_cases() {
   for native_loss in route rule capture core; do
     native_saved_reapply
-    test ! -e /run/systemd/system/server-connect-activation-recover.service
-    test ! -L /run/systemd/system/server-connect-activation-recover.service
-    native_executor_masked=yes
-    # Freeze only the QA recovery executor so negative packets cannot race
-    # a legitimate completed deactivation. The timer remains installed.
-    systemctl mask --runtime --now server-connect-activation-recover.service
-    test "$(readlink /run/systemd/system/server-connect-activation-recover.service)" = /dev/null
+    native_recovery_control pause pending
     case "$native_loss" in
       route)
         ip -4 route del default dev sctunqa0 table 42424 metric 100 protocol 247 scope link src 172.31.99.1
@@ -944,13 +1190,15 @@ native_loss_cases() {
         systemctl kill --kill-who=main --signal=KILL server-connect-smart-tun.service ;;
     esac
     native_no_direct_leak "$native_loss"
+    native_recovery_control check "$native_loss"
     test "$(saved_policy_hashes)" = "$saved_policy_before"
     capture_executor_proof
     killed=0
     "$sc" --json smart-tun-trial-disconnect --operation-id "$op" --revision 1 \
       --qa-kill-at after-stop-request >/dev/null 2>&1 || killed=$?
     test "$killed" = 137
-    native_executor_unmask
+    native_recovery_control resume off
+    test ! -e "$native_pause_file" && test ! -L "$native_pause_file"
     systemctl start server-connect-activation-recover.service
     require_independent_finalization
     echo "PRODUCT_NATIVE_LOSS_FAIL_CLOSED($native_loss)=PASS"
@@ -1018,6 +1266,16 @@ native_crash_cases() {
     --qa-kill-at after-native-route-effect >/dev/null 2>&1 || killed=$?
   test "$killed" = 137
   op=$(python3 -c 'import json;j=json.load(open("/var/lib/server-connect/route-activation-journal.json"));assert j["native"]["ipv4"]["route"]["stage"]=="effect_possible";print(j["operation_id"])')
+  native_ambiguous_before=$(python3 - "$op" <<'PYNATIVEAMBIGUOUSIDENTITY'
+import json,sys
+j=json.load(open('/var/lib/server-connect/route-activation-journal.json'));n=j['native']
+assert j['operation_id']==sys.argv[1] and j['intent_type']=='smart_tun_native_pending_trial_v1'
+assert n['ipv4']['route']=={'stage':'effect_possible','sha256':''}
+identity={key:j[key] for key in ('operation_id','boot_id','deadline_uptime_sec')}
+identity['native']={key:n[key] for key in ('namespace_dev','namespace_ino','link_index','underlay_index','nft_name','nft_handle','link_sha256','address_sha256')}
+print(json.dumps(identity,separators=(',',':')))
+PYNATIVEAMBIGUOUSIDENTITY
+  )
   native_conflict=no
   for native_try in $(seq 1 15); do
     native_start=$(systemctl show server-connect-activation-recover.service -p ExecMainStartTimestampMonotonic --value)
@@ -1028,6 +1286,30 @@ native_crash_cases() {
     sleep 1
   done
   test "$native_conflict" = yes
+  # Observe the independent executor's stop intent and retained ambiguous
+  # effect BEFORE an explicit CLI retry can change operation state.
+  python3 - "$op" "$native_ambiguous_before" <<'PYNATIVEAMBIGUOUSINDEPENDENT'
+import json,os,subprocess,sys
+before=json.loads(sys.argv[2]);j=json.load(open('/var/lib/server-connect/route-activation-journal.json'));n=j['native']
+identity={key:j[key] for key in ('operation_id','boot_id','deadline_uptime_sec')}
+identity['native']={key:n[key] for key in before['native']}
+assert identity==before and j['operation_id']==sys.argv[1] and j['intent_type']=='smart_tun_native_pending_trial_v1'
+assert j['boot_id']==open('/proc/sys/kernel/random/boot_id').read().strip() and type(j['deadline_uptime_sec']) is int and j['deadline_uptime_sec']>0
+assert j['phase']=='trial_stop_requested' and j['revision']==2 and n['stop_reason']=='guard'
+assert n['ipv4']['route']=={'stage':'effect_possible','sha256':''}
+ns=os.stat('/proc/self/ns/net');assert (ns.st_dev,ns.st_ino)==(n['namespace_dev'],n['namespace_ino'])
+assert n['link_index']==int(open('/sys/class/net/sctunqa0/ifindex').read())
+assert n['underlay_index']==int(open('/sys/class/net/scqaedge0/ifindex').read())
+assert open('/sys/class/net/sctunqa0/ifalias').read().strip()=='server-connect:'+sys.argv[1]
+assert subprocess.check_output(['systemctl','show','server-connect-smart-tun.service','-p','ActiveState','--value'],timeout=2).strip()==b'inactive'
+rows=json.loads(subprocess.check_output(['ip','-N','-j','-4','route','show','table','all'],timeout=2))
+rows=[x for x in rows if str(x.get('table'))=='42424' and x.get('dst')=='default' and x.get('metric')==100]
+assert len(rows)==1;x=rows[0]
+assert set(x)<={'table','dst','dev','protocol','scope','prefsrc','metric','flags'} and x['dev']=='sctunqa0'
+assert str(x['protocol'])=='247' and str(x['scope']) in ('253','link') and x['prefsrc']=='172.31.99.1'
+assert set(x.get('flags',[]))<={'linkdown'}
+PYNATIVEAMBIGUOUSINDEPENDENT
+  echo PRODUCT_NATIVE_AMBIGUOUS_INDEPENDENT_STOP_INTENT_RETAINED=PASS
   if "$sc" --json activation-trial-recover >/run/sc-qa-product-tun-conflict.json; then
     echo 'PRODUCT_NATIVE_AMBIGUOUS_EFFECT=FAIL (missing route receipt accepted)' >&2; return 1
   fi
@@ -1202,16 +1484,15 @@ PYNATIVEGUARDUNCERTAIN
   native_fixture verify
   test "$(saved_policy_hashes)" = "$saved_policy_before"
   echo PRODUCT_NATIVE_GUARD_LOSS_UNCERTAIN_CONTAINED=PASS
-  test ! -e /run/systemd/system/server-connect-activation-recover.service
-  test ! -L /run/systemd/system/server-connect-activation-recover.service
-  native_executor_masked=yes
-  systemctl mask --runtime --now server-connect-activation-recover.service
+  native_recovery_control pause guard
   native_guard_graph operator-remove
+  native_recovery_control check removed
   native_fixture verify
   echo PRODUCT_NATIVE_GUARD_LOSS_REMEDIATION=explicit-QA-operator
   native_foreign_remove
   require_native_baseline
-  native_executor_unmask
+  native_recovery_control resume guard
+  test ! -e "$native_pause_file" && test ! -L "$native_pause_file"
   systemctl start server-connect-activation-recover.service
   require_recovered "$op"
   clear_recovered "$op"
