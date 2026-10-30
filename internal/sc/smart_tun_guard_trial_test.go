@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 )
 
@@ -223,38 +224,54 @@ func TestSmartTUNPendingRejectsCorruptAndUntrustedLocalJournal(t *testing.T) {
 }
 
 func TestSmartTUNClearCredentialConflictBeforeGuardDisarm(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "smart-tun-trial.json")
-	record := trialV4Example()
-	record.Phase, record.Revision = "trial_recovered", 2
-	if err := smartTUNTrialCredentialForClear(record, path); err != nil {
-		t.Fatalf("precredential crash should allow an absent config: %v", err)
-	}
-	record.CoreStartAttempted = true
-	if err := smartTUNTrialCredentialForClear(record, path); ErrorCode(err) != "trial_resource_conflict" {
-		t.Fatalf("start-attempt credential loss must block guard disarm: %v", err)
-	}
-	if err := os.WriteFile(path, []byte("changed configuration"), 0600); err != nil {
+	dir := privateJournalTempDir(t)
+	m := New(dir, DefaultCore, DefaultPort)
+	err := m.withActivationJournalLock(syscall.Fsync, func(store *activationJournalDir) error {
+		record := trialV4Example()
+		record.Phase, record.Revision = "trial_recovered", 2
+		if _, err := smartTUNCredentialForCleanupLocked(store, record); err != nil {
+			t.Fatalf("precredential crash must permit absent config: %v", err)
+		}
+		record.CoreStartAttempted = true
+		if _, err := smartTUNCredentialForCleanupLocked(store, record); ErrorCode(err) != "trial_resource_conflict" {
+			t.Fatalf("missing start credential must block cleanup intent: %v", err)
+		}
+		original := []byte("unchanged guarded credential")
+		record.ConfigSHA256 = sha256Hex(original)
+		if err := store.writeSmartTUNFile(smartTUNTrialConfigFile, original, nil); err != nil {
+			return err
+		}
+		identity, err := smartTUNCredentialForCleanupLocked(store, record)
+		if err != nil || identity == nil {
+			t.Fatalf("exact recovered credential rejected: %v", err)
+		}
+		// The same present credential remains valid once cleanup is durable.
+		record.Phase, record.Revision = "trial_cleanup_pending", 4
+		if err := store.removeSmartTUNCredential(*identity, record.ConfigSHA256); err != nil {
+			return err
+		}
+		if identity, err := smartTUNCredentialForCleanupLocked(store, record); err != nil || identity != nil {
+			t.Fatalf("durable cleanup did not permit removed credential: %v", err)
+		}
+		// Replaying the OLD recovered phase must still refuse missing bytes.
+		record.Phase, record.Revision = "trial_recovered", 2
+		if _, err := smartTUNCredentialForCleanupLocked(store, record); ErrorCode(err) != "trial_resource_conflict" {
+			t.Fatalf("old phase silently accepted unexplained credential loss: %v", err)
+		}
+		path := filepath.Join(dir, smartTUNTrialConfigFile)
+		if err := os.WriteFile(path, []byte("changed configuration"), 0600); err != nil {
+			return err
+		}
+		for _, phase := range []string{"trial_recovered", "trial_cleanup_pending"} {
+			record.Phase = phase
+			if _, err := smartTUNCredentialForCleanupLocked(store, record); ErrorCode(err) != "trial_resource_conflict" {
+				t.Fatalf("phase %s accepted replaced credential: %v", phase, err)
+			}
+		}
+		return nil
+	})
+	if err != nil {
 		t.Fatal(err)
-	}
-	if err := smartTUNTrialCredentialForClear(record, path); ErrorCode(err) != "trial_resource_conflict" {
-		t.Fatalf("changed credential must block guard disarm: %v", err)
-	}
-	original := []byte("unchanged guarded credential")
-	record.ConfigSHA256 = sha256Hex(original)
-	if err := os.WriteFile(path, original, 0600); err != nil {
-		t.Fatal(err)
-	}
-	if err := smartTUNTrialCredentialForClear(record, path); err != nil {
-		t.Fatalf("exact recovered credential must be clearable: %v", err)
-	}
-	if err := os.Remove(path); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Symlink("/dev/null", path); err != nil {
-		t.Fatal(err)
-	}
-	if err := smartTUNTrialCredentialForClear(record, path); ErrorCode(err) != "trial_resource_conflict" {
-		t.Fatalf("symlink credential must block guard disarm: %v", err)
 	}
 }
 
