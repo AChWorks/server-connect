@@ -431,6 +431,22 @@ for field,value in (('FragmentPath','/run/systemd/system/'+timer),('LoadState','
 for field,value in (('ActiveState','activating'),('ActiveState','failed'),('Job','42'),('MainPID','123'),('ControlPID','456')):
     check('executor not positively idle '+field,lambda field=field,value=value:unit(dict(executor_fields,**{field:value}),executor,'idle'))
 check('empty job is idle',lambda:unit(dict(executor_fields,Job=''),executor,'idle'),True)
+core_failed=dict(executor_fields,Id=core,FragmentPath='/etc/systemd/system/'+core,
+                 ActiveState='failed',SubState='failed',Result='signal',ExecMainCode='2',ExecMainStatus='9')
+check('authenticated failed core killed by SIGKILL',lambda:unit(core_failed,core,'sigkill'),True)
+check('SIGKILL witness permits empty no-job value',lambda:unit(dict(core_failed,Job=''),core,'sigkill'),True)
+for field,value in (('ActiveState','inactive'),('SubState','dead'),('Result','exit-code'),
+                    ('ExecMainCode','1'),('ExecMainStatus','15'),('MainPID','123'),('ControlPID','456'),('Job','42'),
+                    ('FragmentPath','/run/systemd/system/'+core),('DropInPaths','/run/untrusted.conf'),
+                    ('UnitFileState','enabled'),('Id',executor)):
+    check('SIGKILL witness rejects '+field,lambda field=field,value=value:unit(dict(core_failed,**{field:value}),core,'sigkill'))
+core_inactive=dict(core_failed,ActiveState='inactive',SubState='dead',Result='success',ExecMainCode='1',ExecMainStatus='0')
+check('inactive cannot replace the failed-core precondition',lambda:unit(core_inactive,core,'sigkill'))
+check('failed cannot replace completed inactive baseline',lambda:unit(core_failed,core,'completed'))
+check('inactive core remains completed-state requirement',lambda:unit(core_inactive,core,'completed'),True)
+assert diagnostic(core_failed,core)['ExecMainCode']=='2'
+assert diagnostic(dict(core_failed,ExecMainCode='UNTRUSTED'),core)['ExecMainCode']=='other-redacted'
+cases+=2
 completed_timer=dict(idle_timer,UnitFileState='disabled')
 completed_executor=dict(executor_fields,Result='success',ExecMainStatus='0')
 check('completed timer is disarmed',lambda:unit(completed_timer,timer,'completed'),True)

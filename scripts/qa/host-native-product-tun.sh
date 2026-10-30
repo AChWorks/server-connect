@@ -712,7 +712,7 @@ timer='server-connect-activation-recover.timer';executor='server-connect-activat
 core='server-connect-smart-tun.service';units=(timer,executor,core)
 receipt_name='sc-qa-native-recovery-pause.json'
 def pause_unit_valid(fields,name,state):
-    assert name in (timer,executor,core) and state in ('owned','active','idle','stopped','completed')
+    assert name in (timer,executor,core) and state in ('owned','active','idle','stopped','completed','sigkill')
     assert fields['Id']==name and fields['LoadState']=='loaded' and fields['FragmentPath']=='/etc/systemd/system/'+name
     assert fields['DropInPaths']=='' and fields['Transient']=='no'
     assert fields['UnitFileState']==(('disabled' if state=='completed' else 'enabled') if name==timer else 'static')
@@ -730,6 +730,10 @@ def pause_unit_valid(fields,name,state):
         assert fields['ActiveState'] in (('inactive','failed') if state=='stopped' else ('inactive',))
         assert fields['SubState'] in (('dead','failed') if state=='stopped' else ('dead',))
         if name!=timer:assert fields['MainPID']==fields['ControlPID']=='0'
+    if state=='sigkill':
+        assert name==core and fields['ActiveState']==fields['SubState']=='failed'
+        assert fields['MainPID']==fields['ControlPID']=='0' and fields['Result']=='signal'
+        assert fields['ExecMainCode']=='2' and fields['ExecMainStatus']=='9'
     if state=='completed' and name==executor:assert fields['Result']=='success' and fields['ExecMainStatus']=='0'
 def pause_unit_diagnostic(fields,name):
     # Fixed whitelists only: unexpected paths, messages and values are redacted.
@@ -743,7 +747,7 @@ def pause_unit_diagnostic(fields,name):
            'Transient':{'yes','no'},'Result':{'success','exit-code','signal','core-dump','timeout','start-limit-hit','resources','protocol','watchdog','oom-kill','exec-condition'}}
     for key,values in enums.items():
         if key in fields:safe[key]=fields[key] if isinstance(fields[key],str) and fields[key] in values else 'other-redacted'
-    for key in ('Job','MainPID','ControlPID','ExecMainStatus'):
+    for key in ('Job','MainPID','ControlPID','ExecMainCode','ExecMainStatus'):
         if key in fields:
             value=fields[key]
             safe[key]=value if isinstance(value,str) and (value=='' or re.fullmatch('[0-9]{1,20}',value)) else 'other-redacted'
@@ -818,7 +822,7 @@ def capture(argv,timeout=2):
         assert out.tell()<16384;out.seek(0);return out.read(16384)
 def unit_fields(name,timeout=2):
     properties=['Id','LoadState','FragmentPath','DropInPaths','Transient','UnitFileState','ActiveState','SubState','Job']
-    properties+=['Unit'] if name==timer else ['MainPID','ControlPID','Result','ExecMainStatus']
+    properties+=['Unit'] if name==timer else ['MainPID','ControlPID','Result','ExecMainCode','ExecMainStatus']
     argv=['/usr/bin/systemctl','show',name]
     for key in properties:argv+=['-p',key]
     fields={}
@@ -886,7 +890,7 @@ def remove_receipt(saved,info):
 def idle():
     pause_unit_valid(snapshot(timer),timer,'idle');pause_unit_valid(snapshot(executor),executor,'idle')
 def core_expected(expect):
-    state='active' if expect in ('pending','route','rule','capture') else 'stopped' if expect=='core' else 'idle'
+    state='active' if expect in ('pending','route','rule','capture') else 'sigkill' if expect=='core' else 'idle'
     pause_unit_valid(snapshot(core),core,state)
 try:
     assert os.geteuid()==0 and os.environ.get('SC_QA_TUN_PRODUCT_LAB')=='yes'
@@ -1298,7 +1302,10 @@ native_loss_cases() {
         systemctl kill --kill-who=main --signal=KILL server-connect-smart-tun.service ;;
     esac
     native_no_direct_leak "$native_loss"
-    native_recovery_control check "$native_loss"
+    native_recovery_control check "$native_loss" || return "$?"
+    if [ "$native_loss" = core ]; then
+      echo PRODUCT_NATIVE_CORE_SIGKILL_FAILED_PRE_RECOVERY=PASS
+    fi
     test "$(saved_policy_hashes)" = "$saved_policy_before"
     capture_executor_proof
     killed=0
