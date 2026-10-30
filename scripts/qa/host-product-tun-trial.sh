@@ -46,7 +46,7 @@ assert r["ok"] and r["data"]["phase"]=="absent",r'
       --deadline-seconds "$deadline" "$@"
   }
   pending_receipt() {
-    "$sc" --json smart-tun-trial-status | python3 -c '
+    if "$sc" --json smart-tun-trial-status | python3 -c '
 import json,sys,re
 r=json.load(sys.stdin)
 assert r["ok"],r
@@ -54,7 +54,15 @@ d=r["data"]
 assert d["phase"]=="trial_pending" and d["revision"]==1 and d["experiment_only"],d
 assert d["guard_scheduled"] and not d["activation_ready"] and not d["vpn_verified"],d
 assert not d["recovery_verified"] and re.fullmatch("[0-9a-f]{32}",d["operation_id"]),d
-print(d["operation_id"])'
+print(d["operation_id"])'; then
+      return 0
+    else
+      pending_receipt_rc=$?
+      # This runs inside op=$(...). Keep diagnostics off stdout and retain
+      # the original rejection; never retry/reset/drain an unhealthy guard.
+      native_pending_failure_diagnostic >&2 || :
+      return "$pending_receipt_rc"
+    fi
   }
   require_recovered() {
     expected=$1

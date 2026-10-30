@@ -336,3 +336,78 @@ for offset in (0,6,12,14,16,18,20,22,23,24,26,30,34,36,38,40,len(valid)-1):
 for frame in frames:assert not matches(frame,host,peer,token,identity), 'invalid transit frame accepted'
 print(f'HOST_QA_NATIVE_PACKET_OBSERVER_REGRESSIONS=PASS ({cases} counter cases, {len(frames)+1} frame cases)')
 PYNATIVEPACKETFIXTURES
+
+# The recovery unit has plain-text errors and pretty JSON success receipts.
+# Extract only pure parsing functions; never run its observer/service calls.
+python3 - "$root/scripts/qa/host-native-product-tun.sh" <<'PYPENDINGINVOCATIONFIXTURES'
+import ast,copy,json,re,sys
+from pathlib import Path
+source=Path(sys.argv[1]).read_text().split("<<'PYNATIVEPENDINGFAIL'\n",1)[1].split('\nPYNATIVEPENDINGFAIL\n',1)[0]
+names={'hex32','strict_json','pending_invocation_summary'}
+nodes=[x for x in ast.parse(source).body if isinstance(x,ast.FunctionDef) and x.name in names]
+assert {x.name for x in nodes}==names
+namespace={'json':json,'re':re}
+exec(compile(ast.Module(body=nodes,type_ignores=[]),'<pending invocation parser>','exec'),namespace)
+parse=namespace['pending_invocation_summary']
+operation='a'*32;invocation='b'*32;boot='c'*32;stream='d'*32
+secret='CREDENTIAL_SHOULD_NOT_APPEAR'
+receipt={'operation_id':operation,'revision':1,'phase':'trial_pending','experiment_only':True,
+         'guard_scheduled':True,'activation_ready':False,'vpn_verified':False,'recovery_verified':False}
+def records(value):
+    text=value if isinstance(value,str) else json.dumps(value,indent=2)
+    return [{'__CURSOR':'qa:'+str(index),'_SYSTEMD_UNIT':'server-connect-activation-recover.service',
+             '_SYSTEMD_INVOCATION_ID':invocation,'_BOOT_ID':boot,'_TRANSPORT':'stdout',
+             '_STREAM_ID':stream,'_PID':'4242','MESSAGE':line}
+            for index,line in enumerate(text.splitlines())]
+cases=0
+def check(label,rows,expected=None):
+    global cases
+    original=copy.deepcopy(rows)
+    try:value=parse(rows,invocation,boot,operation)
+    except (AssertionError,KeyError,TypeError,ValueError):value=None
+    if expected is None:assert value is None,label
+    else:assert isinstance(value,dict) and value.get('kind')==expected,(label,value)
+    assert rows==original,label+' mutated input'
+    assert secret not in json.dumps(value),label+' leaked redacted data'
+    assert value is None or 'code' not in value,label+' invented product error code'
+    cases+=1
+    return value
+check('multiline receipt',records(receipt),'receipt')
+check('single-line receipt',records(json.dumps(receipt)),'receipt')
+check('absent prearm receipt',records({'phase':'absent','experiment_only':True}),'receipt')
+for message in ('Error: guard trial schema invalid','Error: guard trial trailing data'):
+    value=check('known static error',records(message),'known-static-error')
+    assert value['message']==message
+    check('near-match is not classified',records(message+' '+secret),'redacted')
+    check('duplicate errors are not a single record',records(message+'\n'+message),'redacted')
+check('unknown plain error',records('Error: '+secret),'redacted')
+check('arbitrary text',records(secret),'redacted')
+value=check('unknown receipt fields redacted',records(dict(receipt,credential=secret)),'receipt')
+assert value['other_fields_redacted'] is True and 'credential' not in value
+for key,value in (('_SYSTEMD_UNIT','other.service'),('_SYSTEMD_INVOCATION_ID','e'*32),('_BOOT_ID','e'*32),
+                  ('_TRANSPORT','journal'),('_STREAM_ID','0'*32),('_PID','1'),('_PID','bad')):
+    rows=records(receipt)
+    for row in rows:row[key]=value
+    check('invalid attribution '+key,rows)
+rows=records(receipt)
+for row in rows:row['SYSTEMD_INVOCATION_ID']=row.pop('_SYSTEMD_INVOCATION_ID')
+check('untrusted replacement field',rows)
+for key,value in (('_STREAM_ID','e'*32),('_PID','4243')):
+    rows=records(receipt)
+    for row in rows[len(rows)//2:]:row[key]=value
+    check('mixed '+key,rows)
+rows=records(receipt);rows[-1]['__CURSOR']=rows[0]['__CURSOR']
+check('duplicate journal row',rows)
+check('wrong receipt operation',records(dict(receipt,operation_id='e'*32)))
+check('missing operation on pending receipt',records({k:v for k,v in receipt.items() if k!='operation_id'}))
+for key,value in (('revision',True),('revision',6),('phase',secret),('guard_scheduled',1)):
+    check('invalid safe field '+key,records(dict(receipt,**{key:value})))
+check('JSON wrapper is not a unit receipt',records({'ok':False,'error':{'code':'arbitrary','message':secret}}))
+check('incomplete JSON',records(receipt)[:-1],'redacted')
+check('duplicate JSON key',records(json.dumps(receipt).replace('"revision": 1','"revision": 1, "revision": 2')),'redacted')
+check('multiple JSON documents',records(json.dumps(receipt)+'\n'+json.dumps(receipt)),'redacted')
+check('empty journal',[])
+check('too many rows',records('\n'.join(['{}']*129)))
+check('oversized message',records('x'*4097))
+print(f'HOST_QA_PENDING_INVOCATION_REGRESSIONS=PASS ({cases} attribution/redaction cases)')
+PYPENDINGINVOCATIONFIXTURES

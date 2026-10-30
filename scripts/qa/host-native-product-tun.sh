@@ -10,6 +10,138 @@ native_trace_dir=
 native_readiness_reported=no
 native_transit_receipt=
 
+native_pending_failure_diagnostic() {
+  # No recovery/service mutation. The failed op=$(pending_receipt) still has
+  # the OLD shell operation, so bind only to the completed Apply receipt.
+  /usr/bin/timeout --signal=KILL 5s python3 - <<'PYNATIVEPENDINGFAIL'
+import json,os,re,resource,socket,stat,subprocess,sys,tempfile
+def emit(label,value):
+    print('PRODUCT_TUN_PENDING_DIAGNOSTIC '+label+' '+json.dumps(value,separators=(',',':')),file=sys.stderr,flush=True)
+def hex32(value):
+    return isinstance(value,str) and re.fullmatch('[0-9a-f]{32}',value) is not None and value!='0'*32
+def strict_json(text):
+    def unique(pairs):
+        result={}
+        for key,value in pairs:
+            assert key not in result
+            result[key]=value
+        return result
+    return json.loads(text,object_pairs_hook=unique)
+def pending_invocation_summary(rows,invocation,boot,expected_operation):
+    assert hex32(invocation) and hex32(boot) and hex32(expected_operation)
+    assert isinstance(rows,list) and 0<len(rows)<=128
+    streams=set();cursors=set();messages=[]
+    for row in rows:
+        assert isinstance(row,dict) and row.get('_SYSTEMD_UNIT')=='server-connect-activation-recover.service'
+        assert row.get('_SYSTEMD_INVOCATION_ID')==invocation and row.get('_BOOT_ID')==boot and row.get('_TRANSPORT')=='stdout'
+        stream,pid,cursor=row.get('_STREAM_ID'),row.get('_PID'),row.get('__CURSOR')
+        assert hex32(stream) and isinstance(pid,str) and re.fullmatch('[1-9][0-9]{0,9}',pid) and int(pid)>1
+        assert isinstance(cursor,str) and 0<len(cursor)<=1024 and cursor not in cursors
+        message=row.get('MESSAGE');assert isinstance(message,str) and len(message.encode('utf-8'))<=4096
+        streams.add((stream,pid));cursors.add(cursor);messages.append(message)
+    assert len(streams)==1, 'mixed invocation streams'
+    text='\n'.join(messages);assert len(text.encode('utf-8'))<=16384
+    # ExecStart has no --json. These exact static CLI error lines are known
+    # from decodeTrialJournal; no product error.code is inferred from text.
+    if text in ('Error: guard trial schema invalid','Error: guard trial trailing data'):
+        return {'kind':'known-static-error','message':text}
+    try:receipt=strict_json(text)
+    except Exception:return {'kind':'redacted','reason':'unclassified-output'}
+    assert isinstance(receipt,dict)
+    phases={'absent','unarmed_prepared','trial_pending','trial_stop_requested','trial_recovered','trial_cleanup_pending','trial_cleared'}
+    assert receipt.get('phase') in phases and type(receipt.get('experiment_only')) is bool
+    safe={'kind':'receipt','phase':receipt['phase'],'experiment_only':receipt['experiment_only']}
+    operation=receipt.get('operation_id','')
+    if operation:
+        assert hex32(operation) and operation==expected_operation, 'different operation receipt'
+        safe['operation_id']=operation
+    else:assert receipt['phase'] in ('absent','unarmed_prepared')
+    if 'revision' in receipt:
+        assert type(receipt['revision']) is int and 0<=receipt['revision']<=5
+        safe['revision']=receipt['revision']
+    flags=('guard_scheduled','activation_ready','vpn_verified','recovery_verified','trial_rule_recovered','trial_route_recovered')
+    for key in flags:
+        if key in receipt:
+            assert type(receipt[key]) is bool
+            safe[key]=receipt[key]
+    safe['other_fields_redacted']=bool(set(receipt)-set(flags)-{'operation_id','phase','revision','experiment_only'})
+    return safe
+def read(path,limit=4096):
+    with open(path) as f:
+        value=f.read(limit+1);assert len(value)<=limit
+        return value.strip()
+def private_json(path,limit):
+    fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
+    with os.fdopen(fd,'rb') as f:
+        before=os.fstat(f.fileno())
+        assert stat.S_ISREG(before.st_mode) and before.st_uid==0 and not before.st_mode&0o022 and before.st_size<=limit
+        raw=f.read(limit+1);after=os.fstat(f.fileno())
+        assert len(raw)<=limit and (before.st_size,before.st_mtime_ns)==(after.st_size,after.st_mtime_ns)
+    return strict_json(raw)
+def capture(argv,limit):
+    def bound():resource.setrlimit(resource.RLIMIT_FSIZE,(limit,limit))
+    with tempfile.TemporaryFile(dir='/run') as out:
+        subprocess.run(argv,stdout=out,stderr=subprocess.DEVNULL,timeout=1,check=True,preexec_fn=bound)
+        assert out.tell()<limit
+        out.seek(0);return out.read(limit)
+properties=('ActiveState','SubState','Result','ExecMainCode','ExecMainStatus',
+            'ExecMainStartTimestampMonotonic','ExecMainExitTimestampMonotonic','InvocationID','Job')
+def unit_snapshot():
+    args=['/usr/bin/systemctl','show','server-connect-activation-recover.service']
+    for key in properties:args+=['-p',key]
+    fields={}
+    for line in capture(args,4096).decode('utf-8').splitlines():
+        key,separator,value=line.partition('=')
+        assert separator and key in properties and key not in fields
+        if key in ('ActiveState','SubState','Result'):assert re.fullmatch('[a-z][a-z0-9-]{0,31}',value)
+        elif key=='InvocationID':assert value=='' or re.fullmatch('[0-9a-f]{32}',value)
+        elif key=='Job':assert value=='' or re.fullmatch('[0-9]{1,20}',value)
+        else:assert re.fullmatch('[0-9]{1,20}',value)
+        fields[key]=value
+    assert set(fields)==set(properties)
+    return fields
+step='scope'
+try:
+    assert os.geteuid()==0 and os.environ.get('SC_QA_TUN_PRODUCT_LAB')=='yes'
+    assert os.path.isfile('/.dockerenv') and socket.gethostname()=='sc-qa' and read('/proc/1/comm')=='systemd'
+    release=read('/etc/os-release').splitlines()
+    assert 'ID=debian' in release and any(x in release for x in ('VERSION_ID=13','VERSION_ID="13"'))
+    ns=os.stat('/proc/self/ns/net');pid1=os.stat('/proc/1/ns/net')
+    assert (ns.st_dev,ns.st_ino)==(pid1.st_dev,pid1.st_ino)
+    applied=private_json('/run/sc-qa-product-tun-apply.json',16384)
+    assert applied.get('ok') is True and isinstance(applied.get('data'),dict)
+    data=applied['data'];operation=data.get('operation_id')
+    assert hex32(operation) and data.get('phase')=='trial_pending' and type(data.get('revision')) is int and data['revision']==1 and data.get('experiment_only') is True
+    def current_operation():
+        journal=private_json('/var/lib/server-connect/route-activation-journal.json',131072)
+        assert journal['version']==4 and journal['intent_type']=='smart_tun_native_pending_trial_v1' and journal['operation_id']==operation
+        assert journal['phase'] in ('trial_pending','trial_stop_requested','trial_recovered','trial_cleanup_pending')
+        assert type(journal['revision']) is int and 1<=journal['revision']<=4
+        assert (journal['native']['namespace_dev'],journal['native']['namespace_ino'])==(ns.st_dev,ns.st_ino)
+        return {key:journal[key] for key in ('version','intent_type','operation_id','phase','revision')}
+    bound=current_operation();boot=read('/proc/sys/kernel/random/boot_id').replace('-','');assert hex32(boot)
+    emit('operation-before',bound)
+    step='unit-snapshot';snapshot=unit_snapshot();emit('unit-before',snapshot)
+    invocation=snapshot['InvocationID'];assert hex32(invocation), 'invocation unavailable'
+    step='journal-sync';capture(['/usr/bin/journalctl','--sync'],4096)
+    step='invocation-read'
+    fields='MESSAGE,_SYSTEMD_UNIT,_SYSTEMD_INVOCATION_ID,_BOOT_ID,_STREAM_ID,_TRANSPORT,_PID,__CURSOR'
+    raw=capture(['/usr/bin/journalctl','-b','--no-pager','-n','129','-o','json','--output-fields='+fields,
+                 '_SYSTEMD_UNIT=server-connect-activation-recover.service','_SYSTEMD_INVOCATION_ID='+invocation,
+                 '_BOOT_ID='+boot,'_TRANSPORT=stdout'],65536)
+    rows=[strict_json(line) for line in raw.decode('utf-8').splitlines() if line.strip()]
+    summary=pending_invocation_summary(rows,invocation,boot,operation)
+    step='attribution-recheck'
+    assert unit_snapshot()==snapshot, 'unit invocation or execution state changed'
+    after=current_operation()
+    assert read('/proc/sys/kernel/random/boot_id').replace('-','')==boot
+    emit('operation-after',after)
+    emit('invocation-output',{'invocation_id':invocation,'output':summary})
+except Exception:
+    emit('unavailable',{'step':step,'reason':'bounded-observation-or-attribution-unavailable'})
+PYNATIVEPENDINGFAIL
+}
+
 native_failure_observation() {
   # Sample silently before a probe; report only its first failure, before
   # recovery erases evidence. Neither diagnostics nor timeouts change QA status.
