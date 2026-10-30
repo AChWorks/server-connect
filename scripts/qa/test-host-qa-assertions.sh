@@ -118,3 +118,88 @@ for failed_query in \
     { echo "Missing phase-specific failed ip diagnostic: $failed_query" >&2; exit 1; }
 done
 echo 'HOST_QA_ASSERTION_NEGATIVE_REGRESSIONS=PASS'
+
+# Exercise the actual receipt checker with native-shaped journald rows.
+# No systemd/root access: reject stale/wrong attribution and JSON fragments
+# that would falsely manufacture independent completion from mixed streams.
+python3 - "$checker" "$scratch" <<'PYRECOVERYFIXTURES'
+import json
+from pathlib import Path
+import subprocess
+import sys
+
+checker, scratch = sys.argv[1:]
+operation = "a" * 32
+invocation = "b" * 32
+receipt = {
+    "operation_id": operation, "revision": 5, "phase": "trial_cleared",
+    "experiment_only": True, "guard_scheduled": False,
+    "activation_ready": False, "vpn_verified": False,
+    "recovery_verified": True, "trial_rule_recovered": False,
+}
+
+
+def records(value, inv=invocation, stream="c" * 32, pid="101"):
+    text = value if isinstance(value, str) else json.dumps(value, indent=2)
+    return [{"__CURSOR": f"qa:{inv}:{stream}:{number}",
+             "_SYSTEMD_UNIT": "server-connect-activation-recover.service",
+             "_SYSTEMD_INVOCATION_ID": inv, "_TRANSPORT": "stdout",
+             "_STREAM_ID": stream, "_PID": pid, "MESSAGE": line}
+            for number, line in enumerate(text.splitlines())]
+
+
+cases = 0
+
+
+def check(label, rows, accepted=False, expected=operation):
+    global cases
+    path = Path(scratch) / "recovery.jsonl"
+    path.write_text("".join(json.dumps(row) + "\n" for row in rows))
+    result = subprocess.run(["/bin/sh", checker, "recovery-receipt", str(path), expected],
+                            text=True, capture_output=True)
+    if accepted:
+        assert result.returncode == 0 and result.stdout.strip() == invocation, (label, result)
+    else:
+        assert result.returncode != 0 and not result.stdout, (label, result)
+        assert "Host QA assertion failed:" in result.stderr, (label, result)
+    cases += 1
+
+
+check("complete multiline receipt", records(receipt), True)
+check("complete single-message receipt", records(json.dumps(receipt)), True)
+pending = dict(receipt, phase="trial_pending", revision=1,
+               guard_scheduled=True, recovery_verified=False)
+check("earlier distinct pending invocation", records(pending, inv="d" * 32) + records(receipt), True)
+for key, value in (("_SYSTEMD_UNIT", "other.service"), ("_TRANSPORT", "journal"),
+                   ("_SYSTEMD_INVOCATION_ID", ""), ("_SYSTEMD_INVOCATION_ID", "0" * 32),
+                   ("_STREAM_ID", ""), ("_PID", "1")):
+    altered = records(receipt)
+    for row in altered:
+        row[key] = value
+    check("untrusted identity " + key + value, altered)
+altered = records(receipt)
+for row in altered:
+    row["SYSTEMD_INVOCATION_ID"] = row.pop("_SYSTEMD_INVOCATION_ID")
+check("untrusted replacement invocation field", altered)
+for key, value in (("_STREAM_ID", "e" * 32), ("_PID", "202"),
+                   ("_SYSTEMD_INVOCATION_ID", "e" * 32)):
+    altered = records(receipt)
+    for row in altered[len(altered) // 2:]:
+        row[key] = value
+    check("stitched JSON across " + key, altered)
+check("wrong operation", records(receipt), expected="f" * 32)
+for key, value in (("revision", 4), ("phase", "trial_recovered"),
+                   ("recovery_verified", False), ("guard_scheduled", True),
+                   ("experiment_only", False), ("activation_ready", True),
+                   ("vpn_verified", True), ("error", "failed"), ("ok", False)):
+    check("failure-shaped receipt " + key, records(dict(receipt, **{key: value})))
+check("incomplete JSON", records(receipt)[:-1])
+check("duplicate journal entry", records(receipt) + records(receipt)[-1:])
+check("duplicate successful invocations", records(receipt) + records(receipt, inv="e" * 32))
+check("conflicting completed invocation", records(receipt) + records(dict(receipt, recovery_verified=False), inv="e" * 32))
+check("conflicting stream within invocation", records(receipt) + records('{"error":"failed"}', stream="e" * 32))
+duplicate_key = json.dumps(receipt).replace('"revision": 5', '"revision": 4, "revision": 5')
+check("duplicate receipt field", records(duplicate_key))
+check("empty journal", [])
+print(f"HOST_QA_RECOVERY_RECEIPT_REGRESSIONS=PASS ({cases} attribution/completion cases)")
+PYRECOVERYFIXTURES

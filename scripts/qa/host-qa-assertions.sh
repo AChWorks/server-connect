@@ -27,6 +27,98 @@ reject_pattern() {
 }
 
 case "$1" in
+  recovery-receipt)
+    [ "$#" -eq 3 ] || fail 'recovery-receipt usage: recovery-receipt JSONL_FILE OPERATION_ID'
+    [ -f "$2" ] && [ ! -L "$2" ] && [ -r "$2" ] ||
+      fail 'missing or non-regular recovery journal evidence'
+    # Caller captures a journal cursor BEFORE the action and supplies only
+    # current-boot entries after it. systemd can garbage-collect an inactive
+    # oneshot's execution statistics; trusted journal stream identity lasts.
+    python3 - "$2" "$3" <<'PYRECOVERYRECEIPT'
+import json
+import re
+import sys
+
+
+def refuse(reason):
+    raise ValueError(reason)
+
+
+def unique_fields(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            refuse("duplicate JSON field in recovery evidence")
+        result[key] = value
+    return result
+
+
+try:
+    path, expected = sys.argv[1:]
+    if not re.fullmatch(r"[0-9a-f]{32}", expected):
+        refuse("invalid expected recovery operation")
+    with open(path, "rb") as handle:
+        payload = handle.read(1024 * 1024 + 1)
+    if not payload or len(payload) > 1024 * 1024:
+        refuse("empty or oversized recovery journal evidence")
+    rows = payload.decode("utf-8").splitlines()
+    if len(rows) > 2048:
+        refuse("excessive recovery journal records")
+    streams = {}
+    cursors = set()
+    for line in rows:
+        row = json.loads(line, object_pairs_hook=unique_fields)
+        if not isinstance(row, dict):
+            refuse("invalid recovery journal record")
+        if row.get("_SYSTEMD_UNIT") != "server-connect-activation-recover.service" or row.get("_TRANSPORT") != "stdout":
+            continue
+        invocation, stream, pid = (row.get(key) for key in
+                                  ("_SYSTEMD_INVOCATION_ID", "_STREAM_ID", "_PID"))
+        if (not isinstance(invocation, str) or not re.fullmatch(r"[0-9a-f]{32}", invocation)
+                or invocation == "0" * 32
+                or not isinstance(stream, str) or not re.fullmatch(r"[0-9a-f]{32}", stream)
+                or not isinstance(pid, str) or not re.fullmatch(r"[1-9][0-9]*", pid)
+                or int(pid) <= 1):
+            refuse("missing or malformed trusted recovery stream identity")
+        cursor, message = row.get("__CURSOR"), row.get("MESSAGE")
+        if not isinstance(cursor, str) or not cursor or cursor in cursors or not isinstance(message, str):
+            refuse("missing, duplicate or malformed recovery journal entry")
+        cursors.add(cursor)
+        streams.setdefault((invocation, stream, pid), []).append(message)
+
+    matches = []
+    for identity, messages in streams.items():
+        try:
+            receipt = json.loads("\n".join(messages), object_pairs_hook=unique_fields)
+        except (ValueError, TypeError):
+            # Other invocations may report an earlier pending operation or
+            # an actual refusal. They cannot supply parts of this receipt.
+            continue
+        if not isinstance(receipt, dict) or receipt.get("operation_id") != expected:
+            continue
+        if receipt.get("phase") != "trial_cleared":
+            continue
+        if (type(receipt.get("revision")) is int and receipt["revision"] == 5
+                and receipt.get("experiment_only") is True
+                and receipt.get("recovery_verified") is True
+                and receipt.get("guard_scheduled") is False
+                and receipt.get("activation_ready") is False
+                and receipt.get("vpn_verified") is False
+                and "error" not in receipt and "ok" not in receipt):
+            matches.append(identity)
+        else:
+            refuse("conflicting completed receipt for expected operation")
+    if len(matches) != 1:
+        refuse("missing or ambiguous exact-operation successful finalization receipt")
+    identity = matches[0]
+    if sum(key[0] == identity[0] for key in streams) != 1:
+        refuse("conflicting streams in successful recovery invocation")
+    print(identity[0])
+except (OSError, UnicodeError, ValueError, TypeError) as error:
+    print("Host QA assertion failed: recovery receipt: " + str(error), file=sys.stderr)
+    sys.exit(1)
+PYRECOVERYRECEIPT
+    ;;
   trace)
     [ "$#" -eq 3 ] || fail 'trace usage: trace DIRECTORY PHASE'
     trace_dir=$2
@@ -106,6 +198,6 @@ case "$1" in
     printf '%s\n' "$1"
     ;;
   *)
-    fail 'usage: host-qa-assertions.sh trace DIRECTORY PHASE | network'
+    fail 'usage: host-qa-assertions.sh trace DIRECTORY PHASE | network | recovery-receipt JSONL_FILE OPERATION_ID'
     ;;
 esac
