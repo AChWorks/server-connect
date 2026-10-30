@@ -41,6 +41,7 @@ PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/qa/test-tun-native-apps.py
 PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/qa/test-tun-payload-wire.py
 PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/qa/test-tun-ipv6-wire.py
 PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/qa/test-tun-wp-check.py
+PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/qa/test-smart-health-wire.py
 sh -n scripts/qa/tun-wordpress-fpm.sh
 # The guard feasibility probe must be strictly guest-local and must reject
 # ambiguous kernel identities before the privileged disconnected guest runs.
@@ -48,6 +49,7 @@ sh -n scripts/qa/host-activation-guard.sh
 sh -n scripts/qa/host-product-guard-trial.sh
 sh -n scripts/qa/host-tun-path.sh
 sh -n scripts/qa/host-product-tun-trial.sh
+sh -n scripts/qa/host-supervised-product-tun.sh
 sh -n scripts/qa/host-native-product-tun.sh
 sh -n scripts/qa/host-owned-tun-boundary.sh
 sh -n scripts/qa/tun-guard-unit-lab.sh
@@ -60,6 +62,8 @@ PYTHONDONTWRITEBYTECODE=1 python3 -B - <<'PYBOOTA'
 import ast
 from pathlib import Path
 ast.parse(Path('scripts/qa/activation-boot-guard.py').read_text())
+for source in ('supervised-product-tun.py', 'smart-health-responder.py', 'smart-health-client.py'):
+    ast.parse(Path('scripts/qa', source).read_text())
 PYBOOTA
 PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/qa/test-activation-boot-guard.py
 # This distinct ephemeral systemd guest begins without Python/curl, acquires
@@ -325,6 +329,12 @@ verify_direct_install() {
     test "$(systemctl show server-connect-smart-tun.service -p LoadState --value)" = loaded
     test "$(systemctl show server-connect-smart-tun.service -p UnitFileState --value)" = static
     test "$(systemctl show server-connect-smart-tun.service -p ActiveState --value)" = inactive
+    test "$(systemctl show server-connect-smart-health.service -p LoadState --value)" = loaded
+    test "$(systemctl show server-connect-smart-health.service -p UnitFileState --value)" = static
+    test "$(systemctl show server-connect-smart-health.service -p ActiveState --value)" = inactive
+    test "$(systemctl show server-connect-smart-health.timer -p LoadState --value)" = loaded
+    test "$(systemctl show server-connect-smart-health.timer -p ActiveState --value)" = inactive
+    test "$(systemctl is-enabled server-connect-smart-health.timer)" = disabled
     test "$(systemctl show server-connect-activation-recover.service -p LoadState --value)" = loaded
     /usr/local/bin/server-connect version --json
   '
@@ -339,6 +349,8 @@ verify_clean_uninstall() {
     test ! -e /etc/systemd/system/server-connect-activation-recover.service
     test ! -e /etc/systemd/system/server-connect-activation-recover.timer
     test ! -e /etc/systemd/system/server-connect-smart-tun.service
+    test ! -e /etc/systemd/system/server-connect-smart-health.service
+    test ! -e /etc/systemd/system/server-connect-smart-health.timer
     test "$(stat -c %a /var/lib/server-connect)" = 700
     test "$(stat -c %a /var/lib/server-connect/profiles)" = 700
     test "$(cat /var/lib/server-connect/profiles/qa-retained)" = SC_QA_RETAIN_PROFILE_BYTES
@@ -605,6 +617,10 @@ docker cp "$root/scripts/qa/tun-wordpress-fpm.sh" "$container:/root/qa-tun-wordp
 docker cp "$root/scripts/qa/tun-wp-check.py" "$container:/root/qa-tun-wp-check.py"
 docker cp "$root/scripts/qa/host-tun-path.sh" "$container:/root/qa-host-tun-path.sh"
 docker cp "$root/scripts/qa/host-product-tun-trial.sh" "$container:/root/qa-product-tun-trial.sh"
+docker cp "$root/scripts/qa/host-supervised-product-tun.sh" "$container:/root/qa-supervised-product-tun.sh"
+docker cp "$root/scripts/qa/supervised-product-tun.py" "$container:/root/qa-supervised-product-tun.py"
+docker cp "$root/scripts/qa/smart-health-responder.py" "$container:/root/qa-smart-health-responder.py"
+docker cp "$root/scripts/qa/smart-health-client.py" "$container:/root/qa-smart-health-client.py"
 docker cp "$root/scripts/qa/host-owned-tun-boundary.sh" "$container:/root/qa-owned-tun-boundary.sh"
 docker cp "$root/scripts/qa/tun-guard-unit-lab.sh" "$container:/root/qa-tun-guard-unit-lab.sh"
 # Independently check resources omitted from the standard route/rule/link
@@ -797,6 +813,38 @@ for marker in \
 done
 assert_tun_native_cleanup installed-product-tun-deadline-and-sigkill
 
+# Confirmed operation remains explicitly experimental and uses the SAME
+# disconnected peer, real root SSH and installed native product lifecycle.
+echo 'REAL_TUN_LAB_STAGE=installed-product-confirmed-supervision'
+supervised_log="$scratch/real-tun-product-supervised.log"
+docker exec -e SC_QA_TUN_PRODUCT_LAB=yes -e SC_QA_TUN_SUPERVISED=yes \
+  "$container" /bin/sh /root/qa-host-tun-path.sh | tee "$supervised_log"
+for marker in \
+  'DIRECT_CONTROLS' 'FRESH_SSH_SINGLE_USE_AND_NEGATIVES' \
+  'ACTIVE_UPDATE_UNINSTALL_REFUSED' 'DISJOINT_FOREIGN_OWNER_PRESERVED' \
+  'CONFIRMED_BEYOND_ACTIVATION_DEADLINE' 'ONE_TARGET_FALSE_ALARM_REJECTED' \
+  'DNS_FAILURE_AND_TRANSIENT_RECOVERY' 'LIVE_CORE_UPSTREAM_FAILURE_NO_DIRECT_LEAK' \
+  'FINITE_EXHAUSTION_FLAPPING_AND_SAVED_STATE' 'EXPIRED_CONFIRMATION' \
+  'PROTECTED_UNDERLAY_IMMEDIATE_OFF_NO_RETRY' \
+  'SUPERVISOR_DEAD' 'SUPERVISOR_FAILED' 'SUPERVISOR_HUNG' \
+  'SUPERVISOR_MASKED' 'SUPERVISOR_MISSING' \
+  'CONFIRM_PUBLICATION_CONTROLLER_DEATH' 'HEALTH_PUBLICATION_CONTROLLER_DEATH' \
+  'COMPLETE_EXPERIMENTAL_ONLY'; do
+  grep -Fx "SUPERVISED_TUN_${marker}=PASS" "$supervised_log" >/dev/null
+done
+assert_tun_native_cleanup installed-product-confirmed-supervision
+
+# The dual-stack variant repeats only real confirmation and ongoing path
+# measurement, without duplicating the full failure matrix above.
+supervised_v6_log="$scratch/real-tun-product-supervised-ipv6.log"
+docker exec -e SC_QA_TUN_PRODUCT_LAB=yes -e SC_QA_TUN_SUPERVISED=yes -e SC_QA_TUN_IPV6=yes \
+  "$container" /bin/sh /root/qa-host-tun-path.sh | tee "$supervised_v6_log"
+for marker in 'DIRECT_CONTROLS' 'CONFIRMED_BEYOND_ACTIVATION_DEADLINE' \
+  'DUALSTACK_SELECTED_TCP_UDP_DNS' 'COMPLETE_EXPERIMENTAL_ONLY'; do
+  grep -Fx "SUPERVISED_TUN_${marker}=PASS" "$supervised_v6_log" >/dev/null
+done
+assert_tun_native_cleanup installed-product-confirmed-supervision-ipv6
+
 # Separate opt-in product-owned IPv4+IPv6 v4 trial: distinct installed
 # service and independent guard, with real selected/outage TCP/UDP wires.
 echo 'REAL_TUN_LAB_STAGE=installed-product-guarded-dualstack-pending'
@@ -901,7 +949,8 @@ echo 'REAL_TUN_CLEANUP_FAILURE_REJECTED=PASS (guest cleanup failure != expected 
 docker exec "$container" /bin/rm -f /root/qa-tun-config-qa /root/qa-host-tun-path.sh \
   /root/qa-tun-guard-unit-lab.sh /root/qa-product-tun-trial.sh /root/qa-tun-sni-client.py /root/qa-tun-native-apps.py \
   /root/qa-owned-tun-boundary.sh \
-  /root/qa-native-product-tun.sh \
+  /root/qa-native-product-tun.sh /root/qa-supervised-product-tun.sh \
+  /root/qa-supervised-product-tun.py /root/qa-smart-health-responder.py /root/qa-smart-health-client.py \
   /root/qa-tun-dns-peer.py /root/qa-tun-dns-client.py /root/qa-tun-wordpress-fpm.sh \
   /root/qa-tun-wp-check.py /root/qa-tun-payload-wire.py /root/qa-tun-ipv6-wire.py
 # Product code + installed inactive-by-default independent recovery units.

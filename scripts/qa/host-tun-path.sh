@@ -481,6 +481,18 @@ case "${SC_QA_TUN_PRODUCT_LAB-}" in
   ''|'yes') ;;
   *) echo 'Invalid isolated installed-product TUN mode' >&2; exit 2 ;;
 esac
+case "${SC_QA_TUN_SUPERVISED-}" in
+  '') ;;
+  yes)
+    [ "${SC_QA_TUN_PRODUCT_LAB-}" = yes ] &&
+    [ -z "${SC_QA_TUN_GUARD_LAB-}" ] &&
+    [ -z "${SC_QA_TUN_OWNED_BOUNDARY-}" ] &&
+    [ -z "${SC_QA_TUN_OUTAGE_FAULT-}" ] &&
+    [ -z "${SC_QA_TUN_CLEANUP_FAULT-}" ] || {
+      echo 'SUPERVISED_TUN_PREFLIGHT=FAIL (requires exclusive installed product fixture)' >&2; exit 2;
+    } ;;
+  *) echo 'Invalid isolated supervised TUN mode' >&2; exit 2 ;;
+esac
 case "${SC_QA_TUN_OWNED_BOUNDARY-}" in
   '') ;;
   yes)
