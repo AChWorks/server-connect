@@ -180,8 +180,13 @@ request or arbitrary host operation is replayed.
 A killed or timed-out health oneshot can leave failed systemd bookkeeping after
 verified Off. Fresh Apply refuses that failed role until the exact trusted idle
 unit is explicitly reconciled; it does not silently reset a changed, masked or
-missing executor. The disposable QA labels any such operator remediation
-separately. Both health and independent recovery emit the operation-bound
+missing executor. A missing or masked executor can also leave its health
+timer failed. Restoring the original executor file alone does not prove an
+inactive, disabled timer: native Off may be verified while final cleanup and
+journal removal remain pending. Exact trusted idle-timer reconciliation is
+explicit operator work, followed by fresh product finalization. The disposable
+QA labels these operator actions separately from automatic recovery.
+Both health and independent recovery emit the operation-bound
 reason, attempt count and timestamped evidence in their structured local
 service output, including the final Off receipt after journal removal.
 
