@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/hex"
@@ -393,5 +394,134 @@ func TestSmartTUNHTTPSCanceledRoundRetainsCriticalSourceEvidence(t *testing.T) {
 		evidence.HTTPSResults[2] != (SmartTUNHTTPSResult{Result: "path_mismatch", StatusCode: 200}) ||
 		!validSmartTUNHTTPSEvidence(evidence, true) {
 		t.Fatalf("alternate HTTPS success/cancellation hid a Direct source: %+v", evidence)
+	}
+}
+
+// The peer performs an actual TLS handshake, reads the fresh HTTP request and
+// writes complete TLS application records. Closing the raw stream at a record
+// boundary lets the client wrapper cancel on the real EOF returned to TLS,
+// before HTTP completion is classified. No classified result is injected.
+func healthTLSReadCompletion(t *testing.T, parent context.Context, respond func(string) []byte,
+	holdOpen bool, readError error) (SmartTUNHTTPSResult, bool) {
+	t.Helper()
+	certificate := healthTLSCertificate(t, "qa-server.pem")
+	client, server := net.Pipe()
+	defer server.Close()
+	ctx, cancel := context.WithTimeout(parent, 2*time.Second)
+	defer cancel()
+	nonce := make([]byte, 16)
+	if _, err := rand.Read(nonce); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	exchanged := make(chan struct{})
+	go func() {
+		defer server.Close()
+		_ = server.SetDeadline(time.Now().Add(2 * time.Second))
+		secure := tls.Server(server, &tls.Config{Certificates: []tls.Certificate{certificate},
+			MinVersion: tls.VersionTLS12, SessionTicketsDisabled: true})
+		if err := secure.Handshake(); err != nil {
+			done <- err
+			return
+		}
+		request, err := http.ReadRequest(bufio.NewReader(io.LimitReader(secure, 4097)))
+		if err != nil {
+			done <- err
+			return
+		}
+		defer request.Body.Close()
+		if request.Method != "GET" || request.RequestURI != "/health/"+hex.EncodeToString(nonce) ||
+			request.Host != smartTUNHealthHTTPSName+":19224" || request.Proto != "HTTP/1.1" || !request.Close {
+			done <- fmt.Errorf("unexpected completed-read HTTPS request")
+			return
+		}
+		// This source value is a deliberate response fault, not a real leak.
+		reply := respond("SCHEALTH1 " + hex.EncodeToString(nonce) + " 10.254.72.1\n")
+		if n, err := secure.Write(reply); err != nil || n != len(reply) {
+			if err == nil {
+				err = io.ErrShortWrite
+			}
+			done <- err
+			return
+		}
+		if holdOpen {
+			// Complete-looking HTTP bytes without peer EOF cannot establish
+			// critical evidence. Only the caller's cancellation closes it.
+			cancel()
+			<-exchanged
+		}
+		done <- nil
+	}()
+	connection := &healthCancelAfterReadConn{Conn: client, cancel: cancel, readError: readError}
+	result := smartTUNHealthExchangeWithDeadline(ctx, connection,
+		smartTUNHealthProbe{protocol: "https", expectedSource: "8.8.8.8"}, nonce)
+	close(exchanged)
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("TLS completed-read peer did not join")
+	}
+	if parent.Err() != nil || (connection.completed || holdOpen) && ctx.Err() != context.Canceled {
+		t.Fatalf("TLS child cancellation escaped its boundary: completed=%v child=%v parent=%v", connection.completed, ctx.Err(), parent.Err())
+	}
+	return result, connection.completed
+}
+
+func TestSmartTUNHTTPSReadCompletionCancellation(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		respond   func(string) []byte
+		want      SmartTUNHTTPSResult
+		complete  bool
+		holdOpen  bool
+		readError error
+	}{
+		{name: "mismatch-content-length", respond: func(body string) []byte { return healthHTTPResponse(200, body) },
+			want: SmartTUNHTTPSResult{"path_mismatch", 200}, complete: true},
+		{name: "mismatch-close-delimited", respond: func(body string) []byte { return []byte("HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n" + body) },
+			want: SmartTUNHTTPSResult{"path_mismatch", 200}, complete: true},
+		{name: "positive", respond: func(body string) []byte {
+			return healthHTTPResponse(200, strings.Replace(body, "10.254.72.1", "8.8.8.8", 1))
+		},
+			want: SmartTUNHTTPSResult{"canceled", 200}, complete: true},
+		{name: "truncated-length", respond: func(body string) []byte {
+			return healthHTTPResponse(200, body+"x")[:len(healthHTTPResponse(200, body+"x"))-1]
+		},
+			want: SmartTUNHTTPSResult{"canceled", 200}, complete: true},
+		{name: "trailing-frame", respond: func(body string) []byte { return append(healthHTTPResponse(200, strings.TrimSuffix(body, "\n")), '\n') },
+			want: SmartTUNHTTPSResult{"canceled", 200}, complete: true},
+		{name: "malformed-body", respond: func(body string) []byte { return healthHTTPResponse(200, strings.TrimSuffix(body, "\n")) },
+			want: SmartTUNHTTPSResult{"canceled", 200}, complete: true},
+		{name: "stale-nonce", respond: func(body string) []byte {
+			reply := []byte(body)
+			reply[10] ^= 1
+			return healthHTTPResponse(200, string(reply))
+		}, want: SmartTUNHTTPSResult{"canceled", 200}, complete: true},
+		{name: "read-error", respond: func(body string) []byte { return healthHTTPResponse(200, body) },
+			want: SmartTUNHTTPSResult{"canceled", 200}, complete: true, readError: io.ErrNoProgress},
+		{name: "body-without-eof", respond: func(body string) []byte { return healthHTTPResponse(200, body) },
+			want: SmartTUNHTTPSResult{"canceled", 200}, holdOpen: true},
+		{name: "oversized-length", respond: func(body string) []byte {
+			return []byte("HTTP/1.1 200 OK\r\nContent-Length: 257\r\nConnection: close\r\n\r\n" + body)
+		},
+			want: SmartTUNHTTPSResult{"http_oversized_response", 200}},
+		{name: "oversized-critical-shaped", respond: func(body string) []byte {
+			prefix := strings.TrimSuffix(body, "10.254.72.1\n") + "fe80::1%"
+			return []byte("HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n" + prefix + strings.Repeat("z", 256-len(prefix)) + "\n")
+		}, want: SmartTUNHTTPSResult{"http_oversized_response", 200}},
+		{name: "malformed-header", respond: func(body string) []byte {
+			return []byte("HTTP/1.1 200 OK\r\nContent-Length: invalid\r\nConnection: close\r\n\r\n" + body)
+		},
+			want: SmartTUNHTTPSResult{"http_invalid_response", 0}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			result, completed := healthTLSReadCompletion(t, context.Background(), tc.respond, tc.holdOpen, tc.readError)
+			if completed != tc.complete || result != tc.want || !validSmartTUNHTTPSResult(result) {
+				t.Fatalf("TLS completed-read classification: got %+v completed=%v want %+v completed=%v", result, completed, tc.want, tc.complete)
+			}
+		})
 	}
 }

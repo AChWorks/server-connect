@@ -314,19 +314,25 @@ func exchangeSmartTUNHealth(ctx context.Context, connection net.Conn, probe smar
 		}
 		reply = reply[:count]
 	}
-	if ctx.Err() != nil {
+	// A full buffer can be the limiter's synthetic EOF or a truncated
+	// datagram, not a complete reply. Preserve critical source evidence only
+	// after a successful bounded read, even if cancellation follows it.
+	classification := "invalid_response"
+	if len(reply) <= 256 {
+		if probe.protocol == "dns" {
+			if bytes.Equal(reply, smartTUNHealthDNSResponse(request, true)) {
+				classification = "pass"
+			} else if bytes.Equal(reply, smartTUNHealthDNSResponse(request, false)) {
+				classification = "path_mismatch"
+			}
+		} else {
+			classification = smartTUNHealthReply(reply, probe, nonce)
+		}
+	}
+	if ctx.Err() != nil && classification != "path_mismatch" {
 		return "canceled"
 	}
-	if probe.protocol == "dns" {
-		if bytes.Equal(reply, smartTUNHealthDNSResponse(request, true)) {
-			return "pass"
-		}
-		if bytes.Equal(reply, smartTUNHealthDNSResponse(request, false)) {
-			return "path_mismatch"
-		}
-		return "invalid_response"
-	}
-	return smartTUNHealthReply(reply, probe, nonce)
+	return classification
 }
 
 func smartTUNHealthReply(reply []byte, probe smartTUNHealthProbe, nonce []byte) string {

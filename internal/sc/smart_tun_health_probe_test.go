@@ -3,6 +3,7 @@ package sc
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
 	"io"
@@ -367,4 +368,195 @@ func runSmartTUNHealthTestProbes(ctx context.Context, dual bool, probe func(cont
 		}
 		return result
 	})
+}
+
+// Cancel only after the real connection has completed its final read. Stream
+// replies require peer EOF; the UDP/DNS exchange consumes one datagram read.
+// The optional read error is a negative control, never completed evidence.
+type healthCancelAfterReadConn struct {
+	net.Conn
+	cancel    context.CancelFunc
+	datagram  bool
+	readError error
+	completed bool
+}
+
+func (c *healthCancelAfterReadConn) Read(p []byte) (int, error) {
+	n, err := c.Conn.Read(p)
+	if !c.completed && (err == io.EOF || c.datagram && n > 0 && err == nil) {
+		c.completed = true
+		c.cancel()
+		if c.readError != nil {
+			err = c.readError
+		}
+	}
+	return n, err
+}
+
+func healthOrdinaryReadCompletion(t *testing.T, parent context.Context, protocol string,
+	respond func([]byte, []byte) []byte, readError error) SmartTUNHTTPSResult {
+	t.Helper()
+	client, server := net.Pipe()
+	defer server.Close()
+	ctx, cancel := context.WithTimeout(parent, time.Second)
+	defer cancel()
+	nonce := make([]byte, 16)
+	if _, err := rand.Read(nonce); err != nil {
+		t.Fatal(err)
+	}
+	requestSize := len("SCHEALTH1 ") + 33
+	if protocol == "dns" {
+		requestSize = len(smartTUNHealthDNSQuery(nonce))
+	}
+	done := make(chan error, 1)
+	go func() {
+		defer server.Close()
+		_ = server.SetDeadline(time.Now().Add(time.Second))
+		request := make([]byte, requestSize)
+		if _, err := io.ReadFull(server, request); err != nil {
+			done <- err
+			return
+		}
+		_, err := server.Write(respond(request, nonce))
+		done <- err
+	}()
+	connection := &healthCancelAfterReadConn{Conn: client, cancel: cancel, datagram: protocol != "tcp", readError: readError}
+	result := smartTUNHealthExchangeWithDeadline(ctx, connection,
+		smartTUNHealthProbe{protocol: protocol, expectedSource: "8.8.8.8"}, nonce)
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("ordinary completed-read peer did not join")
+	}
+	if !connection.completed || ctx.Err() != context.Canceled || parent.Err() != nil {
+		t.Fatalf("cancellation did not occur at the child read boundary: completed=%v child=%v parent=%v", connection.completed, ctx.Err(), parent.Err())
+	}
+	return result
+}
+
+func healthOrdinaryBoundaryReply(protocol, variant string, request, nonce []byte) []byte {
+	if protocol == "dns" {
+		reply := smartTUNHealthDNSResponse(request, variant == "positive")
+		switch variant {
+		case "incomplete":
+			return reply[:len(reply)-1]
+		case "malformed":
+			reply[3] ^= 1
+		case "oversized":
+			return append(reply, bytes.Repeat([]byte{0}, 257-len(reply))...)
+		}
+		return reply
+	}
+	source := "10.254.72.1"
+	if variant == "positive" {
+		source = "8.8.8.8"
+	}
+	reply := []byte("SCHEALTH1 " + hex.EncodeToString(nonce) + " " + source + "\n")
+	switch variant {
+	case "incomplete":
+		return reply[:len(reply)-1]
+	case "malformed":
+		reply[10] ^= 1
+	case "oversized":
+		// ParseAddr accepts IPv6 zones; this exact-looking source must still
+		// fail the wire bound instead of becoming a critical path witness.
+		prefix := "SCHEALTH1 " + hex.EncodeToString(nonce) + " fe80::1%"
+		return []byte(prefix + strings.Repeat("z", 256-len(prefix)) + "\n")
+	}
+	return reply
+}
+
+func TestSmartTUNHealthReadCompletionCancellation(t *testing.T) {
+	for _, protocol := range []string{"tcp", "udp", "dns"} {
+		for _, variant := range []string{"mismatch", "positive", "incomplete", "malformed", "read-error"} {
+			t.Run(protocol+"/"+variant, func(t *testing.T) {
+				var readError error
+				if variant == "read-error" {
+					readError = io.ErrNoProgress
+				}
+				result := healthOrdinaryReadCompletion(t, context.Background(), protocol,
+					func(request, nonce []byte) []byte {
+						return healthOrdinaryBoundaryReply(protocol, variant, request, nonce)
+					}, readError)
+				want := "canceled"
+				if variant == "mismatch" {
+					want = "path_mismatch"
+				}
+				if result.Result != want {
+					t.Fatalf("completed-read cancellation classification: got %+v want %s", result, want)
+				}
+			})
+		}
+		t.Run(protocol+"/oversized-critical-shaped", func(t *testing.T) {
+			// TCP stops at its read bound before peer EOF. Datagram protocols
+			// cancel after the bounded read, so neither can acquire proof.
+			if protocol == "tcp" {
+				got := healthTestExchange(t, protocol, func(request, nonce []byte) []byte {
+					return healthOrdinaryBoundaryReply(protocol, "oversized", request, nonce)
+				})
+				if got != "invalid_response" {
+					t.Fatalf("oversized source text became evidence: %s", got)
+				}
+				return
+			}
+			got := healthOrdinaryReadCompletion(t, context.Background(), protocol,
+				func(request, nonce []byte) []byte {
+					return healthOrdinaryBoundaryReply(protocol, "oversized", request, nonce)
+				}, nil)
+			if got.Result == "pass" || got.Result == "path_mismatch" {
+				t.Fatalf("oversized canceled datagram became evidence: %+v", got)
+			}
+		})
+	}
+}
+
+func TestSmartTUNHealthReadCompletionMismatchStopsSupervision(t *testing.T) {
+	for _, protocol := range []string{"https", "tcp", "udp", "dns"} {
+		t.Run(protocol, func(t *testing.T) {
+			parent, cancel := context.WithTimeout(context.Background(), smartTUNHealthRoundTimeout)
+			defer cancel()
+			var observed SmartTUNHTTPSResult
+			if protocol == "https" {
+				observed, _ = healthTLSReadCompletion(t, parent, func(body string) []byte {
+					return healthHTTPResponse(200, body)
+				}, false, nil)
+			} else {
+				observed = healthOrdinaryReadCompletion(t, parent, protocol,
+					func(request, nonce []byte) []byte {
+						return healthOrdinaryBoundaryReply(protocol, "mismatch", request, nonce)
+					}, nil)
+			}
+			evidence := runSmartTUNHealthProbes(parent, true, func(_ context.Context, probe smartTUNHealthProbe) SmartTUNHTTPSResult {
+				if probe.target == 0 && probe.protocol == protocol {
+					return observed
+				}
+				if probe.protocol == "https" {
+					return SmartTUNHTTPSResult{Result: "pass", StatusCode: 200}
+				}
+				return SmartTUNHTTPSResult{Result: "pass"}
+			})
+			if parent.Err() != nil || evidence.VPNHealthy || evidence.Reason != "vpn_path_mismatch" ||
+				!evidence.UnderlayHealthy || !evidence.IPv4TCP || !evidence.IPv4UDP || !evidence.IPv4DNS || !evidence.IPv4HTTPS ||
+				evidence.FailedTargets != 1 || !validSmartTUNHTTPSEvidence(evidence, true) {
+				t.Fatalf("live alternate masked real completed mismatch: observed=%+v evidence=%+v parent=%v", observed, evidence, parent.Err())
+			}
+			r := supervisedExample(t, true)
+			r.Supervised.Options.FailureThreshold = 3
+			next, stop, reconnect := advanceSupervisedHealth(r, evidence, 106000)
+			if stop != "vpn_path_mismatch" || reconnect || next.Supervised.State != "degraded" || next.Supervised.Reason != stop ||
+				next.Supervised.Evidence != evidence {
+				t.Fatalf("classified critical reply did not request existing stop: stop=%s reconnect=%v supervision=%+v", stop, reconnect, next.Supervised)
+			}
+			unit := smartTUNTrialUnitObservation{activeState: "active", mainPID: 100, result: "success"}
+			if got := supervisedRuntimeReason(next, unit, true, next.BootID, 106001); got != stop {
+				t.Fatalf("independent recovery lost classified critical stop: %s", got)
+			}
+			if err := validateSmartTUNTrial(next); err != nil {
+				t.Fatalf("critical measured record invalid: %v", err)
+			}
+		})
+	}
 }

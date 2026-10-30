@@ -112,6 +112,17 @@ func exchangeSmartTUNHTTPSHealth(ctx context.Context, connection net.Conn, probe
 		return SmartTUNHTTPSResult{Result: "http_oversized_response", StatusCode: status}
 	}
 	reply, err := io.ReadAll(io.LimitReader(reader, smartTUNHealthHTTPBodyLimit+1))
+	// Completed critical evidence survives cancellation after the final read.
+	// Only an error-free, bounded and fully framed reply may establish it;
+	// canceled positive replies still cannot authorize healthy supervision.
+	classification := "invalid_response"
+	if err == nil && len(reply) <= smartTUNHealthHTTPBodyLimit &&
+		(response.ContentLength < 0 || int64(len(reply)) == response.ContentLength) {
+		classification = smartTUNHealthReply(reply, probe, nonce)
+		if classification == "path_mismatch" {
+			return SmartTUNHTTPSResult{Result: classification, StatusCode: status}
+		}
+	}
 	if ctx.Err() != nil {
 		return SmartTUNHTTPSResult{Result: "canceled", StatusCode: status}
 	}
@@ -129,7 +140,7 @@ func exchangeSmartTUNHTTPSHealth(ctx context.Context, connection net.Conn, probe
 			return SmartTUNHTTPSResult{Result: "http_invalid_response", StatusCode: status}
 		}
 	}
-	return SmartTUNHTTPSResult{Result: smartTUNHealthReply(reply, probe, nonce), StatusCode: status}
+	return SmartTUNHTTPSResult{Result: classification, StatusCode: status}
 }
 
 func smartTUNHealthHTTPReadFailure(ctx context.Context, err error, status int) SmartTUNHTTPSResult {
