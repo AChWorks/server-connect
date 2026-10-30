@@ -307,19 +307,31 @@ func run(j bool, m *sc.Manager, args []string) int {
 		tunnel := opts.String("tunnel-if", "", "disposable TUN name")
 		underlay := opts.String("underlay-if", "", "disposable peer underlay")
 		tunnelIPv4 := opts.String("tunnel-ipv4", "", "private guest TUN CIDR")
+		tunnelIPv6 := opts.String("tunnel-ipv6", "", "optional synthetic private IPv6 TUN CIDR")
+		ipv6VPN := opts.String("ipv6-vpn-cidr", "", "synthetic IPv6 VPN exception")
+		ipv6Direct := opts.String("ipv6-direct-cidr", "", "synthetic IPv6 Direct exception")
 		peer := opts.String("management-peer", "", "synthetic guest management peer")
 		deadline := opts.Int("deadline-seconds", 600, "independent mandatory rollback deadline")
 		qaKill := opts.String("qa-kill-at", "", "isolated guest SIGKILL after-journal or after-start")
-		var domestic, protected destinationFlags
+		var domestic, protected, domesticIPv6 destinationFlags
 		opts.Var(&domestic, "domestic-cidr", "synthetic domestic CIDR; repeat")
 		opts.Var(&protected, "protected-cidr", "explicit guest control CIDR; repeat")
+		opts.Var(&domesticIPv6, "domestic-ipv6-cidr", "synthetic IPv6 domestic CIDR; repeat")
 		if e := opts.Parse(args); e != nil || len(opts.Args()) != 0 {
 			return output(j, nil, sc.Fault("invalid_arguments", "invalid guarded TUN trial options"))
 		}
+		var ipv6Exceptions []sc.SmartTUNCIDRException
+		if *ipv6VPN != "" {
+			ipv6Exceptions = append(ipv6Exceptions, sc.SmartTUNCIDRException{CIDR: *ipv6VPN, Via: "vpn"})
+		}
+		if *ipv6Direct != "" {
+			ipv6Exceptions = append(ipv6Exceptions, sc.SmartTUNCIDRException{CIDR: *ipv6Direct, Via: "direct"})
+		}
 		result, err := m.BeginSmartTUNTrial(sc.SmartTUNCandidateOptions{
 			TunnelInterface: *tunnel, UnderlayInterface: *underlay,
-			TunnelIPv4: *tunnelIPv4, DomesticCIDRs: domestic,
-			ProtectedCIDRs: protected,
+			TunnelIPv4: *tunnelIPv4, TunnelIPv6: *tunnelIPv6,
+			DomesticCIDRs: domestic, ProtectedCIDRs: protected,
+			DomesticIPv6CIDRs: domesticIPv6, IPv6Exceptions: ipv6Exceptions,
 		}, *peer, *deadline, *qaKill)
 		return output(j, result, err)
 	case "smart-tun-trial-status":
@@ -580,6 +592,8 @@ Commands:
   smart-tun-trial-apply --tunnel-if sctunqa0 --underlay-if scqaedge0
                         --tunnel-ipv4 172.31.99.1/30 --management-peer 10.254.72.2
                         --domestic-cidr 5.22.0.10/32 --protected-cidr 10.254.72.0/30
+                        [--tunnel-ipv6 fd73:99::1/64 --domestic-ipv6-cidr 2001:db8:5::/64
+                         --ipv6-vpn-cidr 2001:db8:5::10/128 --ipv6-direct-cidr 2001:db8:8::9/128]
                         [--deadline-seconds 600]
                               DISPOSABLE DOCKER GUEST ONLY: pending genuine sing-box
                               TUN with mandatory independent timeout recovery.

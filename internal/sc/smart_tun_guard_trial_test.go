@@ -258,6 +258,72 @@ func TestSmartTUNClearCredentialConflictBeforeGuardDisarm(t *testing.T) {
 	}
 }
 
+// The installed product API is narrower than the offline compiler. It only
+// admits the exact IPv4 QA fixture, or its one explicit synthetic IPv6
+// extension; no untrusted public prefix or arbitrary host can be applied.
+func TestSmartTUNTrialFixtureScopeRejectsPartialAndBroaderIPv6(t *testing.T) {
+	base := func() SmartTUNCandidateOptions {
+		return SmartTUNCandidateOptions{
+			TunnelInterface: "sctunqa0", UnderlayInterface: "scqaedge0",
+			TunnelIPv4: "172.31.99.1/30", DomesticCIDRs: []string{"5.22.0.10/32"},
+			ProtectedCIDRs: []string{"10.254.72.0/30"},
+		}
+	}
+	dual := func() SmartTUNCandidateOptions {
+		o := base()
+		o.TunnelIPv6 = "fd73:99::1/64"
+		o.DomesticIPv6CIDRs = []string{"2001:db8:5::/64"}
+		o.IPv6Exceptions = []SmartTUNCIDRException{
+			{CIDR: "2001:db8:5::10/128", Via: "vpn"},
+			{CIDR: "2001:db8:8::9/128", Via: "direct"},
+		}
+		return o
+	}
+	if !smartTUNTrialFixturePolicySupported(base()) || !smartTUNTrialFixturePolicySupported(dual()) {
+		t.Fatal("exact disposable IPv4 / dual-stack fixtures were refused")
+	}
+	for _, tc := range []struct {
+		name string
+		edit func(*SmartTUNCandidateOptions)
+	}{
+		{"missing IPv6 TUN", func(o *SmartTUNCandidateOptions) { o.TunnelIPv6 = "" }},
+		{"missing IPv6 domestic", func(o *SmartTUNCandidateOptions) { o.DomesticIPv6CIDRs = nil }},
+		{"extra IPv6 domestic", func(o *SmartTUNCandidateOptions) {
+			o.DomesticIPv6CIDRs = append(o.DomesticIPv6CIDRs, "2001:db8:9::/64")
+		}},
+		{"wrong IPv6 TUN", func(o *SmartTUNCandidateOptions) { o.TunnelIPv6 = "fd73:98::1/64" }},
+		{"public IPv6 TUN", func(o *SmartTUNCandidateOptions) { o.TunnelIPv6 = "2001:db8:ffff::1/64" }},
+		{"missing VPN override", func(o *SmartTUNCandidateOptions) { o.IPv6Exceptions = o.IPv6Exceptions[1:] }},
+		{"missing Direct override", func(o *SmartTUNCandidateOptions) { o.IPv6Exceptions = o.IPv6Exceptions[:1] }},
+		{"wrong VPN override", func(o *SmartTUNCandidateOptions) { o.IPv6Exceptions[0].CIDR = "2001:db8:5::11/128" }},
+		{"swapped override precedence", func(o *SmartTUNCandidateOptions) {
+			o.IPv6Exceptions[0], o.IPv6Exceptions[1] = o.IPv6Exceptions[1], o.IPv6Exceptions[0]
+		}},
+		{"protected IPv6 stranger", func(o *SmartTUNCandidateOptions) { o.ProtectedIPv6CIDRs = []string{"2001:db8:ffff::42/128"} }},
+		{"foreign IPv4 exception", func(o *SmartTUNCandidateOptions) {
+			o.Exceptions = []SmartTUNCIDRException{{CIDR: "8.8.8.8/32", Via: "direct"}}
+		}},
+		{"extra IPv4 Direct", func(o *SmartTUNCandidateOptions) { o.DomesticCIDRs = append(o.DomesticCIDRs, "8.8.8.8/32") }},
+		{"different underlay", func(o *SmartTUNCandidateOptions) { o.UnderlayInterface = "enp1s0" }},
+		{"domain sniff", func(o *SmartTUNCandidateOptions) {
+			o.DomainExceptions = []SmartTUNDomainException{{Domain: "example.com", Via: "vpn"}}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			o := dual()
+			tc.edit(&o)
+			if smartTUNTrialFixturePolicySupported(o) {
+				t.Fatal("broadened real product TUN trial fixture")
+			}
+		})
+	}
+	o := base()
+	o.TunnelIPv6 = "fd73:99::1/64"
+	if smartTUNTrialFixturePolicySupported(o) {
+		t.Fatal("partially specified IPv6 fixture accepted")
+	}
+}
+
 func TestSmartTUNTrialRefusesNoninstalledContextBeforeAnySystemctl(t *testing.T) {
 	m := New(t.TempDir(), DefaultCore, DefaultPort)
 	_, err := m.BeginSmartTUNTrial(SmartTUNCandidateOptions{}, "", 600, "")

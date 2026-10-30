@@ -29,7 +29,10 @@ The installed experimental v4 journal deliberately has only
 `trial_pending` (revision 1) and `trial_recovered` (revision 2), **not**
 `ACTIVE_VERIFIED`. It binds the operation, profile, synthetic endpoint,
 native baseline digest, sing-box configuration digest, boot ID and monotonic
-deadline. It records the journal **before** the credential, then durably records a
+deadline. One opt-in synthetic dual-stack fixture uses the same v4 journal
+and native IPv4/IPv6 baseline: the selected policy's exact bytes are bound by
+its configuration digest; the IPv6 addresses/rules do not grant arbitrary
+production routing authority. It records the journal **before** the credential, then durably records a
 `core_start_attempted` transition before invoking the actual pinned sing-box
 Linux TUN in a separate static service. A missing credential from a journal-first
 crash is distinguishable from a vanished credential after start intent, even

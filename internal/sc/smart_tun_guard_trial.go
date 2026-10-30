@@ -414,6 +414,29 @@ func (m *Manager) admitSmartTUNTrialLocked(store *activationJournalDir, opts Sma
 		policy: policy, baseline: baseline}, nil
 }
 
+// Only two exact, pre-tested disconnected fixtures are admitted. The
+// candidate compiler supports broader policy construction, but a real
+// privileged product trial must not inherit that authority. In particular,
+// dual-stack is opt-in and cannot grant arbitrary public IPv6 Direct routes.
+func smartTUNTrialFixturePolicySupported(opts SmartTUNCandidateOptions) bool {
+	if len(opts.DomesticCIDRs) != 1 || opts.DomesticCIDRs[0] != "5.22.0.10/32" ||
+		len(opts.ProtectedCIDRs) != 1 || opts.ProtectedCIDRs[0] != "10.254.72.0/30" ||
+		opts.TunnelIPv4 != "172.31.99.1/30" ||
+		len(opts.Exceptions) != 0 || len(opts.DomainExceptions) != 0 ||
+		opts.TunnelInterface != "sctunqa0" || opts.UnderlayInterface != "scqaedge0" ||
+		len(opts.ProtectedIPv6CIDRs) != 0 {
+		return false
+	}
+	if opts.TunnelIPv6 == "" {
+		return len(opts.DomesticIPv6CIDRs) == 0 && len(opts.IPv6Exceptions) == 0
+	}
+	return opts.TunnelIPv6 == "fd73:99::1/64" &&
+		len(opts.DomesticIPv6CIDRs) == 1 && opts.DomesticIPv6CIDRs[0] == "2001:db8:5::/64" &&
+		len(opts.IPv6Exceptions) == 2 &&
+		opts.IPv6Exceptions[0] == (SmartTUNCIDRException{CIDR: "2001:db8:5::10/128", Via: "vpn"}) &&
+		opts.IPv6Exceptions[1] == (SmartTUNCIDRException{CIDR: "2001:db8:8::9/128", Via: "direct"})
+}
+
 func (m *Manager) BeginSmartTUNTrial(opts SmartTUNCandidateOptions, managementPeer string, deadlineSeconds int, qaKillPoint string) (SmartTUNTrialReceipt, error) {
 	if qaKillPoint != "" && qaKillPoint != "after-journal" && qaKillPoint != "after-start" {
 		return SmartTUNTrialReceipt{}, Fault("invalid_arguments", "unsupported disposable TUN SIGKILL boundary")
@@ -422,13 +445,8 @@ func (m *Manager) BeginSmartTUNTrial(opts SmartTUNCandidateOptions, managementPe
 		deadlineSeconds < 4 || deadlineSeconds > 600 {
 		return SmartTUNTrialReceipt{}, Fault("trial_unsupported", "installed paths and deadline 4-600s required")
 	}
-	if len(opts.DomesticCIDRs) != 1 || opts.DomesticCIDRs[0] != "5.22.0.10/32" ||
-		len(opts.ProtectedCIDRs) != 1 || opts.ProtectedCIDRs[0] != "10.254.72.0/30" ||
-		opts.TunnelIPv4 != "172.31.99.1/30" || opts.TunnelIPv6 != "" ||
-		len(opts.Exceptions) != 0 || len(opts.IPv6Exceptions) != 0 || len(opts.DomainExceptions) != 0 ||
-		len(opts.ProtectedIPv6CIDRs) != 0 || len(opts.DomesticIPv6CIDRs) != 0 ||
-		opts.TunnelInterface != "sctunqa0" || opts.UnderlayInterface != "scqaedge0" {
-		return SmartTUNTrialReceipt{}, Fault("trial_unsupported", "this disposable trial supports IPv4 candidate policy only")
+	if !smartTUNTrialFixturePolicySupported(opts) {
+		return SmartTUNTrialReceipt{}, Fault("trial_unsupported", "only the exact disposable IPv4 or dual-stack TUN fixtures are supported")
 	}
 	if err := EnsureCore(m.Core); err != nil {
 		return SmartTUNTrialReceipt{}, err

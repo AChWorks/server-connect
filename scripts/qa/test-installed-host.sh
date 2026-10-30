@@ -727,6 +727,21 @@ for marker in \
 done
 assert_tun_native_cleanup installed-product-tun-deadline-and-sigkill
 
+# Separate opt-in product-owned IPv4+IPv6 v4 trial: distinct installed
+# service and independent guard, with real selected/outage TCP/UDP wires.
+echo 'REAL_TUN_LAB_STAGE=installed-product-guarded-dualstack-pending'
+product_v6_log="$scratch/real-tun-product-guarded-ipv6.log"
+docker exec -e SC_QA_TUN_PRODUCT_LAB=yes -e SC_QA_TUN_IPV6=yes \
+  "$container" /bin/sh /root/qa-host-tun-path.sh | tee "$product_v6_log"
+for marker in \
+  'PRODUCT_TUN_IPV6_UNSUPPORTED_INPUT_REJECTED=PASS' \
+  'PRODUCT_TUN_IPV6_REAL_SELECTED=PASS' \
+  'PRODUCT_TUN_IPV6_OUTAGE_FAIL_CLOSED=PASS' \
+  'PRODUCT_TUN_IPV6_GUARD_ROLLBACK=PASS'; do
+  grep -Fx "$marker" "$product_v6_log" >/dev/null
+done
+assert_tun_native_cleanup installed-product-guarded-dualstack
+
 # Real sing-box faults must preserve native Direct HTTP and reject the
 # hosting-outage PASS; the guest must prove COMPLETE cleanup independently
 # of its intentional test exit 1, and the outer host independently verifies.
