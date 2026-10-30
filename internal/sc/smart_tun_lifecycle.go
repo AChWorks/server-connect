@@ -125,7 +125,7 @@ func finalizeSmartTUNTrialLocked(store *activationJournalDir, identity activatio
 		if err := writeSmartTUNTrialLocked(store, record, &identity); err != nil {
 			return SmartTUNTrialReceipt{}, err
 		}
-		_, identity, err = loadSmartTUNTrialLocked(store)
+		identity, err = reloadSmartTUNTrialLocked(store, record)
 		if err != nil {
 			return SmartTUNTrialReceipt{}, err
 		}
@@ -209,7 +209,7 @@ func (m *Manager) DisconnectSmartTUNTrial(operationID string, revision uint64, q
 			if err := writeSmartTUNTrialLocked(store, record, &identity); err != nil {
 				return err
 			}
-			record, identity, err = loadSmartTUNTrialLocked(store)
+			identity, err = reloadSmartTUNTrialLocked(store, record)
 			if err != nil {
 				return err
 			}
@@ -217,13 +217,15 @@ func (m *Manager) DisconnectSmartTUNTrial(operationID string, revision uint64, q
 		if err := trialQAKillAt("after-stop-request", qaKillPoint); err != nil {
 			return err
 		}
-		if _, err := recoverSmartTUNTrialLocked(store, identity, record); err != nil {
+		recovered, err := recoverSmartTUNTrialLocked(store, identity, record)
+		if err != nil {
 			return err
 		}
 		if err := trialQAKillAt("after-stop", qaKillPoint); err != nil {
 			return err
 		}
-		record, identity, err = loadSmartTUNTrialLocked(store)
+		record.Phase, record.Revision = recovered.Phase, recovered.Revision
+		identity, err = reloadSmartTUNTrialLocked(store, record)
 		if err != nil {
 			return err
 		}

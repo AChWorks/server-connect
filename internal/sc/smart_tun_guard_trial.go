@@ -145,6 +145,24 @@ func loadSmartTUNTrialLocked(store *activationJournalDir) (smartTUNTrialJournal,
 	return record, identity, err
 }
 
+// Atomic journal writes legitimately change the inode. Refresh that identity
+// only if the ENTIRE expected operation still matches, not merely its schema
+// or operation ID. Otherwise a valid substituted record could be adopted and
+// later overwritten/removed using another operation's recovery evidence.
+func reloadSmartTUNTrialLocked(store *activationJournalDir, expected smartTUNTrialJournal) (activationJournalFileIdentity, error) {
+	record, identity, err := loadSmartTUNTrialLocked(store)
+	if errors.Is(err, os.ErrNotExist) {
+		return activationJournalFileIdentity{}, Fault("activation_journal_conflict", "expected TUN operation disappeared during transition")
+	}
+	if err != nil {
+		return activationJournalFileIdentity{}, err
+	}
+	if record != expected {
+		return activationJournalFileIdentity{}, Fault("activation_journal_conflict", "TUN operation contents changed during transition")
+	}
+	return identity, nil
+}
+
 func writeSmartTUNTrialLocked(store *activationJournalDir, record smartTUNTrialJournal, old *activationJournalFileIdentity) error {
 	if err := validateSmartTUNTrial(record); err != nil {
 		return err
@@ -562,9 +580,9 @@ func (m *Manager) beginSmartTUNTrial(opts SmartTUNCandidateOptions, managementPe
 		// a legitimate precredential crash, even on the NEXT guard tick
 		// after the service has been stopped. No sensitive policy is stored
 		// in this journal: only immutable operation and hash evidence.
-		_, identity, err := store.readJournal()
+		identity, err := reloadSmartTUNTrialLocked(store, record)
 		if err != nil {
-			return Fault("trial_pending_recovery", "cannot reidentify persisted TUN journal before core start")
+			return err
 		}
 		record.CoreStartAttempted = true
 		if err := writeSmartTUNTrialLocked(store, record, &identity); err != nil {
@@ -642,7 +660,8 @@ func (m *Manager) tryRecoverSmartTUNTrial() (TrialReceipt, bool, error) {
 		// deadline recovery retains its historical recovered receipt.
 		if result.Phase == "trial_cleanup_pending" ||
 			(result.Phase == "trial_recovered" && result.Revision == 3) {
-			record, identity, err = loadSmartTUNTrialLocked(store)
+			record.Phase, record.Revision = result.Phase, result.Revision
+			identity, err = reloadSmartTUNTrialLocked(store, record)
 			if err != nil {
 				return err
 			}

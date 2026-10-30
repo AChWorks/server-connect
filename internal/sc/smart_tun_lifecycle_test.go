@@ -58,6 +58,84 @@ func TestSmartTUNDurableStopAndCleanupPhases(t *testing.T) {
 	}
 }
 
+func TestSmartTUNTransitionReloadRejectsValidJournalSubstitution(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		change func(*smartTUNTrialJournal)
+	}{
+		{"other-operation", func(r *smartTUNTrialJournal) { r.OperationID = strings.Repeat("b", 32) }},
+		{"same-operation-baseline", func(r *smartTUNTrialJournal) { r.BaselineSHA256 = strings.Repeat("3", 64) }},
+		{"same-operation-profile", func(r *smartTUNTrialJournal) { r.ProfileID = "1111111111111111" }},
+		{"same-operation-start-intent", func(r *smartTUNTrialJournal) { r.CoreStartAttempted = false }},
+		{"same-operation-phase", func(r *smartTUNTrialJournal) { r.Phase, r.Revision = "trial_recovered", 3 }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := privateJournalTempDir(t)
+			m := New(dir, DefaultCore, DefaultPort)
+			err := m.withActivationJournalLock(syscall.Fsync, func(store *activationJournalDir) error {
+				expected := trialV4Example()
+				expected.CoreStartAttempted = true
+				expected.Phase, expected.Revision = "trial_recovered", 3
+				credential := []byte("exact-operation-credential")
+				expected.ConfigSHA256 = sha256Hex(credential)
+				if err := store.writeSmartTUNFile(smartTUNTrialConfigFile, credential, nil); err != nil {
+					return err
+				}
+				if err := writeSmartTUNTrialLocked(store, expected, nil); err != nil {
+					return err
+				}
+				initialID, err := reloadSmartTUNTrialLocked(store, expected)
+				if err != nil {
+					return err
+				}
+				// A legitimate durable transition publishes a new inode. The
+				// check must accept the exact new record, not pin the old inode.
+				expected.Phase, expected.Revision = "trial_cleanup_pending", 4
+				if err := writeSmartTUNTrialLocked(store, expected, &initialID); err != nil {
+					return err
+				}
+				transitionID, err := reloadSmartTUNTrialLocked(store, expected)
+				if err != nil || transitionID == initialID {
+					t.Fatalf("exact atomic transition did not receive its new identity: %v", err)
+				}
+				foreign := expected
+				tc.change(&foreign)
+				if err := validateSmartTUNTrial(foreign); err != nil {
+					t.Fatalf("substitution fixture must remain valid: %v", err)
+				}
+				foreignBytes, _ := json.Marshal(foreign)
+				foreignPath := filepath.Join(dir, "foreign-journal")
+				if err := os.WriteFile(foreignPath, foreignBytes, 0600); err != nil {
+					return err
+				}
+				if err := os.Rename(foreignPath, filepath.Join(dir, activationJournalFilename)); err != nil {
+					return err
+				}
+				foreignData, foreignID, err := store.readJournal()
+				if err != nil {
+					return err
+				}
+				adopted, err := reloadSmartTUNTrialLocked(store, expected)
+				if ErrorCode(err) != "activation_journal_conflict" || adopted != (activationJournalFileIdentity{}) {
+					t.Fatalf("valid substituted journal identity was adopted: %+v %v", adopted, err)
+				}
+				after, afterID, err := store.readJournal()
+				if err != nil || afterID != foreignID || !bytes.Equal(after, foreignData) {
+					t.Fatalf("substituted journal evidence was changed: %v", err)
+				}
+				secret, _, err := store.readSmartTUNFile(smartTUNTrialConfigFile)
+				if err != nil || !bytes.Equal(secret, credential) {
+					t.Fatalf("failed reload discarded credential evidence: %v", err)
+				}
+				return nil
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
 func TestSavedSmartTUNPolicyStrictScopeAndNoSecrets(t *testing.T) {
 	policy := smartTUNSavedPolicy{Version: 1, ManagementPeerIP: "10.254.72.2", Options: savedSmartTUNFixture()}
 	raw, _ := json.Marshal(policy)
