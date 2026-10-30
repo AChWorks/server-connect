@@ -4,12 +4,14 @@
 import argparse
 import contextlib
 import copy
+import hashlib
 import importlib.util
 import io
 import itertools
 import json
 import os
 from pathlib import Path
+import stat
 import subprocess
 import sys
 import tarfile
@@ -1943,6 +1945,300 @@ class LegacyFixtureTests(unittest.TestCase):
         self.assertFalse(list(self.root.glob("*.scqa-legacy-*")))
 
 
+class TLSFixtureStagingTests(unittest.TestCase):
+    """Execute the embedded byte stager/cleanup with ordinary temporary files."""
+
+    names = {"qa-root.pem", "qa-server.pem", "qa-server-key.pem", "qa-wrong-name.pem", "qa-wrong-trust.pem",
+             "qa-wrong-root.pem", "qa-expired.pem", "qa-client-auth-only.pem"}
+
+    @classmethod
+    def setUpClass(cls):
+        source = Path(__file__).with_name("test-installed-host.sh").read_text()
+        for marker, name in (("PYTLSINPUT", "prepare_tls_fixture"), ("PYTLSSTAGE", "stage_tls_fixture"),
+                             ("PYTLSCLEANUP", "cleanup_tls_fixture")):
+            script = source.split("<<'" + marker + "'\n", 1)[1].split("\n" + marker, 1)[0]
+            scope = {"__name__": "tls_fixture_regression"}
+            exec(compile(script, marker, "exec"), scope)
+            setattr(cls, name, staticmethod(scope[name]))
+
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.base = Path(temporary.name)
+        self.serial = itertools.count()
+        self.source = self.new_source()
+        self.packet, self.manifest = self.prepare_tls_fixture(self.source)
+
+    def new_source(self):
+        source = self.base / ("source-" + str(next(self.serial)))
+        source.mkdir()
+        source.chmod(0o777)
+        for name in sorted(self.names):
+            (source / name).write_bytes(("fixture bytes: " + name + "\n").encode("ascii"))
+            (source / name).chmod(0o666)
+        return source
+
+    def new_guest(self):
+        parent = self.base / ("guest-" + str(next(self.serial)))
+        parent.mkdir(mode=0o700)
+        return parent, parent / "qa-smart-health-tls", parent / "qa-smart-health-tls-receipt.json"
+
+    @staticmethod
+    def metadata(path):
+        info = path.lstat()
+        return (info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_gid,
+                info.st_nlink, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+
+    def test_writable_source_metadata_creates_private_owned_files_and_exact_cleanup(self):
+        parent, root, receipt = self.new_guest()
+        self.assertEqual(self.prepare_tls_fixture(self.source), (self.packet, self.manifest))
+        self.stage_tls_fixture(parent, self.packet)
+        self.assertEqual(set(path.name for path in root.iterdir()), self.names)
+        self.assertEqual(stat.S_IMODE(root.stat().st_mode), 0o700)
+        self.assertEqual(stat.S_IMODE(receipt.stat().st_mode), 0o600)
+        for name in sorted(self.names):
+            path = root / name
+            self.assertEqual(path.read_bytes(), (self.source / name).read_bytes())
+            self.assertEqual((stat.S_IMODE(path.stat().st_mode), path.stat().st_uid, path.stat().st_nlink),
+                             (0o600, os.geteuid(), 1))
+            self.assertIn((hashlib.sha256(path.read_bytes()).hexdigest() + "  ./" + name + "\n").encode("ascii"), self.manifest)
+        self.cleanup_tls_fixture(parent)
+        self.assertEqual(list(parent.iterdir()), [])
+
+    def test_wrapper_keeps_initial_manifest_check_and_enters_bounded_cleanup_directly(self):
+        source = Path(__file__).with_name("test-installed-host.sh").read_text()
+        manifest_check = 'docker exec -i -w /root/qa-smart-health-tls "$container" sha256sum -c - <"$tls_fixture_manifest"'
+        self.assertEqual(source.count(manifest_check), 1)
+        self.assertGreater(source.index(manifest_check), source.index("\nPYTLSSTAGE\n"))
+        cleanup = source.split("# Remove exactly the QA helpers copied for the completed TUN trials. This\n", 1)[1]
+        entry = cleanup.split("<<'PYTLSCLEANUP'", 1)[0]
+        commands = [line for line in entry.splitlines() if line and not line.startswith("#")]
+        self.assertEqual(commands, ['docker exec "$container" /usr/bin/python3 -I -B -c "$(cat '])
+        self.assertNotIn("sha256sum", entry)
+
+    def test_source_rejects_extra_missing_symlink_hardlink_fifo_and_oversized_objects(self):
+        for fault in ("extra", "missing", "symlink", "hardlink", "fifo", "oversized", "empty", "directory-symlink"):
+            source = self.new_source()
+            victim = source / sorted(self.names)[0]
+            outside = source.with_name(source.name + "-outside")
+            outside.write_bytes(b"unrelated source")
+            with self.subTest(fault=fault):
+                if fault == "extra":
+                    (source / "unexpected.pem").write_bytes(b"extra")
+                elif fault == "directory-symlink":
+                    link = source.with_name(source.name + "-link")
+                    link.symlink_to(source, target_is_directory=True)
+                    source = link
+                else:
+                    victim.unlink()
+                    if fault == "symlink":
+                        victim.symlink_to(outside)
+                    elif fault == "hardlink":
+                        os.link(outside, victim)
+                    elif fault == "fifo":
+                        os.mkfifo(victim)
+                    elif fault in ("oversized", "empty"):
+                        victim.write_bytes(b"x" * (4097 if fault == "oversized" else 0))
+                with self.assertRaises((AssertionError, OSError)):
+                    self.prepare_tls_fixture(source)
+                self.assertEqual(outside.read_bytes(), b"unrelated source")
+
+    def test_source_replacement_or_later_in_place_mutation_refuses_packet(self):
+        first, second = sorted(self.names)[:2]
+        real_open, real_stat, real_fstat = os.open, os.stat, os.fstat
+        class AliasedTimes:
+            def __init__(self, current, original):
+                self.current, self.original = current, original
+            def __getattr__(self, name):
+                if name in ("st_mtime", "st_mtime_ns", "st_ctime", "st_ctime_ns"):
+                    return getattr(self.original, name)
+                return getattr(self.current, name)
+        for fault in ("same-size-edit", "file-replacement", "directory-replacement"):
+            source = self.new_source()
+            original = (source / first).read_bytes()
+            original_info = real_stat(source / first)
+            changed = False
+            def alias(info):
+                if fault == "same-size-edit" and (info.st_dev, info.st_ino) == (original_info.st_dev, original_info.st_ino):
+                    return AliasedTimes(info, original_info)
+                return info
+            def opened(name, flags, *args, **kwargs):
+                nonlocal changed
+                if name == second and not changed:
+                    changed = True
+                    if fault == "same-size-edit":
+                        (source / first).write_bytes(b"X" + original[1:])
+                    elif fault == "file-replacement":
+                        (source / first).rename(source.with_name(source.name + "-old-file"))
+                        (source / first).write_bytes(original)
+                    else:
+                        source.rename(source.with_name(source.name + "-old-directory"))
+                        source.mkdir()
+                        (source / "foreign").write_bytes(b"retain")
+                return real_open(name, flags, *args, **kwargs)
+            reason = "TLS source content changed after read" if fault == "same-size-edit" else ""
+            with self.subTest(fault=fault), patch.object(os, "open", side_effect=opened), \
+                 patch.object(os, "stat", side_effect=lambda *args, **kwargs: alias(real_stat(*args, **kwargs))), \
+                 patch.object(os, "fstat", side_effect=lambda descriptor: alias(real_fstat(descriptor))), \
+                 self.assertRaisesRegex(AssertionError, reason):
+                self.prepare_tls_fixture(source)
+            self.assertTrue(changed)
+
+    def test_invalid_and_duplicate_packets_fail_before_any_destination_effect(self):
+        decoded = json.loads(self.packet)
+        first = sorted(self.names)[0]
+        changed = []
+        for fault in ("extra", "missing", "digest", "extra-field", "oversized-file"):
+            value = copy.deepcopy(decoded)
+            if fault == "extra":
+                value["../outside.pem"] = value[first]
+            elif fault == "missing":
+                del value[first]
+            elif fault == "digest":
+                value[first]["sha256"] = "0" * 64
+            elif fault == "extra-field":
+                value[first]["mode"] = 0o777
+            else:
+                import base64
+                value[first] = {"data": base64.b64encode(b"x" * 4097).decode("ascii"), "sha256": hashlib.sha256(b"x" * 4097).hexdigest()}
+            changed.append(json.dumps(value, sort_keys=True, separators=(",", ":")).encode("ascii"))
+        duplicate = (json.dumps(first) + ":" + json.dumps(decoded[first], separators=(",", ":")) + ",").encode("ascii")
+        nested_duplicate = self.packet.replace(b'"data":', b'"data":"unused","data":', 1)
+        for raw in [b"", b"[", b"x" * 65537, b"{" + duplicate + self.packet[1:], nested_duplicate, *changed]:
+            parent, _, _ = self.new_guest()
+            with self.subTest(size=len(raw)), self.assertRaises((AssertionError, ValueError)):
+                self.stage_tls_fixture(parent, raw)
+            self.assertEqual(list(parent.iterdir()), [])
+
+    def test_existing_paths_and_parent_symlink_refuse_without_adoption(self):
+        for fault in ("directory", "directory-symlink", "receipt", "receipt-symlink", "parent-symlink", "writable-parent"):
+            parent, root, receipt = self.new_guest()
+            target = parent / "foreign"
+            target.write_bytes(b"retain foreign bytes")
+            if fault == "directory":
+                root.mkdir(mode=0o777)
+            elif fault == "directory-symlink":
+                root.symlink_to(parent / "missing", target_is_directory=True)
+            elif fault == "receipt":
+                receipt.write_bytes(b"foreign receipt")
+            elif fault == "receipt-symlink":
+                receipt.symlink_to(parent / "missing-receipt")
+            elif fault == "parent-symlink":
+                link = parent.with_name(parent.name + "-link")
+                link.symlink_to(parent, target_is_directory=True)
+                parent = link
+            else:
+                parent.chmod(0o777)
+            before = {path.name: (self.metadata(path), path.read_bytes() if path.is_file() else None) for path in parent.iterdir()}
+            with self.subTest(fault=fault), self.assertRaises((AssertionError, OSError)):
+                self.stage_tls_fixture(parent, self.packet)
+            after = {path.name: (self.metadata(path), path.read_bytes() if path.is_file() else None) for path in parent.iterdir()}
+            self.assertEqual(before, after)
+
+    def test_parent_directory_file_and_receipt_replacement_never_mutate_foreign_objects(self):
+        real_fsync = os.fsync
+        for fault in ("parent", "directory", "file", "receipt"):
+            parent, root, receipt = self.new_guest()
+            injected = False
+            foreign = None
+            def sync(descriptor):
+                nonlocal injected, foreign
+                real_fsync(descriptor)
+                is_directory = stat.S_ISDIR(os.fstat(descriptor).st_mode)
+                if not injected and is_directory == (fault == "receipt"):
+                    injected = True
+                    if fault == "parent":
+                        parent.rename(parent.with_name(parent.name + "-owned"))
+                        parent.mkdir(mode=0o700)
+                        foreign = parent / "foreign"
+                    elif fault == "directory":
+                        root.rename(parent / "owned-directory")
+                        root.mkdir(mode=0o700)
+                        foreign = root / "foreign"
+                    elif fault == "file":
+                        foreign = root / sorted(self.names)[0]
+                        foreign.rename(parent / "owned-file")
+                    else:
+                        foreign = receipt
+                    foreign.write_bytes(b"retain replacement")
+                    foreign.chmod(0o666)
+            with self.subTest(fault=fault), patch.object(os, "fsync", side_effect=sync), self.assertRaises((AssertionError, OSError)):
+                self.stage_tls_fixture(parent, self.packet)
+            self.assertTrue(injected)
+            self.assertEqual(foreign.read_bytes(), b"retain replacement")
+            self.assertEqual(stat.S_IMODE(foreign.stat().st_mode), 0o666)
+            if fault != "receipt":
+                self.assertFalse(receipt.exists())
+
+    def test_creation_short_write_and_fsync_failures_do_not_publish_a_receipt(self):
+        real_mkdir, real_fdopen = os.mkdir, os.fdopen
+        for fault in ("before-mkdir", "after-mkdir", "short-write", "fsync"):
+            parent, root, receipt = self.new_guest()
+            def mkdir(*args, **kwargs):
+                if fault == "after-mkdir":
+                    real_mkdir(*args, **kwargs)
+                raise OSError("injected directory creation result")
+            @contextlib.contextmanager
+            def fdopen(*args, **kwargs):
+                with real_fdopen(*args, **kwargs) as handle:
+                    short = Mock(wraps=handle)
+                    short.write.side_effect = lambda data: handle.write(data[:-1])
+                    yield short
+            if fault in ("before-mkdir", "after-mkdir"):
+                injection = patch.object(os, "mkdir", side_effect=mkdir)
+            elif fault == "short-write":
+                injection = patch.object(os, "fdopen", side_effect=fdopen)
+            else:
+                injection = patch.object(os, "fsync", side_effect=OSError("injected fsync failure"))
+            with self.subTest(fault=fault), injection, self.assertRaises((AssertionError, OSError)):
+                self.stage_tls_fixture(parent, self.packet)
+            self.assertFalse(receipt.exists())
+            self.assertEqual(root.exists(), fault != "before-mkdir")
+            if root.exists():
+                self.assertEqual(stat.S_IMODE(root.stat().st_mode), 0o700)
+                self.assertLessEqual(len(list(root.iterdir())), 1)
+
+    def test_cleanup_refuses_replaced_parent_directory_file_and_changed_metadata(self):
+        for fault in ("parent", "directory", "file", "content", "mode", "symlink", "hardlink", "extra", "missing", "receipt-symlink"):
+            parent, root, receipt = self.new_guest()
+            self.stage_tls_fixture(parent, self.packet)
+            first = root / sorted(self.names)[0]
+            if fault == "parent":
+                old = parent.with_name(parent.name + "-owned")
+                parent.rename(old)
+                parent.mkdir(mode=0o700)
+                (old / root.name).rename(root)
+                (old / receipt.name).rename(receipt)
+            elif fault == "directory":
+                root.rename(parent / "owned-directory")
+                root.mkdir(mode=0o700)
+                (root / "foreign").write_bytes(b"retain")
+            elif fault in ("file", "symlink", "hardlink", "missing"):
+                old = parent / "owned-file"
+                first.rename(old)
+                if fault == "file":
+                    first.write_bytes(old.read_bytes())
+                    first.chmod(0o600)
+                elif fault == "symlink":
+                    first.symlink_to(old)
+                elif fault == "hardlink":
+                    os.link(old, first)
+            elif fault == "content":
+                first.write_bytes(b"X" + first.read_bytes()[1:])
+            elif fault == "mode":
+                first.chmod(0o666)
+            elif fault == "extra":
+                (root / "foreign").write_bytes(b"retain")
+            else:
+                receipt.rename(parent / "owned-receipt")
+                receipt.symlink_to(parent / "owned-receipt")
+            before = {path.name: self.metadata(path) for path in root.iterdir()}
+            with self.subTest(fault=fault), self.assertRaises((AssertionError, OSError)):
+                self.cleanup_tls_fixture(parent)
+            self.assertEqual(before, {path.name: self.metadata(path) for path in root.iterdir()})
+            self.assertTrue(os.path.lexists(receipt))
+
+
 class TLSArchiveExclusionTests(unittest.TestCase):
     def test_actual_pem_and_der_key_bytes_are_excluded_even_across_read_boundary(self):
         import base64
@@ -1979,3 +2275,4 @@ if __name__ == "__main__":
     print("SUPERVISED_FIXTURE_HTTPS_CAUSAL_EVIDENCE=PASS")
     print("SUPERVISED_FIXTURE_LEGACY_PROJECTION_PAUSE_AND_CAS=PASS")
     print("SMART_HEALTH_QA_KEY_ARCHIVE_EXCLUSION_REGRESSIONS=PASS")
+    print("SMART_HEALTH_QA_TLS_PRIVATE_STAGING_REGRESSIONS=PASS")

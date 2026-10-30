@@ -857,29 +857,162 @@ docker cp "$root/scripts/qa/host-supervised-product-tun.sh" "$container:/root/qa
 docker cp "$root/scripts/qa/supervised-product-tun.py" "$container:/root/qa-supervised-product-tun.py"
 docker cp "$root/scripts/qa/smart-health-responder.py" "$container:/root/qa-smart-health-responder.py"
 docker cp "$root/scripts/qa/smart-health-client.py" "$container:/root/qa-smart-health-client.py"
-# Source-only synthetic certificates are copied outside every installed bundle.
-docker exec "$container" test ! -e /root/qa-smart-health-tls
-docker cp "$root/internal/sc/testdata/smart-health-tls" "$container:/root/qa-smart-health-tls"
+# Transfer only the exact source fixture bytes, never checkout ownership/modes.
+# The guest creates private objects afresh; an incomplete stage aborts this
+# harness and is retained for the existing exact disposable-container teardown.
 tls_fixture_manifest="$scratch/smart-health-tls.sha256"
-(cd "$root/internal/sc/testdata/smart-health-tls" && sha256sum ./*.pem) >"$tls_fixture_manifest"
+tls_fixture_packet="$scratch/smart-health-tls.json"
+PYTHONDONTWRITEBYTECODE=1 python3 -I -B - "$root/internal/sc/testdata/smart-health-tls" \
+    "$tls_fixture_packet" "$tls_fixture_manifest" <<'PYTLSINPUT'
+import base64, hashlib, json, os, pathlib, stat, sys
+
+def prepare_tls_fixture(source):
+    names = {"qa-root.pem", "qa-server.pem", "qa-server-key.pem", "qa-wrong-name.pem", "qa-wrong-trust.pem",
+             "qa-wrong-root.pem", "qa-expired.pem", "qa-client-auth-only.pem"}
+    def identity(info):
+        return (info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_gid,
+                info.st_nlink, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+    directory = os.open(source, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        before = os.fstat(directory)
+        assert set(os.listdir(directory)) == names, "TLS fixture source set changed"
+        packet, manifest, identities = {}, [], {}
+        for name in sorted(names):
+            descriptor = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
+            with os.fdopen(descriptor, "rb") as handle:
+                info = os.fstat(handle.fileno())
+                assert stat.S_ISREG(info.st_mode) and info.st_nlink == 1 and 0 < info.st_size <= 4096, \
+                    f"TLS source refused: {name} mode={oct(info.st_mode)} uid={info.st_uid} links={info.st_nlink} size={info.st_size}"
+                data = handle.read(4097)
+                assert len(data) == info.st_size and identity(os.fstat(handle.fileno())) == identity(info)
+                assert identity(os.stat(name, dir_fd=directory, follow_symlinks=False)) == identity(info), "TLS source replaced"
+                identities[name] = identity(info)
+            digest = hashlib.sha256(data).hexdigest()
+            packet[name] = {"data": base64.b64encode(data).decode("ascii"), "sha256": digest}
+            manifest.append(f"{digest}  ./{name}\n")
+        for name in sorted(names):
+            descriptor = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
+            with os.fdopen(descriptor, "rb") as handle:
+                info = os.fstat(handle.fileno())
+                assert identity(info) == identities[name], "TLS source changed after read"
+                data = handle.read(4097)
+                assert len(data) == info.st_size and hashlib.sha256(data).hexdigest() == packet[name]["sha256"], "TLS source content changed after read"
+                assert identity(os.fstat(handle.fileno())) == identities[name], "TLS source changed during final read"
+                assert identity(os.stat(name, dir_fd=directory, follow_symlinks=False)) == identities[name], "TLS source replaced during final read"
+        assert set(os.listdir(directory)) == names and identity(os.fstat(directory)) == identity(before)
+        assert identity(source.lstat()) == identity(before), "TLS source directory replaced"
+        encoded = json.dumps(packet, sort_keys=True, separators=(",", ":")).encode("ascii")
+        assert 0 < len(encoded) <= 65536
+        return encoded, "".join(manifest).encode("ascii")
+    finally:
+        os.close(directory)
+
+if __name__ == "__main__":
+    packet, manifest = prepare_tls_fixture(pathlib.Path(sys.argv[1]))
+    for name, data in ((sys.argv[2], packet), (sys.argv[3], manifest)):
+        descriptor = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(data)
+PYTLSINPUT
+docker exec -i "$container" /usr/bin/python3 -I -B -c "$(cat <<'PYTLSSTAGE'
+import base64, hashlib, json, os, pathlib, stat, sys
+
+def stage_tls_fixture(parent, raw):
+    names = {"qa-root.pem", "qa-server.pem", "qa-server-key.pem", "qa-wrong-name.pem", "qa-wrong-trust.pem",
+             "qa-wrong-root.pem", "qa-expired.pem", "qa-client-auth-only.pem"}
+    assert 0 < len(raw) <= 65536, "TLS fixture packet exceeds its bound"
+    packet, contents = json.loads(raw), {}
+    assert type(packet) is dict and set(packet) == names, "TLS fixture packet set changed"
+    assert json.dumps(packet, sort_keys=True, separators=(",", ":")).encode("ascii") == raw, "TLS fixture packet is not canonical"
+    for name in sorted(names):
+        item = packet[name]
+        assert type(item) is dict and set(item) == {"data", "sha256"}, "TLS fixture packet shape changed"
+        data = base64.b64decode(item["data"], validate=True)
+        assert 0 < len(data) <= 4096 and hashlib.sha256(data).hexdigest() == item["sha256"], "TLS fixture packet digest changed"
+        contents[name] = data
+    owner, root_name, receipt_name = os.geteuid(), "qa-smart-health-tls", "qa-smart-health-tls-receipt.json"
+    def identity(info):
+        return [info.st_dev, info.st_ino, info.st_mode, info.st_uid]
+    def diagnostic(info):
+        return f"mode={oct(info.st_mode)} uid={info.st_uid} gid={info.st_gid} links={info.st_nlink}"
+    parent_fd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    directory = None
+    try:
+        parent_info = os.fstat(parent_fd)
+        assert parent_info.st_uid == owner and not parent_info.st_mode & 0o022, "TLS parent refused: " + diagnostic(parent_info)
+        for name in (root_name, receipt_name):
+            try:
+                info = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+            except FileNotFoundError:
+                continue
+            raise AssertionError("TLS fixture path already exists: " + name + " " + diagnostic(info))
+        assert identity(parent.lstat()) == identity(parent_info), "TLS fixture parent replaced before creation"
+        os.mkdir(root_name, 0o700, dir_fd=parent_fd)
+        created = os.stat(root_name, dir_fd=parent_fd, follow_symlinks=False)
+        directory = os.open(root_name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent_fd)
+        info = os.fstat(directory)
+        assert identity(info) == identity(created) and stat.S_ISDIR(info.st_mode) and info.st_uid == owner \
+            and stat.S_IMODE(info.st_mode) == 0o700, "TLS directory refused: " + diagnostic(info)
+        receipt = {"parent": identity(parent_info), "directory": identity(info), "files": {}}
+        def unchanged():
+            assert identity(parent.lstat()) == receipt["parent"], "TLS fixture parent replaced"
+            current = os.stat(root_name, dir_fd=parent_fd, follow_symlinks=False)
+            assert identity(current) == receipt["directory"], "TLS fixture directory replaced: " + diagnostic(current)
+        for name in sorted(names):
+            unchanged()
+            descriptor = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=directory)
+            with os.fdopen(descriptor, "wb") as handle:
+                info = os.fstat(handle.fileno())
+                assert stat.S_ISREG(info.st_mode) and info.st_uid == owner and info.st_nlink == 1 \
+                    and stat.S_IMODE(info.st_mode) == 0o600, "TLS file refused: " + name + " " + diagnostic(info)
+                created_file = identity(info)
+                assert handle.write(contents[name]) == len(contents[name])
+                handle.flush()
+                os.fsync(handle.fileno())
+                info = os.fstat(handle.fileno())
+                assert identity(info) == created_file and info.st_nlink == 1 and info.st_size == len(contents[name]), "TLS created file changed"
+            receipt["files"][name] = identity(info) + [info.st_size, packet[name]["sha256"]]
+        unchanged()
+        assert set(os.listdir(directory)) == names, "TLS staged fixture set changed"
+        for name in sorted(names):
+            descriptor = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
+            with os.fdopen(descriptor, "rb") as handle:
+                info = os.fstat(handle.fileno())
+                assert stat.S_ISREG(info.st_mode) and info.st_nlink == 1
+                data = handle.read(4097)
+                assert identity(info) + [info.st_size, hashlib.sha256(data).hexdigest()] == receipt["files"][name], "TLS staged file changed"
+                after = os.fstat(handle.fileno())
+                assert identity(after) + [after.st_size, after.st_mtime_ns, after.st_ctime_ns] \
+                    == identity(info) + [info.st_size, info.st_mtime_ns, info.st_ctime_ns], "TLS staged file changed during readback"
+                current = os.stat(name, dir_fd=directory, follow_symlinks=False)
+                assert identity(current) + [current.st_size] == receipt["files"][name][:-1], "TLS staged file replaced"
+        os.fsync(directory)
+        unchanged()
+        encoded_receipt = json.dumps(receipt, sort_keys=True).encode("ascii")
+        descriptor = os.open(receipt_name, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=parent_fd)
+        with os.fdopen(descriptor, "w+b") as handle:
+            info = os.fstat(handle.fileno())
+            assert info.st_uid == owner and info.st_nlink == 1 and stat.S_IMODE(info.st_mode) == 0o600, "TLS receipt refused: " + diagnostic(info)
+            assert handle.write(encoded_receipt) == len(encoded_receipt)
+            handle.flush()
+            os.fsync(handle.fileno())
+            handle.seek(0)
+            assert handle.read(8193) == encoded_receipt, "TLS receipt readback changed"
+            assert identity(os.fstat(handle.fileno())) == identity(info), "TLS receipt metadata changed"
+        unchanged()
+        assert identity(os.stat(receipt_name, dir_fd=parent_fd, follow_symlinks=False)) == identity(info), "TLS receipt replaced"
+        os.fsync(parent_fd)
+    finally:
+        if directory is not None:
+            os.close(directory)
+        os.close(parent_fd)
+
+if __name__ == "__main__":
+    assert os.geteuid() == 0, "TLS fixture staging requires the disposable root guest"
+    stage_tls_fixture(pathlib.Path("/root"), sys.stdin.buffer.read(65537))
+PYTLSSTAGE
+)" <"$tls_fixture_packet"
 docker exec -i -w /root/qa-smart-health-tls "$container" sha256sum -c - <"$tls_fixture_manifest"
-docker exec "$container" /usr/bin/python3 -I -B -c '
-import hashlib, json, os, pathlib, stat
-root = pathlib.Path("/root/qa-smart-health-tls")
-info = root.lstat()
-assert stat.S_ISDIR(info.st_mode) and info.st_uid == 0 and not info.st_mode & 0o022
-receipt = {"directory": [info.st_dev, info.st_ino, info.st_mode, info.st_uid], "files": {}}
-for path in root.iterdir():
-    info = path.lstat()
-    assert stat.S_ISREG(info.st_mode) and info.st_uid == 0 and info.st_nlink == 1 and not info.st_mode & 0o022
-    receipt["files"][path.name] = [info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_size,
-                                  hashlib.sha256(path.read_bytes()).hexdigest()]
-descriptor = os.open("/root/qa-smart-health-tls-receipt.json", os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
-with os.fdopen(descriptor, "w") as handle:
-    json.dump(receipt, handle, sort_keys=True)
-    handle.flush()
-    os.fsync(handle.fileno())
-'
 docker cp "$root/scripts/qa/host-owned-tun-boundary.sh" "$container:/root/qa-owned-tun-boundary.sh"
 docker cp "$root/scripts/qa/tun-guard-unit-lab.sh" "$container:/root/qa-tun-guard-unit-lab.sh"
 # Independently check resources omitted from the standard route/rule/link
@@ -1212,44 +1345,71 @@ assert_tun_native_cleanup real-tun-injected-cleanup-recovery
 echo 'REAL_TUN_CLEANUP_FAILURE_REJECTED=PASS (guest cleanup failure != expected TUN rejection)'
 # Remove exactly the QA helpers copied for the completed TUN trials. This
 # also closes the earlier WordPress intermediate guest-helper cleanup gap.
-docker exec -i -w /root/qa-smart-health-tls "$container" sha256sum -c - <"$tls_fixture_manifest"
-docker exec "$container" /usr/bin/python3 -I -B -c '
+# The bounded helper verifies source hashes after authenticating its pinned
+# objects; a path-following checksum reader must not run before those checks.
+docker exec "$container" /usr/bin/python3 -I -B -c "$(cat <<'PYTLSCLEANUP'
 import hashlib, json, os, pathlib, stat
-root = pathlib.Path("/root/qa-smart-health-tls")
-names = {"qa-root.pem", "qa-server.pem", "qa-server-key.pem", "qa-wrong-name.pem", "qa-wrong-trust.pem",
-         "qa-wrong-root.pem", "qa-expired.pem", "qa-client-auth-only.pem"}
-receipt_path = pathlib.Path("/root/qa-smart-health-tls-receipt.json")
-descriptor = os.open(receipt_path, os.O_RDONLY | os.O_NOFOLLOW)
-with os.fdopen(descriptor, "rb") as handle:
-    identity = os.fstat(handle.fileno())
-    assert stat.S_ISREG(identity.st_mode) and identity.st_uid == 0 and stat.S_IMODE(identity.st_mode) == 0o600
-    assert identity.st_nlink == 1 and 0 < identity.st_size <= 8192
-    raw = handle.read(8193)
-    assert len(raw) == identity.st_size
-receipt = json.loads(raw)
-info = root.lstat()
-assert [info.st_dev, info.st_ino, info.st_mode, info.st_uid] == receipt["directory"] and stat.S_ISDIR(info.st_mode)
-assert {path.name for path in root.iterdir()} == names
-assert set(receipt["files"]) == names
-for name in names:
-    path = root / name
-    info = path.lstat()
-    assert stat.S_ISREG(info.st_mode) and info.st_uid == 0 and info.st_nlink == 1
-    assert [info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_size,
-            hashlib.sha256(path.read_bytes()).hexdigest()] == receipt["files"][name], "TLS fixture ownership changed"
-for name in names:
-    path = root / name
-    info = path.lstat()
-    assert [info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_size,
-            hashlib.sha256(path.read_bytes()).hexdigest()] == receipt["files"][name]
-    path.unlink()
-root.rmdir()
-assert not root.exists()
-current = receipt_path.lstat()
-assert (current.st_dev, current.st_ino) == (identity.st_dev, identity.st_ino) and receipt_path.read_bytes() == raw
-receipt_path.unlink()
-assert not receipt_path.exists()
-'
+
+def cleanup_tls_fixture(parent):
+    names = {"qa-root.pem", "qa-server.pem", "qa-server-key.pem", "qa-wrong-name.pem", "qa-wrong-trust.pem",
+             "qa-wrong-root.pem", "qa-expired.pem", "qa-client-auth-only.pem"}
+    owner, root_name, receipt_name = os.geteuid(), "qa-smart-health-tls", "qa-smart-health-tls-receipt.json"
+    def identity(info):
+        return [info.st_dev, info.st_ino, info.st_mode, info.st_uid]
+    parent_fd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    directory = None
+    try:
+        descriptor = os.open(receipt_name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent_fd)
+        with os.fdopen(descriptor, "rb") as handle:
+            receipt_info = os.fstat(handle.fileno())
+            assert stat.S_ISREG(receipt_info.st_mode) and receipt_info.st_uid == owner \
+                and stat.S_IMODE(receipt_info.st_mode) == 0o600 and receipt_info.st_nlink == 1 and 0 < receipt_info.st_size <= 8192
+            raw = handle.read(8193)
+            assert len(raw) == receipt_info.st_size
+        receipt = json.loads(raw)
+        assert identity(os.fstat(parent_fd)) == receipt["parent"], "TLS fixture cleanup parent changed"
+        directory = os.open(root_name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent_fd)
+        assert identity(os.fstat(directory)) == receipt["directory"], "TLS fixture cleanup directory changed"
+        def unchanged():
+            assert identity(parent.lstat()) == receipt["parent"], "TLS fixture cleanup parent replaced"
+            assert identity(os.stat(root_name, dir_fd=parent_fd, follow_symlinks=False)) == receipt["directory"], "TLS fixture cleanup directory replaced"
+        def check_file(name):
+            descriptor = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
+            with os.fdopen(descriptor, "rb") as handle:
+                info = os.fstat(handle.fileno())
+                assert stat.S_ISREG(info.st_mode) and info.st_uid == owner and info.st_nlink == 1 \
+                    and stat.S_IMODE(info.st_mode) == 0o600 and 0 < info.st_size <= 4096
+                assert identity(info) + [info.st_size, hashlib.sha256(handle.read(4097)).hexdigest()] == receipt["files"][name], "TLS fixture ownership changed"
+                current = os.stat(name, dir_fd=directory, follow_symlinks=False)
+                assert identity(current) + [current.st_size] == receipt["files"][name][:-1], "TLS fixture cleanup file replaced"
+        unchanged()
+        assert set(os.listdir(directory)) == names and set(receipt["files"]) == names, "TLS fixture cleanup set changed"
+        for name in sorted(names):
+            check_file(name)
+        for name in sorted(names):
+            unchanged()
+            check_file(name)
+            os.unlink(name, dir_fd=directory)
+        unchanged()
+        os.rmdir(root_name, dir_fd=parent_fd)
+        assert not os.path.lexists(parent / root_name)
+        descriptor = os.open(receipt_name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent_fd)
+        with os.fdopen(descriptor, "rb") as handle:
+            assert identity(os.fstat(handle.fileno())) == identity(receipt_info) and handle.read(8193) == raw, "TLS cleanup receipt changed"
+        assert identity(parent.lstat()) == receipt["parent"], "TLS fixture cleanup parent replaced"
+        assert identity(os.stat(receipt_name, dir_fd=parent_fd, follow_symlinks=False)) == identity(receipt_info), "TLS cleanup receipt replaced"
+        os.unlink(receipt_name, dir_fd=parent_fd)
+        assert not os.path.lexists(parent / receipt_name)
+    finally:
+        if directory is not None:
+            os.close(directory)
+        os.close(parent_fd)
+
+if __name__ == "__main__":
+    assert os.geteuid() == 0, "TLS fixture cleanup requires the disposable root guest"
+    cleanup_tls_fixture(pathlib.Path("/root"))
+PYTLSCLEANUP
+)"
 echo 'SMART_HEALTH_QA_TLS_FIXTURE_EXACT_CLEANUP=PASS'
 docker exec "$container" /bin/rm -f /root/qa-tun-config-qa /root/qa-host-tun-path.sh \
   /root/qa-tun-guard-unit-lab.sh /root/qa-product-tun-trial.sh /root/qa-tun-sni-client.py /root/qa-tun-native-apps.py \
