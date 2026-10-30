@@ -280,6 +280,32 @@ func TestSmartTUNNativePartialEffectsNeverInventOwnership(t *testing.T) {
 	}
 }
 
+func TestSmartTUNNativePrePolicyContainmentRequiresFreshAbsence(t *testing.T) {
+	for _, stage := range []string{"planned", "effect_possible"} {
+		record := nativeTrialExample(true)
+		record.Phase = "trial_stop_requested"
+		record.Revision = 2
+		record.Native.StopReason = "guard"
+		record.Native.NFT.Stage = stage
+		_, present := nativeNFTFixture(t, record)
+		for _, matches := range []bool{false, true} {
+			t.Run(stage+"/matches="+stringNumberBool(matches), func(t *testing.T) {
+				// The first graph check's absence is not authority for a later
+				// reobservation: a present table has no operation-bound receipt,
+				// even when its policy happens to match the intended compiler.
+				if err := nativeTUNRecoveryContainment(record, nativeTUNNFTObservation{Matches: matches}); err != nil {
+					t.Fatalf("fresh pre-policy absence refused: %v", err)
+				}
+				changed := present
+				changed.Matches = matches
+				if ErrorCode(nativeTUNRecoveryContainment(record, changed)) != "trial_recovery_uncertain" {
+					t.Fatal("new unreceipted graph permitted routing cleanup")
+				}
+			})
+		}
+	}
+}
+
 func TestSmartTUNNativeRouteSelectorsAndForeignDependencies(t *testing.T) {
 	record := nativeTrialExample(true)
 	route := `{"dst":"default","dev":"sctunqa0","table":42424,"protocol":247,"scope":"253","prefsrc":"172.31.99.1","metric":100,"flags":[]}`

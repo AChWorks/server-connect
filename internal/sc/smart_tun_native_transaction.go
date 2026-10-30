@@ -370,6 +370,12 @@ func nativeTUNCheckRecoveryGraph(record smartTUNTrialJournal) error {
 func nativeTUNRecoveryContainment(record smartTUNTrialJournal, observed nativeTUNNFTObservation) error {
 	n := record.Native
 	if n.NFT.Stage == "planned" || n.NFT.Stage == "effect_possible" {
+		// The pre-policy exception requires fresh absence. RemoveResource
+		// reobserves here after the initial graph check; a newly present
+		// exact-looking table still has no durable ownership receipt.
+		if observed.Present {
+			return nativeTUNUncertain("unreceipted native nft graph appeared before routing cleanup")
+		}
 		return nil
 	}
 	complete := n.LinkStage == "removed"
