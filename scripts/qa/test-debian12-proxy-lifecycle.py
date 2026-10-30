@@ -29,8 +29,7 @@ def manifest():
         "source_tree": "b" * 40,
         "boot_id": "c4633c6c-00ff-4abc-8000-f6c43fd73333", "run_name": "run-01",
         "artifacts": {
-            label: {"file": label + ".tar.gz", "bytes": 1024, "sha256": "c" * 64}
-            for label in ("base", "update", "invalid_unit")},
+            "base": {"file": "base.tar.gz", "bytes": 1024, "sha256": "c" * 64}},
     }
 
 
@@ -174,13 +173,18 @@ class InputAdmissionTests(unittest.TestCase):
             with self.subTest(key=key, value=value), self.assertRaises(driver.CheckFailure):
                 driver.validate_manifest(candidate)
         candidate = manifest()
-        del candidate["artifacts"]["invalid_unit"]
+        del candidate["artifacts"]["base"]
         with self.assertRaises(driver.CheckFailure):
             driver.validate_manifest(candidate)
-        candidate = manifest()
-        candidate["artifacts"]["update"]["file"] = candidate["artifacts"]["base"]["file"]
-        with self.assertRaises(driver.CheckFailure):
-            driver.validate_manifest(candidate)
+
+    def test_ci_only_fixture_inputs_are_rejected(self):
+        for extra in (("update",), ("invalid_unit",), ("update", "invalid_unit")):
+            candidate = manifest()
+            for name in extra:
+                candidate["artifacts"][name] = {
+                    "file": name + ".tar.gz", "bytes": 1024, "sha256": "d" * 64}
+            with self.subTest(extra=extra), self.assertRaises(driver.CheckFailure):
+                driver.validate_manifest(candidate)
 
     def test_bundle_requires_exact_regular_payload(self):
         driver.validate_members(members())

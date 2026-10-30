@@ -10,13 +10,12 @@ Run only after MASTER reviews this driver and pins the exact candidate inputs:
 The schema-1 manifest has exactly these required keys:
   schema: 1; target_id: "ira-124"; source_revision: Git SHA; source_tree: Git SHA;
   boot_id: current kernel boot UUID; run_name: "run-01";
-  artifacts: {base, update, invalid_unit}, each {file, bytes, sha256}.
+  artifacts: {base: {file, bytes, sha256}}; no other artifact keys are accepted.
 An optional machine_id_sha256 pins SHA256(/etc/machine-id stripped of whitespace).
-Artifact file names are basenames inside input/. The supplied archives are the
-exact Debian12 bundle and the existing same-source valid/invalid-unit update
-fixtures, prepared elsewhere. No download, compiler, APT or artifact modification
-occurs here. The invalid-unit variant must differ only in the manager build ID,
-its checksums and ExecStart=/usr/bin/false.
+The base archive is the exact ordinary Debian12 bundle, supplied inside input/.
+No download, compiler, APT or artifact modification occurs here. Distinct-byte
+update and invalid-unit rollback fixtures remain disconnected-CI-only and are
+NOT_RUN on this field target. Same-base reinstall is not version migration.
 
 The exclusive run directory retains private evidence. Only a proven test-created
 product state directory is purged, after real product uninstall and exact file
@@ -158,10 +157,8 @@ def validate_manifest(value):
             (isinstance(value["machine_id_sha256"], str) and
              HEX64.fullmatch(value["machine_id_sha256"])), "Invalid machine pin")
     artifacts = value["artifacts"]
-    require(isinstance(artifacts, dict) and
-            set(artifacts) == {"base", "update", "invalid_unit"},
-            "All three exact artifacts are required")
-    names = set()
+    require(isinstance(artifacts, dict) and set(artifacts) == {"base"},
+            "Only the normal base artifact is admitted on this field target")
     for artifact in artifacts.values():
         require(isinstance(artifact, dict) and
                 set(artifact) == {"file", "bytes", "sha256"},
@@ -170,8 +167,6 @@ def validate_manifest(value):
         require(isinstance(name, str) and
                 re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*\.tar\.gz", name),
                 "Artifact basename required")
-        require(name not in names, "Artifacts must have distinct input files")
-        names.add(name)
         require(type(artifact["bytes"]) is int and
                 0 < artifact["bytes"] <= 100 * 1024 * 1024 and
                 isinstance(artifact["sha256"], str) and
@@ -463,8 +458,13 @@ class FieldRun:
             "source_tree": self.manifest["source_tree"],
             "manifest_sha256": manifest_sha, "started_at": now(),
             "artifact_inputs": self.manifest["artifacts"],
-            "scope": "Debian12 installed local Proxy Only lifecycle; no external "
-                     "VPN, TUN, physical reboot or public release acceptance",
+            "scope": "Debian12 ordinary-base install/reinstall and local Proxy Only "
+                     "lifecycle; no external VPN, TUN, physical reboot or public release acceptance",
+            "not_run_on_field": {
+                "distinct_byte_update": "NOT_RUN; disconnected-CI-only",
+                "invalid_unit_rollback": "NOT_RUN; disconnected-CI-only",
+                "version_migration": "NOT_RUN",
+            },
             "stages": [], "cleanup_errors": [],
         }
         save_new(self.run_dir / "owner.json", {
@@ -696,41 +696,18 @@ class FieldRun:
             name: file_hash(destination / name) for name in BUNDLE_FILES}
         self.event("artifact_verified", label=label, **metadata)
 
-    def verify_variants(self):
-        base = self.bundles["base"]
-        original = (base / "server-connect.service").read_bytes()
-        failed = re.sub(br"(?m)^ExecStart=.*$",
-                        b"ExecStart=/usr/bin/false", original)
-        require(failed != original and failed.count(b"ExecStart=") == 1,
-                "Unexpected proxy unit shape")
-        for label in ("update", "invalid_unit"):
-            changed = {name for name in BUNDLE_FILES if
-                       self.bundle_hashes[label][name] !=
-                       self.bundle_hashes["base"][name]}
-            expected = {"bin/server-connect", "checksums.sha256"}
-            if label == "invalid_unit":
-                expected.add("server-connect.service")
-                require((self.bundles[label] / "server-connect.service").read_bytes()
-                        == failed, "Unsafe invalid-unit fixture delta")
-            require(changed == expected, "Unexpected update fixture delta")
-        require(self.bundle_hashes["update"]["bin/server-connect"] !=
-                self.bundle_hashes["invalid_unit"]["bin/server-connect"],
-                "Rollback candidate manager must have distinct bytes")
-
-    def installer(self, label, action, expected=0):
+    def installer(self, action):
         self.install_dispatched = self.install_dispatched or action == "--offline"
         if action != "--verify-only":
             # Set before dispatch. A failed/unknown installer is not erased by
-            # a later uninstall; the invalid-unit case clears this only after
-            # observing exact rollback and the restored live service.
+            # a later uninstall. Only an observed successful exit clears this.
             self.installer_unverified = True
         result = self.call(
-            ["/bin/sh", self.bundles[label] / "install.sh", action],
+            ["/bin/sh", self.bundles["base"] / "install.sh", action],
             timeout=70, expected=None, mutation=action != "--verify-only")
         if action != "--verify-only" and result[0] == 0:
             self.installer_unverified = False
-        if expected is not None:
-            require(result[0] == expected, "Installer returned unexpected exit")
+        require(result[0] == 0, "Installer returned unexpected exit")
         return result
 
     def opposite_target_helper(self):
@@ -1072,16 +1049,6 @@ class FieldRun:
             result[name] = item
         return result
 
-    def installation_receipt(self):
-        self.assert_owned_install()
-        return {
-            "prefix": self.tree_receipt(PREFIX),
-            "command_target": os.readlink(COMMAND),
-            "units": {name: sha(trusted_file(Path("/etc/systemd/system") / name))
-                      for name in UNITS},
-            "state": self.selected_state("proxy"),
-        }
-
     def purge_created_state(self):
         require(self.state_identity is not None and self.profile_id is not None,
                 "No complete task state ownership receipt; preserve state")
@@ -1133,9 +1100,7 @@ class FieldRun:
         self.results["exact_test_state_purged"] = True
 
     def execute(self):
-        for label in ("base", "update", "invalid_unit"):
-            self.prepare_bundle(label)
-        self.verify_variants()
+        self.prepare_bundle("base")
         require(self.call(["systemctl", "--version"])[1].splitlines()[0].startswith(
             b"systemd 252 "), "Field compatibility requires observed systemd252")
         self.baseline = self.observe_host()
@@ -1149,10 +1114,10 @@ class FieldRun:
         self.port_numbers.add(PROXY_PORT)
         self.ssh_observation("before")
         self.stage("host-and-exact-artifacts-admitted")
-        self.installer("base", "--verify-only")
+        self.installer("--verify-only")
         require(self.product_absent(), "Verify-only changed product resources")
         self.opposite_target_helper()
-        self.installer("base", "--offline")
+        self.installer("--offline")
         self.assert_owned_install("base")
         self.inert_roles()
         props = self.unit(UNITS[0])
@@ -1198,42 +1163,19 @@ class FieldRun:
                 "Disconnected proxy did not fail closed")
         self.stage("disconnect-preserves-selected-profile", state=disconnected)
         before_reinstall = self.tree_receipt(PREFIX)
-        self.installer("base", "--offline")
+        self.installer("--offline")
         require(self.tree_receipt(PREFIX) == before_reinstall and
                 self.direct_state() == disconnected, "Reinstall changed saved state")
         self.stage("same-artifact-reinstall")
         self.cli(["connect"])
         self.active_core()
-        self.installer("update", "--offline")
-        self.assert_owned_install("update")
-        self.active_core()
         self.selected_state("proxy")
-        self.request(True, True, "after-valid-update")
-        self.stage("distinct-same-source-update")
-        before_failure = self.installation_receipt()
-        save_new(self.run_dir / "before-invalid-update.json", before_failure)
-        rc, stdout, stderr = self.installer("invalid_unit", "--offline", expected=None)
-        require(rc == 1 and
-                b"candidate failed; attempting owned lifecycle rollback" in stdout and
-                b"previous owned service state restored; profiles retained" in stdout and
-                b"RECOVERY_REQUIRED" not in stdout + stderr and
-                any(reason in stderr for reason in (
-                    b"installed unit provenance could not be verified",
-                    b"updated service start failed",
-                    b"updated service listener readiness failed")),
-                "Expected genuine post-switch rollback was not proved")
-        restored = self.installation_receipt()
-        save_new(self.run_dir / "after-invalid-update.json", restored)
-        require(restored == before_failure,
-                "Rollback did not restore exact prior release/unit/state bytes")
-        self.active_core()
-        self.installer_unverified = False
-        self.request(True, True, "after-invalid-update-rollback")
-        self.stage("invalid-unit-update-restores-exact-prior-state")
-        self.outage("post-rollback-live-core-upstream-loss")
+        self.request(True, True, "after-same-base-reinstall")
+        self.stage("reconnect-after-same-base-reinstall")
+        self.outage("post-reinstall-live-core-upstream-loss")
         self.cli(["disconnect"])
         final_saved = self.direct_state()
-        self.installer("update", "--uninstall")
+        self.installer("--uninstall")
         require(self.product_absent(include_state=False) and
                 self.selected_state("direct") == final_saved,
                 "Uninstall did not preserve saved state and remove owned product")
@@ -1250,7 +1192,7 @@ class FieldRun:
                     self.assert_owned_install()
                     self.inert_roles()
                     self.cli(["disconnect"])
-                    self.installer("base", "--uninstall")
+                    self.installer("--uninstall")
                 if STATE.exists() or STATE.is_symlink():
                     self.purge_created_state()
             except BaseException as error:
@@ -1308,7 +1250,9 @@ class FieldRun:
         self.results["passed"] = final_passed(self.results)
         self.results["limits"] = [
             "No external VPN, TUN, IPv6 path or physical reboot acceptance.",
-            "Same-source distinct-byte updates do not establish version migration.",
+            "Distinct-byte update and invalid-unit rollback are NOT_RUN on the field "
+            "target; those fixtures remain disconnected-CI-only.",
+            "Same-base reinstall does not establish version migration.",
             "iptables compatibility snapshots are not complete native nft inventory.",
             "Host observations are separate non-atomic snapshots.",
             "360-second command-admission budget plus bounded cleanup; process "
@@ -1323,7 +1267,7 @@ class FieldRun:
              "task_listeners_absent",
              "product_resources_absent", "recorded_host_views_unchanged",
              "changed_host_components", "mutation_outcome_known",
-             "cleanup_errors")}), flush=True)
+             "cleanup_errors", "not_run_on_field")}), flush=True)
 
 
 def main():

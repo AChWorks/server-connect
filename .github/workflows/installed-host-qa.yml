@@ -166,7 +166,10 @@ jobs:
             build/installed-qa/server-connect-hostqa-update-valid.tar.gz \
             build/installed-qa/server-connect-hostqa-update-invalid-unit.tar.gz
 
-      # Metadata-only evidence for private reproduction of successful QA.
+      # Metadata-only identities for all three successful CI archives.
+      # Only the normal base archive may be privately reproduced for authorized
+      # field checks; both distinct-manager update fixtures remain isolated CI
+      # evidence and must not be generated outside CI.
       # Installable archives and binaries must never be uploaded here.
       - name: Record successful Debian 12 QA build evidence
         if: ${{ success() && github.event_name == 'workflow_dispatch' && matrix.debian == '12' }}
