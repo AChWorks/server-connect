@@ -87,10 +87,15 @@ Core socket marks are injected into the narrowly supported native profile so
 the outer VPN and core Direct outbounds use the underlay without recursion.
 The existing Proxy Only profile-import behavior is unchanged.
 
-Native OUTPUT capture and a separate OUTPUT containment chain classify the
-same protected paths. The guard checks eligible traffic independently of the
-capture mark, so losing a capture rule is not permission to fall through to
-Direct. Connection-tracking reply direction protects hosted replies without
+Native OUTPUT capture and a separate POSTROUTING containment chain classify
+the same protected paths. OUTPUT route hooks can change the packet's route
+while later OUTPUT hooks still observe the initial output interface. The guard
+therefore checks the final selected interface in POSTROUTING. Its final drop
+applies only to host-origin packets with no ingress interface; forwarded
+traffic retains its existing owner. The guard classifies eligible traffic
+independently of the capture mark, so losing a capture rule or RPDB entry is
+not permission to fall through to Direct. Connection-tracking reply direction
+protects hosted replies without
 exempting new outbound connections to the visitor's IP. Explicit local link
 control exceptions are bounded to the fixture underlay; they do not advertise
 arbitrary ICMP, fragmentation or PMTUD support. The existing core compiler

@@ -145,7 +145,11 @@ from matching fields. An absent object can be reconciled only after outstanding
 mutators are excluded and the complete current ownership graph is observed.
 
 The independent nftables guard reclassifies public traffic rather than trusting
-only the capture mark. Core bypass, protected local traffic and inbound-service
+only the capture mark. It checks the resulting output interface in POSTROUTING:
+a later OUTPUT filter still sees the initial interface after an OUTPUT route
+hook reroutes the packet. The final drop requires zero ingress interface so
+this host-origin policy does not intercept unrelated forwarded traffic.
+Core bypass, protected local traffic and inbound-service
 reply direction have narrowly shared exceptions; new host-origin traffic to a
 foreign visitor remains subject to VPN policy. Unsupported public protocols
 must not silently bypass. Local IPv6 neighbor discovery and other explicitly

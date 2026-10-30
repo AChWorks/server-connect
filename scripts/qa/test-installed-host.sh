@@ -762,6 +762,8 @@ echo 'REAL_TUN_LAB_STAGE=installed-product-guarded-real-tun-pending'
 product_tun_log="$scratch/real-tun-product-guarded-apply.log"
 docker exec -e SC_QA_TUN_PRODUCT_LAB=yes "$container" /bin/sh /root/qa-host-tun-path.sh | tee "$product_tun_log"
 for marker in \
+  'PRODUCT_NATIVE_IPV4_TRANSIT_BASELINE=PASS' \
+  'PRODUCT_NATIVE_IPV4_TRANSIT_ACTIVE=PASS' \
   'PRODUCT_TUN_INSTALLED_PROFILE_AND_IDLE=PASS' \
   'PRODUCT_TUN_GUARD_PREARMED_AND_PENDING=PASS' \
   'PRODUCT_TUN_DIRECT_FALSE_STATUS_AND_PROXY_CONFLICT_REFUSED=PASS' \
@@ -802,6 +804,8 @@ product_v6_log="$scratch/real-tun-product-guarded-ipv6.log"
 docker exec -e SC_QA_TUN_PRODUCT_LAB=yes -e SC_QA_TUN_IPV6=yes \
   "$container" /bin/sh /root/qa-host-tun-path.sh | tee "$product_v6_log"
 for marker in \
+  'PRODUCT_NATIVE_IPV4_TRANSIT_BASELINE=PASS' \
+  'PRODUCT_NATIVE_IPV4_TRANSIT_ACTIVE=PASS' \
   'PRODUCT_TUN_IPV6_UNSUPPORTED_INPUT_REJECTED=PASS' \
   'PRODUCT_TUN_IPV6_REAL_SELECTED=PASS' \
   'PRODUCT_TUN_IPV6_EXPLICIT_OFF_SAVED_REAPPLY=PASS' \
