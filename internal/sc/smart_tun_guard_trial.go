@@ -398,7 +398,10 @@ func (m *Manager) admitSmartTUNTrialLocked(store *activationJournalDir, opts Sma
 		policy: policy, baseline: baseline}, nil
 }
 
-func (m *Manager) BeginSmartTUNTrial(opts SmartTUNCandidateOptions, managementPeer string, deadlineSeconds int, qaKillAfterStart bool) (SmartTUNTrialReceipt, error) {
+func (m *Manager) BeginSmartTUNTrial(opts SmartTUNCandidateOptions, managementPeer string, deadlineSeconds int, qaKillPoint string) (SmartTUNTrialReceipt, error) {
+	if qaKillPoint != "" && qaKillPoint != "after-journal" && qaKillPoint != "after-start" {
+		return SmartTUNTrialReceipt{}, Fault("invalid_arguments", "unsupported disposable TUN SIGKILL boundary")
+	}
 	if m.Dir != DefaultDir || m.Core != DefaultCore ||
 		deadlineSeconds < 4 || deadlineSeconds > 600 {
 		return SmartTUNTrialReceipt{}, Fault("trial_unsupported", "installed paths and deadline 4-600s required")
@@ -436,9 +439,14 @@ func (m *Manager) BeginSmartTUNTrial(opts SmartTUNCandidateOptions, managementPe
 		return SmartTUNTrialReceipt{}, err
 	}
 	if err := smartTUNTrialSystemctl("enable", "--now", trialRecoveryTimer); err != nil {
+		m.disarmUncommittedSmartTUNGuard()
 		return SmartTUNTrialReceipt{}, err
 	}
 	if err := trialGuardScheduled(); err != nil {
+		// Prearm failure may leave a service timer installed/enabled but no
+		// journal. Reconcile only its exact known state; never disarm another
+		// operation or claim a recovery after a conflicted observation.
+		m.disarmUncommittedSmartTUNGuard()
 		return SmartTUNTrialReceipt{}, err
 	}
 	var receipt SmartTUNTrialReceipt
@@ -489,19 +497,25 @@ func (m *Manager) BeginSmartTUNTrial(opts SmartTUNCandidateOptions, managementPe
 		if err != nil || now != baseline {
 			return Fault("trial_observation_uncertain", "network changed before guarded TUN mutation")
 		}
-		if err := put(cfgPath, policy); err != nil {
-			return err
-		}
-		// Durable journal MUST precede systemctl start. If start fails or
-		// controller dies, preserve journal+timer for independent recovery.
+		// Write the durable guarded operation BEFORE writing its credential.
+		// A crash between these operations leaves a recoverable journal with
+		// a missing credential and NO possible TUN start; the independent
+		// timer can prove the unchanged native baseline and mark recovered.
 		if err := writeSmartTUNTrialLocked(store, record, nil); err != nil {
 			return err
 		}
 		journalPersisted = true
+		if qaKillPoint == "after-journal" {
+			_ = syscall.Kill(os.Getpid(), syscall.SIGKILL)
+			return Fault("trial_pending_recovery", "disposable precredential SIGKILL unexpectedly returned")
+		}
+		if err := put(cfgPath, policy); err != nil {
+			return Fault("trial_pending_recovery", "guarded journal durable but TUN credential staging failed; independent recovery required")
+		}
 		if err := smartTUNTrialSystemctl("start", smartTUNTrialUnit); err != nil {
 			return Fault("trial_pending_recovery", "TUN service failed after durable pending journal; independent guard must reconcile")
 		}
-		if qaKillAfterStart {
+		if qaKillPoint == "after-start" {
 			// The independent systemd timer must reconcile a real process
 			// SIGKILL after the journal and TUN service are both live.
 			_ = syscall.Kill(os.Getpid(), syscall.SIGKILL)
@@ -511,20 +525,23 @@ func (m *Manager) BeginSmartTUNTrial(opts SmartTUNCandidateOptions, managementPe
 		return nil
 	})
 	if err != nil && !journalPersisted {
-		// Only a second operation holding the SAME lock may disarm the
-		// timer when there is definitely no journal or active TUN. An
-		// overlapping author's pending journal MUST retain its guard.
-		_ = m.withActivationJournalLock(syscall.Fsync, func(store *activationJournalDir) error {
-			if _, _, e := store.readJournal(); !errors.Is(e, os.ErrNotExist) {
-				return nil
-			}
-			if active, e := smartTUNTrialUnitState(); e != nil || active != "inactive" {
-				return nil
-			}
-			return smartTUNTrialSystemctl("disable", "--now", trialRecoveryTimer)
-		})
+		m.disarmUncommittedSmartTUNGuard()
 	}
 	return receipt, err
+}
+
+// Safe only on the fully admitted disconnected disposable guest. A journal
+// appearance, unowned service, or uncertain filesystem state forbids cleanup.
+func (m *Manager) disarmUncommittedSmartTUNGuard() {
+	_ = m.withActivationJournalLock(syscall.Fsync, func(store *activationJournalDir) error {
+		if _, _, e := store.readJournal(); !errors.Is(e, os.ErrNotExist) {
+			return nil
+		}
+		if active, e := smartTUNTrialUnitState(); e != nil || active != "inactive" {
+			return nil
+		}
+		return smartTUNTrialSystemctl("disable", "--now", trialRecoveryTimer)
+	})
 }
 
 // Called by the existing installed independent systemd oneshot. A handled
@@ -583,10 +600,17 @@ func recoverSmartTUNTrialLocked(store *activationJournalDir, identity activation
 	if err != nil {
 		return SmartTUNTrialReceipt{}, err
 	}
+	credentialPresent, credentialValid := false, false
 	if record.Phase == "trial_pending" {
-		cfg, err := readRegular(filepath.Join(DefaultDir, smartTUNTrialConfigFile))
-		if err != nil || sha256Hex(cfg) != record.ConfigSHA256 {
-			return SmartTUNTrialReceipt{}, Fault("trial_resource_conflict", "pending TUN credential identity is missing or modified")
+		cfg, checkErr := readRegular(filepath.Join(DefaultDir, smartTUNTrialConfigFile))
+		switch {
+		case checkErr == nil:
+			credentialPresent, credentialValid = true, sha256Hex(cfg) == record.ConfigSHA256
+		case errors.Is(checkErr, os.ErrNotExist):
+			// Journal-first interrupted operation; no core could have
+			// started through the trusted LoadCredential unit without it.
+		default:
+			return SmartTUNTrialReceipt{}, Fault("trial_resource_conflict", "pending TUN credential cannot be inspected")
 		}
 	}
 	if record.Phase == "trial_recovered" {
@@ -608,7 +632,7 @@ func recoverSmartTUNTrialLocked(store *activationJournalDir, identity activation
 		return SmartTUNTrialReceipt{}, err
 	}
 	if boot == record.BootID && uptime < record.DeadlineUptimeSec &&
-		(status == "active" || status == "activating") {
+		(status == "active" || status == "activating") && credentialValid {
 		if err := trialGuardScheduled(); err != nil {
 			return SmartTUNTrialReceipt{}, err
 		}
@@ -626,6 +650,16 @@ func recoverSmartTUNTrialLocked(store *activationJournalDir, identity activation
 	current, err := inspectSmartTUNBaseline(record.EndpointIP, record.ManagementPeerIP)
 	if err != nil || current != record.BaselineSHA256 {
 		return SmartTUNTrialReceipt{}, Fault("trial_recovery_uncertain", "host routing or firewall baseline differs after TUN stop")
+	}
+	// A modified credential is an external resource conflict, not an
+	// owned object to delete. A missing credential is legitimate only for
+	// the journal-first, pre-start crash; exact TUN service stop is still
+	// independently required before marking recovered.
+	if credentialPresent && !credentialValid {
+		return SmartTUNTrialReceipt{}, Fault("trial_resource_conflict", "pending TUN credential was replaced")
+	}
+	if !credentialPresent && status != "inactive" {
+		return SmartTUNTrialReceipt{}, Fault("trial_resource_conflict", "running TUN unit lost its original credential; owned service stopped but operation is uncertain")
 	}
 	record.Phase, record.Revision = "trial_recovered", 2
 	if err := writeSmartTUNTrialLocked(store, record, &identity); err != nil {

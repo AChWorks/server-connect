@@ -65,8 +65,8 @@ two-interface Docker systemd fixture, with synthetic VLESS endpoint and CIDRs.
 It first validates selected profile, pinned core and complete native
 route/rule/link/nftables baseline, then independently prearms and executes
 the installed recovery oneshot **outside** the shared journal lock. A second
-locked admission must match, followed by credential persistence, fsynced
-pending journal and only then an explicit `systemctl start` of the exact owned
+locked admission must match, followed by fsynced pending journal, credential persistence
+and only then an explicit `systemctl start` of the exact owned
 TUN unit. An independent systemd timer detects timeout, manager death, core
 exit or reboot, stops only that exact unit and requires the original semantic
 kernel and nftables baseline before recording `trial_recovered`. Exact

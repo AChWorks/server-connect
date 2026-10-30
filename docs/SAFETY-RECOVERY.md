@@ -29,8 +29,8 @@ The installed experimental v4 journal deliberately has only
 `trial_pending` (revision 1) and `trial_recovered` (revision 2), **not**
 `ACTIVE_VERIFIED`. It binds the operation, profile, synthetic endpoint,
 native baseline digest, sing-box configuration digest, boot ID and monotonic
-deadline. It starts the actual pinned sing-box Linux TUN in a separate
-static service after durable journaling, while the prearmed recovery oneshot
+deadline. It records the journal **before** the credential, then starts the actual
+pinned sing-box Linux TUN in a separate static service after both are durable, while the prearmed recovery oneshot
 and 5-second timer have been independently exercised. The default expiry
 is 600 seconds, configurable from 4 to 600 seconds in disconnected QA only.
 A failed/uncertain restoration retains the journal, never presents Direct

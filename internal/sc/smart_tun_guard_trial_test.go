@@ -161,7 +161,7 @@ func TestSmartTUNPendingRejectsCorruptAndUntrustedLocalJournal(t *testing.T) {
 
 func TestSmartTUNTrialRefusesNoninstalledContextBeforeAnySystemctl(t *testing.T) {
 	m := New(t.TempDir(), DefaultCore, DefaultPort)
-	_, err := m.BeginSmartTUNTrial(SmartTUNCandidateOptions{}, "", 600, false)
+	_, err := m.BeginSmartTUNTrial(SmartTUNCandidateOptions{}, "", 600, "")
 	if ErrorCode(err) != "trial_unsupported" {
 		t.Fatalf("trial on arbitrary state directory did not fail closed: %v", err)
 	}

@@ -309,7 +309,7 @@ func run(j bool, m *sc.Manager, args []string) int {
 		tunnelIPv4 := opts.String("tunnel-ipv4", "", "private guest TUN CIDR")
 		peer := opts.String("management-peer", "", "synthetic guest management peer")
 		deadline := opts.Int("deadline-seconds", 600, "independent mandatory rollback deadline")
-		qaKill := opts.Bool("qa-kill-after-start", false, "isolated guest SIGKILL fault after managed TUN start")
+		qaKill := opts.String("qa-kill-at", "", "isolated guest SIGKILL after-journal or after-start")
 		var domestic, protected destinationFlags
 		opts.Var(&domestic, "domestic-cidr", "synthetic domestic CIDR; repeat")
 		opts.Var(&protected, "protected-cidr", "explicit guest control CIDR; repeat")

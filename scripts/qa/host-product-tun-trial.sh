@@ -174,7 +174,7 @@ PYSTATUS
   # Second: kill ONLY the initiating manager after a real systemd core
   # launch. The independent installed oneshot, not this shell, must recover.
   killed=0
-  apply 12 --qa-kill-after-start >/dev/null 2>&1 || killed=$?
+  apply 12 --qa-kill-at after-start >/dev/null 2>&1 || killed=$?
   [ "$killed" = 137 ] || {
     echo "Product TUN controller did not die at post-start boundary: $killed" >&2;return 1
   }
@@ -189,4 +189,19 @@ PYSTATUS
   require_recovered "$op"
   clear_recovered "$op"
   echo PRODUCT_TUN_SIGKILL_INDEPENDENT_SYSTEMD_ROLLBACK=PASS
+
+  # Journal-first crash: the core and TUN were NEVER started. A fresh
+  # systemd executor must still expire the exact operation, prove unchanged
+  # routes/rules/firewall and permit cleaning an absent credential.
+  killed=0
+  apply 10 --qa-kill-at after-journal >/dev/null 2>&1 || killed=$?
+  [ "$killed" = 137 ] || {
+    echo "Product TUN controller did not die after journal: $killed" >&2;return 1
+  }
+  op=$(pending_receipt)
+  [ ! -e /var/lib/server-connect/smart-tun-trial.json ]
+  [ "$(systemctl show server-connect-smart-tun.service -p ActiveState --value)" = inactive ]
+  require_recovered "$op"
+  clear_recovered "$op"
+  echo PRODUCT_TUN_PRE_CREDENTIAL_SIGKILL_INDEPENDENT_ROLLBACK=PASS
 }
