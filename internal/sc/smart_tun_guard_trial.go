@@ -434,10 +434,10 @@ func smartTUNTrialUnitState() (string, error) {
 // Stop, all identity observations and optional failed-state normalization share
 // one budget under the existing 30s recovery service. Never add independent
 // 18s control timeouts for each step or accept an acknowledged reset as proof.
-func stopSmartTUNTrialCore(original smartTUNTrialUnitObservation, allowFailedNormalization bool) error {
+func stopSmartTUNTrialCore(original smartTUNTrialUnitObservation, startAttempted, credentialValid bool) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	return stopSmartTUNTrialCoreWith(original, allowFailedNormalization,
+	return stopSmartTUNTrialCoreWith(original, startAttempted, credentialValid,
 		func() (smartTUNTrialUnitObservation, error) { return observeSmartTUNTrialUnit(ctx) },
 		func(action string) error {
 			cmd, err := trustedSystemctlCommand(ctx, action, smartTUNTrialUnit)
@@ -453,7 +453,7 @@ func stopSmartTUNTrialCore(original smartTUNTrialUnitObservation, allowFailedNor
 
 // This argument-local seam is also the production path; it permits failure
 // boundary tests without systemd, native effects or alternate recovery logic.
-func stopSmartTUNTrialCoreWith(original smartTUNTrialUnitObservation, allowFailedNormalization bool,
+func stopSmartTUNTrialCoreWith(original smartTUNTrialUnitObservation, startAttempted, credentialValid bool,
 	observe func() (smartTUNTrialUnitObservation, error), command func(string) error) error {
 	readOwned := func() (smartTUNTrialUnitObservation, error) {
 		state, err := observe()
@@ -468,6 +468,16 @@ func stopSmartTUNTrialCoreWith(original smartTUNTrialUnitObservation, allowFaile
 	before, err := readOwned()
 	if err != nil {
 		return err
+	}
+	if !startAttempted {
+		// Without durable start intent, activity belongs to no authorized
+		// operation. Stopping it would erase the conflict and let a later
+		// recovery tick mistake inactive state for clean pre-start evidence.
+		// Both snapshots must instead prove an already empty, inactive core.
+		if !original.stopped() || !before.stopped() {
+			return Fault("trial_resource_conflict", "TUN core activity has no durable start authority")
+		}
+		return nil
 	}
 	if (before.job != "" && before.job != "0") || (original.activeState == "inactive" && before.activeState != "inactive") {
 		return Fault("trial_recovery_uncertain", "owned TUN core has an unexpected pending operation")
@@ -486,11 +496,11 @@ func stopSmartTUNTrialCoreWith(original smartTUNTrialUnitObservation, allowFaile
 		stopped.result == "" || stopped.result == "success" || !stopped.noLiveWork() {
 		return Fault("trial_recovery_uncertain", "owned TUN core is not quiescent after stop")
 	}
-	if !allowFailedNormalization {
-		// The caller derives this only from durable start intent and the exact
-		// operation credential. Preserve failed evidence across repeated ticks
-		// rather than converting an untrusted pre-start operation to inactive.
-		return Fault("trial_resource_conflict", "failed TUN core lacks trusted start and credential evidence")
+	if !credentialValid {
+		// Durable start intent permits containment, but only the exact operation
+		// credential permits clearing failed bookkeeping. Keep that conflict
+		// visible across repeated recovery ticks.
+		return Fault("trial_resource_conflict", "failed TUN core lacks trusted credential evidence")
 	}
 	// systemd v257 unit_stop returns EALREADY for FAILED, which JOB_STOP
 	// acknowledges as done. reset-failed does not stop processes: only apply
@@ -984,11 +994,11 @@ func recoverLegacySmartTUNTrialLocked(store *activationJournalDir, identity acti
 		}
 	}
 	// A durable explicit stop does not depend on the old boot clock or
-	// deadline: it is an unconditional request to contain the owned core.
+	// deadline. Core mutation still requires its recorded start authority.
 	// Expired, rebooted, stopped, failed, or unguarded: stop ONLY the
 	// trusted, pinned systemd service and demand EXACT baseline restoration.
 	originalUnitState := status
-	if err := stopSmartTUNTrialCore(unit, record.CoreStartAttempted && credentialValid); err != nil {
+	if err := stopSmartTUNTrialCore(unit, record.CoreStartAttempted, credentialValid); err != nil {
 		return SmartTUNTrialReceipt{}, err
 	}
 	current, err := inspectSmartTUNBaseline(record.EndpointIP, record.ManagementPeerIP)

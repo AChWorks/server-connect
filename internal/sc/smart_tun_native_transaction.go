@@ -621,9 +621,10 @@ func recoverSmartTUNNativeLocked(store *activationJournalDir, record *smartTUNTr
 			return smartTUNReceipt(*record, true, false), nil
 		}
 	}
-	// Deactivation intent is durable before containing the exact core. A
-	// credential/ownership conflict keeps native capture and the independent
-	// POSTROUTING guard, never a silently Direct but still-pending operation.
+	// Deactivation intent is durable before stopping a core with recorded
+	// start authority. A credential/ownership conflict keeps native capture
+	// and the independent POSTROUTING guard, never a silently Direct but
+	// still-pending operation.
 	if record.Native.StopReason == "" {
 		next := cloneSmartTUNTrial(*record)
 		reason := "guard"
@@ -637,7 +638,7 @@ func recoverSmartTUNNativeLocked(store *activationJournalDir, record *smartTUNTr
 		}
 	}
 	previousStatus := status
-	if err := stopSmartTUNTrialCore(unit, record.CoreStartAttempted && valid); err != nil {
+	if err := stopSmartTUNTrialCore(unit, record.CoreStartAttempted, valid); err != nil {
 		return SmartTUNTrialReceipt{}, err
 	}
 	if credentialErr != nil && !errors.Is(credentialErr, os.ErrNotExist) {

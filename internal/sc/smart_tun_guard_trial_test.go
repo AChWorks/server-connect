@@ -120,7 +120,7 @@ func TestSmartTUNCoreStopNormalizesOnlyTheSameQuiescentFailedUnit(t *testing.T) 
 			original := tc.original
 			reads := 0
 			var commands []string
-			err := stopSmartTUNTrialCoreWith(original, true, func() (smartTUNTrialUnitObservation, error) {
+			err := stopSmartTUNTrialCoreWith(original, true, true, func() (smartTUNTrialUnitObservation, error) {
 				if reads >= len(tc.observations) {
 					t.Fatal("unexpected extra state observation")
 				}
@@ -143,7 +143,7 @@ func TestSmartTUNCoreStopPreservesUncertaintyAfterPartialCommandOrQueryFailure(t
 			reads := 0
 			var commands []string
 			injected := errors.New("lost acknowledgement or query")
-			err := stopSmartTUNTrialCoreWith(original, true, func() (smartTUNTrialUnitObservation, error) {
+			err := stopSmartTUNTrialCoreWith(original, true, true, func() (smartTUNTrialUnitObservation, error) {
 				reads++
 				if (reads == 1 && failure == "pre-query") || (reads == 2 && failure == "post-stop-query") || (reads == 3 && failure == "post-reset-query") {
 					return smartTUNTrialUnitObservation{}, injected
@@ -181,7 +181,7 @@ func TestSmartTUNCoreStopPreservesUncertaintyAfterPartialCommandOrQueryFailure(t
 func TestSmartTUNCoreNormalizationDoesNotLaunderOriginalCredentialState(t *testing.T) {
 	original := smartTUNCoreObservationExample("failed")
 	current := original
-	if err := stopSmartTUNTrialCoreWith(original, true,
+	if err := stopSmartTUNTrialCoreWith(original, true, true,
 		func() (smartTUNTrialUnitObservation, error) { return current, nil },
 		func(action string) error {
 			if action == "reset-failed" {
@@ -196,10 +196,6 @@ func TestSmartTUNCoreNormalizationDoesNotLaunderOriginalCredentialState(t *testi
 	}
 	for name, record := range map[string]smartTUNTrialJournal{"legacy": trialV4Example(), "native": nativeTrialExample(false)} {
 		t.Run(name, func(t *testing.T) {
-			record.CoreStartAttempted = false
-			if err := smartTUNTrialCredentialRecoveryCheck(record, original.activeState, false, false); err == nil {
-				t.Fatal("unexpected failed core without start intent became a clean pre-start operation")
-			}
 			record.CoreStartAttempted = true
 			if err := smartTUNTrialCredentialRecoveryCheck(record, original.activeState, false, false); err == nil {
 				t.Fatal("failed core normalization authorized a missing started credential")
@@ -220,7 +216,7 @@ func TestSmartTUNCoreFailedEvidenceSurvivesRepeatedUntrustedNormalization(t *tes
 			current := smartTUNCoreObservationExample("failed")
 			for tick := 0; tick < 2; tick++ {
 				var commands []string
-				err := stopSmartTUNTrialCoreWith(current, started && credentialValid,
+				err := stopSmartTUNTrialCoreWith(current, started, credentialValid,
 					func() (smartTUNTrialUnitObservation, error) { return current, nil },
 					func(action string) error {
 						commands = append(commands, action)
@@ -229,10 +225,122 @@ func TestSmartTUNCoreFailedEvidenceSurvivesRepeatedUntrustedNormalization(t *tes
 						}
 						return nil
 					})
-				if err == nil || current.activeState != "failed" || strings.Join(commands, ",") != "stop" {
+				wantCommands := ""
+				if started {
+					wantCommands = "stop"
+				}
+				if err == nil || current.activeState != "failed" || strings.Join(commands, ",") != wantCommands {
 					t.Fatalf("failed evidence laundered on tick %d (start=%v credential=%v): commands=%v state=%+v err=%v", tick, started, credentialValid, commands, current, err)
 				}
 			}
+		}
+	}
+}
+
+func TestSmartTUNCoreNoStartConflictSurvivesRepeatedRecoveryTicks(t *testing.T) {
+	for kind, record := range map[string]smartTUNTrialJournal{"legacy": trialV4Example(), "native": nativeTrialExample(false)} {
+		record.CoreStartAttempted = false
+		for _, activity := range []string{"active", "activating", "failed"} {
+			for _, credential := range []struct {
+				name           string
+				present, valid bool
+			}{
+				{"valid", true, true}, {"absent", false, false},
+			} {
+				t.Run(kind+"/"+activity+"/"+credential.name, func(t *testing.T) {
+					current := smartTUNCoreObservationExample(activity)
+					if activity == "activating" {
+						current.subState, current.mainPID, current.controlGroup = "start", 123, "/system.slice/"+smartTUNTrialUnit
+					}
+					conflict := current
+					for tick := 0; tick < 2; tick++ {
+						var commands []string
+						err := stopSmartTUNTrialCoreWith(current, record.CoreStartAttempted, credential.valid,
+							func() (smartTUNTrialUnitObservation, error) { return current, nil },
+							func(action string) error {
+								commands = append(commands, action)
+								// This models the old bug: stop erases activity, allowing
+								// the next tick to accept the unchanged no-start journal.
+								current = smartTUNCoreObservationExample("inactive")
+								return nil
+							})
+						if err == nil || len(commands) != 0 || current != conflict {
+							t.Fatalf("no-start evidence erased on tick %d: commands=%v state=%+v err=%v", tick, commands, current, err)
+						}
+						if err := smartTUNTrialCredentialRecoveryCheck(record, current.activeState, credential.present, credential.valid); err == nil {
+							t.Fatal("conflicting activity became acceptable pre-start evidence")
+						}
+					}
+				})
+			}
+		}
+	}
+}
+
+func TestSmartTUNCoreNoStartRequiresBothOwnedObservationsAlreadyStopped(t *testing.T) {
+	clean := smartTUNCoreObservationExample("inactive")
+	active := smartTUNCoreObservationExample("active")
+	dirty := clean
+	dirty.controlGroup = "/system.slice/" + smartTUNTrialUnit
+	queued := clean
+	queued.job = "19"
+	replaced := clean
+	replaced.identity.unitFile.ino++
+	for _, credentialValid := range []bool{false, true} {
+		for _, tc := range []struct {
+			name            string
+			original, fresh smartTUNTrialUnitObservation
+			wantOK          bool
+		}{
+			{"clean", clean, clean, true},
+			{"original activity", active, clean, false},
+			{"new activity", clean, active, false},
+			{"original residual work", dirty, clean, false},
+			{"new residual work", clean, dirty, false},
+			{"original queued job", queued, clean, false},
+			{"new queued job", clean, queued, false},
+			{"unit replacement", clean, replaced, false},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				reads, commands := 0, 0
+				err := stopSmartTUNTrialCoreWith(tc.original, false, credentialValid,
+					func() (smartTUNTrialUnitObservation, error) { reads++; return tc.fresh, nil },
+					func(string) error { commands++; return nil })
+				if (err == nil) != tc.wantOK || reads != 1 || commands != 0 {
+					t.Fatalf("no-start recovery mutated or lost two-snapshot proof: reads=%d commands=%d err=%v", reads, commands, err)
+				}
+			})
+		}
+	}
+}
+
+func TestSmartTUNCoreStartedCredentialConflictStillContains(t *testing.T) {
+	for kind, record := range map[string]smartTUNTrialJournal{"legacy": trialV4Example(), "native": nativeTrialExample(false)} {
+		record.CoreStartAttempted = true
+		for _, credential := range []struct {
+			name    string
+			present bool
+		}{{"missing", false}, {"tampered", true}} {
+			t.Run(kind+"/"+credential.name, func(t *testing.T) {
+				current := smartTUNCoreObservationExample("active")
+				for tick := 0; tick < 2; tick++ {
+					original := current
+					var commands []string
+					err := stopSmartTUNTrialCoreWith(original, record.CoreStartAttempted, false,
+						func() (smartTUNTrialUnitObservation, error) { return current, nil },
+						func(action string) error {
+							commands = append(commands, action)
+							current = smartTUNCoreObservationExample("inactive")
+							return nil
+						})
+					if err != nil || !current.stopped() || strings.Join(commands, ",") != "stop" {
+						t.Fatalf("started core containment changed on tick %d: commands=%v err=%v", tick, commands, err)
+					}
+					if err := smartTUNTrialCredentialRecoveryCheck(record, original.activeState, credential.present, false); err == nil {
+						t.Fatal("containment cleared the durable credential conflict")
+					}
+				}
+			})
 		}
 	}
 }
