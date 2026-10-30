@@ -95,8 +95,15 @@ authority. Invalid or missing saved input is rejected before prearm. A saved
 policy change detected during prearm blocks TUN activation and reconciles only
 an uncommitted guard; it cannot disarm another journaled operation.
 
-Native and legacy trial recovery share one owned core-stop proof. An acknowledged
-`systemctl stop` may leave an already failed service in `failed`
+Native and legacy trial recovery share one owned core-stop proof. Without a
+durable core-start attempt, recovery is observation-only: both the original and
+a fresh same-owned unit observation must prove `inactive`/`dead`, successful and
+without live work. Unexpected activity is left unchanged so a recovery command
+cannot erase the conflict before the next attempt. A started operation still
+contains its owned core when the credential is missing or changed, while
+retaining that credential conflict.
+
+An acknowledged `systemctl stop` may leave an already failed service in `failed`
 ([systemd stop handling](https://github.com/systemd/systemd/blob/v257/src/core/unit.c)).
 Before normalizing that bookkeeping, require the same installed unit identity
 and digest, no queued job or main/control PID, and a released systemd cgroup.
