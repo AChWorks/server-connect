@@ -61,6 +61,13 @@ for candidate, expected in (
 
 # Require exact fail-closed base-owned admission expression; a changed
 # expression must be reviewed together with an updated security test.
+jobs = source.split("\njobs:\n", 1)
+require(len(jobs) == 2, "missing/ambiguous job section")
+job_names = re.findall(r"^  ([a-zA-Z0-9_-]+):$", jobs[1], re.MULTILINE)
+require(job_names == ["debian-systemd-lifecycle"],
+        "an additional privileged job needs its own reviewed admission")
+require(source.count("    if: >-\n") == 1,
+        "missing/duplicate trusted job admission")
 admission_part = source.split("    if: >-\n", 1)
 require(len(admission_part) == 2, "missing/duplicate trusted job admission")
 admission = " ".join(admission_part[1].split("    runs-on:", 1)[0].split())
@@ -71,6 +78,14 @@ expected_admission = (
     "github.event.pull_request.head.repo.full_name == github.repository)"
 )
 require(admission == expected_admission, "unreviewed job admission semantics")
+require("        debian: ['13', '12']\n" in source,
+        "supported installed targets changed without reviewed coverage")
+require("      fail-fast: false\n" in source,
+        "one target failure must not cancel the other target's evidence")
+require("      SC_QA_DEBIAN_VERSION: ${{ matrix.debian }}\n" in source,
+        "matrix target is not bound to the shared installed harness")
+require('"debian-${SC_QA_DEBIAN_VERSION}-amd64"' in source,
+        "target-specific bundle construction missing")
 
 # Exercise the policy's two intended branches (with exact expression above):
 # workflow_dispatch is allowed only after GitHub authenticates an Actions
@@ -120,8 +135,53 @@ require("runs-on: ubuntu-24.04\n" in source, "ephemeral hosted runner required")
 require("secrets." not in source and "environment:" not in source,
         "privileged workflow unexpectedly references secrets/environment")
 
+# Metadata-only evidence may follow a successful, explicitly dispatched
+# Debian12 lifecycle. The sole upload is the identity/checksum JSON; no
+# installable archive, binary, log, profile or directory is permitted.
+handoff_gate = (
+    "        if: ${{ success() && github.event_name == 'workflow_dispatch' "
+    "&& matrix.debian == '12' }}\n"
+)
+steps = re.split(r"(?m)^      - name: ", source)[1:]
+upload_steps = [step for step in steps if "uses: actions/upload-artifact@" in step]
+require(len(upload_steps) == 1, "missing/additional artifact upload step")
+upload = upload_steps[0]
+require(upload == steps[-1], "artifact upload must follow all lifecycle checks")
+require(handoff_gate in upload, "artifact upload admits unsuccessful/non-dispatch/non-Debian12 runs")
+require("        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2\n" in upload,
+        "artifact action is not the reviewed immutable version")
+require("          name: server-connect-debian12-qa-evidence-${{ github.sha }}-attempt-${{ github.run_attempt }}\n" in upload,
+        "artifact identity is not explicit QA evidence candidate/run-attempt scope")
+for setting in ("retention-days: 1", "compression-level: 0", "if-no-files-found: error", "overwrite: false"):
+    require(f"          {setting}\n" in upload, f"artifact setting changed: {setting}")
+inputs = re.findall(r"^          ([a-z-]+):", upload, re.MULTILINE)
+require(len(inputs) == 6 and set(inputs) == {
+    "name", "retention-days", "compression-level", "if-no-files-found", "overwrite", "path",
+}, "unreviewed/duplicate artifact input")
+path_parts = upload.split("          path: |\n")
+require(len(path_parts) == 2, "missing/ambiguous artifact path allowlist")
+require(path_parts[1].splitlines() == [
+    "            build/installed-qa/debian12-qa-handoff.json",
+], "artifact upload must contain only the JSON evidence, never installable bytes")
+identity_steps = [step for step in steps if step.startswith("Record successful Debian 12 QA build evidence\n")]
+require(len(identity_steps) == 1 and identity_steps[0] == steps[-2],
+        "exact-build identity must be recorded immediately before upload")
+require(handoff_gate in identity_steps[0], "identity step bypasses the artifact gate")
+require('[[ $(git rev-parse HEAD) == "$GITHUB_SHA" ]]' in identity_steps[0],
+        "handoff candidate identity is not rechecked")
+archive_parts = identity_steps[0].split("          archive_paths = (\n")
+require(len(archive_parts) == 2, "missing/ambiguous archive evidence inputs")
+archive_inputs = archive_parts[1].split("          )\n", 1)
+require(len(archive_inputs) == 2 and archive_inputs[0].splitlines() == [
+    "              'dist/server-connect-0.1.0-dev-debian12-amd64-local-qa.tar.gz',",
+    "              'build/installed-qa/server-connect-hostqa-update-valid.tar.gz',",
+    "              'build/installed-qa/server-connect-hostqa-update-invalid-unit.tar.gz',",
+], "metadata must identify exactly the three tested QA archives")
+
 print("INSTALLED_HOST_WORKFLOW_POLICY=PASS")
 print("TRUSTED_BASE_ADMISSION_CASES=PASS")
 print("SERVICE_UNIT_ONLY_TRIGGER_SELECTION=PASS")
 print("UNRELATED_DOCS_ONLY_TRIGGER_EXCLUDED=PASS")
 print("EXACT_CANDIDATE_IDENTITY_POLICY=PASS")
+print("EXPLICIT_DEBIAN12_DEBIAN13_INSTALLED_MATRIX=PASS")
+print("DEBIAN12_QA_METADATA_ONLY_ARTIFACT_POLICY=PASS")

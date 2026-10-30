@@ -1,19 +1,31 @@
 # Ephemeral GitHub-hosted QA only. Not a production container or supported install target.
-FROM debian:trixie-slim
+ARG DEBIAN_SUITE=trixie
+FROM debian:${DEBIAN_SUITE}-slim
+ARG SC_QA_DEBIAN_VERSION=13
 ENV DEBIAN_FRONTEND=noninteractive
 ENV container=docker
+RUN set -eu; . /etc/os-release; \
+    case "$SC_QA_DEBIAN_VERSION" in 12|13) ;; *) exit 1 ;; esac; \
+    test "$ID" = debian && test "$VERSION_ID" = "$SC_QA_DEBIAN_VERSION"
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
       ca-certificates curl wget git gzip openssl iproute2 nftables openssh-client openssh-server passwd procps \
       python3 strace systemd systemd-sysv tar util-linux \
-      php8.4-cli php8.4-fpm php8.4-curl php8.4-sqlite3 php8.4-xml \
-      libfcgi-bin unzip \
+ && if [ "$SC_QA_DEBIAN_VERSION" = 13 ]; then \
+      apt-get install -y --no-install-recommends \
+        php8.4-cli php8.4-fpm php8.4-curl php8.4-sqlite3 php8.4-xml \
+        libfcgi-bin unzip; \
+    fi \
  && rm -rf /var/lib/apt/lists/*
 # No unrelated global PHP-FPM service should auto-start in the QA systemd guest.
-RUN rm -f /etc/systemd/system/multi-user.target.wants/php8.4-fpm.service
+RUN if [ "$SC_QA_DEBIAN_VERSION" = 13 ]; then \
+      rm -f /etc/systemd/system/multi-user.target.wants/php8.4-fpm.service; \
+    fi
 # Fixture-only upstream bytes, fetched while building on a connected disposable
 # CI runner and checksum-pinned BEFORE the runtime guest is disconnected.
-RUN set -eu; \
+# Debian12 coverage is the installed Direct/Proxy Only lifecycle; PHP/WordPress
+# and the native TUN acceptance remain in the complete Debian13 lane.
+RUN set -eu; if [ "$SC_QA_DEBIAN_VERSION" = 13 ]; then \
     mkdir -p /opt/sc-qa-wordpress-core /tmp/sc-qa-wp; \
     curl -q --fail --location --proto '=https' --proto-redir '=https' \
       --retry 2 --connect-timeout 15 --max-time 150 --silent --show-error \
@@ -30,7 +42,8 @@ RUN set -eu; \
       /opt/sc-qa-wordpress-core/wp-content/db.php; \
     test -f /opt/sc-qa-wordpress-core/wp-load.php; \
     test -f /opt/sc-qa-wordpress-core/wp-content/db.php; \
-    rm -rf /tmp/sc-qa-wp
+    rm -rf /tmp/sc-qa-wp; \
+    fi
 # Dedicated unprivileged disposable guest account; no host or production users.
 RUN useradd --create-home --shell /bin/sh scqa
 STOPSIGNAL SIGRTMIN+3

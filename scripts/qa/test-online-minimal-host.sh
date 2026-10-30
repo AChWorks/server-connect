@@ -14,6 +14,12 @@ if [[ $# != 2 || ! -f $1 || ! -f $2 ]]; then
   echo 'Usage: test-online-minimal-host.sh QA-BUNDLE.tar.gz BOOTSTRAP.sh' >&2
   exit 2
 fi
+qa_version=${SC_QA_DEBIAN_VERSION:-13}
+case "$qa_version" in
+  12) qa_suite=bookworm ;;
+  13) qa_suite=trixie ;;
+  *) echo 'QA target must be Debian 12 or Debian 13' >&2; exit 2 ;;
+esac
 bundle=$(realpath -- "$1")
 bootstrap=$(realpath -- "$2")
 root=$(cd -- "$(dirname -- "$0")/../.." && pwd -P)
@@ -45,8 +51,10 @@ trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-echo '=== Build native Debian 13 minimal systemd fixture while runner is disposable ==='
+printf '=== Build native Debian %s minimal systemd fixture while runner is disposable ===\n' "$qa_version"
 docker build --pull -f scripts/qa/Dockerfile.online-minimal-systemd \
+  --build-arg "DEBIAN_SUITE=$qa_suite" \
+  --build-arg "SC_QA_DEBIAN_VERSION=$qa_version" \
   -t "$image" scripts/qa
 # Bridge networking is required ONLY for the guest's native Debian APT
 # prerequisite acquisition. No host networking, host files, credentials,
@@ -72,10 +80,10 @@ for attempt in $(seq 1 30); do
   sleep 2
 done
 [[ $ready == yes ]] || { echo 'Connected disposable systemd not ready' >&2; exit 1; }
-docker exec "$container" /bin/sh -c '
+docker exec -e "SC_QA_DEBIAN_VERSION=$qa_version" "$container" /bin/sh -c '
   set -eu
   . /etc/os-release
-  test "$ID" = debian && test "$VERSION_ID" = 13
+  test "$ID" = debian && test "$VERSION_ID" = "$SC_QA_DEBIAN_VERSION"
   test "$(cat /proc/1/comm)" = systemd
   test "$(uname -m)" = x86_64
   test "$(systemctl show server-connect.service -p LoadState --value)" = not-found
@@ -136,7 +144,7 @@ for attempt in $(seq 1 20); do
 done
 [[ $web_ready == yes ]] || { echo 'Guest-only QA HTTP origin unavailable' >&2; exit 1; }
 
-echo '=== Install genuine QA artifact from missing-tools Debian 13 via native APT and shared installer ==='
+printf '=== Install genuine QA artifact from missing-tools Debian %s via native APT and shared installer ===\n' "$qa_version"
 docker exec "$container" /usr/bin/env -i \
   HOME=/root PATH=/usr/sbin:/usr/bin:/sbin:/bin LC_ALL=C \
   /bin/sh /root/sc-qa-bootstrap.sh \
@@ -212,4 +220,5 @@ docker exec "$container" /bin/sh -c '
   exit 1
 }
 echo 'DISCONNECTED_MINIMAL_ONLINE_TO_OFFLINE_UNINSTALL=PASS (profile retained, Direct preserved)'
+printf 'CONNECTED_MINIMAL_DEBIAN%s_COVERAGE=PASS\n' "$qa_version"
 echo 'LIMITATION: guest uses original Debian APT mirrors and fixture loopback, not publisher-authenticated public release or foreign VPN'

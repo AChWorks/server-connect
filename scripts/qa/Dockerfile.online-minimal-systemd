@@ -1,8 +1,13 @@
-# QA-only native Debian 13 guest with systemd, deliberately without
+# QA-only native Debian 12/13 guest with systemd, deliberately without
 # curl/Python. Only use on a disposable GitHub-hosted Docker runner.
-FROM debian:trixie-slim
+ARG DEBIAN_SUITE=trixie
+FROM debian:${DEBIAN_SUITE}-slim
+ARG SC_QA_DEBIAN_VERSION=13
 ENV DEBIAN_FRONTEND=noninteractive
 ENV container=docker
+RUN set -eu; . /etc/os-release; \
+    case "$SC_QA_DEBIAN_VERSION" in 12|13) ;; *) exit 1 ;; esac; \
+    test "$ID" = debian && test "$VERSION_ID" = "$SC_QA_DEBIAN_VERSION"
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
       systemd systemd-sysv iproute2 util-linux \
