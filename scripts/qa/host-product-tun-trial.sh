@@ -114,6 +114,104 @@ import json,sys
 r=json.load(sys.stdin)
 assert r["ok"] and r["data"]["desired"]=="direct" and r["data"]["observed"]=="inactive",r'
   }
+  if [ "$ipv6_trial" = yes ]; then
+    # No arbitrary IPv6 Apply. Refuse a partial/modified dual-stack
+    # candidate BEFORE journaling, prearming or any kernel mutation.
+    for kind in partial broad; do
+      case "$kind" in
+        partial)
+          set -- --tunnel-ipv6 fd73:99::1/64 ;;
+        broad)
+          set -- --tunnel-ipv6 fd73:99::1/64 \
+            --domestic-ipv6-cidr 2001:db8:5::/64 \
+            --ipv6-vpn-cidr 2001:db8:5::10/128 \
+            --ipv6-direct-cidr 2000::/3 ;;
+      esac
+      if apply 8 "$@" > /run/sc-qa-product-tun-conflict.json; then
+        echo "Product admitted unsupported IPv6 $kind policy" >&2;return 1
+      fi
+      python3 - <<'PYV6REFUSED'
+import json
+with open('/run/sc-qa-product-tun-conflict.json') as f:r=json.load(f)
+assert not r['ok'] and r['error']['code']=='trial_unsupported',r
+PYV6REFUSED
+      test ! -e /var/lib/server-connect/route-activation-journal.json
+      test ! -e /var/lib/server-connect/smart-tun-trial.json
+      test "$(systemctl show server-connect-activation-recover.timer -p ActiveState --value)" = inactive
+      test "$(systemctl show server-connect-smart-tun.service -p ActiveState --value)" = inactive
+      test "$(ip -N -j -6 route show table all)" = "$before_v6_routes"
+      test "$(ip -N -j -6 rule show)" = "$before_v6_rules"
+      test "$(nft -j list ruleset)" = "$before_nft"
+    done
+    echo PRODUCT_TUN_IPV6_UNSUPPORTED_INPUT_REJECTED=PASS
+
+    # This is a separate *installed product* trial with the existing real
+    # native dual-stack fixture, not the older QA shell-owned TUN process.
+    apply 55 --tunnel-ipv6 fd73:99::1/64 \
+      --domestic-ipv6-cidr 2001:db8:5::/64 \
+      --ipv6-vpn-cidr 2001:db8:5::10/128 \
+      --ipv6-direct-cidr 2001:db8:8::9/128 \
+      > /run/sc-qa-product-tun-apply.json
+    op=$(pending_receipt)
+    assert_product_tun_policy_active
+    ip -6 route show table all | grep -F 'dev sctunqa0' >/dev/null
+    # Native positive controls were obtained earlier by host-tun-path.sh;
+    # its peer nftables counters distinguish every unsafe Direct leak.
+    test "$ipv6_foreign_tcp_baseline" -gt 0
+    test "$ipv6_foreign_udp_baseline" -gt 0
+    test "$ipv6_override_baseline" -gt 0
+    test "$ipv6_override_udp_baseline" -gt 0
+    ipv6_path tcp 2001:db8:5::11 fd73:1::1 reply
+    ipv6_path udp 2001:db8:5::11 fd73:1::1 reply
+    ipv6_path tcp 2001:db8:5::10 2001:db8:5::10 reply
+    ipv6_path udp 2001:db8:5::10 2001:db8:5::10 reply
+    ipv6_path tcp 2001:db8:8::8 2001:db8:8::8 reply
+    ipv6_path udp 2001:db8:8::8 2001:db8:8::8 reply
+    ipv6_path tcp 2001:db8:8::9 fd73:1::1 reply
+    ipv6_path udp 2001:db8:8::9 fd73:1::1 reply
+    test "$(ipv6_foreign_tcp_direct_packets)" -eq "$ipv6_foreign_tcp_baseline"
+    test "$(ipv6_foreign_udp_direct_packets)" -eq "$ipv6_foreign_udp_baseline"
+    test "$(ipv6_override_direct_packets)" -eq "$ipv6_override_baseline"
+    test "$(ipv6_override_udp_direct_packets)" -eq "$ipv6_override_udp_baseline"
+    expect_source 5.22.0.10 10.254.72.1
+    expect_source 8.8.8.8 8.8.8.8
+    expect_foreign_hosted_reply
+    /bin/sh /root/qa-host-coexistence.sh probe
+    assert_product_tun_policy_active
+    echo PRODUCT_TUN_IPV6_REAL_SELECTED=PASS
+
+    # The selected VLESS upstream is genuinely killed. The product TUN
+    # remains active until its independent deadline, and all VPN-required
+    # IPv6 TCP/UDP must fail CLOSED, not leak native Direct packets.
+    kill "$server_pid"
+    wait "$server_pid" || :
+    ipv6_path tcp 2001:db8:8::8 none no-reply
+    ipv6_path udp 2001:db8:8::8 none no-reply
+    ipv6_path tcp 2001:db8:5::10 none no-reply
+    ipv6_path udp 2001:db8:5::10 none no-reply
+    kill -0 "$ipv6_pid" 2>/dev/null
+    ipv6_path tcp 2001:db8:5::11 fd73:1::1 reply
+    ipv6_path udp 2001:db8:5::11 fd73:1::1 reply
+    ipv6_path tcp 2001:db8:8::9 fd73:1::1 reply
+    ipv6_path udp 2001:db8:8::9 fd73:1::1 reply
+    test "$(ipv6_foreign_tcp_direct_packets)" -eq "$ipv6_foreign_tcp_baseline"
+    test "$(ipv6_foreign_udp_direct_packets)" -eq "$ipv6_foreign_udp_baseline"
+    test "$(ipv6_override_direct_packets)" -eq "$ipv6_override_baseline"
+    test "$(ipv6_override_udp_direct_packets)" -eq "$ipv6_override_udp_baseline"
+    ip -6 route show table all | grep -F 'dev sctunqa0' >/dev/null
+    assert_product_tun_policy_active
+    expect_foreign_hosted_reply
+    echo PRODUCT_TUN_IPV6_OUTAGE_FAIL_CLOSED=PASS
+
+    require_recovered "$op"
+    /bin/sh /root/qa-host-coexistence.sh probe
+    expect_foreign_hosted_reply
+    clear_recovered "$op"
+    rm -f /run/sc-qa-product-tun-apply.json /run/sc-qa-product-tun-conflict.json
+    echo PRODUCT_TUN_IPV6_GUARD_ROLLBACK=PASS
+    return 0
+  fi
+
   # First: live normal product Apply and actual synthetic foreign/domestic
   # packet paths. Do not mistake TUN device creation for installed policy.
   if ! apply 32 > /run/sc-qa-product-tun-apply.json; then

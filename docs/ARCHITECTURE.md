@@ -62,6 +62,12 @@ any of them is active.
 `smart-tun-trial-apply` is **not** the product Smart Routing Apply: it is a
 short-lived, v4-journal-bound real sing-box test *only* in the known disconnected
 two-interface Docker systemd fixture, with synthetic VLESS endpoint and CIDRs.
+It admits only the original exact IPv4 policy or one opt-in, strictly pinned
+synthetic IPv4+IPv6 variant: the same owned TUN unit, journal v4, recovery
+executor, isolated underlay and baseline verification; never an arbitrary
+IPv6 host, public prefix list, or production dual-stack rollout. IPv6
+operator Direct/VPN host exceptions demonstrate precedence only in this QA
+fixture; no geolocation or trusted DNS-to-IP correlation is inferred.
 It first validates selected profile, pinned core and complete native
 route/rule/link/nftables baseline (including any pre-existing QA-guest
 firewall owners), then independently prearms and executes
