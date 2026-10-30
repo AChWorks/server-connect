@@ -94,6 +94,43 @@ cleanup() {
   original_rc=$?
   cleanup_failed=no
   trap - EXIT INT TERM
+  # On failure during the installed product TUN experiment, the independent
+  # prearmed systemd guard (NOT this shell) must own the stop/rollback.
+  # Do not delete its VETH/peer first: that would destroy the exact native
+  # baseline and make a valid watchdog report an unrecoverable drift.
+  # The ORIGINAL test failure remains a failure even if recovery succeeds.
+  if [ "${SC_QA_TUN_PRODUCT_LAB-}" = yes ] && [ "$original_rc" -ne 0 ] &&
+     [ -f /var/lib/server-connect/route-activation-journal.json ]; then
+    product_recovered=no
+    tries=0
+    while [ "$tries" -lt 65 ]; do
+      if /usr/local/bin/server-connect --json smart-tun-trial-status |
+         /usr/bin/python3 -c '
+import json,sys
+r=json.load(sys.stdin)
+assert r["ok"] and r["data"]["phase"]=="trial_recovered" and r["data"]["recovery_verified"],r' 2>/dev/null; then
+        product_recovered=yes
+        break
+      fi
+      tries=$((tries+1))
+      sleep 1
+    done
+    if [ "$product_recovered" = yes ]; then
+      product_op=$(/usr/local/bin/server-connect --json smart-tun-trial-status |
+         /usr/bin/python3 -c 'import json,sys;print(json.load(sys.stdin)["data"]["operation_id"])') || product_op=
+      if [ -n "$product_op" ] &&
+         /usr/local/bin/server-connect --json smart-tun-trial-clear --operation-id "$product_op" --revision 2 |
+           /usr/bin/python3 -c 'import json,sys;r=json.load(sys.stdin);assert r["ok"] and r["data"]["cleared"],r'; then
+        echo 'PRODUCT_TUN_FAILURE_CLEANUP=PASS (independent deadline and exact operation clearance; QA remains failed)'
+      else
+        echo 'PRODUCT_TUN_FAILURE_CLEANUP=FAIL (exact recovered operation clearance unavailable)' >&2
+        cleanup_failed=yes
+      fi
+    else
+      echo 'PRODUCT_TUN_FAILURE_CLEANUP=FAIL (independent recovery not verified before guest teardown)' >&2
+      cleanup_failed=yes
+    fi
+  fi
   if [ "${SC_QA_TUN_GUARD_LAB-}" = yes ] && ! qa_tun_guard_cleanup; then
     cleanup_failed=yes
   fi

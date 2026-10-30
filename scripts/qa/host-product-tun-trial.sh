@@ -155,9 +155,22 @@ assert r["data"]["observed"]=="smart_tun_trial_pending",r
 PYSTATUS
   echo PRODUCT_TUN_DIRECT_FALSE_STATUS_AND_PROXY_CONFLICT_REFUSED=PASS
 
+  # The legacy QA generator starts sing-box as a shell child and its
+  # assert_tun_policy_active predicate correctly checks $client_pid. This
+  # installed product trial is owned by a separate systemd unit instead:
+  # checking a nonexistent shell PID would reject every valid product Apply.
+  assert_product_tun_policy_active() {
+    [ "$(systemctl show server-connect-smart-tun.service -p ActiveState --value)" = active ] || return 1
+    [ -e /sys/class/net/sctunqa0 ] || return 1
+    ip -4 route show table all | grep -F 'dev sctunqa0' >/dev/null || return 1
+    ip -4 rule show >/dev/null || return 1
+    observed=$(nft -j list ruleset) || return 1
+    [ "$observed" != "$before_nft" ] || return 1
+  }
+
   ready=no
   for n in $(seq 1 35); do
-    if assert_tun_policy_active &&
+    if assert_product_tun_policy_active &&
        expect_source 5.22.0.10 10.254.72.1 &&
        expect_source 8.8.8.8 8.8.8.8; then
       ready=yes
@@ -175,6 +188,25 @@ PYSTATUS
   dns_path 8.8.8.8 192.0.2.22 product-foreign-dns udp reply
   expect_foreign_hosted_reply
   echo PRODUCT_TUN_INSTALLED_UDP_DNS_AND_FOREIGN_HOSTING=PASS
+
+  # The actual packaged product TUN must also carry application traffic
+  # without HTTP_PROXY, wrappers, PID attribution or cgroup steering.
+  # Existing independent origin and nftables witnesses MUST record no
+  # foreign Direct bypass, rather than merely trusting command exit status.
+  assert_product_tun_policy_active
+  native_apps selected
+  [ "$(native_app_direct_packets)" -eq "$native_apps_baseline" ] || {
+    echo 'PRODUCT_TUN_NATIVE_APPS=FAIL (APT/Git escaped native Direct)' >&2
+    return 1
+  }
+  wp_probe positive 8.8.8.8
+  [ "$(native_app_direct_packets)" -eq "$native_apps_baseline" ] || {
+    echo 'PRODUCT_TUN_WORDPRESS=FAIL (proxy-unaware PHP escaped native Direct)' >&2
+    return 1
+  }
+  [ "$(without_proxy http://8.8.8.8:19180/wget)" = 'SOURCE=8.8.8.8' ]
+  assert_product_tun_policy_active
+  echo PRODUCT_TUN_INSTALLED_APT_GIT_WORDPRESS=PASS
   require_recovered "$op"
   echo PRODUCT_TUN_SYSTEMD_DEADLINE_EXACT_BASELINE=PASS
   clear_recovered "$op"
