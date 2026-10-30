@@ -88,6 +88,8 @@ docker exec "$container" /bin/sh -c '
   test ! -e /etc/systemd/system/server-connect-activation-recover.service
   test ! -e /etc/systemd/system/server-connect-activation-recover.timer
   test ! -e /etc/systemd/system/server-connect-smart-tun.service
+  test ! -e /etc/systemd/system/server-connect-smart-health.service
+  test ! -e /etc/systemd/system/server-connect-smart-health.timer
 '
 # systemd service-credential mounts must propagate within this guest's own
 # /run tmpfs. No host mount is changed or bound into the guest.
@@ -157,6 +159,12 @@ docker exec "$container" /bin/sh -c '
   test "$(systemctl show server-connect-smart-tun.service -p LoadState --value)" = loaded
   test "$(systemctl show server-connect-smart-tun.service -p UnitFileState --value)" = static
   test "$(systemctl show server-connect-smart-tun.service -p ActiveState --value)" = inactive
+  test "$(systemctl show server-connect-smart-health.service -p LoadState --value)" = loaded
+  test "$(systemctl show server-connect-smart-health.service -p UnitFileState --value)" = static
+  test "$(systemctl show server-connect-smart-health.service -p ActiveState --value)" = inactive
+  test "$(systemctl show server-connect-smart-health.timer -p LoadState --value)" = loaded
+  test "$(systemctl show server-connect-smart-health.timer -p ActiveState --value)" = inactive
+  test "$(systemctl is-enabled server-connect-smart-health.timer)" = disabled
   /usr/local/bin/server-connect version --json
   test -z "$(find /root -maxdepth 1 -name ".server-connect-bootstrap.*" -print)"
 '
@@ -192,6 +200,8 @@ docker exec "$container" /bin/sh -c '
   test ! -e /etc/systemd/system/server-connect-activation-recover.service
   test ! -e /etc/systemd/system/server-connect-activation-recover.timer
   test ! -e /etc/systemd/system/server-connect-smart-tun.service
+  test ! -e /etc/systemd/system/server-connect-smart-health.service
+  test ! -e /etc/systemd/system/server-connect-smart-health.timer
   test "$(cat /var/lib/server-connect/profiles/qa-retained)" = SC_ONLINE_MINIMAL_PROFILE_RETAINED
   test "$(stat -c %a /var/lib/server-connect/profiles)" = 700
   command -v curl

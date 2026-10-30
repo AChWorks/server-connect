@@ -48,25 +48,42 @@ The VPN server's *outer transport* needs an independently reachable bootstrap pa
 
 Track **desired, observed, pending/uncertain and last verified safe** states separately. An observed process, successful Direct probe, route-plan fingerprint or private intent journal is not proof of safe TUN activation. Exact transaction semantics and recovery belong to [SAFETY-RECOVERY.md](SAFETY-RECOVERY.md).
 
-## Inert product TUN unit and disposable pending integration
+## Inert product units and disposable native integration
 
-The development installer carries a third supplementary **static, unenabled**
+The development installer carries a static, unenabled
 `server-connect-smart-tun.service` distinct from the existing unprivileged
-`server-connect.service` Proxy Only unit. The TUN service alone has
-`CAP_NET_ADMIN`/`CAP_NET_RAW`, and reads its exact staged policy using a
-systemd `LoadCredential` copy; the ordinary proxy unit remains unprivileged.
-The installer fingerprints and transactionally restores this unit alongside
-its existing independent recovery service/timer, and refuses updates while
-any of them is active.
+`server-connect.service` Proxy Only unit. The TUN service has the capabilities
+needed for its narrowly admitted native link and marked sockets, and reads its
+exact staged policy using a systemd `LoadCredential` copy. The ordinary proxy
+unit remains unprivileged. The installer fingerprints and transactionally
+restores the TUN unit, independent recovery service/timer and separate health
+service/timer, and refuses updates while any of them is active. Installation
+alone does not enable either experimental timer.
 
-`smart-tun-trial-apply` is **not** the product Smart Routing Apply: it is a
-short-lived real sing-box test only in the known disconnected Docker/systemd
+`smart-tun-trial-apply` is limited to the known disconnected Docker/systemd
 fixture, with an exact synthetic VLESS endpoint and IPv4 or opt-in IPv4+IPv6
-policy. New operations use the v4 journal's distinct
-`smart_tun_native_pending_trial_v1` intent with a required typed native ledger.
-Older v4 automatic-policy records retain their original recovery semantics;
-the two intents cannot substitute for each other. Neither intent can be
-confirmed or left permanently active.
+policy. Its default pending mode uses the v4 journal's distinct
+`smart_tun_native_pending_trial_v1` intent with a required typed native ledger;
+it expires without confirmation. The explicit `--supervised` mode adds a
+separate strict lifecycle record for one-use fresh management confirmation,
+selected-path health and bounded reconnect. Older v4 automatic-policy and
+native-pending records retain their original recovery semantics and cannot
+be interpreted as confirmed supervised authority. All of these modes remain
+experimental and unavailable for general-host Apply.
+
+The supervised health role is a separate bounded systemd oneshot, scheduled
+by an inert-at-install timer. The independent recovery role checks both its
+unit provenance/state and its operation-bound progress deadline; an active
+timer alone cannot prove healthy supervision. The health role also checks the
+independent recovery role before continuing. Network probes execute outside
+the shared operation lock, followed by exact-state revalidation before any
+result is published. The service execution deadline bounds a stalled health
+process even if it stops making progress while holding the lock. Reconnect
+retains the native containment policy, restarts only the selected owned core,
+and must acquire fresh attachment and selected-path proof before reporting
+experimental recovery. The attempt and elapsed-time budgets span flapping
+within an outage incident. Exhaustion ends in exact owned recovery or retained
+uncertainty; it never creates an unlimited restart loop.
 
 The independent executor selects the journal version and runs its recovery
 handler under one continuous manager lock. Concurrent Apply cannot publish
@@ -141,14 +158,15 @@ Supported foreign nftables coexistence is limited to observed non-rewriting
 filtering/counters and the admitted passive statement forms. NAT, packet or
 metadata rewriting, redirection/duplication/forwarding, userspace queueing,
 connection-tracking assignment and offload are unsupported and must remain
-absent while pending. A later privileged path-affecting change can invalidate
+absent while routed. A later privileged path-affecting change can invalidate
 routing assumptions before the periodic executor observes it; stopping the core
 is not instantaneous containment against such a new foreign policy.
 
 This boundary does not authenticate arbitrary simultaneous privileged writers,
-route/rule generations, geographic data or DNS-to-IP correlation. It does not
-provide fresh SSH/provider confirmation, permanent commitment, field-tested
-Runtime Health Guard or physical power-loss recovery. General production
+route/rule generations, geographic data or DNS-to-IP correlation. Fresh root
+SSH confirmation applies only to the admitted disposable transport; provider
+console attestation, general permanent commitment, field-tested Runtime Health
+Guard and physical power-loss recovery remain unavailable. General production
 activation remains unavailable. Legacy automatic-policy cleanup has additional
 [ownership limits](SAFETY-RECOVERY.md#automatic-policy-ownership-limit); it is not
 used as native-transaction deletion authority.

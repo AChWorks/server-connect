@@ -169,6 +169,9 @@ func finalizeSmartTUNTrialLocked(store *activationJournalDir, identity activatio
 	if err := store.removeSmartTUNCredential(identity, record, credential, syscall.Fsync); err != nil {
 		return SmartTUNTrialReceipt{}, err
 	}
+	if err := disarmSmartTUNHealthTimer(record); err != nil {
+		return SmartTUNTrialReceipt{}, err
+	}
 	if err := trialQAKillAt("after-credential-remove", qaKillPoint); err != nil {
 		return SmartTUNTrialReceipt{}, err
 	}
@@ -236,6 +239,10 @@ func (m *Manager) DisconnectSmartTUNTrial(operationID string, revision uint64, q
 			record.Phase, record.Revision = "trial_stop_requested", 2
 			if record.Native != nil {
 				record.Native.StopReason = "off"
+			}
+			if record.Supervised != nil {
+				record.Supervised.State, record.Supervised.Reason = "stopped", "operator_off"
+				record.Supervised.Generation++
 			}
 			if err := writeSmartTUNTrialLocked(store, record, &identity); err != nil {
 				return err

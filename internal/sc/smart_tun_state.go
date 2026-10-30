@@ -306,5 +306,5 @@ func (m *Manager) BeginSavedSmartTUNTrial(deadlineSeconds int, qaKillPoint strin
 	if err != nil {
 		return SmartTUNTrialReceipt{}, err
 	}
-	return m.beginSmartTUNTrial(policy.Options, policy.ManagementPeerIP, deadlineSeconds, qaKillPoint, &binding)
+	return m.beginSmartTUNTrial(policy.Options, policy.ManagementPeerIP, deadlineSeconds, qaKillPoint, &binding, nil)
 }

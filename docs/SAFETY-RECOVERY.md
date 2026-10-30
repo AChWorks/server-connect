@@ -26,7 +26,7 @@
 ### Disposable v4 guarded TUN trial (not production acceptance)
 
 The installed experimental v4 journal never reaches `ACTIVE_VERIFIED`.
-A pending trial is `trial_pending` (revision 1); ordinary timeout recovery
+The default unconfirmed path uses the following control phases. A pending trial is `trial_pending` (revision 1); ordinary timeout recovery
 retains `trial_recovered` (revision 2). Explicit Disconnect durably advances
 to `trial_stop_requested` (revision 2), then verified `trial_recovered`
 (revision 3). Finalization uses `trial_cleanup_pending` (revision 4) before
@@ -64,9 +64,10 @@ automatic policy. Unresolved stop, credential or ownership conflicts retain the
 operation and block Direct/Proxy Only. A lost timer is reported honestly as
 `guard_scheduled=false`; it never grants broader deletion authority.
 Exact operation-ID/revision clearance disarms the remaining guard after
-rechecking the credential. This is an observed-loss containment path in the
-isolated guest, **not** a substitute for independent guard-liveness supervision
-or the future production Runtime Health Guard (#3).
+rechecking the credential. For the default pending mode, this is an observed-loss containment path in the
+isolated guest; it does not establish independent guard-liveness supervision.
+The explicitly supervised mode below adds that role within the same fixture.
+Neither mode establishes the production Runtime Health Guard.
 
 The dedicated trial Disconnect is bound to the exact current operation and
 revision. It durably records deactivation intent before stopping the trusted
@@ -117,13 +118,92 @@ decisions. Query/stop/reset uncertainty, residual work or changed provenance
 retains recovery evidence and native protection. This deactivation-only action
 does not reset a failed guard or authorize another activation.
 
+
+#### Supervised native lifecycle
+
+`smart-tun-trial-apply --supervised` retains the exact disposable admission,
+independent recovery prearm and native ownership contract. It adds a required
+strict `supervised` record under a separate intent. The top-level transaction
+phase/revision continues to describe pending resources, stop, recovery and
+cleanup; it does not by itself describe confirmation. The receipt's separate
+`supervision_state` distinguishes awaiting confirmation, healthy, degraded,
+reconnecting, stopped and uncertain. Neither a confirmed experiment nor a
+healthy probe grants general-host `ACTIVE_VERIFIED`.
+
+A random one-use challenge is returned only by successful initial Apply after
+the native capture policy is complete. The private journal retains its digest,
+not a recoverable challenge value. Status cannot reissue it. Confirmation must
+match the operation, control revision, boot, selected configuration and deadline,
+and must carry the fresh authenticated management evidence described below.
+A replay, stale operation or old multiplexed transport cannot confirm another
+activation. Publishing confirmation requires the unchanged complete journal and
+current native ownership proof; interrupted publication retains recovery state.
+
+The installed health oneshot has a 20-second systemd execution limit and a
+separate 5-second timer. Independent recovery checks recorded executor
+provenance, current role state and a 35-second operation-bound progress lease.
+A single interrupted invocation may be replaced by the unchanged trusted timer
+and resume valid progress before that lease expires. An observed failed or
+unavailable health role, or an expired progress lease, triggers exact owned Off
+recovery; incomplete ownership or finalization remains explicit uncertainty.
+A replacement invocation cannot renew expired authority, but it can perform
+owned Off itself. The emitting service's journal provenance distinguishes that
+outcome from Off completed by the independent recovery role. The health role
+also refuses to keep routing when independent recovery is unavailable. Network
+probes run outside the manager lock, and their results require exact journal,
+boot and ownership revalidation before publication. Stale concurrent results
+cannot revive a stopped or replacement operation.
+
+Health separates a device/source/mark-bound protected underlay witness from
+ordinary selected-path TCP, UDP and DNS wire probes. The latter use fresh
+nonces and independent peer-observed source evidence; Direct responses cannot
+satisfy VPN health. Each enabled address family has two destinations, so one
+failed site is not a total-path failure. The custom TCP witness proves that
+fixture's TCP delivery; it does not imply TLS/HTTPS health or foreign Internet
+reachability. DNS is a fresh bounded wire exchange, not a cached host resolver
+answer. DNS evidence is UDP transport with an IN/A question, including when
+the transport uses IPv6; it does not establish system-resolver/bootstrap or
+AAAA-answer behavior. The aggregate probe round is bounded to four seconds.
+
+Defaults are a 15-second probe interval, 30-second startup grace, three failed
+rounds, at most three reconnect attempts for the entire operation and a
+120-second deadline for each degraded incident. A successful interval can end
+an incident, but never replenishes the operation's consumed attempt budget.
+These are experimental bounds, not field-calibrated promises. Native
+containment remains present during reconnect. Restart affects only the exact
+selected core and requires durable pre-start intent, a fresh attachment witness
+and fresh selected-path success. A missing attachment receipt remains uncertain
+even if a later process snapshot appears healthy. Short healthy intervals cannot
+erase an incident's consumed budget. Exhaustion or a critical guard/underlay
+failure enters owned Off recovery; incomplete ownership is `UNCERTAIN`.
+A core exit or unapproved process generation change is classified as critical
+and goes directly to owned Off; only selected-path failure with the same live,
+trusted core is eligible for bounded reconnect. Saved policy and profile
+survive, and another activation requires an explicit new Apply. No application
+request or arbitrary host operation is replayed.
+
+A killed or timed-out health oneshot can leave failed systemd bookkeeping after
+verified Off. Fresh Apply refuses that failed role until the exact trusted idle
+unit is explicitly reconciled; it does not silently reset a changed, masked or
+missing executor. A missing or masked executor can also leave its health
+timer failed. Restoring the original executor file alone does not prove an
+inactive, disabled timer: native Off may be verified while final cleanup and
+journal removal remain pending. Exact trusted idle-timer reconciliation is
+explicit operator work, followed by fresh product finalization. The disposable
+QA labels these operator actions separately from automatic recovery.
+Both health and independent recovery emit the operation-bound
+reason, attempt count and timestamped evidence in their structured local
+service output, including the final Off receipt after journal removal.
+
 #### Native ownership and containment
 
-New pending trials use exact intent `smart_tun_native_pending_trial_v1` and a
-required versioned native subrecord. The complete subrecord participates in
-journal substitution checks and is copied before progress changes. Legacy v4
-keysets remain strict; unknown intents, partial native records or mixed legacy
-and native authority are rejected. Saved settings never supply deletion rights.
+Native pending trials use exact intent `smart_tun_native_pending_trial_v1`;
+explicitly supervised trials use `smart_tun_native_supervised_trial_v1`.
+Both require the versioned native subrecord. The complete native and, where
+applicable, supervision subrecords participate in journal substitution checks
+and are copied before progress changes. Legacy v4 keysets remain strict;
+unknown intents, partial records or mixed legacy/native/supervised authority
+are rejected. Saved settings never supply deletion rights.
 
 The native ledger binds namespace identity, underlay and TUN indices, observed
 link/address/dependency hashes, route/rule stages and receipts, and the complete
@@ -260,8 +340,8 @@ refusal/reconciliation, but general preservation against arbitrary overlapping
 owners and replacement objects remains an unfinished product gate. These limits do not relax
 the safety invariants or authorize wider activation.
 
-This is one step toward the real activation state machine, **not** a
-substitute for privileged third-party ownership/conntrack proof, SSH
+This legacy evidence is one step toward the real activation state machine;
+it does not establish privileged third-party ownership/conntrack proof, SSH
 confirmation, permanent commit, Runtime Health Guard, VPN-bound health
 monitoring or physical crash/reboot tests. A restored guest baseline does
 not certify production rollback safety or authorize public installation.
@@ -279,6 +359,34 @@ Default confirmation window: **600 seconds**, operator configurable. High-risk r
 7. Commit the desired state and disarm only the matching operation on complete evidence. On timeout, crash, reboot while pending, invalid confirmation or critical failure, restore only classified owned changes and verify the safest reachable baseline. Never reapply an unconfirmed TUN blindly after boot.
 
 If an existing resource was replaced or altered by another owner, classify `UNCERTAIN`, preserve it and require controlled operator recovery instead of deleting/overwriting it. Reobserve native kernel identity and all relevant foreign dependencies before cleanup: an `ip route`/RPDB protocol tag or a matching rule number alone is **not authenticated proof of Server Connect ownership**, and a Manager lock cannot exclude independent privileged writers.
+
+### Fresh management confirmation evidence
+
+For the disposable supervised native lifecycle, confirmation is deliberately
+limited to a new authenticated root OpenSSH connection over the admitted guest
+management path. An operation challenge is issued only after native capture is
+complete. Its monotonic boot-relative time, operation, configuration and control
+revision bind the confirmation. The original Apply shell and a new channel on an
+older SSH multiplexed connection cannot satisfy that requirement.
+
+The observer verifies the caller's actual process ancestry, trusted installed
+OpenSSH executable identity, root session ownership and network namespace. A
+bounded read-only Linux `SOCK_DIAG_BY_FAMILY` dump binds an established TCP tuple,
+inode and kernel socket cookie to a descriptor held by that ancestor. The oldest
+transport-owning session process must have started strictly after the challenge;
+process lifetime, ancestry, descriptor and socket generation are checked again
+before returning evidence. `SSH_CONNECTION`, `SSH_CLIENT`, process names and
+operator-supplied timestamps are not authentication. Ambiguous, missing or
+changed evidence refuses confirmation. Provider-console confirmation and
+non-root/sudo management sessions require their own future accepted proof; they
+are not silently treated as equivalent to this root-only fixture.
+
+The kernel's [process lifetime documentation](https://www.kernel.org/doc/html/latest/filesystems/proc.html)
+and [socket diagnostic UAPI](https://github.com/torvalds/linux/blob/v6.12/include/uapi/linux/inet_diag.h)
+explain the observation boundary. OpenSSH's [per-session executable split](https://www.openssh.com/releasenotes.html)
+is handled through the installed `sshd` / `sshd-session` executable identities.
+These are Linux/session observations, not an external management attestation or
+a general physical-host acceptance claim.
 
 ## Runtime Health Guard
 

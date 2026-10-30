@@ -335,6 +335,11 @@ PYSTALEDISCONNECT
   }
 
   . /root/qa-native-product-tun.sh
+  if [ "${SC_QA_TUN_SUPERVISED-}" = yes ]; then
+    . /root/qa-supervised-product-tun.sh
+    supervised_product_tun_trial
+    return
+  fi
   native_ipv4_transit baseline
 
   if [ "$ipv6_trial" = yes ]; then

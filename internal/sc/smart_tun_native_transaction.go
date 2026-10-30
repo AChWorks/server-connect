@@ -615,10 +615,18 @@ func recoverSmartTUNNativeLocked(store *activationJournalDir, record *smartTUNTr
 	present := credentialErr == nil
 	valid := present && sha256Hex(data) == record.ConfigSHA256
 	if record.Phase == "trial_pending" {
-		boot, bootErr := trialBootIdentity()
-		uptime, upErr := trialUptime()
-		if bootErr == nil && upErr == nil && smartTUNTrialMayRemainPending(*record, status, valid, boot == record.BootID, uptime) && trialGuardScheduled() == nil && nativeTUNVerifyPending(*record) == nil {
-			return smartTUNReceipt(*record, true, false), nil
+		if record.Supervised != nil {
+			if reason := inspectSupervisedRuntime(store, *record, true); reason == "" {
+				return smartTUNReceipt(*record, true, false), nil
+			} else if err := supervisedRequestStop(store, record, reason); err != nil {
+				return SmartTUNTrialReceipt{}, err
+			}
+		} else {
+			boot, bootErr := trialBootIdentity()
+			uptime, upErr := trialUptime()
+			if bootErr == nil && upErr == nil && smartTUNTrialMayRemainPending(*record, status, valid, boot == record.BootID, uptime) && trialGuardScheduled() == nil && nativeTUNVerifyPending(*record) == nil {
+				return smartTUNReceipt(*record, true, false), nil
+			}
 		}
 	}
 	// Deactivation intent is durable before stopping a core with recorded
@@ -649,6 +657,9 @@ func recoverSmartTUNNativeLocked(store *activationJournalDir, record *smartTUNTr
 	}
 	if record.CoreStartAttempted && !record.Native.StartupVerified {
 		return SmartTUNTrialReceipt{}, nativeTUNUncertain("native core attach was not durably verified; generation uncertainty retained")
+	}
+	if record.Supervised != nil && record.Supervised.ReconnectStage == "start_requested" {
+		return SmartTUNTrialReceipt{}, nativeTUNUncertain("restarted native core attach was not durably verified; containment retained")
 	}
 	boot, err := trialBootIdentity()
 	if err != nil {
@@ -695,6 +706,10 @@ func recoverSmartTUNNativeLocked(store *activationJournalDir, record *smartTUNTr
 		}
 	}
 	next.Phase, next.Revision = "trial_recovered", 2
+	if next.Supervised != nil {
+		next.Supervised.State = "stopped"
+		next.Supervised.Generation++
+	}
 	if next.Native.StopReason == "off" {
 		next.Revision = 3
 	}

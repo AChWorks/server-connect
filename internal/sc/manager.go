@@ -471,6 +471,9 @@ func (m *Manager) statusWithService(observe func() (string, error), verifyOwners
 			status = Status{Desired: s.Desired, Observed: "smart_tun_" + phase,
 				Selected: s.Selected, Port: s.Port, CoreVersion: CoreVersion,
 				Health: "guarded_trial_unconfirmed"}
+			if strings.HasPrefix(phase, "supervised_") {
+				status.Health = "supervised_record_not_freshly_verified"
+			}
 			return Fault("guard_pending", "Smart Routing trial is not Direct; inspect smart-tun-trial-status")
 		}
 		observed, inspectErr := observe()

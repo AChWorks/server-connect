@@ -53,6 +53,14 @@ func TestSmartTUNLifecycleCLIRejectsInvalidSyntaxWithoutMutation(t *testing.T) {
 		{"smart-tun-trial-disconnect", "--operation-id", strings.Repeat("a", 32), "extra"},
 		{"smart-tun-trial-clear", "--revision", "invalid"},
 		{"smart-tun-trial-clear", "--qa-kill-at", "after-cleanup-intent", "extra"},
+		{"smart-tun-trial-apply", "--health-interval", "5"},
+		{"smart-tun-trial-apply", "--supervised=false", "--health-attempts", "1"},
+		{"smart-tun-trial-apply", "--saved", "--supervised", "--management-peer="},
+		{"smart-tun-trial-confirm", "--unexpected"},
+		{"smart-tun-trial-confirm", "--revision", "-1"},
+		{"smart-tun-trial-confirm", "--challenge", "private-input-must-not-be-printed", "extra"},
+		{"smart-tun-trial-health", "--unexpected"},
+		{"smart-tun-trial-health", "extra"},
 	} {
 		t.Run(strings.Join(args, "_"), func(t *testing.T) {
 			code, stdout, stderr := hostDriftCapturedOutput(t, func() int {

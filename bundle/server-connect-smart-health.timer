@@ -1,0 +1,12 @@
+[Unit]
+Description=Server Connect experimental selected-path health schedule
+Documentation=https://github.com/AChWorks/server-connect
+
+[Timer]
+OnBootSec=8s
+OnUnitInactiveSec=5s
+AccuracySec=1s
+Unit=server-connect-smart-health.service
+
+[Install]
+WantedBy=timers.target
