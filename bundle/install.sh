@@ -57,13 +57,8 @@ check_source_ancestry() {
 }
 check_platform() {
  [ "$(uname -m)" = x86_64 ] || die 'unsupported CPU; this candidate supports only x86_64'
- [ -r /etc/os-release ] || die 'missing /etc/os-release'
- # shellcheck disable=SC1091
- . /etc/os-release
- case "${ID:-}:${VERSION_ID:-}" in
-  debian:12|debian:13) ;;
-  *) die 'unsupported OS; this candidate targets Debian 12 or Debian 13 only' ;;
- esac
+ # Distro/target admission belongs to the verified manager in verify_payload,
+ # after ownership/checksums; its bounded OS-identity parser never sources shell.
  need systemctl; need sha256sum; need install; need mktemp; need readlink; need cmp; need mv; need tar; need stat; need flock
  [ -d /run/systemd/system ] || die 'systemd is not PID 1; use a supported systemd host'
 }

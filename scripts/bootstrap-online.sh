@@ -11,6 +11,113 @@ export PATH
 unset TAR_OPTIONS GZIP GZIP_OPT ENV BASH_ENV CDPATH
 unset LD_PRELOAD LD_LIBRARY_PATH LD_AUDIT LD_DEBUG LD_ORIGIN_PATH
 unset PYTHONPATH PYTHONHOME PYTHONSTARTUP
+
+# A literal parser, not a shell evaluator. Keep this pure stdin operation
+# separate from the fixed trusted-path reader so ordinary tests need no host
+# identity override. Canonical Debian metadata uses printable ASCII and blanks.
+bootstrap_parse_os_identity() (
+ LC_ALL=C
+ export LC_ALL
+ # Preserve trailing newlines with a sentinel. A failed bounded read emits a
+ # control byte, so the final pipeline command fails rather than hiding it.
+ os_identity_raw=$(
+  { /usr/bin/head -c 16385 || printf '\001'; printf '.'; } |
+   /usr/bin/sed '/[^[:print:][:blank:]]/q 1'
+ ) || return 1
+ case "$os_identity_raw" in *.) os_identity_raw=${os_identity_raw%.} ;; *) return 1 ;; esac
+ [ "${#os_identity_raw}" -gt 0 ] && [ "${#os_identity_raw}" -le 16384 ] || return 1
+ os_identity_id=''
+ os_identity_version=''
+ while IFS= read -r os_identity_line || [ -n "$os_identity_line" ]; do
+  os_identity_line=${os_identity_line#"${os_identity_line%%[![:blank:]]*}"}
+  os_identity_line=${os_identity_line%"${os_identity_line##*[![:blank:]]}"}
+  case "$os_identity_line" in ''|\#*) continue ;; esac
+  case "$os_identity_line" in
+   *=*) os_identity_key=${os_identity_line%%=*}; os_identity_value=${os_identity_line#*=} ;;
+   *) return 1 ;;
+  esac
+  case "$os_identity_key" in ''|[0-9]*|*[!a-zA-Z0-9_]*) return 1 ;; esac
+  case "$os_identity_key" in
+   [Ii][Dd])
+    [ "$os_identity_key" = ID ] && [ -z "$os_identity_id" ] || return 1
+    case "$os_identity_value" in debian|'"debian"'|"'debian'") os_identity_id=debian ;; *) return 1 ;; esac
+    ;;
+   [Vv][Ee][Rr][Ss][Ii][Oo][Nn]_[Ii][Dd])
+    [ "$os_identity_key" = VERSION_ID ] && [ -z "$os_identity_version" ] || return 1
+    case "$os_identity_value" in
+     12|'"12"'|"'12'") os_identity_version=12 ;;
+     13|'"13"'|"'13'") os_identity_version=13 ;;
+     *) return 1 ;;
+    esac
+    ;;
+   *) ;; # Descriptive values are never expanded, sourced or executed.
+  esac
+ done <<SC_OS_IDENTITY_LITERAL
+$os_identity_raw
+SC_OS_IDENTITY_LITERAL
+ [ "$os_identity_id" = debian ] && [ -n "$os_identity_version" ] || return 1
+ printf '%s\n' "$os_identity_version"
+)
+
+bootstrap_os_path_owned() {
+ os_identity_owner=$(/usr/bin/stat -c '%u' -- "$1") || return 1
+ [ "$os_identity_owner" = 0 ] || return 1
+ os_identity_mode=$(/usr/bin/stat -c '%a' -- "$1") || return 1
+ case "$os_identity_mode" in ''|*[!0-7]*) return 1 ;; esac
+ [ "$((0$os_identity_mode & 022))" -eq 0 ]
+}
+
+bootstrap_read_os_version() (
+ LC_ALL=C
+ export LC_ALL
+ for os_identity_directory in / /etc; do
+  [ -d "$os_identity_directory" ] && [ ! -L "$os_identity_directory" ] &&
+   bootstrap_os_path_owned "$os_identity_directory" || return 1
+ done
+ os_identity_before=$(/usr/bin/stat -c '%d:%i:%f:%u:%g:%s:%y:%z' -- /etc/os-release) || return 1
+ os_identity_owner=$(/usr/bin/stat -c '%u' -- /etc/os-release) || return 1
+ [ "$os_identity_owner" = 0 ] || return 1
+ os_identity_link=''
+ if [ -L /etc/os-release ]; then
+  # Preserve target bytes, including trailing newlines, before allowlisting.
+  os_identity_link=$(/usr/bin/readlink -n -- /etc/os-release && printf '.') || return 1
+  os_identity_link=${os_identity_link%.}
+  case "$os_identity_link" in ../usr/lib/os-release|/usr/lib/os-release) ;; *) return 1 ;; esac
+  os_identity_path=/usr/lib/os-release
+  for os_identity_directory in /usr /usr/lib; do
+   [ -d "$os_identity_directory" ] && [ ! -L "$os_identity_directory" ] &&
+    bootstrap_os_path_owned "$os_identity_directory" || return 1
+  done
+ else
+  os_identity_path=/etc/os-release
+ fi
+ [ -f "$os_identity_path" ] && [ ! -L "$os_identity_path" ] &&
+  bootstrap_os_path_owned "$os_identity_path" || return 1
+ os_identity_size=$(/usr/bin/stat -c '%s' -- "$os_identity_path") || return 1
+ case "$os_identity_size" in ''|*[!0-9]*) return 1 ;; esac
+ [ "$os_identity_size" -gt 0 ] && [ "$os_identity_size" -le 16384 ] || return 1
+ os_identity_file_before=$(/usr/bin/stat -c '%d:%i:%f:%u:%g:%s:%y:%z' -- "$os_identity_path") || return 1
+ os_identity_version=$(bootstrap_parse_os_identity < "$os_identity_path") || return 1
+ os_identity_file_after=$(/usr/bin/stat -c '%d:%i:%f:%u:%g:%s:%y:%z' -- "$os_identity_path") || return 1
+ os_identity_after=$(/usr/bin/stat -c '%d:%i:%f:%u:%g:%s:%y:%z' -- /etc/os-release) || return 1
+ [ "$os_identity_file_before" = "$os_identity_file_after" ] &&
+  [ "$os_identity_before" = "$os_identity_after" ] || return 1
+ if [ -n "$os_identity_link" ]; then
+  os_identity_link_after=$(/usr/bin/readlink -n -- /etc/os-release && printf '.') || return 1
+  os_identity_link_after=${os_identity_link_after%.}
+  [ "$os_identity_link" = "$os_identity_link_after" ] || return 1
+  for os_identity_directory in /usr /usr/lib; do
+   [ -d "$os_identity_directory" ] && [ ! -L "$os_identity_directory" ] &&
+    bootstrap_os_path_owned "$os_identity_directory" || return 1
+  done
+ fi
+ for os_identity_directory in / /etc; do
+  [ -d "$os_identity_directory" ] && [ ! -L "$os_identity_directory" ] &&
+   bootstrap_os_path_owned "$os_identity_directory" || return 1
+ done
+ printf '%s\n' "$os_identity_version"
+)
+
 url=''
 digest=''
 verify_only=no
@@ -55,7 +162,7 @@ fi
 # this bootstrap, including staging, measurement and EXIT-trap cleanup tools.
 # Fail before APT on an incomplete base; never auto-repair essential packages.
 # Require native /usr/bin executables (not a custom PATH wrapper).
-for native_tool in id sed sha256sum stat timeout mktemp rm wc cut; do
+for native_tool in id sed sha256sum stat timeout mktemp rm wc cut head readlink; do
  if [ ! -x "/usr/bin/$native_tool" ] ||
     [ "$(command -v "$native_tool")" != "/usr/bin/$native_tool" ]; then
   echo "Missing native Debian bootstrap utility: /usr/bin/$native_tool" >&2
@@ -74,14 +181,12 @@ if [ "$#" -gt 0 ]; then
   echo 'Online --verify-only needs existing curl, Python 3 and HTTPS CA certificates; no packages installed' >&2
   exit 1
  fi
- # Only the explicitly supported Debian targets may acquire prerequisites.
- # Never guess an apt command or install packages on another distribution.
- [ -r /etc/os-release ] || { echo 'OS identity unavailable; cannot safely install online prerequisites' >&2; exit 1; }
- . /etc/os-release
- case "${ID:-}:${VERSION_ID:-}" in
-  debian:12|debian:13) ;;
-  *) echo 'Automatic online prerequisites are supported only on Debian 12 or Debian 13 with native APT' >&2;exit 1 ;;
- esac
+ # Read only the fixed trusted host identity. No shell evaluation or caller
+ # override may authorize a prerequisite package transaction.
+ prerequisite_version=$(bootstrap_read_os_version) || {
+  echo 'Verified Debian 12 or Debian 13 OS identity is required for automatic online prerequisites' >&2
+  exit 1
+ }
  [ -x /usr/bin/apt-get ] || {
   echo 'Automatic online prerequisites require native Debian APT' >&2
   exit 1
@@ -97,7 +202,7 @@ if [ "$#" -gt 0 ]; then
   echo 'Root staging parent is group/other writable' >&2
   exit 1
  }
- echo "Installing missing Debian $VERSION_ID online-bootstrap prerequisites through native APT" >&2
+ echo "Installing missing Debian $prerequisite_version online-bootstrap prerequisites through native APT" >&2
  # Fixed package names only; no user-provided package, source, repository or
  # global APT policy changes. Failure leaves the Server Connect install alone.
  unset APT_CONFIG DPKG_ROOT
