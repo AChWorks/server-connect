@@ -114,6 +114,19 @@ import json,sys
 r=json.load(sys.stdin)
 assert r["ok"] and r["data"]["desired"]=="direct" and r["data"]["observed"]=="inactive",r'
   }
+  # The legacy QA generator starts sing-box as a shell child and its
+  # assert_tun_policy_active predicate correctly checks $client_pid. This
+  # installed product trial is owned by a separate systemd unit instead:
+  # checking a nonexistent shell PID would reject every valid product Apply.
+  assert_product_tun_policy_active() {
+    [ "$(systemctl show server-connect-smart-tun.service -p ActiveState --value)" = active ] || return 1
+    [ -e /sys/class/net/sctunqa0 ] || return 1
+    ip -4 route show table all | grep -F 'dev sctunqa0' >/dev/null || return 1
+    ip -4 rule show >/dev/null || return 1
+    observed=$(nft -j list ruleset) || return 1
+    [ "$observed" != "$before_nft" ] || return 1
+  }
+
   if [ "$ipv6_trial" = yes ]; then
     # No arbitrary IPv6 Apply. Refuse a partial/modified dual-stack
     # candidate BEFORE journaling, prearming or any kernel mutation.
@@ -252,19 +265,6 @@ assert not r["ok"] and r["error"]["code"]=="guard_pending",r
 assert r["data"]["observed"]=="smart_tun_trial_pending",r
 PYSTATUS
   echo PRODUCT_TUN_DIRECT_FALSE_STATUS_AND_PROXY_CONFLICT_REFUSED=PASS
-
-  # The legacy QA generator starts sing-box as a shell child and its
-  # assert_tun_policy_active predicate correctly checks $client_pid. This
-  # installed product trial is owned by a separate systemd unit instead:
-  # checking a nonexistent shell PID would reject every valid product Apply.
-  assert_product_tun_policy_active() {
-    [ "$(systemctl show server-connect-smart-tun.service -p ActiveState --value)" = active ] || return 1
-    [ -e /sys/class/net/sctunqa0 ] || return 1
-    ip -4 route show table all | grep -F 'dev sctunqa0' >/dev/null || return 1
-    ip -4 rule show >/dev/null || return 1
-    observed=$(nft -j list ruleset) || return 1
-    [ "$observed" != "$before_nft" ] || return 1
-  }
 
   ready=no
   for n in $(seq 1 35); do
