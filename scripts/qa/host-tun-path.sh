@@ -94,6 +94,11 @@ cleanup() {
   original_rc=$?
   cleanup_failed=no
   trap - EXIT INT TERM
+  if [ "${SC_QA_TUN_PRODUCT_LAB-}" = yes ] &&
+     command -v native_product_cleanup >/dev/null && ! native_product_cleanup; then
+    echo 'PRODUCT_NATIVE_QA_FIXTURE_CLEANUP=FAIL (unresolved QA fixture ownership)' >&2
+    cleanup_failed=yes
+  fi
   # On failure during the installed product TUN experiment, the independent
   # prearmed systemd guard (NOT this shell) must own the stop/rollback.
   # Do not delete its VETH/peer first: that would destroy the exact native
@@ -160,6 +165,9 @@ print(d["operation_id"],d["revision"])' 2>/dev/null); then
   if [ "${SC_QA_TUN_GUARD_LAB-}" = yes ] && ! qa_tun_guard_cleanup; then
     cleanup_failed=yes
   fi
+  if [ "${SC_QA_TUN_OWNED_BOUNDARY-}" = yes ] && ! owned_boundary_cleanup; then
+    cleanup_failed=yes
+  fi
   for pid in "$client_pid" "$server_pid" "$origin_pid" "$hosting_pid" "$udp_pid" "$dns_pid" "$tls_pid" "$native_apps_pid" "$wp_pid" "$payload_pid" "$ipv6_pid"; do
     if [ -n "$pid" ]; then
       kill "$pid" 2>/dev/null || :
@@ -214,6 +222,10 @@ print(d["operation_id"],d["revision"])' 2>/dev/null); then
   # Fail, rather than claim cleanup, if the real core leaked its TUN.
   if [ -e /sys/class/net/sctunqa0 ]; then
     echo 'REAL_TUN_LAB_CLEANUP=FAIL (TUN still present)' >&2
+    cleanup_failed=yes
+  fi
+  if [ -e /sys/class/net/scqaowned0 ]; then
+    echo 'REAL_TUN_LAB_CLEANUP=FAIL (renamed QA TUN still present)' >&2
     cleanup_failed=yes
   fi
   if [ -e /sys/class/net/"$edge" ]; then
@@ -284,6 +296,8 @@ print(counters[0])
 
 direct_witness_packets() { peer_counter_packets direct_packets; }
 direct_udp_witness_packets() { peer_counter_packets direct_udp_packets; }
+visitor_origin_direct_packets() { peer_counter_packets visitor_origin_packets; }
+public_icmp6_direct_packets() { peer_counter_packets public_icmp6_packets; }
 payload_tcp_direct_packets() { peer_counter_packets payload_tcp_direct_packets; }
 payload_udp_direct_packets() { peer_counter_packets payload_udp_direct_packets; }
 ipv6_foreign_tcp_direct_packets() { peer_counter_packets ipv6_foreign_tcp_packets; }
@@ -402,7 +416,8 @@ except OSError as exc:
     # During a deliberately dead VLESS upstream, an explicit kernel error is
     # also a failed VPN-required request, not successful Direct delivery.
     if mode != "no-reply" or exc.errno not in (
-        errno.ENETUNREACH, errno.EHOSTUNREACH, errno.ECONNREFUSED
+        errno.ENETUNREACH, errno.EHOSTUNREACH, errno.ECONNREFUSED,
+        errno.EPERM, errno.EACCES
     ):
         raise
 finally:
@@ -424,6 +439,32 @@ ipv6_path() {
     /usr/bin/python3 -I -B /root/qa-tun-ipv6-wire.py "$@"
 }
 
+icmp6_path() {
+  # Exact synthetic peer only: distinguish required local ND from a broad
+  # public ICMPv6 exception. Kernel checksum handling is used for ICMPv6.
+  python3 - "$1" <<'PYICMP6PATH'
+import errno,os,socket,struct,sys,time
+mode=sys.argv[1]
+assert mode in ('reply','no-reply')
+token=os.urandom(16);request=struct.pack('!BBHHH',128,0,0,0x5ca1,1)+token
+found=False
+with socket.socket(socket.AF_INET6,socket.SOCK_RAW,socket.IPPROTO_ICMPV6) as sock:
+    sock.bind(('fd73:1::1',0));sock.settimeout(2)
+    try:sock.sendto(request,('2001:db8:8::8',0))
+    except OSError as error:
+        if mode!='no-reply' or error.errno not in (errno.EPERM,errno.EACCES,errno.ENETUNREACH,errno.EHOSTUNREACH):raise
+        sys.exit(0)
+    end=time.monotonic()+2
+    while time.monotonic()<end:
+        sock.settimeout(max(0.01,end-time.monotonic()))
+        try:reply,source=sock.recvfrom(2048)
+        except socket.timeout:break
+        if source[0]=='2001:db8:8::8' and len(reply)==len(request) and reply[0]==129 and reply[4:]==request[4:]:
+            found=True;break
+assert found==(mode=='reply'), 'unexpected public ICMPv6 echo result'
+PYICMP6PATH
+}
+
 payload_path() {
   env -i HOME=/root PATH=/usr/bin:/bin:/sbin:/usr/sbin \
     /usr/bin/python3 -I -B /root/qa-tun-payload-wire.py "$@"
@@ -439,6 +480,17 @@ dns_path() {
 case "${SC_QA_TUN_PRODUCT_LAB-}" in
   ''|'yes') ;;
   *) echo 'Invalid isolated installed-product TUN mode' >&2; exit 2 ;;
+esac
+case "${SC_QA_TUN_OWNED_BOUNDARY-}" in
+  '') ;;
+  yes)
+    if [ "${SC_QA_TUN_IPV6-}" != yes ] ||
+       [ -n "${SC_QA_TUN_PRODUCT_LAB-}" ] || [ -n "${SC_QA_TUN_GUARD_LAB-}" ] ||
+       [ -n "${SC_QA_TUN_OUTAGE_FAULT-}" ] || [ -n "${SC_QA_TUN_CLEANUP_FAULT-}" ]; then
+      echo 'OWNED_TUN_BOUNDARY=FAIL (requires exclusive explicit dual-stack fixture)' >&2; exit 2
+    fi
+    . /root/qa-owned-tun-boundary.sh ;;
+  *) echo 'Invalid isolated owned TUN boundary mode' >&2; exit 2 ;;
 esac
 if [ "${SC_QA_TUN_PRODUCT_LAB-}" = yes ] && [ "${SC_QA_TUN_GUARD_LAB-}" = yes ]; then
   echo 'Concurrent distinct TUN guard modes are unsupported' >&2; exit 2
@@ -664,6 +716,8 @@ ip netns exec "$peer" nft -f - <<'NFTWITNESS'
 table inet scqawitness {
   counter direct_packets { }
   counter direct_udp_packets { }
+  counter visitor_origin_packets { }
+  counter public_icmp6_packets { }
   counter ipv6_foreign_tcp_packets { }
   counter ipv6_foreign_udp_packets { }
   counter ipv6_override_packets { }
@@ -680,6 +734,8 @@ table inet scqawitness {
     type filter hook input priority filter; policy accept;
     iifname "scqapeer0" ip daddr 8.8.8.8 tcp dport 19180 counter name direct_packets
     iifname "scqapeer0" ip daddr 8.8.8.8 udp dport 19186 counter name direct_udp_packets
+    iifname "scqapeer0" ip daddr 198.51.100.42 tcp dport 19180 counter name visitor_origin_packets
+    iifname "scqapeer0" ip6 daddr 2001:db8:8::8 icmpv6 type echo-request counter name public_icmp6_packets
     iifname "scqapeer0" ip6 daddr 2001:db8:8::8 tcp dport 19192 counter name ipv6_foreign_tcp_packets
     iifname "scqapeer0" ip6 daddr 2001:db8:8::8 udp dport 19193 counter name ipv6_foreign_udp_packets
     iifname "scqapeer0" ip6 daddr 2001:db8:5::10 tcp dport 19192 counter name ipv6_override_packets
@@ -854,6 +910,12 @@ if [ "$witness_baseline" -le 0 ]; then
 fi
 echo "REAL_TUN_LAB_UNTUNNELED_BASELINE=PASS (two native routes)"
 echo "REAL_TUN_DIRECT_WITNESS=PASS (positive control observed $witness_baseline direct packets)"
+if [ "${SC_QA_TUN_PRODUCT_LAB-}" = yes ]; then
+  expect_source 198.51.100.42 10.254.72.1
+  visitor_origin_baseline=$(visitor_origin_direct_packets)
+  test "$visitor_origin_baseline" -gt 0
+  echo PRODUCT_NATIVE_VISITOR_ORIGIN_DIRECT_CONTROL=PASS
+fi
 domestic_tls_baseline=$(domestic_tls_direct_packets)
 foreign_tls_baseline=$(foreign_tls_direct_packets)
 test "$domestic_tls_baseline" -gt 0 && test "$foreign_tls_baseline" -gt 0 || {
@@ -904,6 +966,12 @@ if [ "$ipv6_trial" = yes ]; then
     }
   echo 'REAL_TUN_IPV6_DIRECT_BASELINE=PASS (independent TCP/UDP source and native counters)'
   echo 'REAL_TUN_IPV6_OVERRIDE_UDP_DIRECT_BASELINE=PASS (native UDP positive-controlled counter)'
+  if [ "${SC_QA_TUN_PRODUCT_LAB-}" = yes ]; then
+    icmp6_path reply
+    public_icmp6_baseline=$(public_icmp6_direct_packets)
+    test "$public_icmp6_baseline" -gt 0
+    echo PRODUCT_NATIVE_PUBLIC_ICMP6_DIRECT_CONTROL=PASS
+  fi
 fi
 if [ "$payload_trial" = yes ]; then
   payload_path tcp 8.8.8.8 10.254.72.1 reply
@@ -992,6 +1060,10 @@ fi
 if [ "${SC_QA_TUN_PRODUCT_LAB-}" = yes ]; then
   . /root/qa-product-tun-trial.sh
   product_tun_trial
+  exit 0
+fi
+if [ "${SC_QA_TUN_OWNED_BOUNDARY-}" = yes ]; then
+  owned_tun_boundary_trial
   exit 0
 fi
 

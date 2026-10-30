@@ -60,46 +60,98 @@ its existing independent recovery service/timer, and refuses updates while
 any of them is active.
 
 `smart-tun-trial-apply` is **not** the product Smart Routing Apply: it is a
-short-lived, v4-journal-bound real sing-box test *only* in the known disconnected
-two-interface Docker systemd fixture, with synthetic VLESS endpoint and CIDRs.
-It admits only the original exact IPv4 policy or one opt-in, strictly pinned
-synthetic IPv4+IPv6 variant: the same owned TUN unit, journal v4, recovery
-executor, isolated underlay and baseline verification; never an arbitrary
-IPv6 host, public prefix list, or production dual-stack rollout. IPv6
-operator Direct/VPN host exceptions demonstrate precedence only in this QA
-fixture; no geolocation or trusted DNS-to-IP correlation is inferred.
-It first validates selected profile, pinned core and complete native
-route/rule/link/nftables baseline (including any pre-existing QA-guest
-firewall owners), then independently prearms and executes
-the installed recovery oneshot **outside** the shared journal lock. A second
-locked admission must match, followed by fsynced pending journal, credential persistence
-and only then an explicit `systemctl start` of the exact owned
-TUN unit. An independent systemd timer detects timeout, manager death, core
-exit or reboot, stops only that exact unit and requires the original semantic
-kernel and nftables baseline before recording `trial_recovered`. Exact
-operation-bound Disconnect records durable stop intent before stopping the
-owned TUN service. The independent executor can complete an interrupted stop;
-wrong or stale operation identities never authorize stopping a later trial.
-Finalization records its cleanup intent before sensitive credential removal,
-so interruption is distinguishable from unauthorized credential loss after
-core start. Only a verified restored native baseline permits clearance.
-Unresolved trial operations block Proxy Only mode changes and prevent generic
-status from claiming ordinary Direct.
+short-lived real sing-box test only in the known disconnected Docker/systemd
+fixture, with an exact synthetic VLESS endpoint and IPv4 or opt-in IPv4+IPv6
+policy. New operations use the v4 journal's distinct
+`smart_tun_native_pending_trial_v1` intent with a required typed native ledger.
+Older v4 automatic-policy records retain their original recovery semantics;
+the two intents cannot substitute for each other. Neither intent can be
+confirmed or left permanently active.
+
+The independent executor selects the journal version and runs its recovery
+handler under one continuous manager lock. Concurrent Apply cannot publish
+a new journal between version selection and legacy interpretation.
+
+The manager validates the selected profile, pinned core, native baseline and
+reserved resource absence, then independently prearms the installed recovery
+oneshot/timer outside the shared journal lock. It repeats admission under the
+lock and persists the operation before any native network mutation. Native ownership binds
+the network namespace, actual interface index, complete addresses and relevant
+dependencies, exact route/rule receipts, and the nftables table and ordered
+child handles. The original host fingerprint remains diagnostic evidence; it
+is not a restoration snapshot or permission to delete changed foreign state.
+
+The manager creates an exclusive, initially nonpersistent TUN, configures its
+addresses and disables automatic IPv6 address generation, then durably records
+the observed identity before making the link persistent. The official core
+attaches to this link with an empty address list, explicit gVisor stack,
+`auto_route=false`, `auto_redirect=false` and `dns_mode=disabled`. The manager
+owns capture routes, RPDB entries and one operation-specific nftables table.
+Core socket marks are injected into the narrowly supported native profile so
+the outer VPN and core Direct outbounds use the underlay without recursion.
+The existing Proxy Only profile-import behavior is unchanged.
+
+Native OUTPUT capture and a separate POSTROUTING containment chain classify
+the same protected paths. OUTPUT route hooks can change the packet's route
+while later OUTPUT hooks still observe the initial output interface. The guard
+therefore checks the final selected interface in POSTROUTING. Its final drop
+applies only to host-origin packets with no ingress interface; forwarded
+traffic retains its existing owner. The guard classifies eligible traffic
+independently of the capture mark, so losing a capture rule or RPDB entry is
+not permission to fall through to Direct. Connection-tracking reply direction
+protects hosted replies without
+exempting new outbound connections to the visitor's IP. Explicit local link
+control exceptions are bounded to the fixture underlay; they do not advertise
+arbitrary ICMP, fragmentation or PMTUD support. The existing core compiler
+retains protected/operator/domestic/default precedence and rejects unsupported
+or untrusted policy inputs.
+
+Each native resource-changing phase records durable intent. Successful
+observations produce resource receipts; initial nonpersistent TUN setup is
+one FD-scoped phase whose complete identity is recorded before persistence.
+An effect that exists without its receipt is not adopted merely because its
+name or attributes look expected. Mutating native subprocesses inherit the
+existing operation lock and a parent-death signal; recovery must not run past
+an outstanding command after controller death. Core attachment also requires
+a bounded link-event observation and durable verified-start receipt. Missing
+or lost observation remains uncertainty, even if a later snapshot looks normal.
+
+Exact-operation Disconnect persists stop intent, contains the core, then
+removes proven routes/rules/link while the complete independent guard remains
+present for a receipted active policy. Before policy creation, or after an
+unreceipted policy is conclusively absent and outstanding mutators are excluded,
+cleanup may proceed without a guard. A present unreceipted graph remains uncertain. It removes the nftables guard last using a stable observed generation
+and an exact table-handle deletion conditioned on that generation. A concurrent
+committed nftables change invalidates deletion instead of allowing recursive
+foreign-child removal. Supported disjoint changes survive Off; overlapping,
+replaced or uninspectable dependencies retain resources and evidence. Only
+verified removal and protected underlay observations permit truthful Direct
+finalization. The precise ordering and uncertainty cases are in
+[Safety and recovery](SAFETY-RECOVERY.md#native-ownership-and-containment).
 
 One private saved trial policy holds validated, non-secret settings separately
 from the transient sing-box credential and operation journal. Explicit Off,
 timeout and cleanup preserve this policy and the selected profile. Saved
-reapply validates the policy/profile again, repeats the full native admission
-and independent prearm, and creates a fresh operation/deadline. Stored policy
-alone is never authority to start a service or restore a prior active state.
+reapply validates them again, repeats admission and independent prearm, and
+creates a fresh operation/deadline. Stored policy alone is never authority to
+start a service or restore a prior active state. Unresolved operations block
+Proxy Only and installer transitions and prevent status from claiming Direct.
 
-This deliberately cannot **commit** TUN, cannot authenticate foreign host
-owners or geographic data, and does not have fresh SSH/provider confirmation
-or Runtime Health Guard. Production activation still needs exactly owned
-multi-owner kernel transactions and a separate permission/review boundary.
-The current whole-host equality check also cannot guarantee preservation of
-foreign objects overlapping the core's automatic cleanup targets; see the
-[automatic-policy ownership limit](SAFETY-RECOVERY.md#automatic-policy-ownership-limit).
+Supported foreign nftables coexistence is limited to observed non-rewriting
+filtering/counters and the admitted passive statement forms. NAT, packet or
+metadata rewriting, redirection/duplication/forwarding, userspace queueing,
+connection-tracking assignment and offload are unsupported and must remain
+absent while pending. A later privileged path-affecting change can invalidate
+routing assumptions before the periodic executor observes it; stopping the core
+is not instantaneous containment against such a new foreign policy.
+
+This boundary does not authenticate arbitrary simultaneous privileged writers,
+route/rule generations, geographic data or DNS-to-IP correlation. It does not
+provide fresh SSH/provider confirmation, permanent commitment, field-tested
+Runtime Health Guard or physical power-loss recovery. General production
+activation remains unavailable. Legacy automatic-policy cleanup has additional
+[ownership limits](SAFETY-RECOVERY.md#automatic-policy-ownership-limit); it is not
+used as native-transaction deletion authority.
 
 ## Optional inbound website connectivity
 

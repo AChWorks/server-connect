@@ -45,8 +45,19 @@ assert r["ok"] and r["data"]["phase"]=="absent",r'
       --domestic-cidr 5.22.0.10/32 --protected-cidr 10.254.72.0/30 \
       --deadline-seconds "$deadline" "$@"
   }
+  report_apply_failure() {
+    native_failure_observation apply || :
+    python3 - <<'PYAPPLYFAIL'
+import json
+with open('/run/sc-qa-product-tun-apply.json') as f:
+    result=json.load(f)
+assert not result.get("ok"),result
+err=result.get("error") or {}
+print("PRODUCT_TUN_APPLY_REFUSED="+str(err.get("code","unknown"))+": "+str(err.get("message","unspecified")))
+PYAPPLYFAIL
+  }
   pending_receipt() {
-    "$sc" --json smart-tun-trial-status | python3 -c '
+    if "$sc" --json smart-tun-trial-status | python3 -c '
 import json,sys,re
 r=json.load(sys.stdin)
 assert r["ok"],r
@@ -54,7 +65,15 @@ d=r["data"]
 assert d["phase"]=="trial_pending" and d["revision"]==1 and d["experiment_only"],d
 assert d["guard_scheduled"] and not d["activation_ready"] and not d["vpn_verified"],d
 assert not d["recovery_verified"] and re.fullmatch("[0-9a-f]{32}",d["operation_id"]),d
-print(d["operation_id"])'
+print(d["operation_id"])'; then
+      return 0
+    else
+      pending_receipt_rc=$?
+      # This runs inside op=$(...). Keep diagnostics off stdout and retain
+      # the original rejection; never retry/reset/drain an unhealthy guard.
+      native_pending_failure_diagnostic >&2 || :
+      return "$pending_receipt_rc"
+    fi
   }
   require_recovered() {
     expected=$1
@@ -68,8 +87,8 @@ if r["data"]["phase"]=="trial_recovered":
     assert r["data"]["revision"]==2 and r["data"]["recovery_verified"],r
     assert not r["data"]["guard_scheduled"] and not r["data"]["activation_ready"],r
     sys.exit(0)
-assert r["data"]["phase"]=="trial_pending",r
-sys.exit(1)' 2>/dev/null; then
+assert r["data"]["phase"]=="trial_pending" or (sys.argv[1]=="yes" and r["data"]["phase"]=="trial_stop_requested" and r["data"]["revision"]==2),r
+sys.exit(1)' "$native_product" 2>/dev/null; then
         result=yes
         break
       fi
@@ -272,13 +291,16 @@ assert r["ok"] and r["data"]["present"] and r["data"]["experiment_only"],r
 assert r["data"]["management_peer_ip"]=="10.254.72.2",r'
     saved_policy_before=$(saved_policy_hashes)
   }
-  disconnect_now() {
+  disconnect_receipt() {
     "$sc" --json smart-tun-trial-disconnect --operation-id "$1" --revision "$2" |
       python3 -c '
 import json,sys
 r=json.load(sys.stdin); d=r.get("data",{})
 assert r["ok"] and d["phase"]=="trial_cleared" and d["revision"]==5,r
 assert d["recovery_verified"] and not d["guard_scheduled"] and not d["activation_ready"],r'
+  }
+  disconnect_now() {
+    disconnect_receipt "$1" "$2"
     require_finalized
     [ "$(saved_policy_hashes)" = "$saved_policy_before" ]
   }
@@ -290,7 +312,7 @@ assert d["recovery_verified"] and not d["guard_scheduled"] and not d["activation
     stale_rules=$(ip -N -j -4 rule show)
     stale_v6_routes=$(ip -N -j -6 route show table all)
     stale_v6_rules=$(ip -N -j -6 rule show)
-    stale_nft=$(nft -j list ruleset)
+    if [ "$native_product" = yes ]; then stale_nft=$(native_nft_snapshot); else stale_nft=$(nft -j list ruleset); fi
     if "$sc" --json smart-tun-trial-disconnect --operation-id "$1" --revision "$2" > /run/sc-qa-product-tun-conflict.json; then
       echo 'Stale Disconnect unexpectedly accepted' >&2; return 1
     fi
@@ -304,9 +326,16 @@ PYSTALEDISCONNECT
     [ "$(ip -N -j -4 rule show)" = "$stale_rules" ]
     [ "$(ip -N -j -6 route show table all)" = "$stale_v6_routes" ]
     [ "$(ip -N -j -6 rule show)" = "$stale_v6_rules" ]
-    [ "$(nft -j list ruleset)" = "$stale_nft" ]
+    if [ "$native_product" = yes ]; then
+      [ "$(native_nft_snapshot)" = "$stale_nft" ]
+    else
+      [ "$(nft -j list ruleset)" = "$stale_nft" ]
+    fi
     require_selected_ready
   }
+
+  . /root/qa-native-product-tun.sh
+  native_ipv4_transit baseline
 
   if [ "$ipv6_trial" = yes ]; then
     # No arbitrary IPv6 Apply. Refuse a partial/modified dual-stack
@@ -341,22 +370,25 @@ PYV6REFUSED
 
     # This is a separate *installed product* trial with the existing real
     # native dual-stack fixture, not the older QA shell-owned TUN process.
-    apply 55 --tunnel-ipv6 fd73:99::1/64 \
+    if ! apply 55 --tunnel-ipv6 fd73:99::1/64 \
       --domestic-ipv6-cidr 2001:db8:5::/64 \
       --ipv6-vpn-cidr 2001:db8:5::10/128 \
       --ipv6-direct-cidr 2001:db8:8::9/128 \
-      > /run/sc-qa-product-tun-apply.json
+      > /run/sc-qa-product-tun-apply.json; then
+      report_apply_failure || :
+      return 1
+    fi
     op=$(pending_receipt)
-    # systemctl start does not prove that sing-box has finished installing
-    # its native IPv4 and IPv6 policy. Never probe a VPN-required flow
-    # before BOTH kernel TUN families are visibly present and the selected
-    # IPv4 path is independently confirmed, as in the existing IPv4 trial.
+    native_product_detect
+    # The manager owns native IPv4/IPv6 routing. An active core process does
+    # not prove capture or selected paths. Require both visible TUN families
+    # and real IPv4 Direct/VLESS evidence before the IPv6 traffic checks.
     ready=no
     for n in $(seq 1 35); do
       if assert_product_tun_policy_active &&
          ip -6 route show table all | grep -F 'dev sctunqa0' >/dev/null &&
-         expect_source 5.22.0.10 10.254.72.1 &&
-         expect_source 8.8.8.8 8.8.8.8; then
+         native_readiness_probe domestic &&
+         native_readiness_probe vpn; then
         ready=yes
         break
       fi
@@ -391,6 +423,12 @@ PYV6REFUSED
     /bin/sh /root/qa-host-coexistence.sh probe
     assert_product_tun_policy_active
     echo PRODUCT_TUN_IPV6_REAL_SELECTED=PASS
+    if [ "$native_product" = yes ]; then
+      native_product_identity
+      native_ipv4_transit active
+      native_cold_neighbors
+      native_visitor_origin
+    fi
 
     # Real dual-stack Off/on lifecycle using the installed commands. The
     # peer witnesses must see native Direct after Off and selected VLESS
@@ -426,6 +464,16 @@ PYV6REFUSED
     test "$(ipv6_override_udp_direct_packets)" -eq "$ipv6_override_udp_baseline"
     echo PRODUCT_TUN_IPV6_EXPLICIT_OFF_SAVED_REAPPLY=PASS
 
+    if [ "$native_product" = yes ]; then
+      # Reuse this dual-stack topology and saved operation policy. Each
+      # bounded case ends with genuine owned cleanup before the next Apply.
+      disconnect_now "$op" 1
+      native_overlap_cases
+      native_loss_cases
+      native_crash_cases
+      native_saved_reapply
+    fi
+
     # The selected VLESS upstream is genuinely killed. The product TUN
     # remains active until its independent deadline, and all VPN-required
     # IPv6 TCP/UDP must fail CLOSED, not leak native Direct packets.
@@ -455,20 +503,14 @@ PYV6REFUSED
     clear_recovered "$op"
     rm -f /run/sc-qa-product-tun-apply.json /run/sc-qa-product-tun-conflict.json
     echo PRODUCT_TUN_IPV6_GUARD_ROLLBACK=PASS
+    if [ "$native_product" = yes ]; then native_guard_loss_last; fi
     return 0
   fi
 
   # First: live normal product Apply and actual synthetic foreign/domestic
   # packet paths. Do not mistake TUN device creation for installed policy.
   if ! apply 32 > /run/sc-qa-product-tun-apply.json; then
-    python3 - <<'PYAPPLYFAIL'
-import json
-with open('/run/sc-qa-product-tun-apply.json') as f:
-    result=json.load(f)
-assert not result.get("ok"),result
-err=result.get("error") or {}
-print("PRODUCT_TUN_APPLY_REFUSED="+str(err.get("code","unknown"))+": "+str(err.get("message","unspecified")))
-PYAPPLYFAIL
+    report_apply_failure || :
     return 1
   fi
   python3 - <<'PYAPPLIED'
@@ -480,6 +522,7 @@ assert re.fullmatch("[0-9a-f]{32}",r["data"]["operation_id"]),r
 PYAPPLIED
   op=$(pending_receipt)
   echo PRODUCT_TUN_GUARD_PREARMED_AND_PENDING=PASS
+  native_product_detect
   if "$sc" --json connect >/run/sc-qa-product-tun-conflict.json 2>&1; then
     echo 'Product allowed Proxy Only while guarded TUN was pending' >&2;return 1
   fi
@@ -502,8 +545,8 @@ PYSTATUS
   ready=no
   for n in $(seq 1 35); do
     if assert_product_tun_policy_active &&
-       expect_source 5.22.0.10 10.254.72.1 &&
-       expect_source 8.8.8.8 8.8.8.8; then
+       native_readiness_probe domestic &&
+       native_readiness_probe vpn; then
       ready=yes
       break
     fi
@@ -515,6 +558,11 @@ PYSTATUS
     return 1
   }
   echo PRODUCT_TUN_INSTALLED_REAL_TCP_DIRECT_AND_VLESS=PASS
+  if [ "$native_product" = yes ]; then
+    native_product_identity
+    native_ipv4_transit active
+    native_visitor_origin
+  fi
   udp_path 8.8.8.8 8.8.8.8 product-foreign-udp reply
   dns_path 8.8.8.8 192.0.2.22 product-foreign-dns udp reply
   expect_foreign_hosted_reply
@@ -654,18 +702,21 @@ PYCONTAINED
   echo PRODUCT_TUN_GUARD_TIMER_LOSS_IMMEDIATE_CONTAINMENT=PASS
   clear_recovered "$op"
 
-  # Separate executor-loss test: a guest-owned *runtime* mask and a
-  # synthetic foreign nftables owner. The Manager must stop its TUN even
-  # when the executor cannot run, but it must retain the pending journal
-  # and not delete a foreign table or falsely claim exact recovery.
+  # Runtime executor-ownership conflict plus a synthetic foreign nft owner.
+  # The installed /etc unit outranks this /run mask and may still execute.
+  # The Manager must reject the conflicted guard identity, contain its TUN
+  # and preserve unrelated owners according to this intent's recovery rules.
   apply 60 >/run/sc-qa-product-tun-apply.json
   op=$(pending_receipt)
   assert_product_tun_policy_active
+  test ! -e /run/systemd/system/server-connect-activation-recover.service
+  test ! -L /run/systemd/system/server-connect-activation-recover.service
+  native_executor_masked=yes
   systemctl mask --runtime server-connect-activation-recover.service
   test "$(readlink /run/systemd/system/server-connect-activation-recover.service)" = /dev/null
   assert_product_tun_policy_active
   if "$sc" --json smart-tun-trial-status >/run/sc-qa-product-tun-conflict.json; then
-    echo 'Masked executor incorrectly reported an armed TUN guard' >&2;return 1
+    echo 'Runtime executor ownership conflict incorrectly reported an armed TUN guard' >&2;return 1
   fi
   python3 - <<'PYEXECUTORLOST'
 import json
@@ -674,6 +725,21 @@ assert not r['ok'] and r['error']['code']=='guard_unavailable',r
 PYEXECUTORLOST
   nft add table inet scqa_guardloss_foreign
   foreign_table=$(nft -j list table inet scqa_guardloss_foreign)
+  if [ "$native_product" = yes ]; then
+    # Native per-object recovery permits disjoint additions by other owners.
+    "$sc" --json activation-trial-recover >/run/sc-qa-product-tun-recover.json
+    python3 - "$op" <<'PYNATIVEGUARDLOSS'
+import json,sys
+with open('/run/sc-qa-product-tun-recover.json') as f:r=json.load(f)
+assert r['ok'] and r['data']['operation_id']==sys.argv[1],r
+assert r['data']['phase']=='trial_recovered' and r['data']['revision']==2 and r['data']['recovery_verified'],r
+PYNATIVEGUARDLOSS
+    test "$(nft -j list table inet scqa_guardloss_foreign)" = "$foreign_table"
+    nft delete table inet scqa_guardloss_foreign
+    require_native_baseline
+    echo PRODUCT_NATIVE_EXECUTOR_LOSS_DISJOINT_PRESERVED=PASS
+  else
+    # Preserve the original whole-host-baseline requirement for legacy v4.
   if "$sc" --json activation-trial-recover > /run/sc-qa-product-tun-conflict.json; then
     echo 'Foreign nftables conflict incorrectly reported recovered after executor loss' >&2;return 1
   fi
@@ -716,7 +782,9 @@ assert r['ok'] and d['operation_id']==sys.argv[1],r
 assert d['phase']=='trial_recovered' and d['revision']==2,d
 assert d['recovery_verified'] and not d['guard_scheduled'],d
 PYRESOLVED
+  fi
   systemctl unmask --runtime server-connect-activation-recover.service
+  native_executor_masked=no
   test ! -e /run/systemd/system/server-connect-activation-recover.service
   test ! -L /run/systemd/system/server-connect-activation-recover.service
   # The timer may have recorded a failed oneshot while its runtime name
@@ -733,9 +801,11 @@ PYRESOLVED
   # Negative path: the manager DID durably attempt to start the core.
   # Removing its source credential must never be accepted as the benign
   # "crash before credential" case, even after systemd has stopped the
-  # core and the native kernel baseline has returned to Direct.
+  # core. Legacy v4 requires restored Direct; native intent must instead
+  # retain its independently owned leak protection until trust is restored.
   apply 30 >/run/sc-qa-product-tun-apply.json
   op=$(pending_receipt)
+  if [ "$native_product" = yes ]; then native_product_identity; fi
   credential=/var/lib/server-connect/smart-tun-trial.json
   saved=/run/sc-qa-product-tun-credential.saved
   test -f "$credential" && test ! -e "$saved"
@@ -752,10 +822,9 @@ PYSTARTED
   conflict=no
   for n in $(seq 1 30); do
     if [ "$(systemctl show server-connect-activation-recover.service -p Result --value)" = exit-code ] &&
-       [ "$(systemctl show server-connect-smart-tun.service -p ActiveState --value)" = inactive ] &&
-       [ ! -e /sys/class/net/sctunqa0 ]; then
-      conflict=yes
-      break
+       [ "$(systemctl show server-connect-smart-tun.service -p ActiveState --value)" = inactive ]; then
+      if [ "$native_product" = yes ] && [ -e /sys/class/net/sctunqa0 ]; then conflict=yes; break; fi
+      if [ "$native_product" != yes ] && [ ! -e /sys/class/net/sctunqa0 ]; then conflict=yes; break; fi
     fi
     sleep 1
   done
@@ -763,11 +832,17 @@ PYSTARTED
     echo 'PRODUCT_TUN_CREDENTIAL_CONFLICT=FAIL (watchdog did not stop TUN)' >&2
     return 1
   }
+  if [ "$native_product" = yes ]; then
+    native_require_retained
+    native_no_direct_leak
+    echo PRODUCT_NATIVE_CREDENTIAL_CONFLICT_CONTAINMENT=PASS
+  else
   [ "$(ip -N -j -4 route show table all)" = "$before_routes" ]
   [ "$(ip -N -j -4 rule show)" = "$before_rules" ]
   [ "$(ip -N -j -6 route show table all)" = "$before_v6_routes" ]
   [ "$(ip -N -j -6 rule show)" = "$before_v6_rules" ]
   [ "$(nft -j list ruleset)" = "$before_nft" ]
+  fi
   # A second independent invocation must still refuse a false success
   # after the first one changed the service state to inactive.
   for n in 1 2; do
@@ -775,13 +850,16 @@ PYSTARTED
       echo 'Missing credential was silently accepted on repeated recovery' >&2
       return 1
     fi
-    python3 - "$op" <<'PYMISSING'
+    python3 - "$op" "$native_product" <<'PYMISSING'
 import json,sys
 with open('/run/sc-qa-product-tun-conflict.json') as f:r=json.load(f)
 assert not r['ok'] and r['error']['code']=='trial_resource_conflict',r
 with open('/var/lib/server-connect/route-activation-journal.json') as f:j=json.load(f)
-assert j['operation_id']==sys.argv[1] and j['revision']==1,r
-assert j['phase']=='trial_pending' and j['core_start_attempted'] is True,j
+assert j['operation_id']==sys.argv[1] and j['core_start_attempted'] is True,j
+if sys.argv[2]=='yes':
+    assert j['phase']=='trial_stop_requested' and j['revision']==2 and j['native']['stop_reason']=='guard',j
+else:
+    assert j['phase']=='trial_pending' and j['revision']==1,j
 PYMISSING
   done
   echo PRODUCT_TUN_CREDENTIAL_REMOVAL_PERSISTENT_CONFLICT=PASS
@@ -897,6 +975,9 @@ PYNOPREARM
   echo PRODUCT_TUN_STALE_DISCONNECT_NO_MUTATION=PASS
   echo PRODUCT_TUN_SAVED_REAPPLY_NEW_OPERATION=PASS
 
+  if [ "$native_product" = yes ]; then
+    native_disjoint_off
+  else
   # Another network owner appearing after Apply is retained, even though
   # this product can stop its own TUN. Cleanup resumes only after the QA
   # owner removes its exact fixture; no broad nftables reset is allowed.
@@ -927,6 +1008,7 @@ PYOFFCONFLICT
   /bin/sh /root/qa-host-coexistence.sh probe
   expect_foreign_hosted_reply
   echo PRODUCT_TUN_OFF_FOREIGN_CONFLICT_RETAINED=PASS
+  fi
 
   # An untrusted special-file credential must not block inspection or
   # prevent containment of the independently identified product TUN.
@@ -935,6 +1017,7 @@ PYOFFCONFLICT
   op=$(pending_receipt)
   require_selected_ready
   credential=/var/lib/server-connect/smart-tun-trial.json
+  if [ "$native_product" = yes ]; then native_product_identity; fi
   saved=/run/sc-qa-product-tun-credential.saved
   test -f "$credential" && test ! -e "$saved"
   mv -- "$credential" "$saved"
@@ -951,7 +1034,12 @@ assert not r['ok'] and r['error']['code']=='trial_resource_conflict',r
 with open('/var/lib/server-connect/route-activation-journal.json') as f:j=json.load(f)
 assert j['operation_id']==sys.argv[1] and j['phase']=='trial_stop_requested' and j['revision']==2,j
 PYFIFOCONFLICT
-  require_native_baseline
+  if [ "$native_product" = yes ]; then
+    native_require_retained
+    native_no_direct_leak
+  else
+    require_native_baseline
+  fi
   test -p "$credential"
   test "$(stat -c '%d:%i:%f' "$credential")" = "$foreign_fifo"
   systemctl is-active --quiet server-connect-activation-recover.timer

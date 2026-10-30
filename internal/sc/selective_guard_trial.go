@@ -743,14 +743,6 @@ func (m *Manager) beginGuardedTrial(operationID string, revision uint64, ttlSeco
 // living initiating shell. The v2 record must survive a process crash. A
 // changed boot ID triggers recovery immediately, not a new 600s allowance.
 func (m *Manager) RecoverGuardedRuleTrial(qaCrashPoint, qaFaultPoint string) (TrialReceipt, error) {
-	if qaCrashPoint == "" && qaFaultPoint == "" {
-		// One installed recovery executor handles both legacy v2/v3 lab
-		// records and the real-core pending v4 TUN trial. Never interpret a
-		// v4 journal as a legacy rule/route to delete.
-		if result, handled, err := m.tryRecoverSmartTUNTrial(); handled || err != nil {
-			return result, err
-		}
-	}
 	if m.Dir != DefaultDir {
 		return TrialReceipt{}, Fault("trial_unsupported", "guard recovery requires the installed default private state directory")
 	}
@@ -770,134 +762,187 @@ func (m *Manager) RecoverGuardedRuleTrial(qaCrashPoint, qaFaultPoint string) (Tr
 			return TrialReceipt{}, err
 		}
 	}
+	return m.recoverGuardedTrialWithHandler(qaCrashPoint, qaFaultPoint,
+		func(store *activationJournalDir, selected trialRecoverySelection) (TrialReceipt, error) {
+			switch selected.version {
+			case 0:
+				return TrialReceipt{Phase: "absent", ExperimentOnly: true}, nil
+			case 1:
+				return TrialReceipt{Phase: "unarmed_prepared", ExperimentOnly: true}, nil
+			case smartTUNTrialVersion:
+				return recoverSmartTUNTrialJournalLocked(store, selected.identity, selected.tun)
+			case 2, 3:
+				return recoverLegacyGuardedTrialLocked(store, selected.identity, selected.trial, qaCrashPoint, qaFaultPoint)
+			default:
+				return TrialReceipt{}, activationJournalError("unsupported recovery journal selection")
+			}
+		})
+}
+
+// Selection and its selected handler share one uninterrupted manager lock.
+// An executor must not observe absence, unlock, then feed a newly published
+// v4 Apply to legacy recovery. The private typed handler permits no-native
+// tests of that exact lock boundary; production uses the wrapper above.
+type trialRecoverySelection struct {
+	version  int
+	identity activationJournalFileIdentity
+	trial    trialJournal
+	tun      smartTUNTrialJournal
+}
+
+func (m *Manager) recoverGuardedTrialWithHandler(qaCrashPoint, qaFaultPoint string,
+	handle func(*activationJournalDir, trialRecoverySelection) (TrialReceipt, error)) (TrialReceipt, error) {
 	var receipt TrialReceipt
 	err := m.withActivationJournalLock(syscall.Fsync, func(store *activationJournalDir) error {
-		record, id, err := loadTrialLocked(store)
-		if errors.Is(err, os.ErrNotExist) {
-			if err := trialRequirePendingV3ForQAFault(qaFaultPoint, nil); err != nil {
-				return err
-			}
-			receipt = TrialReceipt{Phase: "absent", ExperimentOnly: true}
-			return nil
-		}
-		if err != nil {
-			// A valid v1 unarmed PREPARED intent is an expected no-op for
-			// the always-independent watchdog. Corrupt/future/uncertain
-			// state is never silently accepted as safe.
-			legacy, _, legacyErr := loadActivationJournalLocked(store)
-			if legacyErr == nil && legacy.Version == 1 && legacy.Phase == "prepared" {
-				if err := trialRequirePendingV3ForQAFault(qaFaultPoint, nil); err != nil {
-					return err
-				}
-				receipt = TrialReceipt{Phase: "unarmed_prepared", ExperimentOnly: true}
-				return nil
-			}
-			return err
-		}
-		if err := trialRequirePendingV3ForQAFault(qaFaultPoint, &record); err != nil {
-			return err
-		}
-		if qaCrashPoint == "after-route-delete" && record.Version != 3 {
-			return Fault("invalid_arguments", "route-delete crash point requires the v3 route trial")
-		}
-		if record.Phase == "trial_recovered" {
-			if err := trialVerifyRecoveredNative(record); err != nil {
-				return err
-			}
-			receipt = trialReceipt(record, false, true)
-			return nil
-		}
-		if err := trialDisposableContext(); err != nil {
-			return err
-		}
-		boot, err := trialBootIdentity()
+		selected, err := selectTrialRecoveryLocked(store, qaCrashPoint, qaFaultPoint)
 		if err != nil {
 			return err
 		}
-		uptime, err := trialUptime()
-		if err != nil {
-			return err
-		}
-		if boot == record.BootID && uptime < record.DeadlineUptimeSec {
-			// The timer may have been stopped/masked since application. A
-			// pending return must NEVER claim a scheduled guard from journal
-			// intent alone, even when the rule is still within its deadline.
-			if err := trialGuardScheduled(); err != nil {
-				return err
-			}
-			receipt = trialReceipt(record, true, false)
-			return nil
-		}
-		rule, err := trialSingleRule(record)
-		if err != nil {
-			return err
-		}
-		rows, err := trialNativeRules()
-		if err != nil {
-			return err
-		}
-		present, err := trialRulePresence(rows, rule)
-		if err != nil {
-			return err
-		}
-		if record.Version == 3 {
-			// Refuse foreign route/table consumers BEFORE deleting even the
-			// owned rule. Otherwise the two-object rollback could half-succeed.
-			route, err := trialSingleRoute(record)
-			if err != nil {
-				return err
-			}
-			if _, err := trialNativeRoutePresence(route); err != nil {
-				return err
-			}
-			if err := trialNoForeignTableRules(rows, rule); err != nil {
-				return err
-			}
-		}
-		if present {
-			// This narrowly identifies our exact protocol/table/destination/priority
-			// rather than deleting any rule at the occupied priority.
-			if err := trialRunIP("-4", "rule", "del", "pref", strconv.Itoa(rule.Priority), "to", rule.Destination,
-				"table", strconv.Itoa(rule.Table), "protocol", trialProtocol); err != nil {
-				return err
-			}
-			if err := trialQAKillAt("after-delete", qaCrashPoint); err != nil {
-				return err
-			}
-		}
-		after, err := trialNativeRules()
-		if err != nil {
-			return err
-		}
-		remains, err := trialRulePresence(after, rule)
-		if err != nil {
-			return err
-		}
-		if remains {
-			return Fault("trial_recovery_uncertain", "guarded rule persists after recovery")
-		}
-		if record.Version == 3 {
-			if err := trialRecoverRoute(record, qaCrashPoint, qaFaultPoint); err != nil {
-				return err
-			}
-		}
-		if err := trialQAKillAt("before-recovered-journal", qaCrashPoint); err != nil {
-			return err
-		}
-		record.Phase, record.Revision = "trial_recovered", 3
-		if err := trialQAFailRecoveredJournal(qaFaultPoint); err != nil {
-			return err
-		}
-		if err := writeTrialLocked(store, record, &id); err != nil {
-			return err
-		}
-		receipt = trialReceipt(record, false, true)
-		return nil
+		receipt, err = handle(store, selected)
+		return err
 	})
 	if err != nil {
 		return TrialReceipt{}, err
 	}
 	return receipt, nil
+}
+
+func selectTrialRecoveryLocked(store *activationJournalDir, qaCrashPoint, qaFaultPoint string) (trialRecoverySelection, error) {
+	raw, identity, err := store.readJournal()
+	if errors.Is(err, os.ErrNotExist) {
+		return trialRecoverySelection{}, trialRequirePendingV3ForQAFault(qaFaultPoint, nil)
+	}
+	if err != nil {
+		return trialRecoverySelection{}, err
+	}
+	if err := rejectAmbiguousJournalJSON(raw); err != nil {
+		return trialRecoverySelection{}, err
+	}
+	var marker struct {
+		Version int `json:"version"`
+	}
+	if err := json.Unmarshal(raw, &marker); err == nil && marker.Version == smartTUNTrialVersion &&
+		qaCrashPoint == "" && qaFaultPoint == "" {
+		record, err := decodeSmartTUNTrial(raw)
+		if err != nil {
+			return trialRecoverySelection{}, err
+		}
+		return trialRecoverySelection{version: smartTUNTrialVersion, identity: identity, tun: record}, nil
+	}
+	record, err := decodeTrialJournal(raw)
+	if err != nil {
+		// Only an exact valid v1 PREPARED intent is a no-op. Keep the same
+		// lock during this legacy check; corrupt/future/v4-with-QA records
+		// must never become an accepted legacy recovery selection.
+		legacy, legacyID, legacyErr := loadActivationJournalLocked(store)
+		if legacyErr == nil && legacyID == identity && legacy.Version == 1 && legacy.Phase == "prepared" {
+			if err := trialRequirePendingV3ForQAFault(qaFaultPoint, nil); err != nil {
+				return trialRecoverySelection{}, err
+			}
+			return trialRecoverySelection{version: 1, identity: identity}, nil
+		}
+		return trialRecoverySelection{}, err
+	}
+	if err := trialRequirePendingV3ForQAFault(qaFaultPoint, &record); err != nil {
+		return trialRecoverySelection{}, err
+	}
+	if qaCrashPoint == "after-route-delete" && record.Version != 3 {
+		return trialRecoverySelection{}, Fault("invalid_arguments", "route-delete crash point requires the v3 route trial")
+	}
+	return trialRecoverySelection{version: record.Version, identity: identity, trial: record}, nil
+}
+
+func recoverLegacyGuardedTrialLocked(store *activationJournalDir, id activationJournalFileIdentity, record trialJournal, qaCrashPoint, qaFaultPoint string) (TrialReceipt, error) {
+	if record.Phase == "trial_recovered" {
+		if err := trialVerifyRecoveredNative(record); err != nil {
+			return TrialReceipt{}, err
+		}
+		return trialReceipt(record, false, true), nil
+	}
+	if err := trialDisposableContext(); err != nil {
+		return TrialReceipt{}, err
+	}
+	boot, err := trialBootIdentity()
+	if err != nil {
+		return TrialReceipt{}, err
+	}
+	uptime, err := trialUptime()
+	if err != nil {
+		return TrialReceipt{}, err
+	}
+	if boot == record.BootID && uptime < record.DeadlineUptimeSec {
+		// The timer may have been stopped/masked since application. A
+		// pending return must NEVER claim a scheduled guard from journal
+		// intent alone, even when the rule is still within its deadline.
+		if err := trialGuardScheduled(); err != nil {
+			return TrialReceipt{}, err
+		}
+		return trialReceipt(record, true, false), nil
+	}
+	rule, err := trialSingleRule(record)
+	if err != nil {
+		return TrialReceipt{}, err
+	}
+	rows, err := trialNativeRules()
+	if err != nil {
+		return TrialReceipt{}, err
+	}
+	present, err := trialRulePresence(rows, rule)
+	if err != nil {
+		return TrialReceipt{}, err
+	}
+	if record.Version == 3 {
+		// Refuse foreign route/table consumers BEFORE deleting even the
+		// owned rule. Otherwise the two-object rollback could half-succeed.
+		route, err := trialSingleRoute(record)
+		if err != nil {
+			return TrialReceipt{}, err
+		}
+		if _, err := trialNativeRoutePresence(route); err != nil {
+			return TrialReceipt{}, err
+		}
+		if err := trialNoForeignTableRules(rows, rule); err != nil {
+			return TrialReceipt{}, err
+		}
+	}
+	if present {
+		// This narrowly identifies our exact protocol/table/destination/priority
+		// rather than deleting any rule at the occupied priority.
+		if err := trialRunIP("-4", "rule", "del", "pref", strconv.Itoa(rule.Priority), "to", rule.Destination,
+			"table", strconv.Itoa(rule.Table), "protocol", trialProtocol); err != nil {
+			return TrialReceipt{}, err
+		}
+		if err := trialQAKillAt("after-delete", qaCrashPoint); err != nil {
+			return TrialReceipt{}, err
+		}
+	}
+	after, err := trialNativeRules()
+	if err != nil {
+		return TrialReceipt{}, err
+	}
+	remains, err := trialRulePresence(after, rule)
+	if err != nil {
+		return TrialReceipt{}, err
+	}
+	if remains {
+		return TrialReceipt{}, Fault("trial_recovery_uncertain", "guarded rule persists after recovery")
+	}
+	if record.Version == 3 {
+		if err := trialRecoverRoute(record, qaCrashPoint, qaFaultPoint); err != nil {
+			return TrialReceipt{}, err
+		}
+	}
+	if err := trialQAKillAt("before-recovered-journal", qaCrashPoint); err != nil {
+		return TrialReceipt{}, err
+	}
+	record.Phase, record.Revision = "trial_recovered", 3
+	if err := trialQAFailRecoveredJournal(qaFaultPoint); err != nil {
+		return TrialReceipt{}, err
+	}
+	if err := writeTrialLocked(store, record, &id); err != nil {
+		return TrialReceipt{}, err
+	}
+	return trialReceipt(record, false, true), nil
 }
 
 func (m *Manager) InspectGuardedRuleTrial() (TrialReceipt, error) {

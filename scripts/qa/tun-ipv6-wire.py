@@ -26,7 +26,10 @@ UDP_BIND_ADDRESSES = ("2001:db8:5::10", "2001:db8:5::11",
                       "2001:db8:8::8", "2001:db8:8::9")
 ALLOWED = {
     errno.ENETUNREACH, errno.EHOSTUNREACH, errno.ECONNREFUSED,
-    errno.ECONNRESET, errno.EPIPE, errno.ETIMEDOUT
+    errno.ECONNRESET, errno.EPIPE, errno.ETIMEDOUT,
+    # Native OUTPUT containment can reject before transmission. These are
+    # accepted only by negative probes; positive paths must still succeed.
+    errno.EPERM, errno.EACCES
 }
 HEADER = len(MAGIC) + 16 + 4
 
@@ -57,6 +60,24 @@ def verify(reply, token, expected_source, size):
     expected = MAGIC + socket.inet_pton(socket.AF_INET6, expected_source) + token + data(token, size)
     if reply != expected:
         raise ValueError("wrong IPv6 source, nonce, size, or exact response bytes")
+
+
+def unexpected_response_kind(reply, token, destination, size):
+    # Authenticate the already received frame before classifying its source.
+    # Only fixed labels leave this function; arbitrary response bytes, source
+    # text and the nonce are never diagnostic output or a reason to pass QA.
+    try:
+        if not isinstance(reply, bytes) or len(reply) != len(MAGIC) + 32 + size:
+            return "unverified-response"
+        source = socket.inet_ntop(socket.AF_INET6, reply[len(MAGIC):len(MAGIC) + 16])
+        verify(reply, token, source, size)
+    except (OSError, ValueError, TypeError):
+        return "unverified-response"
+    if source == "fd73:1::1":
+        return "authenticated-direct-underlay-source"
+    if source == destination:
+        return "authenticated-peer-vpn-source"
+    return "authenticated-other-ipv6-source"
 
 
 def recv_exact(sock, count):
@@ -160,6 +181,10 @@ def probe(transport, destination, expected_source, mode):
         print(f"REAL_TUN_IPV6_{transport.upper()}_NO_REPLY=PASS (upstream unavailable)", flush=True)
         return
     if mode == "no-reply":
+        kind = unexpected_response_kind(value, token, destination,
+                                        TCP_BYTES if transport == "tcp" else UDP_BYTES)
+        print(f"REAL_TUN_IPV6_UNEXPECTED_RESPONSE transport={transport} classification={kind}",
+              file=sys.stderr, flush=True)
         raise ValueError("VPN-required IPv6 connection unexpectedly reached peer")
     verify(value, token, expected_source, TCP_BYTES if transport == "tcp" else UDP_BYTES)
     print(f"REAL_TUN_IPV6_{transport.upper()}=PASS (source={expected_source})", flush=True)
