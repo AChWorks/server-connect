@@ -60,7 +60,10 @@ check_platform() {
  [ -r /etc/os-release ] || die 'missing /etc/os-release'
  # shellcheck disable=SC1091
  . /etc/os-release
- [ "${ID:-}" = debian ] && [ "${VERSION_ID:-}" = 13 ] || die 'unsupported OS; this candidate targets Debian 13 only'
+ case "${ID:-}:${VERSION_ID:-}" in
+  debian:12|debian:13) ;;
+  *) die 'unsupported OS; this candidate targets Debian 12 or Debian 13 only' ;;
+ esac
  need systemctl; need sha256sum; need install; need mktemp; need readlink; need cmp; need mv; need tar; need stat; need flock
  [ -d /run/systemd/system ] || die 'systemd is not PID 1; use a supported systemd host'
 }
@@ -72,6 +75,10 @@ verify_payload() {
  check_root_dir "$SOURCE_DIR"
  check_root_dir "$(dirname -- "$SOURCE_DIR")"
  (cd "$SOURCE_DIR" && sha256sum --quiet -c checksums.sha256) || die 'bundle checksum mismatch; no changes applied'
+ # The same installer serves both target-specific bundles. The verified
+ # manager reads the actual host identity; callers cannot override its OS.
+ "$SOURCE_DIR/bin/server-connect" installer-check-target --manifest "$SOURCE_DIR/manifest.json" >/dev/null ||
+  die 'bundle target does not match this supported host'
  version=$($SOURCE_DIR/bin/server-connect version --json) || die 'candidate manager fails version check'
  echo "$version" | grep -q '"sing_box":"1.14.3"' || die 'manager requires a different core version'
  core=$($SOURCE_DIR/bin/sing-box version 2>/dev/null | head -n 1) || die 'candidate sing-box not executable'

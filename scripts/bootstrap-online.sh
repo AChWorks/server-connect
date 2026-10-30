@@ -38,7 +38,7 @@ max_download_bytes=$(printf '%s' "$max_download_bytes" | sed 's/^0*//')
 [ -n "$max_download_bytes" ] || max_download_bytes=0
 [ "${#max_download_bytes}" -le 10 ] && [ "$max_download_bytes" -ge 1 ] &&
  [ "$max_download_bytes" -le 100663296 ] || { echo 'Download ceiling outside supported range' >&2;exit 2; }
-# A real connected installation may acquire *missing* native Debian 13
+# A real connected installation may acquire *missing* native Debian 12/13
 # prerequisites via the host's existing signed APT policy. This is a separate
 # OS package transaction, not a second Server Connect installer. --verify-only
 # NEVER changes OS packages, even when invoked as root.
@@ -51,7 +51,7 @@ if [ "$verify_only" != yes ] && [ "$user_id" -ne 0 ]; then
  echo 'Run the online installation command as root; non-root --verify-only is supported.' >&2
  exit 1
 fi
-# The supported Debian 13 base must provide every native helper used by
+# The supported Debian 12/13 base must provide every native helper used by
 # this bootstrap, including staging, measurement and EXIT-trap cleanup tools.
 # Fail before APT on an incomplete base; never auto-repair essential packages.
 # Require native /usr/bin executables (not a custom PATH wrapper).
@@ -74,13 +74,16 @@ if [ "$#" -gt 0 ]; then
   echo 'Online --verify-only needs existing curl, Python 3 and HTTPS CA certificates; no packages installed' >&2
   exit 1
  fi
- # The first advertised online target is Debian 13. Never guess an apt
- # command or install packages on another distribution.
+ # Only the explicitly supported Debian targets may acquire prerequisites.
+ # Never guess an apt command or install packages on another distribution.
  [ -r /etc/os-release ] || { echo 'OS identity unavailable; cannot safely install online prerequisites' >&2; exit 1; }
  . /etc/os-release
- [ "${ID:-}" = debian ] && [ "${VERSION_ID:-}" = 13 ] &&
+ case "${ID:-}:${VERSION_ID:-}" in
+  debian:12|debian:13) ;;
+  *) echo 'Automatic online prerequisites are supported only on Debian 12 or Debian 13 with native APT' >&2;exit 1 ;;
+ esac
  [ -x /usr/bin/apt-get ] || {
-  echo 'Automatic online prerequisites are supported only on Debian 13 with native APT' >&2
+  echo 'Automatic online prerequisites require native Debian APT' >&2
   exit 1
  }
  # Refuse an unsafe root staging parent BEFORE any OS package mutation.
@@ -94,7 +97,7 @@ if [ "$#" -gt 0 ]; then
   echo 'Root staging parent is group/other writable' >&2
   exit 1
  }
- echo 'Installing missing Debian 13 online-bootstrap prerequisites through native APT' >&2
+ echo "Installing missing Debian $VERSION_ID online-bootstrap prerequisites through native APT" >&2
  # Fixed package names only; no user-provided package, source, repository or
  # global APT policy changes. Failure leaves the Server Connect install alone.
  unset APT_CONFIG DPKG_ROOT

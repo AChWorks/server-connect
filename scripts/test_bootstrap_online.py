@@ -9,8 +9,10 @@ from __future__ import annotations
 import gzip
 import hashlib
 import io
+import json
 import os
 from pathlib import Path
+import shlex
 import shutil
 import subprocess
 import tarfile
@@ -52,7 +54,9 @@ class ZeroSource:
         return b"\x00" * count
 
 
-def archive(path: Path, *, abnormal: str | None = None) -> str:
+def archive(path: Path, *, abnormal: str | None = None,
+            contents: dict[str, bytes] | None = None,
+            executable_members: tuple[str, ...] = ()) -> str:
     if abnormal == "compressed_oversized":
         # Actual ~192 MiB expansion, tiny gzip. Budget gate must reject the
         # member before creating any extracted data on the host filesystem.
@@ -92,8 +96,10 @@ def archive(path: Path, *, abnormal: str | None = None) -> str:
             body = b"INERT QA ONLY\n"
             if name == "server-connect/install.sh":
                 body = b"#!/bin/sh\nexit 93\n"  # Never executed by --verify-only.
+            if contents is not None:
+                body = contents.get(name, body)
             entry = tarfile.TarInfo(name)
-            entry.mode = 0o755 if name.endswith("/install.sh") else 0o644
+            entry.mode = 0o755 if name.endswith("/install.sh") or name in executable_members else 0o644
             entry.size = len(body)
             if abnormal == "pax_metadata" and name.endswith("/install.sh"):
                 entry.pax_headers = {"comment": "x" * 3_000_000}
@@ -230,6 +236,43 @@ class BootstrapSecurityTest(unittest.TestCase):
     def test_valid_local_archive(self):
         result = self.bootstrap()
         self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_verify_only_does_not_admit_targets_or_execute_payloads(self):
+        # Target admission belongs to the shared installer. These archives
+        # prove only acquisition/layout verification, including when their
+        # target metadata is unsupported; no fixture payload may execute.
+        executable_names = (
+            "server-connect/install.sh",
+            "server-connect/bin/server-connect",
+            "server-connect/bin/sing-box",
+        )
+        for target in ("debian-12-amd64", "debian-13-amd64", "unsupported-qa-target"):
+            with self.subTest(target=target):
+                contents = {
+                    "server-connect/manifest.json": json.dumps(
+                        {"schema": 1, "target": target},
+                    ).encode(),
+                }
+                markers = []
+                for name in executable_names:
+                    marker = self.directory / f"verify-{target}-{Path(name).name}.executed"
+                    self.assertFalse(marker.exists())
+                    markers.append(marker)
+                    contents[name] = (
+                        "#!/bin/sh\n"
+                        f": > {shlex.quote(str(marker))}\n"
+                        "exit 93\n"
+                    ).encode()
+                filename = f"verify-{target}.tar.gz"
+                digest = archive(
+                    self.directory / filename, contents=contents,
+                    executable_members=executable_names,
+                )
+                result = self.bootstrap(filename, digest=digest)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn("Installation was not attempted.", result.stdout)
+                for marker in markers:
+                    self.assertFalse(marker.exists(), "verify-only executed a release payload")
 
     def test_inherited_tar_options_are_ignored(self):
         result = self.bootstrap(changes={"TAR_OPTIONS": "--help", "GZIP": "--bad-option"})

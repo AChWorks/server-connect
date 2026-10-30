@@ -3,7 +3,16 @@
 set -eu
 umask 077
 CORE_ARCHIVE=${1:-}
-[ -n "$CORE_ARCHIVE" ] && [ -f "$CORE_ARCHIVE" ] || { echo 'Usage: scripts/package.sh /trusted/path/sing-box-1.14.3-linux-amd64.tar.gz' >&2;exit 2; }
+[ "$#" -ge 1 ] && [ "$#" -le 2 ] && [ -n "$CORE_ARCHIVE" ] && [ -f "$CORE_ARCHIVE" ] || {
+ echo 'Usage: scripts/package.sh /trusted/path/sing-box-1.14.3-linux-amd64.tar.gz [debian-12-amd64|debian-13-amd64]' >&2
+ exit 2
+}
+package_target=${2-debian-13-amd64}
+case "$package_target" in
+ debian-12-amd64) artifact_target=debian12-amd64 ;;
+ debian-13-amd64) artifact_target=debian13-amd64 ;;
+ *) echo 'Unsupported package target; choose debian-12-amd64 or debian-13-amd64' >&2;exit 2 ;;
+esac
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)
 CORE_ARCHIVE=$(realpath "$CORE_ARCHIVE")
 EXPECTED=e2bdf179c15a3652955dc44867e33ca0965c9c9b91b34267dcc5a5d639a5feee
@@ -24,7 +33,7 @@ cp bundle/install.sh bundle/server-connect.service bundle/server-connect-activat
 chmod 0755 "$work/server-connect/install.sh" "$work/server-connect/bin/server-connect" "$work/server-connect/bin/sing-box"
 source_revision=$(git rev-parse HEAD)
 if git diff --quiet && git diff --cached --quiet && [ -z "$(git ls-files --others --exclude-standard)" ]; then source_state=clean;else source_state=dirty;fi
-printf '{"schema":1,"manager":"0.1.0-dev","core":"sing-box 1.14.3","core_archive_sha256":"%s","source_revision":"%s","source_state":"%s","target":"debian-13-amd64","redistribution":"not authorized; local QA only"}\n' "$EXPECTED" "$source_revision" "$source_state" > "$work/server-connect/manifest.json"
+printf '{"schema":1,"manager":"0.1.0-dev","core":"sing-box 1.14.3","core_archive_sha256":"%s","source_revision":"%s","source_state":"%s","target":"%s","redistribution":"not authorized; local QA only"}\n' "$EXPECTED" "$source_revision" "$source_state" "$package_target" > "$work/server-connect/manifest.json"
 (
  cd "$work/server-connect"
  sha256sum bin/server-connect bin/sing-box bin/libcronet.so server-connect.service server-connect-activation-recover.service server-connect-activation-recover.timer server-connect-smart-tun.service server-connect-smart-health.service server-connect-smart-health.timer install.sh THIRD-PARTY-LICENSES/sing-box-LICENSE manifest.json > checksums.sha256
@@ -32,7 +41,7 @@ printf '{"schema":1,"manager":"0.1.0-dev","core":"sing-box 1.14.3","core_archive
  ./bin/server-connect version --json
  ./bin/sing-box version | head -n 1
 )
-artifact="$ROOT/dist/server-connect-0.1.0-dev-debian13-amd64-local-qa.tar.gz"
+artifact="$ROOT/dist/server-connect-0.1.0-dev-$artifact_target-local-qa.tar.gz"
 # Normalize archive order, ownership and timestamps. A QA reviewer can
 # independently rebuild the same byte-identical artifact from pinned inputs.
 source_date_epoch=$(git show -s --format=%ct HEAD)
