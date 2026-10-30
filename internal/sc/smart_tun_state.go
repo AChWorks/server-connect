@@ -116,9 +116,19 @@ func (store *activationJournalDir) writeSmartTUNFile(name string, data []byte, e
 	return nil
 }
 
-func (store *activationJournalDir) removeSmartTUNCredential(identity activationJournalFileIdentity, digest string) error {
+// Keep the exact-operation durability prerequisite next to the unlink so
+// every attempt, including a visible-cleanup retry, must pass it. The same
+// barrier also persists an earlier uncertain unlink when already absent.
+// directorySync is only an argument-scoped filesystem failure seam.
+func (store *activationJournalDir) removeSmartTUNCredential(journalIdentity activationJournalFileIdentity, record smartTUNTrialJournal, credential *activationJournalFileIdentity, directorySync func(int) error) error {
+	if err := syncSmartTUNCleanupLocked(store, journalIdentity, record, directorySync); err != nil {
+		return err
+	}
 	data, found, err := store.readSmartTUNFile(smartTUNTrialConfigFile)
-	if err != nil || found != identity || sha256Hex(data) != digest {
+	if credential == nil && errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil || credential == nil || found != *credential || sha256Hex(data) != record.ConfigSHA256 {
 		return Fault("trial_resource_conflict", "TUN credential identity or bytes changed before removal")
 	}
 	if err := store.ensureLockIdentity(); err != nil {
@@ -127,7 +137,7 @@ func (store *activationJournalDir) removeSmartTUNCredential(identity activationJ
 	if err := syscall.Unlinkat(int(store.dir.Fd()), smartTUNTrialConfigFile); err != nil {
 		return journalFSUnavailable("cannot remove exact TUN credential")
 	}
-	if err := store.dir.Sync(); err != nil {
+	if err := directorySync(int(store.dir.Fd())); err != nil {
 		return journalFSUnavailable("TUN credential removal durability is uncertain")
 	}
 	return nil

@@ -67,6 +67,10 @@ unit, verifies the complete native baseline, and finalizes only that operation.
 A stale command cannot stop a replacement trial. Cleanup intent must be durable
 before deleting a credential, so authorized removal can be resumed without
 accepting an unexplained missing credential from a running or recovered trial.
+An already visible cleanup phase is not proof that an earlier directory fsync
+succeeded. Every cleanup retry must establish a successful durability barrier
+for the exact current operation before removing its credential; a failed barrier
+preserves the credential and recovery evidence for another attempt.
 Foreign-resource drift or changed credential/unit provenance retains evidence
 and blocks a successful Direct claim. The independent executor resumes durable
 stop and cleanup intent while its timer is armed; status inspection alone must

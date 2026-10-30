@@ -231,6 +231,16 @@ func TestSmartTUNCredentialRemovalRefusesReplacementAndRetainsEvidence(t *testin
 		if err := store.writeSmartTUNFile(smartTUNTrialConfigFile, data, nil); err != nil {
 			return err
 		}
+		record := trialV4Example()
+		record.Phase, record.Revision = "trial_cleanup_pending", 4
+		record.CoreStartAttempted, record.ConfigSHA256 = true, sha256Hex(data)
+		if err := writeSmartTUNTrialLocked(store, record, nil); err != nil {
+			return err
+		}
+		journalIdentity, err := reloadSmartTUNTrialLocked(store, record)
+		if err != nil {
+			return err
+		}
 		_, identity, err := store.readSmartTUNFile(smartTUNTrialConfigFile)
 		if err != nil {
 			return err
@@ -242,7 +252,7 @@ func TestSmartTUNCredentialRemovalRefusesReplacementAndRetainsEvidence(t *testin
 		if err := os.WriteFile(path, data, 0600); err != nil {
 			return err
 		}
-		if err := store.removeSmartTUNCredential(identity, sha256Hex(data)); ErrorCode(err) != "trial_resource_conflict" {
+		if err := store.removeSmartTUNCredential(journalIdentity, record, &identity, syscall.Fsync); ErrorCode(err) != "trial_resource_conflict" {
 			t.Fatalf("removed foreign same-byte credential: %v", err)
 		}
 		if _, err := os.Stat(path); err != nil {
@@ -255,7 +265,7 @@ func TestSmartTUNCredentialRemovalRefusesReplacementAndRetainsEvidence(t *testin
 		if err := os.WriteFile(path, []byte("changed-secret"), 0600); err != nil {
 			return err
 		}
-		if err := store.removeSmartTUNCredential(replacement, sha256Hex(data)); ErrorCode(err) != "trial_resource_conflict" {
+		if err := store.removeSmartTUNCredential(journalIdentity, record, &replacement, syscall.Fsync); ErrorCode(err) != "trial_resource_conflict" {
 			t.Fatalf("removed mutated credential bytes: %v", err)
 		}
 		return nil

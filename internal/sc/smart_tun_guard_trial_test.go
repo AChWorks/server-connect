@@ -247,7 +247,14 @@ func TestSmartTUNClearCredentialConflictBeforeGuardDisarm(t *testing.T) {
 		}
 		// The same present credential remains valid once cleanup is durable.
 		record.Phase, record.Revision = "trial_cleanup_pending", 4
-		if err := store.removeSmartTUNCredential(*identity, record.ConfigSHA256); err != nil {
+		if err := writeSmartTUNTrialLocked(store, record, nil); err != nil {
+			return err
+		}
+		journalIdentity, err := reloadSmartTUNTrialLocked(store, record)
+		if err != nil {
+			return err
+		}
+		if err := store.removeSmartTUNCredential(journalIdentity, record, identity, syscall.Fsync); err != nil {
 			return err
 		}
 		if identity, err := smartTUNCredentialForCleanupLocked(store, record); err != nil || identity != nil {

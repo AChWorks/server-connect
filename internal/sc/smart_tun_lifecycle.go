@@ -102,6 +102,36 @@ func smartTUNCredentialForCleanupLocked(store *activationJournalDir, record smar
 	return &identity, nil
 }
 
+// A visible cleanup record may follow a successful rename whose directory
+// fsync failed. Retry that barrier before deleting evidence, while pinning
+// both the entire expected operation and its already-observed inode. Unlike
+// a transition reload, a barrier never adopts a replacement journal inode.
+func syncSmartTUNCleanupLocked(store *activationJournalDir, identity activationJournalFileIdentity, record smartTUNTrialJournal, directorySync func(int) error) error {
+	if record.Phase != "trial_cleanup_pending" || record.Revision != 4 {
+		return Fault("activation_journal_conflict", "durable TUN cleanup intent required before credential removal")
+	}
+	if directorySync == nil {
+		return journalFSUnavailable("TUN cleanup directory sync is unavailable")
+	}
+	check := func() error {
+		found, err := reloadSmartTUNTrialLocked(store, record)
+		if err != nil {
+			return err
+		}
+		if found != identity {
+			return Fault("activation_journal_conflict", "TUN cleanup journal identity changed before credential removal")
+		}
+		return nil
+	}
+	if err := check(); err != nil {
+		return err
+	}
+	if err := directorySync(int(store.dir.Fd())); err != nil {
+		return journalFSUnavailable("TUN cleanup intent durability is uncertain")
+	}
+	return check()
+}
+
 func finalizeSmartTUNTrialLocked(store *activationJournalDir, identity activationJournalFileIdentity, record smartTUNTrialJournal, qaKillPoint string) (SmartTUNTrialReceipt, error) {
 	if record.Phase != "trial_recovered" && record.Phase != "trial_cleanup_pending" {
 		return SmartTUNTrialReceipt{}, Fault("activation_journal_conflict", "TUN operation has not recovered before cleanup")
@@ -133,13 +163,8 @@ func finalizeSmartTUNTrialLocked(store *activationJournalDir, identity activatio
 	if err := trialQAKillAt("after-cleanup-intent", qaKillPoint); err != nil {
 		return SmartTUNTrialReceipt{}, err
 	}
-	if credential != nil {
-		if err := store.removeSmartTUNCredential(*credential, record.ConfigSHA256); err != nil {
-			return SmartTUNTrialReceipt{}, err
-		}
-	} else if err := store.dir.Sync(); err != nil {
-		// Retry an uncertain unlink fsync even when the file is absent now.
-		return SmartTUNTrialReceipt{}, journalFSUnavailable("cannot persist absent TUN credential")
+	if err := store.removeSmartTUNCredential(identity, record, credential, syscall.Fsync); err != nil {
+		return SmartTUNTrialReceipt{}, err
 	}
 	if err := trialQAKillAt("after-credential-remove", qaKillPoint); err != nil {
 		return SmartTUNTrialReceipt{}, err
