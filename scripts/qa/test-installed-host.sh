@@ -47,6 +47,7 @@ sh -n scripts/qa/tun-wordpress-fpm.sh
 sh -n scripts/qa/host-activation-guard.sh
 sh -n scripts/qa/host-product-guard-trial.sh
 sh -n scripts/qa/host-tun-path.sh
+sh -n scripts/qa/host-product-tun-trial.sh
 sh -n scripts/qa/tun-guard-unit-lab.sh
 bash scripts/qa/test-installer-rollback-backups.sh
 PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/qa/test-activation-guard-inspect.py
@@ -284,6 +285,9 @@ verify_direct_install() {
     test "$(systemctl show server-connect.service -p ActiveState --value)" = inactive
     test "$(systemctl is-enabled server-connect.service)" = disabled
     test "$(systemctl is-enabled server-connect-activation-recover.timer)" = disabled
+    test "$(systemctl show server-connect-smart-tun.service -p LoadState --value)" = loaded
+    test "$(systemctl show server-connect-smart-tun.service -p UnitFileState --value)" = static
+    test "$(systemctl show server-connect-smart-tun.service -p ActiveState --value)" = inactive
     test "$(systemctl show server-connect-activation-recover.service -p LoadState --value)" = loaded
     /usr/local/bin/server-connect version --json
   '
@@ -297,6 +301,7 @@ verify_clean_uninstall() {
     test ! -e /etc/systemd/system/server-connect.service
     test ! -e /etc/systemd/system/server-connect-activation-recover.service
     test ! -e /etc/systemd/system/server-connect-activation-recover.timer
+    test ! -e /etc/systemd/system/server-connect-smart-tun.service
     test "$(stat -c %a /var/lib/server-connect)" = 700
     test "$(stat -c %a /var/lib/server-connect/profiles)" = 700
     test "$(cat /var/lib/server-connect/profiles/qa-retained)" = SC_QA_RETAIN_PROFILE_BYTES
@@ -562,6 +567,7 @@ docker cp "$root/scripts/qa/tun-ipv6-wire.py" "$container:/root/qa-tun-ipv6-wire
 docker cp "$root/scripts/qa/tun-wordpress-fpm.sh" "$container:/root/qa-tun-wordpress-fpm.sh"
 docker cp "$root/scripts/qa/tun-wp-check.py" "$container:/root/qa-tun-wp-check.py"
 docker cp "$root/scripts/qa/host-tun-path.sh" "$container:/root/qa-host-tun-path.sh"
+docker cp "$root/scripts/qa/host-product-tun-trial.sh" "$container:/root/qa-product-tun-trial.sh"
 docker cp "$root/scripts/qa/tun-guard-unit-lab.sh" "$container:/root/qa-tun-guard-unit-lab.sh"
 # Independently check resources omitted from the standard route/rule/link
 # digest, in addition to the guest's own explicit cleanup verdict.
@@ -696,6 +702,31 @@ docker exec "$container" /bin/sh -c '
 '
 assert_tun_native_cleanup real-tun-guard-stale-unit-negative-cleanup
 echo 'QA_TUN_GUARD_STALE_UNIT_FALSE_PASS_REJECTED=PASS'
+echo 'REAL_TUN_LAB_STAGE=installed-product-guarded-real-tun-pending'
+product_tun_log="$scratch/real-tun-product-guarded-apply.log"
+docker exec -e SC_QA_TUN_PRODUCT_LAB=yes "$container" /bin/sh /root/qa-host-tun-path.sh | tee "$product_tun_log"
+for marker in \
+  'PRODUCT_TUN_INSTALLED_PROFILE_AND_IDLE=PASS' \
+  'PRODUCT_TUN_GUARD_PREARMED_AND_PENDING=PASS' \
+  'PRODUCT_TUN_DIRECT_FALSE_STATUS_AND_PROXY_CONFLICT_REFUSED=PASS' \
+  'PRODUCT_TUN_INSTALLED_REAL_TCP_DIRECT_AND_VLESS=PASS' \
+  'PRODUCT_TUN_INSTALLED_UDP_DNS_AND_FOREIGN_HOSTING=PASS' \
+  'PRODUCT_TUN_INSTALLED_APT_GIT_WORDPRESS=PASS' \
+  'PRODUCT_TUN_SYSTEMD_DEADLINE_EXACT_BASELINE=PASS' \
+  'PRODUCT_TUN_RECOVERED_CLEARED_DIRECT=PASS' \
+  'PRODUCT_TUN_CONTROLLER_SIGKILL_INDEPENDENT_PENDING=PASS' \
+  'PRODUCT_TUN_SIGKILL_INDEPENDENT_SYSTEMD_ROLLBACK=PASS' \
+  'PRODUCT_TUN_PRE_CREDENTIAL_SIGKILL_INDEPENDENT_ROLLBACK=PASS' \
+  'PRODUCT_TUN_GUARD_TIMER_LOSS_IMMEDIATE_CONTAINMENT=PASS' \
+  'PRODUCT_TUN_GUARD_EXECUTOR_LOSS_FOREIGN_CONFLICT_RETAINED=PASS' \
+  'PRODUCT_TUN_GUARD_EXECUTOR_LOSS_GUEST_CLEANUP=PASS' \
+  'PRODUCT_TUN_CREDENTIAL_REMOVAL_PERSISTENT_CONFLICT=PASS' \
+  'PRODUCT_TUN_CLEAR_CONFLICT_GUARD_STAYS_ARMED=PASS' \
+  'PRODUCT_TUN_CREDENTIAL_CONFLICT_RECONCILED=PASS'; do
+  grep -Fx "$marker" "$product_tun_log" >/dev/null
+done
+assert_tun_native_cleanup installed-product-tun-deadline-and-sigkill
+
 # Real sing-box faults must preserve native Direct HTTP and reject the
 # hosting-outage PASS; the guest must prove COMPLETE cleanup independently
 # of its intentional test exit 1, and the outer host independently verifies.
@@ -756,7 +787,7 @@ echo 'REAL_TUN_CLEANUP_FAILURE_REJECTED=PASS (guest cleanup failure != expected 
 # Remove exactly the QA helpers copied for the completed TUN trials. This
 # also closes the earlier WordPress intermediate guest-helper cleanup gap.
 docker exec "$container" /bin/rm -f /root/qa-tun-config-qa /root/qa-host-tun-path.sh \
-  /root/qa-tun-guard-unit-lab.sh /root/qa-tun-sni-client.py /root/qa-tun-native-apps.py \
+  /root/qa-tun-guard-unit-lab.sh /root/qa-product-tun-trial.sh /root/qa-tun-sni-client.py /root/qa-tun-native-apps.py \
   /root/qa-tun-dns-peer.py /root/qa-tun-dns-client.py /root/qa-tun-wordpress-fpm.sh \
   /root/qa-tun-wp-check.py /root/qa-tun-payload-wire.py /root/qa-tun-ipv6-wire.py
 # Product code + installed inactive-by-default independent recovery units.

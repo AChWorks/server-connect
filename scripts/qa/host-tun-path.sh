@@ -94,6 +94,43 @@ cleanup() {
   original_rc=$?
   cleanup_failed=no
   trap - EXIT INT TERM
+  # On failure during the installed product TUN experiment, the independent
+  # prearmed systemd guard (NOT this shell) must own the stop/rollback.
+  # Do not delete its VETH/peer first: that would destroy the exact native
+  # baseline and make a valid watchdog report an unrecoverable drift.
+  # The ORIGINAL test failure remains a failure even if recovery succeeds.
+  if [ "${SC_QA_TUN_PRODUCT_LAB-}" = yes ] && [ "$original_rc" -ne 0 ] &&
+     [ -f /var/lib/server-connect/route-activation-journal.json ]; then
+    product_recovered=no
+    tries=0
+    while [ "$tries" -lt 65 ]; do
+      if /usr/local/bin/server-connect --json smart-tun-trial-status |
+         /usr/bin/python3 -c '
+import json,sys
+r=json.load(sys.stdin)
+assert r["ok"] and r["data"]["phase"]=="trial_recovered" and r["data"]["recovery_verified"],r' 2>/dev/null; then
+        product_recovered=yes
+        break
+      fi
+      tries=$((tries+1))
+      sleep 1
+    done
+    if [ "$product_recovered" = yes ]; then
+      product_op=$(/usr/local/bin/server-connect --json smart-tun-trial-status |
+         /usr/bin/python3 -c 'import json,sys;print(json.load(sys.stdin)["data"]["operation_id"])') || product_op=
+      if [ -n "$product_op" ] &&
+         /usr/local/bin/server-connect --json smart-tun-trial-clear --operation-id "$product_op" --revision 2 |
+           /usr/bin/python3 -c 'import json,sys;r=json.load(sys.stdin);assert r["ok"] and r["data"]["cleared"],r'; then
+        echo 'PRODUCT_TUN_FAILURE_CLEANUP=PASS (independent deadline and exact operation clearance; QA remains failed)'
+      else
+        echo 'PRODUCT_TUN_FAILURE_CLEANUP=FAIL (exact recovered operation clearance unavailable)' >&2
+        cleanup_failed=yes
+      fi
+    else
+      echo 'PRODUCT_TUN_FAILURE_CLEANUP=FAIL (independent recovery not verified before guest teardown)' >&2
+      cleanup_failed=yes
+    fi
+  fi
   if [ "${SC_QA_TUN_GUARD_LAB-}" = yes ] && ! qa_tun_guard_cleanup; then
     cleanup_failed=yes
   fi
@@ -373,6 +410,13 @@ dns_path() {
     /usr/bin/python3 -I -B /root/qa-tun-dns-client.py "$1" "$2" "$3" "$4" "$5"
 }
 
+case "${SC_QA_TUN_PRODUCT_LAB-}" in
+  ''|'yes') ;;
+  *) echo 'Invalid isolated installed-product TUN mode' >&2; exit 2 ;;
+esac
+if [ "${SC_QA_TUN_PRODUCT_LAB-}" = yes ] && [ "${SC_QA_TUN_GUARD_LAB-}" = yes ]; then
+  echo 'Concurrent distinct TUN guard modes are unsupported' >&2; exit 2
+fi
 case "${SC_QA_TUN_GUARD_LAB-}" in
   '' ) ;;
   yes ) . /root/qa-tun-guard-unit-lab.sh ;;
@@ -679,11 +723,18 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, *args):
         pass
 
-server = ThreadingHTTPServer(("0.0.0.0", 19181), Handler)
+# Do the TLS handshake INSIDE each worker thread, not on the listening
+# socket's main accept() loop. A deliberately failed VPN/SNI handshake must
+# not stall or reset an unrelated Direct positive control. The real packet
+# route/source witnesses remain unchanged and still fail if Direct fails.
 ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
 ctx.load_cert_chain(certfile=sys.argv[1], keyfile=sys.argv[2])
-server.socket = ctx.wrap_socket(server.socket, server_side=True)
-server.serve_forever()
+class TLSOrigin(ThreadingHTTPServer):
+    def finish_request(self, request, client_address):
+        request.settimeout(3)
+        with ctx.wrap_socket(request, server_side=True) as secured:
+            super().finish_request(secured, client_address)
+TLSOrigin(("0.0.0.0", 19181), Handler).serve_forever()
 PYTLSSERVER
 tls_pid=$!
 
@@ -877,7 +928,7 @@ echo "REAL_TUN_DNS_DIRECT_WITNESS=PASS (native DNS UDP/TCP positive controls)"
 hosting_baseline=$(hosting_reply_packets)
 test "$hosting_baseline" -gt 0 || { echo 'FAIL: no positive control of foreign visitor hosting reply' >&2; exit 1; }
 echo "REAL_TUN_FOREIGN_HOSTING_BASELINE=PASS (foreign visitor request/reply, packets=$hosting_baseline)"
-if [ "${SC_QA_TUN_GUARD_LAB-}" = yes ]; then
+if [ "${SC_QA_TUN_GUARD_LAB-}" = yes ] || [ "${SC_QA_TUN_PRODUCT_LAB-}" = yes ]; then
   # The disposable VETH may still be doing IPv6 duplicate-address detection.
   # Its fe80:: local /128 route appears only after DAD finishes. Capturing
   # before then produces a false rollback failure 25s later even when the
@@ -908,6 +959,14 @@ if [ "${SC_QA_TUN_GUARD_LAB-}" = yes ]; then
   guard_rules_before=$(ip -N -j -4 rule show)
   guard_v6_routes_before=$(ip -N -j -6 route show table all)
   guard_v6_rules_before=$(ip -N -j -6 rule show)
+fi
+
+# Separate installed-product guard trial reuses the identical peer paths
+# but starts the real TUN through its installed manager/systemd ownership.
+if [ "${SC_QA_TUN_PRODUCT_LAB-}" = yes ]; then
+  . /root/qa-product-tun-trial.sh
+  product_tun_trial
+  exit 0
 fi
 
 # Generate the candidate via the actual manager compiler, not a manually
@@ -1248,7 +1307,14 @@ test "$(domestic_tls_direct_packets)" -eq "$domestic_tls_active" &&
 test "$(foreign_tls_direct_packets)" -eq "$foreign_tls_baseline" || {
   echo 'REAL_TUN_TLS_SNI_NO_DIRECT_ON_UPSTREAM_LOSS=FAIL (native VPN-only TLS leak)' >&2; exit 1;
 }
-tls_path child.only-exact.test 5.22.0.10 10.254.72.1 reply
+if ! tls_path child.only-exact.test 5.22.0.10 10.254.72.1 reply; then
+  echo 'REAL_TUN_TLS_DIRECT_AFTER_UPSTREAM_LOSS=FAIL (fresh Direct positive control)' >&2
+  echo "QA_TLS_PEER_ALIVE=$(kill -0 "$tls_pid" 2>/dev/null && echo yes || echo no)" >&2
+  # Failure-only diagnostic evidence from the isolated synthetic server.
+  # Keep the original failure and do not retry away a routing regression.
+  tail -n 20 /run/sc-qa-tun-tls.log >&2 || :
+  exit 1
+fi
 test "$(domestic_tls_direct_packets)" -gt "$domestic_tls_active" || {
   echo 'REAL_TUN_TLS_SNI_NO_DIRECT_ON_UPSTREAM_LOSS=FAIL (Direct negative control missing)' >&2; exit 1;
 }

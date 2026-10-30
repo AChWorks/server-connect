@@ -48,6 +48,38 @@ The VPN server's *outer transport* needs an independently reachable bootstrap pa
 
 Track **desired, observed, pending/uncertain and last verified safe** states separately. An observed process, successful Direct probe, route-plan fingerprint or private intent journal is not proof of safe TUN activation. Exact transaction semantics and recovery belong to [SAFETY-RECOVERY.md](SAFETY-RECOVERY.md).
 
+## Inert product TUN unit and disposable pending integration
+
+The development installer carries a third supplementary **static, unenabled**
+`server-connect-smart-tun.service` distinct from the existing unprivileged
+`server-connect.service` Proxy Only unit. The TUN service alone has
+`CAP_NET_ADMIN`/`CAP_NET_RAW`, and reads its exact staged policy using a
+systemd `LoadCredential` copy; the ordinary proxy unit remains unprivileged.
+The installer fingerprints and transactionally restores this unit alongside
+its existing independent recovery service/timer, and refuses updates while
+any of them is active.
+
+`smart-tun-trial-apply` is **not** the product Smart Routing Apply: it is a
+short-lived, v4-journal-bound real sing-box test *only* in the known disconnected
+two-interface Docker systemd fixture, with synthetic VLESS endpoint and CIDRs.
+It first validates selected profile, pinned core and complete native
+route/rule/link/nftables baseline (including any pre-existing QA-guest
+firewall owners), then independently prearms and executes
+the installed recovery oneshot **outside** the shared journal lock. A second
+locked admission must match, followed by fsynced pending journal, credential persistence
+and only then an explicit `systemctl start` of the exact owned
+TUN unit. An independent systemd timer detects timeout, manager death, core
+exit or reboot, stops only that exact unit and requires the original semantic
+kernel and nftables baseline before recording `trial_recovered`. Exact
+operation-bound clearance disarms the timer and removes the sensitive trial
+credential and journal. Pending/recovered v4 trials block Proxy Only mode
+changes and prevent generic status from claiming ordinary Direct.
+
+This deliberately cannot **commit** TUN, cannot authenticate foreign host
+owners or geographic data, and does not have fresh SSH/provider confirmation
+or Runtime Health Guard. Production activation still needs exactly owned
+multi-owner kernel transactions and a separate permission/review boundary.
+
 ## Optional inbound website connectivity
 
 A selected consumer VPN does **not** create public inbound ports. A separately enabled **official cloudflared** connector may open an outbound connection to Cloudflare and serve an explicitly approved HTTP(S) hostname from a bounded local origin, via Direct or the verified Smart Routing VPN if needed. Its account/domain/DNS, credentials, trusted proxy/source-IP handling, TLS, origin binding and service lifecycle are separately authorized and independently diagnosed.

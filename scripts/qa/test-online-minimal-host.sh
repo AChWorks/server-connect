@@ -87,6 +87,7 @@ docker exec "$container" /bin/sh -c '
   test ! -e /etc/systemd/system/server-connect.service
   test ! -e /etc/systemd/system/server-connect-activation-recover.service
   test ! -e /etc/systemd/system/server-connect-activation-recover.timer
+  test ! -e /etc/systemd/system/server-connect-smart-tun.service
 '
 # systemd service-credential mounts must propagate within this guest's own
 # /run tmpfs. No host mount is changed or bound into the guest.
@@ -153,6 +154,9 @@ docker exec "$container" /bin/sh -c '
   test "$(systemctl show server-connect-activation-recover.timer -p LoadState --value)" = loaded
   test "$(systemctl is-enabled server-connect-activation-recover.timer)" = disabled
   test "$(systemctl show server-connect-activation-recover.service -p LoadState --value)" = loaded
+  test "$(systemctl show server-connect-smart-tun.service -p LoadState --value)" = loaded
+  test "$(systemctl show server-connect-smart-tun.service -p UnitFileState --value)" = static
+  test "$(systemctl show server-connect-smart-tun.service -p ActiveState --value)" = inactive
   /usr/local/bin/server-connect version --json
   test -z "$(find /root -maxdepth 1 -name ".server-connect-bootstrap.*" -print)"
 '
@@ -187,6 +191,7 @@ docker exec "$container" /bin/sh -c '
   test ! -e /etc/systemd/system/server-connect.service
   test ! -e /etc/systemd/system/server-connect-activation-recover.service
   test ! -e /etc/systemd/system/server-connect-activation-recover.timer
+  test ! -e /etc/systemd/system/server-connect-smart-tun.service
   test "$(cat /var/lib/server-connect/profiles/qa-retained)" = SC_ONLINE_MINIMAL_PROFILE_RETAINED
   test "$(stat -c %a /var/lib/server-connect/profiles)" = 700
   command -v curl

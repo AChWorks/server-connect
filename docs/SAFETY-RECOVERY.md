@@ -23,6 +23,43 @@
 
 **Beware historical naming:** the developer's `selective-stage-intent` may report `prepared`, but its private **unarmed, non-atomic** journal is **not** the guarded `PREPARED` state above. QA-only v2 RPDB-rule and v3 loopback-route trials also do not create a real TUN or production Activation Guard. Their limits and reproducible tests are recorded in [ACCEPTANCE.md](ACCEPTANCE.md).
 
+### Disposable v4 guarded TUN trial (not production acceptance)
+
+The installed experimental v4 journal deliberately has only
+`trial_pending` (revision 1) and `trial_recovered` (revision 2), **not**
+`ACTIVE_VERIFIED`. It binds the operation, profile, synthetic endpoint,
+native baseline digest, sing-box configuration digest, boot ID and monotonic
+deadline. It records the journal **before** the credential, then durably records a
+`core_start_attempted` transition before invoking the actual pinned sing-box
+Linux TUN in a separate static service. A missing credential from a journal-first
+crash is distinguishable from a vanished credential after start intent, even
+on successive independent recovery ticks. A credential mismatch is not an
+owned resource to discard simply because the kernel returned to baseline.
+The recovery oneshot and 5-second systemd timer are independently prearmed
+and verified before starting the TUN. The default expiry
+is 600 seconds, configurable from 4 to 600 seconds in disconnected QA only.
+A failed/uncertain restoration retains the journal, never presents Direct
+as safely verified and blocks installer/update/profile/Proxy Only transitions.
+Preexisting guest nftables owners are fingerprinted and must remain
+unchanged; the product never adopts or deletes their objects. If a running
+pending TUN loses its independently verified recovery timer or executor, an
+explicit recovery invocation must stop **only the provenance-verified TUN
+service immediately**, even before the recorded deadline. Loss of the guard
+is never permission to keep an active pending interception running. Only full
+native IP/nftables equality after stopping the verified service permits
+`trial_recovered`, with `guard_scheduled=false`; unresolved stop, credential
+or foreign-resource conflicts retain the operation and block Direct/Proxy Only.
+Exact operation-ID/revision clearance disarms the remaining guard after
+rechecking the credential. This is an observed-loss containment path in the
+isolated guest, **not** a substitute for independent guard-liveness supervision
+or the future production Runtime Health Guard (#3).
+
+This is one step toward the real activation state machine, **not** a
+substitute for privileged third-party ownership/conntrack proof, SSH
+confirmation, permanent commit, Runtime Health Guard, VPN-bound health
+monitoring or physical crash/reboot tests. A restored guest baseline does
+not certify production rollback safety or authorize public installation.
+
 ## Activation Guard
 
 Default confirmation window: **600 seconds**, operator configurable. High-risk route changes require:

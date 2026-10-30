@@ -51,7 +51,7 @@ for variant in valid invalid-unit; do
     cd "$dest"
     sha256sum bin/server-connect bin/sing-box bin/libcronet.so \
       server-connect.service server-connect-activation-recover.service \
-      server-connect-activation-recover.timer install.sh \
+      server-connect-activation-recover.timer server-connect-smart-tun.service install.sh \
       THIRD-PARTY-LICENSES/sing-box-LICENSE manifest.json > checksums.sha256
     sha256sum --quiet --check checksums.sha256
     ./bin/server-connect version --json | grep -q '"sing_box":"1.14.3"'
