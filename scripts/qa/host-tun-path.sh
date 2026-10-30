@@ -160,6 +160,9 @@ print(d["operation_id"],d["revision"])' 2>/dev/null); then
   if [ "${SC_QA_TUN_GUARD_LAB-}" = yes ] && ! qa_tun_guard_cleanup; then
     cleanup_failed=yes
   fi
+  if [ "${SC_QA_TUN_OWNED_BOUNDARY-}" = yes ] && ! owned_boundary_cleanup; then
+    cleanup_failed=yes
+  fi
   for pid in "$client_pid" "$server_pid" "$origin_pid" "$hosting_pid" "$udp_pid" "$dns_pid" "$tls_pid" "$native_apps_pid" "$wp_pid" "$payload_pid" "$ipv6_pid"; do
     if [ -n "$pid" ]; then
       kill "$pid" 2>/dev/null || :
@@ -214,6 +217,10 @@ print(d["operation_id"],d["revision"])' 2>/dev/null); then
   # Fail, rather than claim cleanup, if the real core leaked its TUN.
   if [ -e /sys/class/net/sctunqa0 ]; then
     echo 'REAL_TUN_LAB_CLEANUP=FAIL (TUN still present)' >&2
+    cleanup_failed=yes
+  fi
+  if [ -e /sys/class/net/scqaowned0 ]; then
+    echo 'REAL_TUN_LAB_CLEANUP=FAIL (renamed QA TUN still present)' >&2
     cleanup_failed=yes
   fi
   if [ -e /sys/class/net/"$edge" ]; then
@@ -439,6 +446,17 @@ dns_path() {
 case "${SC_QA_TUN_PRODUCT_LAB-}" in
   ''|'yes') ;;
   *) echo 'Invalid isolated installed-product TUN mode' >&2; exit 2 ;;
+esac
+case "${SC_QA_TUN_OWNED_BOUNDARY-}" in
+  '') ;;
+  yes)
+    if [ "${SC_QA_TUN_IPV6-}" != yes ] ||
+       [ -n "${SC_QA_TUN_PRODUCT_LAB-}" ] || [ -n "${SC_QA_TUN_GUARD_LAB-}" ] ||
+       [ -n "${SC_QA_TUN_OUTAGE_FAULT-}" ] || [ -n "${SC_QA_TUN_CLEANUP_FAULT-}" ]; then
+      echo 'OWNED_TUN_BOUNDARY=FAIL (requires exclusive explicit dual-stack fixture)' >&2; exit 2
+    fi
+    . /root/qa-owned-tun-boundary.sh ;;
+  *) echo 'Invalid isolated owned TUN boundary mode' >&2; exit 2 ;;
 esac
 if [ "${SC_QA_TUN_PRODUCT_LAB-}" = yes ] && [ "${SC_QA_TUN_GUARD_LAB-}" = yes ]; then
   echo 'Concurrent distinct TUN guard modes are unsupported' >&2; exit 2
@@ -992,6 +1010,10 @@ fi
 if [ "${SC_QA_TUN_PRODUCT_LAB-}" = yes ]; then
   . /root/qa-product-tun-trial.sh
   product_tun_trial
+  exit 0
+fi
+if [ "${SC_QA_TUN_OWNED_BOUNDARY-}" = yes ]; then
+  owned_tun_boundary_trial
   exit 0
 fi
 

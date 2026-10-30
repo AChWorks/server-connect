@@ -48,6 +48,7 @@ sh -n scripts/qa/host-activation-guard.sh
 sh -n scripts/qa/host-product-guard-trial.sh
 sh -n scripts/qa/host-tun-path.sh
 sh -n scripts/qa/host-product-tun-trial.sh
+sh -n scripts/qa/host-owned-tun-boundary.sh
 sh -n scripts/qa/tun-guard-unit-lab.sh
 bash scripts/qa/test-installer-rollback-backups.sh
 PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/qa/test-activation-guard-inspect.py
@@ -568,6 +569,7 @@ docker cp "$root/scripts/qa/tun-wordpress-fpm.sh" "$container:/root/qa-tun-wordp
 docker cp "$root/scripts/qa/tun-wp-check.py" "$container:/root/qa-tun-wp-check.py"
 docker cp "$root/scripts/qa/host-tun-path.sh" "$container:/root/qa-host-tun-path.sh"
 docker cp "$root/scripts/qa/host-product-tun-trial.sh" "$container:/root/qa-product-tun-trial.sh"
+docker cp "$root/scripts/qa/host-owned-tun-boundary.sh" "$container:/root/qa-owned-tun-boundary.sh"
 docker cp "$root/scripts/qa/tun-guard-unit-lab.sh" "$container:/root/qa-tun-guard-unit-lab.sh"
 # Independently check resources omitted from the standard route/rule/link
 # digest, in addition to the guest's own explicit cleanup verdict.
@@ -584,7 +586,7 @@ assert_tun_native_cleanup() {
     exit 1
   }
   if ! docker exec "$container" /bin/sh -c \
-      'test ! -e /sys/class/net/scqaedge0 && test ! -e /sys/class/net/sctunqa0'; then
+      'test ! -e /sys/class/net/scqaedge0 && test ! -e /sys/class/net/sctunqa0 && test ! -e /sys/class/net/scqaowned0'; then
     echo "REAL_TUN_NATIVE_CLEANUP($phase)=FAIL (VETH or TUN still present)" >&2
     exit 1
   fi
@@ -652,6 +654,24 @@ grep -Fx 'REAL_TUN_IPV6_OVERRIDE_UDP_OUTAGE=PASS (no reply and unchanged native 
 grep -Fx 'REAL_TUN_IPV6_OUTAGE=PASS (VPN-required TCP/UDP failed closed, native Direct preserved)' "$ipv6_tun_log" >/dev/null
 grep -F 'REAL_TUN_LAB_CLEANUP=PASS' "$ipv6_tun_log" >/dev/null
 assert_tun_native_cleanup real-tun-ipv6-candidate-cleanup
+
+# First native feasibility gate for an explicit manager-owned TUN boundary.
+# It reuses the disconnected topology; no production Apply is enabled.
+echo 'REAL_TUN_LAB_STAGE=addressless-owned-tun-boundary'
+owned_tun_log="$scratch/real-tun-owned-boundary.log"
+docker exec -e SC_QA_TUN_OWNED_BOUNDARY=yes -e SC_QA_TUN_IPV6=yes \
+  "$container" /bin/sh /root/qa-host-tun-path.sh | tee "$owned_tun_log"
+for marker in \
+  'OWNED_TUN_ADDRESSLESS_GVISOR_CONFIG=PASS' \
+  'OWNED_TUN_NO_CORE_ROUTE_RULE_NFT_CREATION=PASS' \
+  'OWNED_TUN_REAL_DUALSTACK_AND_PAYLOAD=PASS' \
+  'OWNED_TUN_MARKED_DIRECT_AND_HOSTING=PASS' \
+  'OWNED_TUN_SIGKILL_PRESERVES_FOREIGN_OBJECTS=PASS' \
+  'OWNED_TUN_RENAME_REPLACEMENT_GRACEFUL_PRESERVED=PASS' \
+  'OWNED_TUN_NATIVE_BOUNDARY_CLEANUP=PASS'; do
+  grep -Fx "$marker" "$owned_tun_log" >/dev/null
+done
+assert_tun_native_cleanup addressless-owned-tun-boundary
 # The same genuine TUN is started again, but only after an independently
 # armed systemd timer. SIGKILL the initiating controller and prove a fresh
 # PID1 recovery executor restores native Direct without the parent doing it.
@@ -813,6 +833,7 @@ echo 'REAL_TUN_CLEANUP_FAILURE_REJECTED=PASS (guest cleanup failure != expected 
 # also closes the earlier WordPress intermediate guest-helper cleanup gap.
 docker exec "$container" /bin/rm -f /root/qa-tun-config-qa /root/qa-host-tun-path.sh \
   /root/qa-tun-guard-unit-lab.sh /root/qa-product-tun-trial.sh /root/qa-tun-sni-client.py /root/qa-tun-native-apps.py \
+  /root/qa-owned-tun-boundary.sh \
   /root/qa-tun-dns-peer.py /root/qa-tun-dns-client.py /root/qa-tun-wordpress-fpm.sh \
   /root/qa-tun-wp-check.py /root/qa-tun-payload-wire.py /root/qa-tun-ipv6-wire.py
 # Product code + installed inactive-by-default independent recovery units.
