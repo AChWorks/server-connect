@@ -30,22 +30,23 @@ const (
 )
 
 type smartTUNTrialJournal struct {
-	Version            int    `json:"version"`
-	Revision           uint64 `json:"revision"`
-	OperationID        string `json:"operation_id"`
-	IntentType         string `json:"intent_type"`
-	Phase              string `json:"phase"`
-	CreatedUnix        int64  `json:"created_unix"`
-	BootID             string `json:"boot_id"`
-	DeadlineUptimeSec  int64  `json:"deadline_uptime_sec"`
-	ProfileID          string `json:"profile_id"`
-	EndpointIP         string `json:"endpoint_ip"`
-	ManagementPeerIP   string `json:"management_peer_ip"`
-	TunnelInterface    string `json:"tunnel_interface"`
-	UnderlayInterface  string `json:"underlay_interface"`
-	ConfigSHA256       string `json:"config_sha256"`
-	CoreStartAttempted bool   `json:"core_start_attempted"`
-	BaselineSHA256     string `json:"baseline_sha256"`
+	Version            int                   `json:"version"`
+	Revision           uint64                `json:"revision"`
+	OperationID        string                `json:"operation_id"`
+	IntentType         string                `json:"intent_type"`
+	Phase              string                `json:"phase"`
+	CreatedUnix        int64                 `json:"created_unix"`
+	BootID             string                `json:"boot_id"`
+	DeadlineUptimeSec  int64                 `json:"deadline_uptime_sec"`
+	ProfileID          string                `json:"profile_id"`
+	EndpointIP         string                `json:"endpoint_ip"`
+	ManagementPeerIP   string                `json:"management_peer_ip"`
+	TunnelInterface    string                `json:"tunnel_interface"`
+	UnderlayInterface  string                `json:"underlay_interface"`
+	ConfigSHA256       string                `json:"config_sha256"`
+	CoreStartAttempted bool                  `json:"core_start_attempted"`
+	BaselineSHA256     string                `json:"baseline_sha256"`
+	Native             *smartTUNNativeLedger `json:"native,omitempty"`
 }
 
 var smartTUNTrialFields = map[string]bool{
@@ -78,7 +79,10 @@ func smartTUNReceipt(record smartTUNTrialJournal, scheduled, recovered bool) Sma
 }
 
 func validateSmartTUNTrial(record smartTUNTrialJournal) error {
-	if record.Version != smartTUNTrialVersion || record.IntentType != smartTUNTrialIntent ||
+	if record.Version != smartTUNTrialVersion ||
+		(record.IntentType != smartTUNTrialIntent && record.IntentType != smartTUNNativeIntent) ||
+		(record.IntentType == smartTUNTrialIntent && record.Native != nil) ||
+		(record.IntentType == smartTUNNativeIntent && record.Native == nil) ||
 		!journalHex32.MatchString(record.OperationID) ||
 		!trialBootIDPattern.MatchString(record.BootID) ||
 		!idPattern.MatchString(record.ProfileID) ||
@@ -101,6 +105,9 @@ func validateSmartTUNTrial(record smartTUNTrialJournal) error {
 			return activationJournalError("unsupported guarded trial underlay/management identity")
 		}
 	}
+	if record.Native != nil {
+		return validateSmartTUNNative(record)
+	}
 	return nil
 }
 
@@ -109,7 +116,21 @@ func decodeSmartTUNTrial(data []byte) (smartTUNTrialJournal, error) {
 	if err := rejectAmbiguousJournalJSON(data); err != nil {
 		return record, err
 	}
-	if err := requireExactJournalKeys(data, smartTUNTrialFields); err != nil {
+	var discriminator struct {
+		Intent string `json:"intent_type"`
+	}
+	if json.Unmarshal(data, &discriminator) != nil {
+		return record, activationJournalError("guarded TUN intent invalid")
+	}
+	keys := smartTUNTrialFields
+	if discriminator.Intent == smartTUNNativeIntent {
+		keys = make(map[string]bool, len(smartTUNTrialFields)+1)
+		for key, required := range smartTUNTrialFields {
+			keys[key] = required
+		}
+		keys["native"] = true
+	}
+	if err := requireExactJournalKeys(data, keys); err != nil {
 		return record, err
 	}
 	// encoding/json treats null as the zero value for a Go bool. A
@@ -120,6 +141,11 @@ func decodeSmartTUNTrial(data []byte) (smartTUNTrialJournal, error) {
 	if err := json.Unmarshal(data, &fields); err != nil ||
 		(string(fields["core_start_attempted"]) != "true" && string(fields["core_start_attempted"]) != "false") {
 		return record, activationJournalError("guarded Smart Routing start-intent type invalid")
+	}
+	if discriminator.Intent == smartTUNNativeIntent {
+		if err := strictSmartTUNNativeJSON(fields["native"]); err != nil {
+			return record, err
+		}
 	}
 	dec := json.NewDecoder(bytes.NewReader(data))
 	dec.DisallowUnknownFields()
@@ -157,7 +183,7 @@ func reloadSmartTUNTrialLocked(store *activationJournalDir, expected smartTUNTri
 	if err != nil {
 		return activationJournalFileIdentity{}, err
 	}
-	if record != expected {
+	if !sameSmartTUNTrial(record, expected) {
 		return activationJournalFileIdentity{}, Fault("activation_journal_conflict", "TUN operation contents changed during transition")
 	}
 	return identity, nil
@@ -347,6 +373,7 @@ type smartTUNTrialAdmission struct {
 	endpoint string
 	policy   []byte
 	baseline string
+	native   smartTUNNativeLedger
 }
 
 // The first pass is entirely side-effect-free on Linux networking/systemd.
@@ -393,7 +420,7 @@ func (m *Manager) admitSmartTUNTrialLocked(store *activationJournalDir, opts Sma
 	if _, err := parsePreflightAddress(managementPeer, "management peer"); err != nil {
 		return smartTUNTrialAdmission{}, err
 	}
-	policy, err := SmartTUNCandidateConfig(profile, opts)
+	policy, err := smartTUNNativeConfig(profile, opts)
 	if err != nil {
 		return smartTUNTrialAdmission{}, err
 	}
@@ -412,13 +439,9 @@ func (m *Manager) admitSmartTUNTrialLocked(store *activationJournalDir, opts Sma
 	if err != nil {
 		return smartTUNTrialAdmission{}, err
 	}
-	// Retain the full native firewall fingerprint for the controlled guest.
-	// Current foreign-object QA uses a separate table outside the core's
-	// automatic cleanup targets; this admission does not exclude every
-	// overlap. Core teardown may delete an overlapping foreign object before
-	// the baseline comparison, so equality is not ownership/preservation
-	// proof. Such collisions/replacements remain unsupported and unaccepted;
-	// this is not authorization for physical/production hosts.
+	// The full baseline detects drift during admission. Native rollback uses
+	// the independent per-object ledger; disjoint foreign changes are allowed
+	// after activation and never grant the core host cleanup authority.
 	if host.Firewall == nil || !host.Firewall.Observed {
 		return smartTUNTrialAdmission{}, Fault("trial_observation_uncertain", "complete native nftables observation required before guarded guest trial")
 	}
@@ -426,8 +449,12 @@ func (m *Manager) admitSmartTUNTrialLocked(store *activationJournalDir, opts Sma
 	if err != nil {
 		return smartTUNTrialAdmission{}, err
 	}
+	native, err := nativeTUNAdmission(opts, host)
+	if err != nil {
+		return smartTUNTrialAdmission{}, err
+	}
 	return smartTUNTrialAdmission{profile: profile, endpoint: endpoint.String(),
-		policy: policy, baseline: baseline}, nil
+		policy: policy, baseline: baseline, native: native}, nil
 }
 
 // Only two exact, pre-tested disconnected fixtures are admitted. The
@@ -458,7 +485,7 @@ func (m *Manager) BeginSmartTUNTrial(opts SmartTUNCandidateOptions, managementPe
 }
 
 func (m *Manager) beginSmartTUNTrial(opts SmartTUNCandidateOptions, managementPeer string, deadlineSeconds int, qaKillPoint string, saved *smartTUNSavedPolicyBinding) (SmartTUNTrialReceipt, error) {
-	if qaKillPoint != "" && qaKillPoint != "after-journal" && qaKillPoint != "after-start" {
+	if qaKillPoint != "" && qaKillPoint != "after-journal" && qaKillPoint != "after-start" && !nativeTUNQAKillValid(qaKillPoint, true) {
 		return SmartTUNTrialReceipt{}, Fault("invalid_arguments", "unsupported disposable TUN SIGKILL boundary")
 	}
 	if m.Dir != DefaultDir || m.Core != DefaultCore ||
@@ -519,7 +546,7 @@ func (m *Manager) beginSmartTUNTrial(opts SmartTUNCandidateOptions, managementPe
 		if admission.profile.ID != planned.profile.ID ||
 			admission.endpoint != planned.endpoint ||
 			!bytes.Equal(admission.policy, planned.policy) ||
-			admission.baseline != planned.baseline {
+			admission.baseline != planned.baseline || admission.native != planned.native {
 			return Fault("trial_observation_uncertain", "selected profile or kernel baseline changed while arming guard")
 		}
 		profile, endpoint, policy, baseline := admission.profile, admission.endpoint, admission.policy, admission.baseline
@@ -536,13 +563,15 @@ func (m *Manager) beginSmartTUNTrial(opts SmartTUNCandidateOptions, managementPe
 			return err
 		}
 		record := smartTUNTrialJournal{
-			Version: smartTUNTrialVersion, Revision: 1, IntentType: smartTUNTrialIntent,
+			Version: smartTUNTrialVersion, Revision: 1, IntentType: smartTUNNativeIntent,
 			OperationID: op, Phase: "trial_pending", CreatedUnix: time.Now().Unix(),
 			BootID: boot, DeadlineUptimeSec: uptime + int64(deadlineSeconds),
 			ProfileID: profile.ID, EndpointIP: endpoint, ManagementPeerIP: managementPeer,
 			TunnelInterface: opts.TunnelInterface, UnderlayInterface: opts.UnderlayInterface,
 			ConfigSHA256: sha256Hex(policy), BaselineSHA256: baseline,
+			Native: &admission.native,
 		}
+		record.Native.NFTName = "scnt_" + op
 		if err := validateSmartTUNTrial(record); err != nil {
 			return err
 		}
@@ -561,10 +590,9 @@ func (m *Manager) beginSmartTUNTrial(opts SmartTUNCandidateOptions, managementPe
 		if err := saveSmartTUNPolicyLocked(store, opts, managementPeer); err != nil {
 			return err
 		}
-		// Write the durable guarded operation BEFORE writing its credential.
-		// A crash between these operations leaves a recoverable journal with
-		// a missing credential and NO possible TUN start; the independent
-		// timer can prove the unchanged native baseline and mark recovered.
+		// The self-contained native intent is durable before link creation,
+		// persistence, credential staging or core start. Every partial effect
+		// is reconciled using its own receipt, never the broad host baseline.
 		if err := writeSmartTUNTrialLocked(store, record, nil); err != nil {
 			return err
 		}
@@ -572,6 +600,9 @@ func (m *Manager) beginSmartTUNTrial(opts SmartTUNCandidateOptions, managementPe
 		if qaKillPoint == "after-journal" {
 			_ = syscall.Kill(os.Getpid(), syscall.SIGKILL)
 			return Fault("trial_pending_recovery", "disposable precredential SIGKILL unexpectedly returned")
+		}
+		if err := nativeTUNPrepareLink(store, &record, qaKillPoint); err != nil {
+			return err
 		}
 		if err := store.writeSmartTUNFile(smartTUNTrialConfigFile, policy, nil); err != nil {
 			return Fault("trial_pending_recovery", "guarded journal durable but TUN credential staging failed; independent recovery required")
@@ -581,6 +612,11 @@ func (m *Manager) beginSmartTUNTrial(opts SmartTUNCandidateOptions, managementPe
 		// a legitimate precredential crash, even on the NEXT guard tick
 		// after the service has been stopped. No sensitive policy is stored
 		// in this journal: only immutable operation and hash evidence.
+		watch, err := nativeTUNWatchStart(record)
+		if err != nil {
+			return err
+		}
+		defer watch.close()
 		identity, err := reloadSmartTUNTrialLocked(store, record)
 		if err != nil {
 			return err
@@ -591,6 +627,24 @@ func (m *Manager) beginSmartTUNTrial(opts SmartTUNCandidateOptions, managementPe
 		}
 		if err := smartTUNTrialSystemctl("start", smartTUNTrialUnit); err != nil {
 			return Fault("trial_pending_recovery", "TUN service failed after durable pending journal; independent guard must reconcile")
+		}
+		if err := watch.verify(record); err != nil {
+			return err
+		}
+		next := cloneSmartTUNTrial(record)
+		next.Native.StartupVerified = true
+		if err := nativeTUNAdvance(store, &record, next); err != nil {
+			return err
+		}
+		watch.close()
+		if err := nativeTUNApplyPolicy(store, &record, qaKillPoint); err != nil {
+			return err
+		}
+		if err := nativeTUNVerifyPending(record); err != nil {
+			return err
+		}
+		if err := trialQAKillAt("after-native-capture", qaKillPoint); err != nil {
+			return err
 		}
 		if qaKillPoint == "after-start" {
 			// The independent systemd timer must reconcile a real process
@@ -652,7 +706,7 @@ func (m *Manager) tryRecoverSmartTUNTrial() (TrialReceipt, bool, error) {
 		if err != nil {
 			return err
 		}
-		result, err := recoverSmartTUNTrialLocked(store, identity, record)
+		result, err := recoverSmartTUNTrialLocked(store, identity, &record, "")
 		if err != nil {
 			return err
 		}
@@ -709,7 +763,19 @@ func smartTUNTrialMayRemainPending(record smartTUNTrialJournal, unitState string
 		(unitState == "active" || unitState == "activating")
 }
 
-func recoverSmartTUNTrialLocked(store *activationJournalDir, identity activationJournalFileIdentity, record smartTUNTrialJournal) (SmartTUNTrialReceipt, error) {
+func recoverSmartTUNTrialLocked(store *activationJournalDir, identity activationJournalFileIdentity, record *smartTUNTrialJournal, qaPoint string) (SmartTUNTrialReceipt, error) {
+	if record.Native != nil {
+		return recoverSmartTUNNativeLocked(store, record, qaPoint)
+	}
+	receipt, err := recoverLegacySmartTUNTrialLocked(store, identity, *record)
+	if err == nil {
+		record.Phase, record.Revision = receipt.Phase, receipt.Revision
+	}
+	return receipt, err
+}
+
+// Preserve the historical v4 intent's core-owned teardown and baseline contract.
+func recoverLegacySmartTUNTrialLocked(store *activationJournalDir, identity activationJournalFileIdentity, record smartTUNTrialJournal) (SmartTUNTrialReceipt, error) {
 	// Never silently recover a physical host or unowned systemd unit even if
 	// a journal is copied to it. Persist an unresolved receipt for console.
 	if err := trialDisposableContext(); err != nil {
@@ -816,7 +882,7 @@ func (m *Manager) InspectSmartTUNTrial() (SmartTUNTrialReceipt, error) {
 		if record.Phase == "trial_recovered" || record.Phase == "trial_cleanup_pending" {
 			// These phases only reobserve the inactive unit/native baseline.
 			// Status MUST NOT finish stop/cleanup or manufacture watchdog proof.
-			result, err := recoverSmartTUNTrialLocked(store, activationJournalFileIdentity{}, record)
+			result, err := recoverSmartTUNTrialLocked(store, activationJournalFileIdentity{}, &record, "")
 			if err != nil {
 				return err
 			}

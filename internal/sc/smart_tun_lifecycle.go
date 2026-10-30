@@ -29,6 +29,9 @@ func smartTUNTrialPhaseRevisionValid(phase string, revision uint64) bool {
 }
 
 func validateSmartTUNCleanupKillPoint(point string, disconnect bool) error {
+	if disconnect && nativeTUNQAKillValid(point, false) {
+		return nil
+	}
 	switch point {
 	case "", "after-cleanup-intent", "after-credential-remove", "after-guard-disarm":
 		return nil
@@ -138,7 +141,7 @@ func finalizeSmartTUNTrialLocked(store *activationJournalDir, identity activatio
 	}
 	// These phases never start/stop anything: independently verify native
 	// Direct baseline again before disarming or discarding any evidence.
-	if _, err := recoverSmartTUNTrialLocked(store, identity, record); err != nil {
+	if _, err := recoverSmartTUNTrialLocked(store, identity, &record, ""); err != nil {
 		return SmartTUNTrialReceipt{}, err
 	}
 	if _, err := smartTUNTrialTimerState(); err != nil {
@@ -172,7 +175,7 @@ func finalizeSmartTUNTrialLocked(store *activationJournalDir, identity activatio
 	// Retain the already-running independent timer until the credential is
 	// durably gone and the native baseline still matches. A death before
 	// disarm is recoverable by that same executor, without a second service.
-	if _, err := recoverSmartTUNTrialLocked(store, identity, record); err != nil {
+	if _, err := recoverSmartTUNTrialLocked(store, identity, &record, ""); err != nil {
 		return SmartTUNTrialReceipt{}, err
 	}
 	if _, err := smartTUNTrialTimerState(); err != nil {
@@ -229,8 +232,11 @@ func (m *Manager) DisconnectSmartTUNTrial(operationID string, revision uint64, q
 		if !matchingSmartTUNOperation(record, operationID, revision) {
 			return Fault("activation_journal_conflict", "nonmatching TUN operation or stale revision")
 		}
-		if record.Phase == "trial_pending" {
+		if record.Phase == "trial_pending" || (record.Phase == "trial_stop_requested" && record.Native != nil && record.Native.StopReason != "off") {
 			record.Phase, record.Revision = "trial_stop_requested", 2
+			if record.Native != nil {
+				record.Native.StopReason = "off"
+			}
 			if err := writeSmartTUNTrialLocked(store, record, &identity); err != nil {
 				return err
 			}
@@ -242,7 +248,7 @@ func (m *Manager) DisconnectSmartTUNTrial(operationID string, revision uint64, q
 		if err := trialQAKillAt("after-stop-request", qaKillPoint); err != nil {
 			return err
 		}
-		recovered, err := recoverSmartTUNTrialLocked(store, identity, record)
+		recovered, err := recoverSmartTUNTrialLocked(store, identity, &record, qaKillPoint)
 		if err != nil {
 			return err
 		}
