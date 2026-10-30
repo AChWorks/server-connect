@@ -712,7 +712,7 @@ timer='server-connect-activation-recover.timer';executor='server-connect-activat
 core='server-connect-smart-tun.service';units=(timer,executor,core)
 receipt_name='sc-qa-native-recovery-pause.json'
 def pause_unit_valid(fields,name,state):
-    assert name in (timer,executor,core) and state in ('owned','active','idle','stopped','completed','sigkill')
+    assert name in (timer,executor,core) and state in ('owned','active','idle','stopped','completed','sigkill','guard-quiescent')
     assert fields['Id']==name and fields['LoadState']=='loaded' and fields['FragmentPath']=='/etc/systemd/system/'+name
     assert fields['DropInPaths']=='' and fields['Transient']=='no'
     assert fields['UnitFileState']==(('disabled' if state=='completed' else 'enabled') if name==timer else 'static')
@@ -734,6 +734,11 @@ def pause_unit_valid(fields,name,state):
         assert name==core and fields['ActiveState']==fields['SubState']=='failed'
         assert fields['MainPID']==fields['ControlPID']=='0' and fields['Result']=='signal'
         assert fields['ExecMainCode']=='2' and fields['ExecMainStatus']=='9'
+    if state=='guard-quiescent':
+        assert name==executor and (fields['ActiveState'],fields['SubState']) in (('inactive','dead'),('failed','failed'))
+        assert fields['MainPID']==fields['ControlPID']=='0' and fields['ControlGroup']==''
+        if fields['ActiveState']=='failed':
+            assert fields['Result']=='exit-code' and fields['ExecMainCode']=='1' and fields['ExecMainStatus']=='1'
     if state=='completed' and name==executor:assert fields['Result']=='success' and fields['ExecMainStatus']=='0'
 def pause_unit_diagnostic(fields,name):
     # Fixed whitelists only: unexpected paths, messages and values are redacted.
@@ -757,6 +762,7 @@ def pause_unit_diagnostic(fields,name):
     safe['drop_ins']='none' if fields.get('DropInPaths')=='' else 'nonempty-or-unavailable-redacted'
     safe['id_matches']=fields.get('Id')==name
     if name==timer:safe['executor_matches']=fields.get('Unit')==executor
+    else:safe['control_group']='empty' if fields.get('ControlGroup')=='' else 'nonempty-or-unavailable-redacted'
     return safe
 def pause_journal_valid(record,operation,expected,uptime):
     assert record['version']==4 and record['intent_type']=='smart_tun_native_pending_trial_v1' and record['operation_id']==operation
@@ -784,10 +790,20 @@ def pause_journal_valid(record,operation,expected,uptime):
         assert record['phase']=='trial_stop_requested' and record['revision']==2 and n['stop_reason']=='off'
     else:
         assert expected=='cleanup' and n['stop_reason'] in ('','guard','off')
+def pause_guard_context(receipt,record,operation):
+    # The caller has authenticated the private receipt, current journal,
+    # installed units and original lock. A stale guard receipt alone cannot
+    # admit a failed executor after recovery has advanced to another phase.
+    pause_journal_valid(record,operation,'cleanup',0)
+    assert receipt['kind'] in ('pending','guard') and receipt['operation_id']==operation
+    assert receipt['boot_id']==record['boot_id'] and receipt['deadline_uptime_sec']==record['deadline_uptime_sec']
+    n=record['native']
+    assert all(receipt[key]==n[key] for key in ('namespace_dev','namespace_ino','link_index','underlay_index','nft_handle'))
+    return receipt['kind']=='guard' and record['phase']=='trial_stop_requested' and record['revision']==2 and n['stop_reason']=='guard'
 def canonical(value):return (json.dumps(value,sort_keys=True,separators=(',',':'))+'\n').encode('ascii')
 def private_file(info):
     return stat.S_ISREG(info.st_mode) and info.st_uid==0 and stat.S_IMODE(info.st_mode)==0o600 and info.st_nlink==1
-fds=[];links=[];lock_fd=None;step='scope';scope_verified=False
+fds=[];links=[];lock_fd=None;step='scope';scope_verified=False;guard_failed_witness=False
 def directory(path,private=False):
     current=os.open('/',os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW|os.O_CLOEXEC);fds.append(current)
     for name in path.strip('/').split('/'):
@@ -822,7 +838,7 @@ def capture(argv,timeout=2):
         assert out.tell()<16384;out.seek(0);return out.read(16384)
 def unit_fields(name,timeout=2):
     properties=['Id','LoadState','FragmentPath','DropInPaths','Transient','UnitFileState','ActiveState','SubState','Job']
-    properties+=['Unit'] if name==timer else ['MainPID','ControlPID','Result','ExecMainCode','ExecMainStatus']
+    properties+=['Unit'] if name==timer else ['MainPID','ControlPID','ControlGroup','Result','ExecMainCode','ExecMainStatus']
     argv=['/usr/bin/systemctl','show',name]
     for key in properties:argv+=['-p',key]
     fields={}
@@ -887,8 +903,14 @@ def remove_receipt(saved,info):
     current,again=read_at(run_fd,receipt_name,4096,True)
     assert current==saved and (again.st_dev,again.st_ino)==(info.st_dev,info.st_ino)
     os.unlink(receipt_name,dir_fd=run_fd);os.fsync(run_fd)
-def idle():
-    pause_unit_valid(snapshot(timer),timer,'idle');pause_unit_valid(snapshot(executor),executor,'idle')
+def idle(receipt,record):
+    global guard_failed_witness
+    guard_context=pause_guard_context(receipt,record,operation)
+    pause_unit_valid(snapshot(timer),timer,'idle')
+    fields=snapshot(executor)
+    pause_unit_valid(fields,executor,'guard-quiescent' if guard_context else 'idle')
+    if guard_context and fields['ActiveState']=='failed':guard_failed_witness=True
+    return guard_context
 def core_expected(expect):
     state='active' if expect in ('pending','route','rule','capture') else 'sigkill' if expect=='core' else 'idle'
     pause_unit_valid(snapshot(core),core,state)
@@ -943,7 +965,7 @@ try:
         # A valid durable receipt is the rearm obligation, before either stop.
         step='stop-timer';capture(['/usr/bin/systemctl','stop',timer])
         step='stop-executor';capture(['/usr/bin/systemctl','stop',executor])
-        step='paused-proof';idle();core_expected(expected)
+        step='paused-proof';idle(receipt,record);core_expected(expected)
         after,record=current_journal(expected);assert after==raw and owned_units()==digests
         native_identity(record);lock_identity()
     elif action=='retire':
@@ -976,7 +998,7 @@ try:
         assert record['deadline_uptime_sec']==receipt['deadline_uptime_sec']
         assert all(n[key]==receipt[key] for key in ('link_index','underlay_index','nft_handle'))
         if action=='check':
-            step='paused-proof';idle();core_expected(expected)
+            step='paused-proof';idle(receipt,record);core_expected(expected)
             assert hashlib.sha256(raw).hexdigest()==receipt['journal_sha256']
             if expected!='removed':native_identity(record)
         else:
@@ -986,7 +1008,8 @@ try:
                 # rearming; every stop remains under the original lock.
                 step='resume-drain-timer';capture(['/usr/bin/systemctl','stop',timer])
                 step='resume-drain-executor';capture(['/usr/bin/systemctl','stop',executor])
-            step='resume-idle-proof';idle()
+            step='resume-idle-proof'
+            if idle(receipt,record):core_expected('guard')
             step='rearm-timer';capture(['/usr/bin/systemctl','start',timer])
             if extra=='qa-after-timer-start':
                 # Real timer-start ACK, then a QA-only caller failure. The
@@ -1009,6 +1032,10 @@ except Exception:
 finally:
     # No product CLI runs under this lock; subprocesses close all inherited FDs.
     for fd in reversed(fds):os.close(fd)
+if guard_failed_witness:
+    # This reports the authenticated quiescent observation only after every
+    # ownership/state check and the requested helper action has succeeded.
+    print('PRODUCT_NATIVE_GUARD_EXECUTOR_QUIESCENT_FAILED=PASS',flush=True)
 PYNATIVEPAUSE
 }
 

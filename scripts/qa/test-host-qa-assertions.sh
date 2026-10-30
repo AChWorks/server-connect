@@ -393,7 +393,7 @@ import ast,copy,hashlib,json,re,stat,sys
 from pathlib import Path
 from types import SimpleNamespace
 source=Path(sys.argv[1]).read_text().split("<<'PYNATIVEPAUSE'\n",1)[1].split('\nPYNATIVEPAUSE\n',1)[0]
-names={'pause_unit_valid','pause_unit_diagnostic','pause_journal_valid','canonical','private_file','pause_receipt_valid','pause_completion_binding'}
+names={'pause_unit_valid','pause_unit_diagnostic','pause_journal_valid','pause_guard_context','canonical','private_file','pause_receipt_valid','pause_completion_binding'}
 nodes=[x for x in ast.parse(source).body if isinstance(x,ast.FunctionDef) and x.name in names]
 assert {x.name for x in nodes}==names
 timer='server-connect-activation-recover.timer';executor='server-connect-activation-recover.service';core='server-connect-smart-tun.service'
@@ -403,7 +403,7 @@ namespace={'json':json,'re':re,'stat':stat,'hashlib':hashlib,'timer':timer,'exec
            'units':(timer,executor,core),'operation':operation,'boot':boot,'ns':ns,'lock_identity':lambda:lock}
 exec(compile(ast.Module(body=nodes,type_ignores=[]),'<native recovery pause predicates>','exec'),namespace)
 unit=namespace['pause_unit_valid'];journal=namespace['pause_journal_valid'];receipt_valid=namespace['pause_receipt_valid'];canonical=namespace['canonical']
-diagnostic=namespace['pause_unit_diagnostic'];completion_binding=namespace['pause_completion_binding']
+diagnostic=namespace['pause_unit_diagnostic'];completion_binding=namespace['pause_completion_binding'];guard_context=namespace['pause_guard_context']
 cases=0
 def check(label,call,valid=False):
     global cases
@@ -417,7 +417,8 @@ timer_fields={'Id':timer,'LoadState':'loaded','FragmentPath':'/etc/systemd/syste
 idle_timer=dict(timer_fields,ActiveState='inactive',SubState='dead')
 executor_fields={'Id':executor,'LoadState':'loaded','FragmentPath':'/etc/systemd/system/'+executor,
                  'DropInPaths':'','Transient':'no','UnitFileState':'static','ActiveState':'inactive',
-                 'SubState':'dead','Job':'0','MainPID':'0','ControlPID':'0'}
+                 'SubState':'dead','Job':'0','MainPID':'0','ControlPID':'0','ControlGroup':'',
+                 'Result':'success','ExecMainCode':'1','ExecMainStatus':'0'}
 check('original active enabled timer',lambda:unit(timer_fields,timer,'active'),True)
 check('triggered timer active/running',lambda:unit(dict(timer_fields,SubState='running'),timer,'active'),True)
 check('active elapsed timer',lambda:unit(dict(timer_fields,SubState='elapsed'),timer,'active'),True)
@@ -431,6 +432,27 @@ for field,value in (('FragmentPath','/run/systemd/system/'+timer),('LoadState','
 for field,value in (('ActiveState','activating'),('ActiveState','failed'),('Job','42'),('MainPID','123'),('ControlPID','456')):
     check('executor not positively idle '+field,lambda field=field,value=value:unit(dict(executor_fields,**{field:value}),executor,'idle'))
 check('empty job is idle',lambda:unit(dict(executor_fields,Job=''),executor,'idle'),True)
+guard_failed=dict(executor_fields,ActiveState='failed',SubState='failed',Result='exit-code',ExecMainCode='1',ExecMainStatus='1')
+check('guard executor has paired inactive/dead quiescence',lambda:unit(executor_fields,executor,'guard-quiescent'),True)
+check('guard executor retains observed exit-code failure',lambda:unit(guard_failed,executor,'guard-quiescent'),True)
+check('guard executor permits empty no-job value',lambda:unit(dict(guard_failed,Job=''),executor,'guard-quiescent'),True)
+for field,value in (('ActiveState','inactive'),('SubState','dead'),('Result','success'),('Result','signal'),
+                    ('ExecMainCode','2'),('ExecMainStatus','9'),('MainPID','123'),('ControlPID','456'),('Job','42'),
+                    ('ControlGroup','/system.slice/untrusted.service'),('FragmentPath','/run/systemd/system/'+executor),
+                    ('DropInPaths','/run/untrusted.conf'),('UnitFileState','enabled'),('Id',core),('Transient','yes')):
+    check('guard quiescence rejects '+field+'='+value,
+          lambda field=field,value=value:unit(dict(guard_failed,**{field:value}),executor,'guard-quiescent'))
+missing_group=dict(guard_failed);del missing_group['ControlGroup']
+check('guard quiescence requires observed empty cgroup',lambda:unit(missing_group,executor,'guard-quiescent'))
+check('inactive guard executor also requires empty cgroup',lambda:unit(dict(executor_fields,ControlGroup='/nonempty'),executor,'guard-quiescent'))
+check('failed executor remains invalid for ordinary idle',lambda:unit(guard_failed,executor,'idle'))
+check('failed executor remains invalid for completed proof',lambda:unit(guard_failed,executor,'completed'))
+check('guard state cannot authorize timer',lambda:unit(idle_timer,timer,'guard-quiescent'))
+assert diagnostic(guard_failed,executor)['control_group']=='empty'
+safe=diagnostic(dict(guard_failed,ControlGroup='/secret/UNTRUSTED'),executor)
+assert safe['control_group']=='nonempty-or-unavailable-redacted' and 'UNTRUSTED' not in repr(safe)
+assert diagnostic(missing_group,executor)['control_group']=='nonempty-or-unavailable-redacted'
+cases+=3
 core_failed=dict(executor_fields,Id=core,FragmentPath='/etc/systemd/system/'+core,
                  ActiveState='failed',SubState='failed',Result='signal',ExecMainCode='2',ExecMainStatus='9')
 check('authenticated failed core killed by SIGKILL',lambda:unit(core_failed,core,'sigkill'),True)
@@ -493,6 +515,32 @@ receipt={'version':1,'operation_id':operation,'kind':'pending','boot_id':boot,'n
          'deadline_uptime_sec':160,'journal_sha256':'b'*64,'unit_sha256':{name:'c'*64 for name in (timer,executor,core)},
          'link_index':22,'underlay_index':8,'nft_handle':16}
 check('exact private receipt',lambda:receipt_valid(receipt,info,canonical(receipt)),True)
+guard_receipt=dict(receipt,kind='guard')
+def guard_checkpoint(value,current,fields,core_fields=core_inactive):
+    receipt_valid(value,info,canonical(value))
+    scoped=guard_context(value,current,operation)
+    unit(fields,executor,'guard-quiescent' if scoped else 'idle')
+    if scoped:unit(core_fields,core,'idle')
+check('same guard operation permits actual quiescent failed executor',lambda:guard_checkpoint(guard_receipt,guard,guard_failed),True)
+check('same guard operation permits ordinary inactive executor',lambda:guard_checkpoint(guard_receipt,guard,executor_fields),True)
+check('pending receipt does not authorize failed guard state',lambda:guard_checkpoint(receipt,guard,guard_failed))
+check('pending operation keeps strict idle',lambda:guard_checkpoint(receipt,record,guard_failed))
+check('Off phase keeps strict idle despite old guard receipt',lambda:guard_checkpoint(guard_receipt,off,guard_failed))
+recovered_guard=copy.deepcopy(guard);recovered_guard['phase']='trial_recovered'
+check('later guard recovery uses strict inactive executor',lambda:guard_checkpoint(guard_receipt,recovered_guard,executor_fields),True)
+check('later guard recovery cannot reuse failed-state exception',lambda:guard_checkpoint(guard_receipt,recovered_guard,guard_failed))
+cleanup_guard=copy.deepcopy(guard);cleanup_guard.update(phase='trial_cleanup_pending',revision=4)
+check('later cleanup cannot reuse failed-state exception',lambda:guard_checkpoint(guard_receipt,cleanup_guard,guard_failed))
+for field,value in (('operation_id','d'*32),('boot_id','different'),('revision',3),('deadline_uptime_sec',161)):
+    changed=dict(guard,**{field:value})
+    check('guard context rejects journal '+field,lambda changed=changed:guard_checkpoint(guard_receipt,changed,guard_failed))
+for field,value in (('namespace_ino',ns.st_ino+1),('link_index',23),('underlay_index',9),('nft_handle',17),('stop_reason','off')):
+    changed=copy.deepcopy(guard);changed['native'][field]=value
+    check('guard context rejects native '+field,lambda changed=changed:guard_checkpoint(guard_receipt,changed,guard_failed))
+for field,value in (('operation_id','d'*32),('kind','unknown'),('boot_id','different'),('lock_ino',lock.st_ino+1)):
+    changed=dict(guard_receipt,**{field:value})
+    check('guard context retains receipt provenance '+field,lambda changed=changed:guard_checkpoint(changed,guard,guard_failed))
+check('guard context requires inactive core',lambda:guard_checkpoint(guard_receipt,guard,guard_failed,core_failed))
 for field,value in (('operation_id','d'*32),('kind','unknown'),('boot_id','different'),('namespace_ino',ns.st_ino+1),
                     ('lock_ino',lock.st_ino+1),('receipt_ino',info.st_ino+1),('version',True),('deadline_uptime_sec',0),
                     ('journal_sha256','malformed')):
