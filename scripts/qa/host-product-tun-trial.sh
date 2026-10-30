@@ -45,6 +45,17 @@ assert r["ok"] and r["data"]["phase"]=="absent",r'
       --domestic-cidr 5.22.0.10/32 --protected-cidr 10.254.72.0/30 \
       --deadline-seconds "$deadline" "$@"
   }
+  report_apply_failure() {
+    native_failure_observation apply || :
+    python3 - <<'PYAPPLYFAIL'
+import json
+with open('/run/sc-qa-product-tun-apply.json') as f:
+    result=json.load(f)
+assert not result.get("ok"),result
+err=result.get("error") or {}
+print("PRODUCT_TUN_APPLY_REFUSED="+str(err.get("code","unknown"))+": "+str(err.get("message","unspecified")))
+PYAPPLYFAIL
+  }
   pending_receipt() {
     if "$sc" --json smart-tun-trial-status | python3 -c '
 import json,sys,re
@@ -359,17 +370,19 @@ PYV6REFUSED
 
     # This is a separate *installed product* trial with the existing real
     # native dual-stack fixture, not the older QA shell-owned TUN process.
-    apply 55 --tunnel-ipv6 fd73:99::1/64 \
+    if ! apply 55 --tunnel-ipv6 fd73:99::1/64 \
       --domestic-ipv6-cidr 2001:db8:5::/64 \
       --ipv6-vpn-cidr 2001:db8:5::10/128 \
       --ipv6-direct-cidr 2001:db8:8::9/128 \
-      > /run/sc-qa-product-tun-apply.json
+      > /run/sc-qa-product-tun-apply.json; then
+      report_apply_failure || :
+      return 1
+    fi
     op=$(pending_receipt)
     native_product_detect
-    # systemctl start does not prove that sing-box has finished installing
-    # its native IPv4 and IPv6 policy. Never probe a VPN-required flow
-    # before BOTH kernel TUN families are visibly present and the selected
-    # IPv4 path is independently confirmed, as in the existing IPv4 trial.
+    # The manager owns native IPv4/IPv6 routing. An active core process does
+    # not prove capture or selected paths. Require both visible TUN families
+    # and real IPv4 Direct/VLESS evidence before the IPv6 traffic checks.
     ready=no
     for n in $(seq 1 35); do
       if assert_product_tun_policy_active &&
@@ -497,15 +510,7 @@ PYV6REFUSED
   # First: live normal product Apply and actual synthetic foreign/domestic
   # packet paths. Do not mistake TUN device creation for installed policy.
   if ! apply 32 > /run/sc-qa-product-tun-apply.json; then
-    native_failure_observation apply || :
-    python3 - <<'PYAPPLYFAIL'
-import json
-with open('/run/sc-qa-product-tun-apply.json') as f:
-    result=json.load(f)
-assert not result.get("ok"),result
-err=result.get("error") or {}
-print("PRODUCT_TUN_APPLY_REFUSED="+str(err.get("code","unknown"))+": "+str(err.get("message","unspecified")))
-PYAPPLYFAIL
+    report_apply_failure || :
     return 1
   fi
   python3 - <<'PYAPPLIED'
