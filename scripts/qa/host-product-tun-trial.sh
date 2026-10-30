@@ -265,6 +265,125 @@ print(d["operation_id"])')
   clear_recovered "$op"
   echo PRODUCT_TUN_PRE_CREDENTIAL_SIGKILL_INDEPENDENT_ROLLBACK=PASS
 
+  # If the independently prearmed timer is lost, even a healthy
+  # product-owned TUN with a future deadline must be stopped on explicit
+  # installed recovery. The pending receipt must not claim a live guard.
+  apply 60 >/run/sc-qa-product-tun-apply.json
+  op=$(pending_receipt)
+  assert_product_tun_policy_active
+  systemctl is-active --quiet server-connect-activation-recover.timer
+  test "$(systemctl is-enabled server-connect-activation-recover.timer)" = enabled
+  systemctl disable --now server-connect-activation-recover.timer
+  test "$(systemctl is-enabled server-connect-activation-recover.timer)" = disabled
+  test "$(systemctl show server-connect-activation-recover.timer -p ActiveState --value)" = inactive
+  assert_product_tun_policy_active
+  python3 - "$op" <<'PYDEADLINE'
+import json,sys
+with open('/var/lib/server-connect/route-activation-journal.json') as f:r=json.load(f)
+with open('/proc/uptime') as f:uptime=int(float(f.read().split()[0]))
+assert r['operation_id']==sys.argv[1] and r['core_start_attempted'] is True,r
+assert r['phase']=='trial_pending' and r['deadline_uptime_sec']>uptime+5,(r,uptime)
+PYDEADLINE
+  if "$sc" --json smart-tun-trial-status >/run/sc-qa-product-tun-conflict.json; then
+    echo 'Disabled independent timer incorrectly reported an armed TUN guard' >&2;return 1
+  fi
+  python3 - <<'PYGUARDLOST'
+import json
+with open('/run/sc-qa-product-tun-conflict.json') as f:r=json.load(f)
+assert not r['ok'] and r['error']['code']=='guard_unavailable',r
+PYGUARDLOST
+  "$sc" --json activation-trial-recover >/run/sc-qa-product-tun-recover.json
+  python3 - "$op" <<'PYCONTAINED'
+import json,sys
+with open('/run/sc-qa-product-tun-recover.json') as f:r=json.load(f)
+d=r['data']
+assert r['ok'] and d['operation_id']==sys.argv[1],r
+assert d['phase']=='trial_recovered' and d['revision']==2,d
+assert d['experiment_only'] and d['recovery_verified'] and not d['guard_scheduled'],d
+assert not d['activation_ready'] and not d['vpn_verified'],d
+PYCONTAINED
+  test "$(systemctl show server-connect-smart-tun.service -p ActiveState --value)" = inactive
+  test ! -e /sys/class/net/sctunqa0
+  test "$(ip -N -j -4 route show table all)" = "$before_routes"
+  test "$(ip -N -j -4 rule show)" = "$before_rules"
+  test "$(ip -N -j -6 route show table all)" = "$before_v6_routes"
+  test "$(ip -N -j -6 rule show)" = "$before_v6_rules"
+  test "$(nft -j list ruleset)" = "$before_nft"
+  /bin/sh /root/qa-host-coexistence.sh probe
+  expect_foreign_hosted_reply
+  echo PRODUCT_TUN_GUARD_TIMER_LOSS_IMMEDIATE_CONTAINMENT=PASS
+  clear_recovered "$op"
+
+  # Separate executor-loss test: a guest-owned *runtime* mask and a
+  # synthetic foreign nftables owner. The Manager must stop its TUN even
+  # when the executor cannot run, but it must retain the pending journal
+  # and not delete a foreign table or falsely claim exact recovery.
+  apply 60 >/run/sc-qa-product-tun-apply.json
+  op=$(pending_receipt)
+  assert_product_tun_policy_active
+  systemctl mask --runtime server-connect-activation-recover.service
+  test "$(readlink /run/systemd/system/server-connect-activation-recover.service)" = /dev/null
+  assert_product_tun_policy_active
+  if "$sc" --json smart-tun-trial-status >/run/sc-qa-product-tun-conflict.json; then
+    echo 'Masked executor incorrectly reported an armed TUN guard' >&2;return 1
+  fi
+  python3 - <<'PYEXECUTORLOST'
+import json
+with open('/run/sc-qa-product-tun-conflict.json') as f:r=json.load(f)
+assert not r['ok'] and r['error']['code']=='guard_unavailable',r
+PYEXECUTORLOST
+  nft add table inet scqa_guardloss_foreign
+  foreign_table=$(nft -j list table inet scqa_guardloss_foreign)
+  if "$sc" --json activation-trial-recover > /run/sc-qa-product-tun-conflict.json; then
+    echo 'Foreign nftables conflict incorrectly reported recovered after executor loss' >&2;return 1
+  fi
+  python3 - "$op" <<'PYUNRESOLVED'
+import json,sys
+with open('/run/sc-qa-product-tun-conflict.json') as f:r=json.load(f)
+assert not r['ok'] and r['error']['code']=='trial_recovery_uncertain',r
+with open('/var/lib/server-connect/route-activation-journal.json') as f:j=json.load(f)
+assert j['operation_id']==sys.argv[1] and j['revision']==1,j
+assert j['phase']=='trial_pending' and j['core_start_attempted'] is True,j
+PYUNRESOLVED
+  test "$(systemctl show server-connect-smart-tun.service -p ActiveState --value)" = inactive
+  test ! -e /sys/class/net/sctunqa0
+  test "$(nft -j list table inet scqa_guardloss_foreign)" = "$foreign_table"
+  test "$(ip -N -j -4 route show table all)" = "$before_routes"
+  test "$(ip -N -j -4 rule show)" = "$before_rules"
+  test "$(ip -N -j -6 route show table all)" = "$before_v6_routes"
+  test "$(ip -N -j -6 rule show)" = "$before_v6_rules"
+  if "$sc" --json status >/run/sc-qa-product-tun-conflict.json; then
+    echo 'Unresolved guard/executor conflict incorrectly claimed Direct' >&2;return 1
+  fi
+  python3 - <<'PYUNRESOLVEDSTATUS'
+import json
+with open('/run/sc-qa-product-tun-conflict.json') as f:r=json.load(f)
+assert not r['ok'] and r['error']['code']=='guard_pending',r
+assert r['data']['observed']=='smart_tun_trial_pending',r
+PYUNRESOLVEDSTATUS
+  /bin/sh /root/qa-host-coexistence.sh probe
+  expect_foreign_hosted_reply
+  echo PRODUCT_TUN_GUARD_EXECUTOR_LOSS_FOREIGN_CONFLICT_RETAINED=PASS
+  # Only the QA fixture, not product recovery, may remove its own table.
+  nft delete table inet scqa_guardloss_foreign
+  test "$(nft -j list ruleset)" = "$before_nft"
+  "$sc" --json activation-trial-recover >/run/sc-qa-product-tun-recover.json
+  python3 - "$op" <<'PYRESOLVED'
+import json,sys
+with open('/run/sc-qa-product-tun-recover.json') as f:r=json.load(f)
+d=r['data']
+assert r['ok'] and d['operation_id']==sys.argv[1],r
+assert d['phase']=='trial_recovered' and d['revision']==2,d
+assert d['recovery_verified'] and not d['guard_scheduled'],d
+PYRESOLVED
+  systemctl unmask --runtime server-connect-activation-recover.service
+  test ! -e /run/systemd/system/server-connect-activation-recover.service
+  test ! -L /run/systemd/system/server-connect-activation-recover.service
+  systemctl is-active --quiet server-connect-activation-recover.timer
+  clear_recovered "$op"
+  rm -f /run/sc-qa-product-tun-recover.json
+  echo PRODUCT_TUN_GUARD_EXECUTOR_LOSS_GUEST_CLEANUP=PASS
+
   # Negative path: the manager DID durably attempt to start the core.
   # Removing its source credential must never be accepted as the benign
   # "crash before credential" case, even after systemd has stopped the

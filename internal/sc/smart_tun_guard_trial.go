@@ -638,6 +638,8 @@ func smartTUNTrialCredentialRecoveryCheck(record smartTUNTrialJournal, originalU
 // A kernel-visible active service is not authority to keep a pending TUN.
 // The owner must first have durably recorded core-start intent on this boot,
 // while the same operation still has time and its credential still matches.
+// The independent supervisor must ALSO pass a fresh runtime check before
+// this predicate can authorize leaving an active TUN pending.
 func smartTUNTrialMayRemainPending(record smartTUNTrialJournal, unitState string, credentialValid, sameBoot bool, uptime int64) bool {
 	return record.Phase == "trial_pending" && record.CoreStartAttempted &&
 		credentialValid && sameBoot && uptime < record.DeadlineUptimeSec &&
@@ -686,13 +688,17 @@ func recoverSmartTUNTrialLocked(store *activationJournalDir, identity activation
 		return SmartTUNTrialReceipt{}, err
 	}
 	if smartTUNTrialMayRemainPending(record, status, credentialValid, boot == record.BootID, uptime) {
-		if err := trialGuardScheduled(); err != nil {
-			return SmartTUNTrialReceipt{}, err
+		if trialGuardScheduled() == nil {
+			return smartTUNReceipt(record, true, false), nil
 		}
-		return smartTUNReceipt(record, true, false), nil
+		// A valid deadline is not sufficient once the independent guard is
+		// observed unavailable. Contain the exact trusted TUN now rather
+		// than allowing it to run past a deadline no executor can enforce.
+		// If stopping or native restoration fails, the pending journal
+		// remains and the caller must report uncertainty, never Direct.
 	}
-	// Expired, rebooted, stopped or failed: stop ONLY the trusted,
-	// pinned systemd service and demand EXACT baseline restoration.
+	// Expired, rebooted, stopped, failed, or unguarded: stop ONLY the
+	// trusted, pinned systemd service and demand EXACT baseline restoration.
 	originalUnitState := status
 	if err := smartTUNTrialSystemctl("stop", smartTUNTrialUnit); err != nil {
 		return SmartTUNTrialReceipt{}, err

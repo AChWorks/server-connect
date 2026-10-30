@@ -41,8 +41,18 @@ is 600 seconds, configurable from 4 to 600 seconds in disconnected QA only.
 A failed/uncertain restoration retains the journal, never presents Direct
 as safely verified and blocks installer/update/profile/Proxy Only transitions.
 Preexisting guest nftables owners are fingerprinted and must remain
-unchanged; the product never adopts or deletes their objects. Only full
-native IP/nftables equality after stopping the verified service permits `trial_recovered`, followed by exact operation-ID/revision clearance.
+unchanged; the product never adopts or deletes their objects. If a running
+pending TUN loses its independently verified recovery timer or executor, an
+explicit recovery invocation must stop **only the provenance-verified TUN
+service immediately**, even before the recorded deadline. Loss of the guard
+is never permission to keep an active pending interception running. Only full
+native IP/nftables equality after stopping the verified service permits
+`trial_recovered`, with `guard_scheduled=false`; unresolved stop, credential
+or foreign-resource conflicts retain the operation and block Direct/Proxy Only.
+Exact operation-ID/revision clearance disarms the remaining guard after
+rechecking the credential. This is an observed-loss containment path in the
+isolated guest, **not** a substitute for independent guard-liveness supervision
+or the future production Runtime Health Guard (#3).
 
 This is one step toward the real activation state machine, **not** a
 substitute for privileged third-party ownership/conntrack proof, SSH
