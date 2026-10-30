@@ -166,8 +166,26 @@ PYV6REFUSED
       --ipv6-direct-cidr 2001:db8:8::9/128 \
       > /run/sc-qa-product-tun-apply.json
     op=$(pending_receipt)
-    assert_product_tun_policy_active
-    ip -6 route show table all | grep -F 'dev sctunqa0' >/dev/null
+    # systemctl start does not prove that sing-box has finished installing
+    # its native IPv4 and IPv6 policy. Never probe a VPN-required flow
+    # before BOTH kernel TUN families are visibly present and the selected
+    # IPv4 path is independently confirmed, as in the existing IPv4 trial.
+    ready=no
+    for n in $(seq 1 35); do
+      if assert_product_tun_policy_active &&
+         ip -6 route show table all | grep -F 'dev sctunqa0' >/dev/null &&
+         expect_source 5.22.0.10 10.254.72.1 &&
+         expect_source 8.8.8.8 8.8.8.8; then
+        ready=yes
+        break
+      fi
+      sleep 0.2
+    done
+    [ "$ready" = yes ] || {
+      echo 'PRODUCT_TUN_IPV6_SELECTED_POLICY=FAIL (owned dual-stack policy not ready)' >&2
+      systemctl status server-connect-smart-tun.service --no-pager >&2 || :
+      return 1
+    }
     # Native positive controls were obtained earlier by host-tun-path.sh;
     # its peer nftables counters distinguish every unsafe Direct leak.
     test "$ipv6_foreign_tcp_baseline" -gt 0
