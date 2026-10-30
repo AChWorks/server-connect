@@ -327,7 +327,7 @@ func nativeTUNObserveLink(record smartTUNTrialJournal) (nativeTUNLinkObservation
 					continue
 				}
 				if n.LinkStage == "create_possible" && !nativeTUNInitialDependentRoute(record, family, route) {
-					return nativeTUNLinkObservation{}, nativeTUNConflict("unexpected route appeared during exclusive TUN creation")
+					return nativeTUNLinkObservation{}, nativeTUNConflict("unexpected route appeared during exclusive TUN creation: " + nativeTUNRouteDiagnostic(family, route))
 				}
 				hash, err := nativeTUNRouteCanonical(route)
 				if err != nil {
@@ -399,7 +399,7 @@ func nativeTUNInitialAddresses(record smartTUNTrialJournal, rows []json.RawMessa
 	return nil
 }
 
-// Only kernel local/multicast routes may be captured as automatically
+// Only exact kernel local/broadcast/multicast routes may be captured as automatically
 // dependent children of a newly created no-prefix-route TUN. A foreign route
 // is never adopted merely because it appeared before the first receipt.
 func nativeTUNInitialDependentRoute(record smartTUNTrialJournal, family int, row map[string]json.RawMessage) bool {
@@ -412,6 +412,9 @@ func nativeTUNInitialDependentRoute(record smartTUNTrialJournal, family int, row
 	if family == 6 && typ == "multicast" && dst == "ff00::/8" {
 		metric, ok := selectiveInt(row["metric"])
 		return ok && metric == 256
+	}
+	if family == 4 && typ == "broadcast" {
+		return nativeTUNInitialBroadcast(record, row)
 	}
 	f := nativeFamily(record.Native, family)
 	if f.Address == "" || typ != "local" {
@@ -431,6 +434,129 @@ func nativeTUNInitialDependentRoute(record smartTUNTrialJournal, family int, row
 		}
 	}
 	return true
+}
+
+func nativeTUNInitialBroadcast(record smartTUNTrialJournal, row map[string]json.RawMessage) bool {
+	// Linux v6.12 and v7.0 fib_add_ifaddr add the upper broadcast child
+	// independently of IFA_F_NOPREFIXROUTE. fib_magic binds it to the
+	// kernel protocol, local table, own source/device, link scope and metric0.
+	// Accept only that computed child, never a generic broadcast route.
+	prefix, err := netip.ParsePrefix(record.Native.IPv4.Address)
+	if err != nil || !prefix.Addr().Is4() || prefix.Bits() >= 31 || prefix.Bits() == 0 {
+		return false
+	}
+	network := prefix.Masked().Addr().As4()
+	mask := ^uint32(0) << uint(32-prefix.Bits())
+	var last [4]byte
+	binary.BigEndian.PutUint32(last[:], binary.BigEndian.Uint32(network[:])|^mask)
+	broadcast := netip.AddrFrom4(last)
+	dst := selectiveText(row["dst"])
+	if dst != broadcast.String() && dst != netip.PrefixFrom(broadcast, 32).String() {
+		return false
+	}
+	if selectiveText(row["prefsrc"]) != prefix.Addr().String() {
+		return false
+	}
+	scope, ok := selectiveInt(row["scope"])
+	if (!ok || scope != 253) && selectiveText(row["scope"]) != "link" {
+		return false
+	}
+	if raw, exists := row["metric"]; exists {
+		metric, ok := selectiveInt(raw)
+		if !ok || metric != 0 {
+			return false
+		}
+	}
+	for key := range row {
+		switch key {
+		case "type", "dst", "dev", "table", "protocol", "scope", "prefsrc", "metric", "flags":
+		default:
+			return false
+		}
+	}
+	if raw, exists := row["flags"]; exists {
+		var flags []string
+		if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) || json.Unmarshal(raw, &flags) != nil {
+			return false
+		}
+		for _, flag := range flags {
+			if flag != "linkdown" {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// Rejected rows need enough evidence for an isolated-host diagnosis, without
+// dumping arbitrary nested fields, profile bytes, paths or credential URLs.
+// The fixed projection accepts only bounded native identifiers/IPs/enums.
+func nativeTUNRouteDiagnostic(family int, row map[string]json.RawMessage) string {
+	result := map[string]any{"family": family}
+	known := 0
+	for _, key := range []string{"type", "table", "protocol", "scope", "metric"} {
+		if raw, exists := row[key]; exists {
+			known++
+			if number, ok := selectiveInt(raw); ok {
+				result[key] = number
+				continue
+			}
+			value := selectiveText(raw)
+			switch value {
+			case "unicast", "local", "broadcast", "multicast", "unreachable", "kernel", "boot", "main", "default", "global", "link", "host", "nowhere":
+				result[key] = value
+			default:
+				result[key] = "unsupported"
+			}
+		}
+	}
+	for _, key := range []string{"dst", "prefsrc", "gateway"} {
+		if raw, exists := row[key]; exists {
+			known++
+			value := selectiveText(raw)
+			address, addressErr := netip.ParseAddr(value)
+			prefix, prefixErr := netip.ParsePrefix(value)
+			switch {
+			case key == "dst" && value == "default":
+				result[key] = value
+			case addressErr == nil && address.Zone() == "":
+				result[key] = address.String()
+			case prefixErr == nil:
+				result[key] = prefix.String()
+			default:
+				result[key] = "unsupported"
+			}
+		}
+	}
+	if raw, exists := row["dev"]; exists {
+		known++
+		name := selectiveText(raw)
+		if smartTUNDeviceName.MatchString(name) {
+			result["dev"] = name
+		} else {
+			result["dev"] = "unsupported"
+		}
+	}
+	if raw, exists := row["flags"]; exists {
+		known++
+		var flags []string
+		valid := json.Unmarshal(raw, &flags) == nil && len(flags) <= 8 && !bytes.Equal(bytes.TrimSpace(raw), []byte("null"))
+		for _, flag := range flags {
+			if flag != "linkdown" && flag != "onlink" && flag != "pervasive" && flag != "notify" {
+				valid = false
+			}
+		}
+		if valid {
+			result["flags"] = flags
+		} else {
+			result["flags"] = "unsupported"
+		}
+	}
+	if extra := len(row) - known; extra > 0 {
+		result["extra_fields"] = extra
+	}
+	raw, _ := json.Marshal(result)
+	return string(raw)
 }
 
 func nativeTUNVerifyLink(record smartTUNTrialJournal, observed nativeTUNLinkObservation) error {
@@ -793,6 +919,8 @@ func nativeTUNRouteType(raw json.RawMessage) string {
 			return "unicast"
 		case 2:
 			return "local"
+		case 3:
+			return "broadcast"
 		case 5:
 			return "multicast"
 		case 7:

@@ -309,6 +309,84 @@ func TestSmartTUNNativeRouteSelectorsAndForeignDependencies(t *testing.T) {
 	}
 }
 
+func TestSmartTUNNativeInitialBroadcastIsExactKernelChild(t *testing.T) {
+	record := nativeTrialExample(true)
+	base := `{"type":"3","dst":"172.31.99.3","dev":"sctunqa0","table":"255","protocol":"2","scope":"253","prefsrc":"172.31.99.1","flags":[]}`
+	decode := func(raw string) map[string]json.RawMessage {
+		t.Helper()
+		var row map[string]json.RawMessage
+		if err := json.Unmarshal([]byte(raw), &row); err != nil {
+			t.Fatal(err)
+		}
+		return row
+	}
+	// fib_add_ifaddr's upper /30 broadcast is independent of NOPREFIXROUTE.
+	// Numeric RTN_BROADCAST output must retain the same exact identity.
+	for _, raw := range []string{base,
+		strings.Replace(base, `"type":"3"`, `"type":3`, 1),
+		strings.Replace(strings.Replace(base, `"type":"3"`, `"type":"broadcast"`, 1), `"scope":"253"`, `"scope":"link"`, 1),
+		strings.Replace(base, `"dst":"172.31.99.3"`, `"dst":"172.31.99.3/32"`, 1),
+		strings.TrimSuffix(base, "}") + `,"metric":0}`,
+	} {
+		if !nativeTUNInitialDependentRoute(record, 4, decode(raw)) {
+			t.Fatalf("exact kernel broadcast child rejected: %s", raw)
+		}
+	}
+	for _, change := range [][2]string{
+		{`"172.31.99.3"`, `"172.31.99.0"`}, {`"172.31.99.3"`, `"172.31.99.7"`},
+		{`"type":"3"`, `"type":"1"`}, {`"table":"255"`, `"table":"254"`},
+		{`"protocol":"2"`, `"protocol":"3"`}, {`"dev":"sctunqa0"`, `"dev":"foreign0"`},
+		{`"prefsrc":"172.31.99.1"`, `"prefsrc":"172.31.99.2"`}, {`"prefsrc":"172.31.99.1",`, ""},
+		{`"scope":"253"`, `"scope":"0"`}, {`"scope":"253",`, ""}, {`"flags":[]`, `"flags":["onlink"]`},
+	} {
+		if nativeTUNInitialDependentRoute(record, 4, decode(strings.Replace(base, change[0], change[1], 1))) {
+			t.Fatalf("foreign broadcast identity accepted: %v", change)
+		}
+	}
+	for _, extra := range []string{`,"metric":1`, `,"gateway":"172.31.99.2"`, `,"nhid":10`, `,"unknown":true`} {
+		if nativeTUNInitialDependentRoute(record, 4, decode(strings.TrimSuffix(base, "}")+extra+"}")) {
+			t.Fatal("foreign broadcast attribute was adopted")
+		}
+	}
+	for _, address := range []string{"172.31.99.1/31", "172.31.99.1/32"} {
+		changed := cloneSmartTUNTrial(record)
+		changed.Native.IPv4.Address = address
+		if nativeTUNInitialDependentRoute(changed, 4, decode(base)) {
+			t.Fatal("broadcast admitted for a prefix without this kernel child")
+		}
+	}
+	if nativeTUNInitialDependentRoute(record, 6, decode(base)) {
+		t.Fatal("IPv4 broadcast admitted as IPv6 dependency")
+	}
+}
+
+func TestSmartTUNNativeRouteDiagnosticIsBoundedAndCredentialSafe(t *testing.T) {
+	var row map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(`{"type":"3","dst":"172.31.99.3","dev":"sctunqa0","table":"255","protocol":"2","scope":"253","prefsrc":"172.31.99.1","flags":[]}`), &row); err != nil {
+		t.Fatal(err)
+	}
+	detail := nativeTUNRouteDiagnostic(4, row)
+	for _, part := range []string{`"family":4`, `"type":3`, `"dst":"172.31.99.3"`, `"protocol":2`, `"table":255`, `"scope":253`, `"prefsrc":"172.31.99.1"`} {
+		if !strings.Contains(detail, part) {
+			t.Fatalf("missing bounded route evidence %s: %s", part, detail)
+		}
+	}
+	secret := "vless://never-log-credential@secret.example:443/" + strings.Repeat("x", 5000)
+	raw, _ := json.Marshal(secret)
+	for _, key := range []string{"type", "dst", "dev", "table", "protocol", "scope", "metric", "prefsrc", "gateway"} {
+		row[key] = raw
+	}
+	row[secret] = json.RawMessage(`{"profile":"never-log-credential"}`)
+	row["flags"] = json.RawMessage(`["never-log-credential"]`)
+	detail = nativeTUNRouteDiagnostic(6, row)
+	if len(detail) > 1024 || strings.Contains(detail, "never-log-credential") || strings.Contains(detail, "secret.example") || strings.Contains(detail, "vless://") || strings.ContainsAny(detail, "\n\r") {
+		t.Fatalf("unsafe route diagnostic: length=%d", len(detail))
+	}
+	if !strings.Contains(detail, `"extra_fields":1`) {
+		t.Fatal("unknown-field presence not summarized safely")
+	}
+}
+
 func TestSmartTUNNativeIPv6RouteUsesKernelUniverseScope(t *testing.T) {
 	record := nativeTrialExample(true)
 	// IPv6 rt6_fill_node emits RT_SCOPE_UNIVERSE even for our requested
