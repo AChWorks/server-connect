@@ -675,65 +675,36 @@ func (m *Manager) disarmUncommittedSmartTUNGuard() {
 	})
 }
 
-// Called by the existing installed independent systemd oneshot. A handled
-// v4 journal is NEVER passed to legacy v2/v3 recovery. Invalid v4 evidence
-// fails closed without guessing which native objects belong to the product.
-func (m *Manager) tryRecoverSmartTUNTrial() (TrialReceipt, bool, error) {
-	if m.Dir != DefaultDir {
-		return TrialReceipt{}, false, nil
+// The independent executor dispatches a fully decoded v4 record while still
+// holding the SAME lock used for current/legacy selection. This helper must
+// never acquire a second lock or let an absent observation fall through after
+// an intervening Apply has published a different journal version.
+func recoverSmartTUNTrialJournalLocked(store *activationJournalDir, identity activationJournalFileIdentity, record smartTUNTrialJournal) (TrialReceipt, error) {
+	result, err := recoverSmartTUNTrialLocked(store, identity, &record, "")
+	if err != nil {
+		return TrialReceipt{}, err
 	}
-	var receipt TrialReceipt
-	handled := false
-	err := m.withActivationJournalLock(syscall.Fsync, func(store *activationJournalDir) error {
-		raw, identity, err := store.readJournal()
-		if errors.Is(err, os.ErrNotExist) {
-			return nil
-		}
+	// A durable operator stop/cleanup request authorizes completion of
+	// that exact operation by this already-independent executor. Ordinary
+	// deadline recovery retains its historical recovered receipt.
+	if result.Phase == "trial_cleanup_pending" ||
+		(result.Phase == "trial_recovered" && result.Revision == 3) {
+		record.Phase, record.Revision = result.Phase, result.Revision
+		identity, err = reloadSmartTUNTrialLocked(store, record)
 		if err != nil {
-			return err
+			return TrialReceipt{}, err
 		}
-		if err := rejectAmbiguousJournalJSON(raw); err != nil {
-			return err
-		}
-		var marker struct {
-			Version int `json:"version"`
-		}
-		if err := json.Unmarshal(raw, &marker); err != nil || marker.Version != smartTUNTrialVersion {
-			return nil
-		}
-		handled = true
-		record, err := decodeSmartTUNTrial(raw)
+		result, err = finalizeSmartTUNTrialLocked(store, identity, record, "")
 		if err != nil {
-			return err
+			return TrialReceipt{}, err
 		}
-		result, err := recoverSmartTUNTrialLocked(store, identity, &record, "")
-		if err != nil {
-			return err
-		}
-		// A durable operator stop/cleanup request authorizes completion of
-		// that exact operation by this already-independent executor. Ordinary
-		// deadline recovery retains its historical recovered receipt.
-		if result.Phase == "trial_cleanup_pending" ||
-			(result.Phase == "trial_recovered" && result.Revision == 3) {
-			record.Phase, record.Revision = result.Phase, result.Revision
-			identity, err = reloadSmartTUNTrialLocked(store, record)
-			if err != nil {
-				return err
-			}
-			result, err = finalizeSmartTUNTrialLocked(store, identity, record, "")
-			if err != nil {
-				return err
-			}
-		}
-		receipt = TrialReceipt{
-			OperationID: result.OperationID, Revision: result.Revision,
-			Phase: result.Phase, ExperimentOnly: true,
-			GuardScheduled:   result.GuardScheduled,
-			RecoveryVerified: result.RecoveryVerified,
-		}
-		return nil
-	})
-	return receipt, handled, err
+	}
+	return TrialReceipt{
+		OperationID: result.OperationID, Revision: result.Revision,
+		Phase: result.Phase, ExperimentOnly: true,
+		GuardScheduled:   result.GuardScheduled,
+		RecoveryVerified: result.RecoveryVerified,
+	}, nil
 }
 
 // An absent credential is legitimate ONLY for journal-first failure before
