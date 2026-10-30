@@ -243,6 +243,11 @@ func TestNativeAPTMethodInventoryFailsClosedOnUntrustedHelpers(t *testing.T) {
 				t.Fatal(err)
 			}
 		}},
+		{"disabled sentinel exists", func(t *testing.T, dir string) {
+			if err := os.WriteFile(filepath.Join(dir, "false"), []byte("fixture - not executed"), 0755); err != nil {
+				t.Fatal(err)
+			}
+		}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -261,5 +266,106 @@ func TestNativeAPTMethodInventoryRejectsNonTrustedOwnership(t *testing.T) {
 	// reject a regular native helper that belongs to another principal.
 	if err := verifyNativeAPTMethodInventory(dir, uid+1); ErrorCode(err) != "apt_untrusted_executable" {
 		t.Fatalf("different-owner native method incorrectly accepted: %v", err)
+	}
+}
+
+func TestAPTLegacyCompatibilityRequiresExactHostAndBothVersions(t *testing.T) {
+	for _, tc := range []struct {
+		name, target, command, config string
+		want                          aptCompatibility
+	}{
+		{"stock Debian12", "debian-12-amd64", "apt 2.6.1 (amd64)", "apt 2.6.1 (amd64)", aptDebian12Native261},
+		{"Debian13 with old binary", "debian-13-amd64", "apt 2.6.1 (amd64)", "apt 2.6.1 (amd64)", aptStrictNative},
+		{"unverified OS", "", "apt 2.6.1 (amd64)", "apt 2.6.1 (amd64)", aptStrictNative},
+		{"unknown target", "debian-12-arm64", "apt 2.6.1 (amd64)", "apt 2.6.1 (amd64)", aptStrictNative},
+		{"APT3", "debian-12-amd64", "apt 3.0.3 (amd64)", "apt 3.0.3 (amd64)", aptStrictNative},
+		{"command mismatch", "debian-12-amd64", "apt 3.0.3 (amd64)", "apt 2.6.1 (amd64)", aptStrictNative},
+		{"config mismatch", "debian-12-amd64", "apt 2.6.1 (amd64)", "apt 3.0.3 (amd64)", aptStrictNative},
+		{"unknown patch", "debian-12-amd64", "apt 2.6.2 (amd64)", "apt 2.6.2 (amd64)", aptStrictNative},
+		{"missing command version", "debian-12-amd64", "", "apt 2.6.1 (amd64)", aptStrictNative},
+		{"missing config version", "debian-12-amd64", "apt 2.6.1 (amd64)", "", aptStrictNative},
+		{"ambiguous banner", "debian-12-amd64", "apt 2.6.1 (amd64) extra", "apt 2.6.1 (amd64) extra", aptStrictNative},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := aptCompatibilityForVersions(tc.target, tc.command, tc.config); got != tc.want {
+				t.Fatalf("incorrect native compatibility boundary: got=%d want=%d", got, tc.want)
+			}
+		})
+	}
+}
+
+func createDebian12APTMethodFixture(t *testing.T) (string, uint32) {
+	t.Helper()
+	dir, uid := createNativeAPTMethodFixture(t, true)
+	for _, name := range []string{"ftp", "rsh"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("fixture - not executed"), 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for name, target := range map[string]string{"ssh": "rsh", "mirror+ftp": "mirror"} {
+		if err := os.Symlink(target, filepath.Join(dir, name)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return dir, uid
+}
+
+func TestNativeAPTLegacyInventoryRequiresVerified261Compatibility(t *testing.T) {
+	dir, uid := createDebian12APTMethodFixture(t)
+	if err := verifyNativeAPTMethodInventoryWithCompatibility(dir, uid, aptDebian12Native261); err != nil {
+		t.Fatal("stock Debian12 legacy inventory refused:", err)
+	}
+	for _, mode := range []aptCompatibility{aptStrictNative, aptCompatibility(255)} {
+		if err := verifyNativeAPTMethodInventoryWithCompatibility(dir, uid, mode); ErrorCode(err) != "apt_untrusted_executable" {
+			t.Fatal("legacy inventory accepted without the verified Debian12/2.6.1 boundary")
+		}
+	}
+	if err := verifyNativeAPTMethodInventoryWithCompatibility(dir, uid+1, aptDebian12Native261); ErrorCode(err) != "apt_untrusted_executable" {
+		t.Fatal("legacy compatibility bypassed the native owner check")
+	}
+}
+
+func TestNativeAPTLegacyInventoryRetainsExactIdentityChecks(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		mutate func(string) error
+	}{
+		{"writable ftp", func(dir string) error { return os.Chmod(filepath.Join(dir, "ftp"), 0775) }},
+		{"writable rsh", func(dir string) error { return os.Chmod(filepath.Join(dir, "rsh"), 0757) }},
+		{"nonexecutable ftp", func(dir string) error { return os.Chmod(filepath.Join(dir, "ftp"), 0644) }},
+		{"setuid rsh", func(dir string) error { return os.Chmod(filepath.Join(dir, "rsh"), 0755|os.ModeSetuid) }},
+		{"missing ssh target", func(dir string) error { return os.Remove(filepath.Join(dir, "rsh")) }},
+		{"foreign helper", func(dir string) error {
+			return os.WriteFile(filepath.Join(dir, "custom-transport"), []byte("not executed"), 0755)
+		}},
+		{"disabled sentinel exists", func(dir string) error { return os.WriteFile(filepath.Join(dir, "false"), []byte("not executed"), 0755) }},
+		{"ssh traversal", func(dir string) error {
+			if err := os.Remove(filepath.Join(dir, "ssh")); err != nil {
+				return err
+			}
+			return os.Symlink("../rsh", filepath.Join(dir, "ssh"))
+		}},
+		{"mirror ftp wrong target", func(dir string) error {
+			if err := os.Remove(filepath.Join(dir, "mirror+ftp")); err != nil {
+				return err
+			}
+			return os.Symlink("ftp", filepath.Join(dir, "mirror+ftp"))
+		}},
+		{"symlink replaces ftp", func(dir string) error {
+			if err := os.Remove(filepath.Join(dir, "ftp")); err != nil {
+				return err
+			}
+			return os.Symlink("http", filepath.Join(dir, "ftp"))
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir, uid := createDebian12APTMethodFixture(t)
+			if err := tc.mutate(dir); err != nil {
+				t.Fatal(err)
+			}
+			if err := verifyNativeAPTMethodInventoryWithCompatibility(dir, uid, aptDebian12Native261); ErrorCode(err) != "apt_untrusted_executable" {
+				t.Fatal("unsafe legacy method identity accepted")
+			}
+		})
 	}
 }

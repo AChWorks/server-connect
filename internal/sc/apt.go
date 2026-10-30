@@ -32,17 +32,29 @@ func (m *Manager) Apt(args []string) (int, error) {
 	if _, err = trustedAPTConfig(); err != nil {
 		return 1, err
 	}
+	compatibility, err := observedAPTCompatibility(nativeAPT)
+	if err != nil {
+		return 1, err
+	}
 	proxy, err := m.proxyURL()
 	if err != nil {
 		return 1, err
 	}
-	return aptThroughSelectedProxy(nativeAPT, args[1:], m.Dir, proxy)
+	return aptThroughSelectedProxyChecked(nativeAPT, args[1:], m.Dir, proxy, compatibility)
 }
 
 // aptThroughSelectedProxy owns the *entire* credential-bearing subprocess
 // operation. This is also used by genuine-core isolated integration tests;
 // no test-only implementation of the APT transport is required.
 func aptThroughSelectedProxy(nativeAPT string, args []string, dir string, proxy *url.URL) (int, error) {
+	compatibility, err := observedAPTCompatibility(nativeAPT)
+	if err != nil {
+		return 1, err
+	}
+	return aptThroughSelectedProxyChecked(nativeAPT, args, dir, proxy, compatibility)
+}
+
+func aptThroughSelectedProxyChecked(nativeAPT string, args []string, dir string, proxy *url.URL, compatibility aptCompatibility) (int, error) {
 	if nativeAPT != systemAPT && nativeAPT != systemAPTGet {
 		return 1, Fault("apt_untrusted_executable", "APT command is not a trusted native executable")
 	}
@@ -59,7 +71,7 @@ func aptThroughSelectedProxy(nativeAPT string, args []string, dir string, proxy 
 	if _, err := trustedAPTConfig(); err != nil {
 		return 1, err
 	}
-	if err := verifyNativeAPTMethods(); err != nil {
+	if err := verifyNativeAPTMethodsWithCompatibility(compatibility); err != nil {
 		return 1, err
 	}
 	file, err := privateAptConfig(dir, proxy)
@@ -69,7 +81,12 @@ func aptThroughSelectedProxy(nativeAPT string, args []string, dir string, proxy 
 	defer file.Close()
 	// Host-specific and autodetected APT settings take precedence over the
 	// generic proxy. Inspect the effective configuration; never log its output.
-	if err = verifyEffectiveAptProxy(file, proxy.String(), opts); err != nil {
+	if err = verifyEffectiveAptProxyWithCompatibility(file, proxy.String(), opts, compatibility); err != nil {
+		return 1, err
+	}
+	// Reject inherited enablers FIRST. Then verify the stricter policy that the
+	// wrapper appends to the actual child, independent of libapt-pkg version.
+	if err = verifyEffectiveAptProxyPolicy(file, proxy.String(), aptOwnedDisabledOpts(opts), compatibility, true); err != nil {
 		return 1, err
 	}
 	argv := aptExecArgs(args, action)
@@ -92,10 +109,28 @@ func aptThroughSelectedProxy(nativeAPT string, args []string, dir string, proxy 
 func aptExecArgs(arguments []string, action string) []string {
 	argv := []string{"-c", "/proc/self/fd/3"}
 	argv = append(argv, arguments...)
+	argv = append(argv, aptOwnedDisabledOpts(nil)...)
 	if action == "update" {
 		argv = append(argv, "--error-on=any")
 	}
 	return argv
+}
+
+const aptDisabledMethodPath = "/usr/lib/apt/methods/false"
+
+var aptDisabledMethods = []string{"ftp", "rsh", "ssh", "mirror+ftp"}
+
+// Worker::Start in native APT2.6/2.9/3 honors an explicit method path before
+// dispatch. A missing path whose basename is false means disabled, before
+// fork/exec. The complete trusted inventory rejects any file named false;
+// this policy creates no files and changes no host APT settings.
+// https://github.com/Debian/apt/blob/a626a66fece0a7d680e40b9e35b66e29fe9ae12c/apt-pkg/acquire-worker.cc
+func aptOwnedDisabledOpts(opts []string) []string {
+	result := append([]string{}, opts...)
+	for _, method := range aptDisabledMethods {
+		result = append(result, "-o", "Dir::Bin::Methods::"+method+"="+aptDisabledMethodPath)
+	}
+	return result
 }
 
 // Validate caller overrides before forwarding them to apt-get. Proxy
@@ -200,6 +235,18 @@ func isCombinedAPTUpdateShortFlag(a string) bool {
 // Inspect APT host policy and caller-supplied supported options with the
 // same anonymous config FD/environment. apt-config's stdout is a secret.
 func verifyEffectiveAptProxy(file *os.File, expected string, opts []string) error {
+	compatibility, err := observedAPTCompatibility(systemAPTGet)
+	if err != nil {
+		return err
+	}
+	return verifyEffectiveAptProxyWithCompatibility(file, expected, opts, compatibility)
+}
+
+func verifyEffectiveAptProxyWithCompatibility(file *os.File, expected string, opts []string, compatibility aptCompatibility) error {
+	return verifyEffectiveAptProxyPolicy(file, expected, opts, compatibility, false)
+}
+
+func verifyEffectiveAptProxyPolicy(file *os.File, expected string, opts []string, compatibility aptCompatibility, ownedDisabled bool) error {
 	if _, err := file.Seek(0, 0); err != nil {
 		return Fault("apt_configuration", "private APT configuration unavailable")
 	}
@@ -218,7 +265,7 @@ func verifyEffectiveAptProxy(file *os.File, expected string, opts []string) erro
 	if err := cmd.Run(); err != nil {
 		return Fault("apt_policy_conflict", "cannot verify effective APT configuration; refusing Direct fallback")
 	}
-	return verifyAptDump(out.String(), expected)
+	return verifyAptDumpPolicy(out.String(), expected, compatibility, ownedDisabled)
 }
 
 type limitedAptOutput struct {
@@ -269,9 +316,18 @@ var nativeAPTCompressors = map[string][]string{
 }
 
 func verifyAptDump(dump, expected string) error {
+	return verifyAptDumpWithCompatibility(dump, expected, aptStrictNative)
+}
+
+func verifyAptDumpWithCompatibility(dump, expected string, compatibility aptCompatibility) error {
+	return verifyAptDumpPolicy(dump, expected, compatibility, false)
+}
+
+func verifyAptDumpPolicy(dump, expected string, compatibility aptCompatibility, ownedDisabled bool) error {
 	seenHTTP, seenHTTPS := false, false
 	seenDir, seenUsr := false, false
 	seenBins := make(map[string]bool, len(nativeAPTBinConfig))
+	seenDisabled := make(map[string]bool, len(aptDisabledMethods))
 	for _, line := range strings.Split(dump, "\n") {
 		fields := strings.Fields(line)
 		if len(fields) == 0 {
@@ -318,6 +374,19 @@ func verifyAptDump(dump, expected string) error {
 			}
 		}
 		if key == "dir::bin" || strings.HasPrefix(key, "dir::bin::") {
+			if strings.HasPrefix(key, "dir::bin::methods::") {
+				known := false
+				for _, method := range aptDisabledMethods {
+					if key == "dir::bin::methods::"+method {
+						known = true
+					}
+				}
+				if !ownedDisabled || !known || seenDisabled[key] || len(fields) != 2 || fields[1] != "\""+aptDisabledMethodPath+"\";" {
+					return Fault("apt_policy_conflict", "APT per-method execution override is not the verified disabled policy")
+				}
+				seenDisabled[key] = true
+				continue
+			}
 			want, known := nativeAPTBinConfig[key]
 			approved := known && len(fields) == 2 && fields[1] == "\""+want+"\";"
 			// Debian 13's minimal image selects the native lzma program
@@ -360,7 +429,12 @@ func verifyAptDump(dump, expected string) error {
 	if !seenHTTP || !seenHTTPS {
 		return Fault("apt_policy_conflict", "effective APT HTTP(S) proxy settings not verified")
 	}
-	if !seenDir || !seenUsr || len(seenBins) != len(nativeAPTBinConfig) {
+	if ownedDisabled && len(seenDisabled) != len(aptDisabledMethods) {
+		return Fault("apt_policy_conflict", "APT disabled acquisition method policy not established")
+	}
+	// Native APT2.6.1 has no Dir::Usr default. Only the independently observed
+	// Debian12/2.6.1 mode may omit it; a present value was still checked above.
+	if !seenDir || (!seenUsr && compatibility != aptDebian12Native261) || len(seenBins) != len(nativeAPTBinConfig) {
 		return Fault("apt_policy_conflict", "trusted native APT executable path configuration not established")
 	}
 	return nil

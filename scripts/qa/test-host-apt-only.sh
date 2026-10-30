@@ -63,6 +63,22 @@ case "$SC_QA_TIMEOUT_CASE" in
   unrelated)
     printf '%s\n' 'Error: unable to initialize manager' >&2
     exit 1 ;;
+  inventory-refusal)
+    printf '%s\n' 'Error: unsupported APT acquisition method installed' \
+      'Private diagnostic http://qa-user:qa-secret-must-stay-private@127.0.0.1/' >&2
+    exit 1 ;;
+  path-refusal)
+    printf '%s\n' 'Error: trusted native APT executable path configuration not established' >&2
+    exit 1 ;;
+  method-override-refusal)
+    printf '%s\n' 'Error: APT per-method execution override is not the verified disabled policy' >&2
+    exit 1 ;;
+  owned-policy-refusal)
+    printf '%s\n' 'Error: APT disabled acquisition method policy not established' >&2
+    exit 1 ;;
+  unclassified-secret)
+    printf '%s\n' 'Error: unsupported APT acquisition method installed http://qa-user:qa-secret-must-stay-private@127.0.0.1/' >&2
+    exit 1 ;;
   missing-evidence)
     printf '%s\n' 'W: unrelated non-acquisition error'
     exit 100 ;;
@@ -199,6 +215,27 @@ chmod 000 "$scratch/bin/apt-cache"
 require_fail 'non-executable apt-cache' /bin/sh "$fixture" negative upstream-stopped
 chmod 0700 "$scratch/bin/apt-cache"
 
+# Public diagnostics are an exact fixed-label projection, never a raw log.
+# A near-match containing a credential-bearing URL must stay unclassified.
+while IFS='|' read -r refusal expected_label; do
+  require_fail "safe public preflight classification: $refusal" \
+    env SC_QA_TIMEOUT_CASE="$refusal" /bin/sh "$fixture" positive initial
+  grep -Fx "INSTALLED_APT_FAILURE_CAUSE=$expected_label" "$err" >/dev/null ||
+    { echo 'Public APT preflight classification missing or imprecise' >&2; exit 1; }
+  if grep -F 'qa-secret-must-stay-private' "$out" "$err" >/dev/null; then
+    echo 'Private APT diagnostic escaped into public QA output' >&2
+    exit 1
+  fi
+done <<'SAFE_LABEL_CASES'
+inventory-refusal|METHOD_INVENTORY_REFUSAL
+path-refusal|NATIVE_PATH_POLICY_REFUSAL
+method-override-refusal|METHOD_OVERRIDE_REFUSAL
+owned-policy-refusal|DISABLED_METHOD_POLICY_REFUSAL
+unclassified-secret|UNCLASSIFIED
+unrelated|UNCLASSIFIED
+SAFE_LABEL_CASES
+echo 'HOST_APT_SAFE_PREFLIGHT_CLASSIFICATION=PASS'
+
 # Current policy digest of an empty fixture directory is SHA-256(empty).
 /usr/bin/python3 -c 'import hashlib,sys; print(hashlib.sha256(b"").hexdigest())' \
   > "$scratch/base/host-apt-policy.sha256"
@@ -326,6 +363,146 @@ require_pass 'restored APT symlink identity' \
   'INSTALLED_APT_NATIVE_HOST_POLICY_UNCHANGED=PASS' \
   /bin/sh "$fixture" verify-host-policy
 echo 'HOST_APT_STRICT_NESTED_POLICY_WALK_REGRESSIONS=PASS'
+
+# Import only the pure trace reader. Synthetic traces and ordinary owned
+# temporary files exercise refusal logic; no tracing/native APT runs here.
+PYTHONDONTWRITEBYTECODE=1 /usr/bin/python3 -B - \
+  "$root/scripts/qa/apt-disabled-trace.py" "$scratch" <<'PY'
+import importlib.util
+import os
+from pathlib import Path
+import sys
+
+spec = importlib.util.spec_from_file_location("apt_disabled_trace", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+
+def execution(path, args):
+    quoted = ", ".join('"' + value + '"' for value in [path, *args])
+    return f'execve("{path}", [{quoted}], ["LC_ALL=C"]) = 0\n'
+
+owned = []
+for method in module.DISABLED:
+    owned.extend(["-o", f"Dir::Bin::Methods::{method}={module.DISABLED_PATH}"])
+
+valid = {
+    10: execution("/usr/local/bin/server-connect", ["apt", "--", "apt-get", "update"])
+        + 'clone(child_stack=NULL, flags=SIGCHLD) = 11\n'
+        + 'clone(child_stack=NULL, flags=SIGCHLD) = 12\n'
+        + 'clone(child_stack=NULL, flags=SIGCHLD) = 13\n'
+        + 'exit_group(100) = ?\n+++ exited with 100 +++\n',
+    11: execution("/usr/bin/apt-config", ["-c", "/proc/self/fd/3", "dump"])
+        + 'exit_group(0) = ?\n+++ exited with 0 +++\n',
+    12: execution("/usr/bin/apt-config", ["-c", "/proc/self/fd/3", *owned, "dump"])
+        + 'exit_group(0) = ?\n+++ exited with 0 +++\n',
+    13: execution("/usr/bin/apt-get", ["-c", "/proc/self/fd/3", "update", *owned, "--error-on=any"])
+        + 'exit_group(100) = ?\n+++ exited with 100 +++\n',
+}
+module.check_payloads(valid)
+
+def refused(name, payloads, reason=None):
+    try:
+        module.check_payloads(payloads)
+    except module.TraceFailure as error:
+        if reason is not None and str(error) != reason:
+            raise SystemExit("Wrong safe trace refusal: " + name)
+    else:
+        raise SystemExit("Unsafe trace evidence accepted: " + name)
+
+def altered(pid, old, new):
+    result = dict(valid)
+    if old not in result[pid]:
+        raise SystemExit("Synthetic trace fixture drifted")
+    result[pid] = result[pid].replace(old, new, 1)
+    return result
+
+refused("no process files", {})
+missing = dict(valid)
+del missing[12]
+refused("missing descendant", missing, "missing descendant trace")
+refused("unrelated orphan", {**valid, 99: "+++ exited with 0 +++\n"})
+refused("disconnected cycle", {
+    **valid,
+    90: "fork() = 91\n+++ exited with 0 +++\n",
+    91: "fork() = 90\n+++ exited with 0 +++\n",
+}, "disconnected process evidence")
+refused("duplicate descendant", altered(10, " = 12\n", " = 11\n"))
+refused("self descendant", altered(10, " = 11\n", " = 10\n"))
+refused("empty process file", {**valid, 12: ""})
+refused("missing final newline", {**valid, 12: valid[12].rstrip("\n")})
+refused("missing exit record", altered(12, "+++ exited with 0 +++\n", ""))
+refused("nontextual byte", altered(12, "exit_group(0)", "\x00exit_group(0)"))
+refused("unrecognized record", altered(12, "exit_group(0)", "truncated record\nexit_group(0)"))
+refused("record after exit", {**valid, 12: valid[12] + "exit_group(0) = ?\n"})
+refused("timeout killed child", altered(13, "+++ exited with 100 +++", "+++ killed by SIGKILL +++"))
+refused("wrong native status", altered(13, "exited with 100", "exited with 0"))
+refused("wrong manager status", altered(10, "exited with 100", "exited with 0"))
+
+for family in ("AF_INET", "AF_INET6", "AF_PACKET"):
+    payloads = altered(13, "exit_group(100)", f"socket({family}, SOCK_STREAM, 0) = 4\nexit_group(100)")
+    refused(family, payloads, "nonlocal network attempt")
+for decoded in ("TCP", "UDP", "TCPv6", "UDPv6", "IP", "IPv6"):
+    payloads = altered(13, "exit_group(100)", f'sendto(4<{decoded}:[127.0.0.1:9]>, "x", 1, 0, NULL, 0) = 1\nexit_group(100)')
+    refused(decoded, payloads, "decoded Internet descriptor used")
+for method in (*module.DISABLED, "false"):
+    attempted = f'execve("/usr/lib/apt/methods/{method}", ["{method}"], []) = -1 ENOENT (No such file or directory)\n'
+    refused(method, altered(13, "exit_group(100)", attempted + "exit_group(100)"),
+            "unsupported transport execution attempted")
+refused("execveat", altered(13, "exit_group(100)", 'execveat(4, "", [], [], AT_EMPTY_PATH) = -1 ENOENT (No such file or directory)\nexit_group(100)'))
+for method in module.DISABLED:
+    setting = f'Dir::Bin::Methods::{method}={module.DISABLED_PATH}'
+    refused("lost acquisition denial " + method, altered(13, setting, "Debug::NoLocking=1"))
+    refused("lost effective denial " + method, altered(12, setting, "Debug::NoLocking=1"))
+refused("private configuration absent", altered(13, '"/proc/self/fd/3"', '"/tmp/other"'))
+refused("only version executed", altered(13, '"update"', '"--version"'))
+refused("missing owned policy pass", {**valid, 12: valid[11]})
+refused("missing baseline policy pass", {**valid, 11: valid[12]})
+
+interrupted = altered(10,
+    'clone(child_stack=NULL, flags=SIGCHLD) = 11\n',
+    'clone(child_stack=NULL, flags=SIGCHLD <unfinished ...>\n'
+    '--- SIGCHLD {si_signo=SIGCHLD, si_pid=11, si_status=0} ---\n'
+    '<... clone resumed>) = 11\n')
+module.check_payloads(interrupted)
+refused("lost clone resumption", {**interrupted, 10: interrupted[10].replace('<... clone resumed>) = 11\n', '')})
+refused("mismatched resumption", {**interrupted, 10: interrupted[10].replace('<... clone resumed>', '<... fork resumed>')})
+refused("standalone resumption", altered(10, 'clone(child_stack=NULL, flags=SIGCHLD) = 11', '<... clone resumed>) = 11'))
+
+trace_dir = Path(sys.argv[2]) / "trace-reader-fixture"
+trace_dir.mkdir(mode=0o700)
+for pid, payload in valid.items():
+    path = trace_dir / f"trace.{pid}"
+    path.write_text(payload, encoding="ascii")
+    path.chmod(0o600)
+module.check_directory(trace_dir)
+
+def refused_directory(name):
+    try:
+        module.check_directory(trace_dir)
+    except (module.TraceFailure, OSError, UnicodeError):
+        return
+    raise SystemExit("Unsafe trace directory accepted: " + name)
+
+subject = trace_dir / "trace.12"
+subject.unlink()
+subject.symlink_to("trace.11")
+refused_directory("symlink")
+subject.unlink()
+subject.write_text("", encoding="ascii")
+refused_directory("empty file")
+subject.write_text(valid[12], encoding="ascii")
+subject.chmod(0o622)
+refused_directory("writable trace")
+subject.chmod(0o600)
+trace_dir.chmod(0o722)
+refused_directory("writable directory")
+trace_dir.chmod(0o700)
+subject.write_bytes(b"\xff\n")
+refused_directory("non-ASCII trace")
+subject.write_text(valid[12], encoding="ascii")
+module.check_directory(trace_dir)
+print("HOST_APT_DISABLED_TRACE_READER_REGRESSIONS=PASS")
+PY
 
 # Real GNU timeout SIGTERM -> SIGKILL behavior, including a descendant
 # that deliberately ignores TERM; all processes are in a disposable session.

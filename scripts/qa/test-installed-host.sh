@@ -1067,6 +1067,9 @@ else
   echo 'PHP_WORDPRESS_PHASES=NOT_RUN (Debian12 installation and Proxy Only lane; no PHP compatibility claim)'
 fi
 docker exec "$container" /bin/sh /root/qa-apt-only.sh positive initial
+docker cp "$root/scripts/qa/apt-disabled-trace.py" "$container:/root/qa-apt-disabled-trace.py"
+docker exec "$container" /bin/sh /root/qa-apt-only.sh disabled-transports
+docker exec "$container" /bin/rm -- /root/qa-apt-disabled-trace.py
 assert_network_unchanged installed-vless-proxy "$offline_before"
 verify_host_services installed-vless-proxy
 docker exec "$container" /bin/sh /root/qa-proxy-only.sh upstream-failure

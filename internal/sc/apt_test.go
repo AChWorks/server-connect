@@ -494,3 +494,164 @@ func TestNativeAPTOptionalCompressorCompatibility(t *testing.T) {
 		}
 	}
 }
+
+func TestAPT261MayOmitOnlyNativeDirUsr(t *testing.T) {
+	proxy := "http://sc:synthetic-never-expose@127.0.0.1:20807"
+	base := nativeAptDumpForTest() + "Acquire::http::Proxy \"" + proxy + "\";\n" +
+		"Acquire::https::Proxy \"" + proxy + "\";\n"
+	withoutUsr := strings.Replace(base, "Dir::Usr \"usr\";\n", "", 1)
+	if err := verifyAptDumpWithCompatibility(withoutUsr, proxy, aptDebian12Native261); err != nil {
+		t.Fatal("observed Debian12/2.6.1 layout rejected:", err)
+	}
+	if err := verifyAptDumpWithCompatibility(base, proxy, aptDebian12Native261); err != nil {
+		t.Fatal("exact optional Dir::Usr rejected:", err)
+	}
+	for _, mode := range []aptCompatibility{aptStrictNative, aptCompatibility(255)} {
+		if err := verifyAptDumpWithCompatibility(withoutUsr, proxy, mode); ErrorCode(err) != "apt_policy_conflict" {
+			t.Fatal("Dir::Usr omission accepted outside verified Debian12/2.6.1")
+		}
+	}
+	for _, setting := range []string{"Dir::Usr \"\";\n", "Dir::Usr \"/tmp/foreign\";\n", "Dir::Usr:: \"usr\";\n"} {
+		if err := verifyAptDumpWithCompatibility(withoutUsr+setting, proxy, aptDebian12Native261); ErrorCode(err) != "apt_policy_conflict" {
+			t.Fatal("unsafe Dir::Usr spelling accepted in compatibility mode")
+		}
+	}
+	for key, value := range nativeAPTBinConfig {
+		missing := strings.Replace(withoutUsr, key+" \""+value+"\";\n", "", 1)
+		if err := verifyAptDumpWithCompatibility(missing, proxy, aptDebian12Native261); ErrorCode(err) != "apt_policy_conflict" {
+			t.Fatalf("mandatory native path became optional: %s", key)
+		}
+	}
+	if err := verifyAptDumpWithCompatibility(strings.Replace(withoutUsr, "Dir \"/\";\n", "", 1), proxy, aptDebian12Native261); ErrorCode(err) != "apt_policy_conflict" {
+		t.Fatal("mandatory native root became optional")
+	}
+}
+
+func TestAPTLegacyEnablersRemainRejectedBeforeAcquisition(t *testing.T) {
+	proxy := "http://sc:synthetic-never-expose@127.0.0.1:20807"
+	base := nativeAptDumpForTest() + "Acquire::http::Proxy \"" + proxy + "\";\n" +
+		"Acquire::https::Proxy \"" + proxy + "\";\n"
+	for _, method := range []string{"ftp", "rsh", "ssh", "mirror+ftp"} {
+		for _, prefix := range []string{"", "Binary::apt::", "Binary::apt-get::", "bInArY::ApT-gEt::"} {
+			key := prefix + "dIr::bIn::mEtHoDs::" + method
+			for _, value := range []string{method, "/usr/lib/apt/methods/" + method, "false", ""} {
+				if _, _, err := validateAptArgs([]string{"update", "-o", key + "=" + value}); ErrorCode(err) != "apt_policy_conflict" {
+					t.Fatalf("caller legacy enabler reached credential phase: %s", key)
+				}
+				for _, mode := range []aptCompatibility{aptStrictNative, aptDebian12Native261} {
+					dump := base + key + " \"" + value + "\";\n"
+					if err := verifyAptDumpWithCompatibility(dump, proxy, mode); ErrorCode(err) != "apt_policy_conflict" {
+						t.Fatalf("inherited legacy enabler accepted: %s", key)
+					}
+				}
+			}
+		}
+	}
+}
+
+func ownedDisabledAptDumpForTest() string {
+	var result strings.Builder
+	for _, method := range []string{"ftp", "rsh", "ssh", "mirror+ftp"} {
+		result.WriteString("Dir::Bin::Methods::" + method + " \"" + aptDisabledMethodPath + "\";\n")
+	}
+	return result.String()
+}
+
+func TestAPTOwnedDisabledPolicyMustBeExactAndComplete(t *testing.T) {
+	proxy := "http://sc:synthetic-never-expose@127.0.0.1:20807"
+	base := nativeAptDumpForTest() + "Acquire::http::Proxy \"" + proxy + "\";\n" +
+		"Acquire::https::Proxy \"" + proxy + "\";\n"
+	owned := ownedDisabledAptDumpForTest()
+	for _, mode := range []aptCompatibility{aptStrictNative, aptDebian12Native261} {
+		if err := verifyAptDumpPolicy(base+owned, proxy, mode, true); err != nil {
+			t.Fatal("exact owned disabled policy refused:", err)
+		}
+		if mode == aptDebian12Native261 {
+			withoutUsr := strings.Replace(base+owned, "Dir::Usr \"usr\";\n", "", 1)
+			if err := verifyAptDumpPolicy(withoutUsr, proxy, mode, true); err != nil {
+				t.Fatal("owned policy refused the exact Debian12/2.6.1 layout:", err)
+			}
+		}
+		if err := verifyAptDumpPolicy(base+owned, proxy, mode, false); ErrorCode(err) != "apt_policy_conflict" {
+			t.Fatal("first inspection accepted inherited method overrides")
+		}
+		for _, method := range []string{"ftp", "rsh", "ssh", "mirror+ftp"} {
+			line := "Dir::Bin::Methods::" + method + " \"" + aptDisabledMethodPath + "\";\n"
+			for _, broken := range []string{
+				strings.Replace(owned, line, "", 1),
+				strings.Replace(owned, line, "Dir::Bin::Methods::"+method+" \""+method+"\";\n", 1),
+				strings.Replace(owned, line, "Dir::Bin::Methods::"+method+" \"\";\n", 1),
+				owned + line,
+			} {
+				if err := verifyAptDumpPolicy(base+broken, proxy, mode, true); ErrorCode(err) != "apt_policy_conflict" {
+					t.Fatal("missing, enabled, empty or duplicate method denial accepted")
+				}
+			}
+		}
+		for _, extra := range []string{
+			"Dir::Bin::Methods::http \"" + aptDisabledMethodPath + "\";\n",
+			"Binary::apt::Dir::Bin::Methods::ftp \"ftp\";\n",
+			"RootDir \"/tmp/foreign\";\n",
+			"Acquire::http::Proxy::mirror.invalid \"DIRECT\";\n",
+		} {
+			if err := verifyAptDumpPolicy(base+owned+extra, proxy, mode, true); ErrorCode(err) != "apt_policy_conflict" {
+				t.Fatal("owned-denial phase weakened another native guard")
+			}
+		}
+	}
+}
+
+func TestAPTOwnedDisabledArgumentsFollowValidatedCallerOptions(t *testing.T) {
+	for _, args := range [][]string{
+		{"update"}, {"-t", "testing", "update"},
+		{"update", "-o", "Dir::Etc::sourcelist=/tmp/qa.list"},
+		{"install", "safe-test-package"}, {"download", "safe-test-package"},
+	} {
+		_, action, err := validateAptArgs(args)
+		if err != nil {
+			t.Fatal(err)
+		}
+		argv := aptExecArgs(args, action)
+		start := 2 + len(args)
+		want := []string{
+			"-o", "Dir::Bin::Methods::ftp=/usr/lib/apt/methods/false",
+			"-o", "Dir::Bin::Methods::rsh=/usr/lib/apt/methods/false",
+			"-o", "Dir::Bin::Methods::ssh=/usr/lib/apt/methods/false",
+			"-o", "Dir::Bin::Methods::mirror+ftp=/usr/lib/apt/methods/false",
+		}
+		if len(argv) < start+len(want) || strings.Join(argv[start:start+len(want)], "\x00") != strings.Join(want, "\x00") {
+			t.Fatal("owned method denial was not appended after all caller arguments")
+		}
+	}
+	for _, args := range [][]string{{"--", "update"}, {"update", "--"}, {"install", "safe-test-package", "--", "-oDir::Bin::Methods::ftp=ftp"}} {
+		if _, _, err := validateAptArgs(args); err == nil {
+			t.Fatal("argument separator could hide appended wrapper-owned options")
+		}
+	}
+}
+
+func TestRealAPTTwoStageDisabledMethodPolicy(t *testing.T) {
+	requireNativeAPT(t)
+	compatibility, err := observedAPTCompatibility(systemAPTGet)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := verifyNativeAPTMethodsWithCompatibility(compatibility); err != nil {
+		t.Fatal(err)
+	}
+	proxy, _ := url.Parse("http://sc:synthetic-never-expose@127.0.0.1:20807")
+	fd, err := privateAptConfig(t.TempDir(), proxy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer fd.Close()
+	if err := verifyEffectiveAptProxyWithCompatibility(fd, proxy.String(), nil, compatibility); err != nil {
+		t.Fatal("baseline native policy refused:", err)
+	}
+	if err := verifyEffectiveAptProxyPolicy(fd, proxy.String(), aptOwnedDisabledOpts(nil), compatibility, true); err != nil {
+		t.Fatal("native APT did not retain exact wrapper-owned denial:", err)
+	}
+	if err := verifyEffectiveAptProxyWithCompatibility(fd, proxy.String(), aptOwnedDisabledOpts(nil), compatibility); ErrorCode(err) != "apt_policy_conflict" {
+		t.Fatal("baseline phase accepted inherited per-method overrides")
+	}
+}
