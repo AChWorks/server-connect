@@ -30,6 +30,8 @@ FILE_NAMES = [
     "server-connect/server-connect-activation-recover.service",
     "server-connect/server-connect-activation-recover.timer",
     "server-connect/server-connect-smart-tun.service",
+    "server-connect/server-connect-smart-health.service",
+    "server-connect/server-connect-smart-health.timer",
     "server-connect/manifest.json",
     "server-connect/checksums.sha256",
     "server-connect/bin/server-connect",
@@ -80,7 +82,12 @@ def archive(path: Path, *, abnormal: str | None = None) -> str:
             entry.mode = 0o755
             output.addfile(entry)
         for name in FILE_NAMES:
-            if abnormal == "missing_recovery_timer" and name.endswith("server-connect-activation-recover.timer"):
+            missing_unit = {
+                "missing_recovery_timer": "server-connect-activation-recover.timer",
+                "missing_health_service": "server-connect-smart-health.service",
+                "missing_health_timer": "server-connect-smart-health.timer",
+            }.get(abnormal)
+            if missing_unit and name.endswith("/" + missing_unit):
                 continue
             body = b"INERT QA ONLY\n"
             if name == "server-connect/install.sh":
@@ -176,6 +183,8 @@ class BootstrapSecurityTest(unittest.TestCase):
         for name, abnormal in [
             ("valid.tar.gz", None),
             ("missing_recovery_timer.tar.gz", "missing_recovery_timer"),
+            ("missing_health_service.tar.gz", "missing_health_service"),
+            ("missing_health_timer.tar.gz", "missing_health_timer"),
             ("duplicate.tar.gz", "duplicate"),
             ("traversal.tar.gz", "traversal"),
             ("symlink.tar.gz", "symlink"),
@@ -297,7 +306,8 @@ class BootstrapSecurityTest(unittest.TestCase):
 
     def test_rejects_unsafe_members_and_parser_resource_abuse(self):
         for filename in (
-            "missing_recovery_timer.tar.gz", "duplicate.tar.gz", "traversal.tar.gz", "symlink.tar.gz",
+            "missing_recovery_timer.tar.gz", "missing_health_service.tar.gz",
+            "missing_health_timer.tar.gz", "duplicate.tar.gz", "traversal.tar.gz", "symlink.tar.gz",
             "hardlink.tar.gz", "expanded.tar.gz", "members.tar.gz",
             "pax_metadata.tar.gz", "compressed_oversized.tar.gz",
         ):

@@ -1,0 +1,27 @@
+# Inert until an exact disposable supervised operation arms this role.
+# The independent activation-recover timer checks this executor and its lease.
+[Unit]
+Description=Server Connect experimental selected-path health round
+Documentation=https://github.com/AChWorks/server-connect
+After=local-fs.target
+
+[Service]
+Type=oneshot
+ExecStart=/opt/server-connect/current/bin/server-connect --json smart-tun-trial-health
+TimeoutStartSec=20s
+TimeoutStartFailureMode=kill
+TimeoutStopSec=2s
+KillMode=control-group
+Restart=no
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/var/lib/server-connect
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+CapabilityBoundingSet=CAP_NET_ADMIN
+AmbientCapabilities=CAP_NET_ADMIN
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+UMask=0077

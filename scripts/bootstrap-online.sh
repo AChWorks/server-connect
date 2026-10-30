@@ -270,6 +270,8 @@ REQUIRED_FILES = {
     "server-connect/server-connect-activation-recover.service",
     "server-connect/server-connect-activation-recover.timer",
     "server-connect/server-connect-smart-tun.service",
+    "server-connect/server-connect-smart-health.service",
+    "server-connect/server-connect-smart-health.timer",
     "server-connect/manifest.json",
     "server-connect/checksums.sha256",
     "server-connect/bin/server-connect",
