@@ -96,6 +96,7 @@ class Fixture:
         self.recovery_identity = None
         self.health_role_originals = {}
         self.fixture_boot_id = None
+        self.health_fault_series = None
 
     def command(self, argv, *, check=True, timeout=20, data=None):
         elapsed = time.monotonic() - self.started
@@ -866,11 +867,89 @@ class Fixture:
                 type(health["failures"]) is int and health["failures"] == 0 and
                 type(health["recovery_deadline_uptime_ms"]) is int and health["recovery_deadline_uptime_ms"] == 0), \
             "executor fault requires a confirmed healthy operation before any failure or reconnect"
+        self.health_signal_pending_operation = current
         return health
+
+    def health_fault_context(self):
+        series = self.health_fault_series
+        if series is None:
+            return self.signal_operation_context()
+        current = self.journal()
+        if current is None:
+            series["stop_reason"] = "operation_absent"
+            return None
+        original = series["operation"]
+        mutable = {"phase", "revision", "native", "supervised"}
+        assert ({key: value for key, value in current.items() if key not in mutable} ==
+                {key: value for key, value in original.items() if key not in mutable}), \
+            "sustained executor fault lost the original operation identity"
+        if current["phase"] != "trial_pending":
+            terminal = {"trial_stop_requested": (2,), "trial_recovered": (2, 3),
+                        "trial_cleanup_pending": (4,), "trial_cleared": (5,)}
+            assert (type(current["revision"]) is int and
+                    current["revision"] in terminal.get(current["phase"], ())), \
+                "unexpected operation transition during sustained executor fault"
+            series["stop_reason"] = "operation_cleanup"
+            return None
+        assert current == original, \
+            "health publication, lease renewal, or retry occurred during sustained executor fault"
+        now = int(float(Path("/proc/uptime").read_text().split()[0]) * 1000)
+        if now >= series["lease_deadline_uptime_ms"]:
+            series["stop_reason"] = "original_lease_due"
+            return None
+        if time.monotonic() >= series["monotonic_deadline"]:
+            series["stop_reason"] = "absolute_polling_window_elapsed"
+            return None
+        return current["supervised"]
+
+    def sustain_health_executor_fault(self, requested_signal):
+        assert self.health_fault_series is None, "executor fault series already active"
+        # One failed oneshot can be replaced by the still-enabled authentic
+        # timer. Exercise sustained loss without altering either installed role.
+        self.wait_for_health_executor(requested_signal)
+        started = time.monotonic()
+        original = json.loads(json.dumps(self.health_signal_operation_snapshot))
+        health = original["supervised"]
+        lease = health["lease_deadline_uptime_ms"]
+        now = int(float(Path("/proc/uptime").read_text().split()[0]) * 1000)
+        assert (type(lease) is int and lease > 0 and
+                type(health["heartbeat_uptime_ms"]) is int and lease - health["heartbeat_uptime_ms"] == 35000), \
+            "invalid original supervision lease for sustained fault"
+        remaining = max(0, (lease - now) / 1000)
+        assert remaining <= 35, "sustained fault would exceed the original health lease"
+        first = dict(self.health_signal_identity)
+        series = {"operation": original, "lease_deadline_uptime_ms": lease,
+                  "monotonic_deadline": time.monotonic() + remaining,
+                  "invocations": {first["invocation"]: first}, "stop_reason": None}
+        self.health_fault_series = series
+        try:
+            # Every successor shares this one absolute deadline. A stopped
+            # invocation is skipped until systemd retires it; it is not signalled
+            # again. Stop before any same-operation cleanup or expired authority
+            # can turn a health invocation into a recovery executor.
+            while self.health_fault_context() is not None:
+                self.signal_health_executor(requested_signal)
+                if series["stop_reason"] is not None:
+                    break
+                time.sleep(0.1)
+            evidence = {"operation_id": self.op, "signal": int(requested_signal),
+                        "invocations": len(series["invocations"]),
+                        "original_lease_deadline_uptime_ms": lease,
+                        "observed_fault_window_seconds": round(time.monotonic() - started, 3),
+                        "stop_reason": series["stop_reason"]}
+            # This is the fault-injection receipt. Only the later attributable
+            # final receipt establishes automatic supervision-loss Off and names
+            # its actual HEALTH or RECOVERY emitter.
+            print("SUPERVISED_TUN_SUSTAINED_EXECUTOR_FAULT=" + json.dumps(evidence, separators=(",", ":")), flush=True)
+        finally:
+            self.health_fault_series = None
 
     def signal_health_executor(self, requested_signal):
         assert requested_signal in (signal.SIGKILL, signal.SIGSTOP), "unsupported executor fault"
-        due = self.signal_operation_context()["next_probe_uptime_ms"]
+        health = self.health_fault_context()
+        if health is None:
+            return False
+        due = health["next_probe_uptime_ms"]
         assert type(due) is int and due >= 0, "invalid next health probe time"
         if float(Path("/proc/uptime").read_text().split()[0]) * 1000 < due:
             self.health_signal_observation = {"pid": None, "readiness": "probe_not_due"}
@@ -886,6 +965,13 @@ class Fixture:
         if (re.fullmatch("[0-9a-f]{32}", invocation) is None or not started.isdigit() or
                 int(started) <= 0 or initial["ExecMainPID"] != str(pid)):
             self.health_signal_observation["readiness"] = "invocation_not_ready"
+            return False
+        series = self.health_fault_series
+        if series is not None and invocation in series["invocations"]:
+            previous = series["invocations"][invocation]
+            assert previous["pid"] == pid and previous["start"] == started, \
+                "a faulted health invocation changed process identity"
+            self.health_signal_observation["readiness"] = "invocation_already_faulted"
             return False
         try:
             descriptor = os.pidfd_open(pid)
@@ -933,13 +1019,17 @@ class Fixture:
                 if observed["MainPID"] != str(pid) or not same_invocation(observed):
                     self.health_signal_observation["readiness"] = "unit_identity_changed"
                     return False
-            operation_health = self.signal_operation_context()
+            operation_health = self.health_fault_context()
+            if operation_health is None:
+                return False
             if operation_health["next_probe_uptime_ms"] != due:
                 self.health_signal_observation["readiness"] = "probe_deadline_changed"
                 return False
-            # Keep the exact pre-dispatch health publication for the final
-            # independent Off receipt; a later outage round cannot stand in.
-            self.health_signal_snapshot = json.loads(json.dumps(operation_health))
+            if series is not None:
+                assert len(series["invocations"]) < 8, "sustained executor fault exceeded eight distinct invocations"
+            # Capture before dispatch; only a proven outcome may establish the
+            # immutable first snapshot used by the complete sustained series.
+            operation = json.loads(json.dumps(self.health_signal_pending_operation if series is None else series["operation"]))
             signal.pidfd_send_signal(descriptor, requested_signal)
             dispatched = True
             self.health_signal_observation["readiness"] = "awaiting_signal_outcome"
@@ -966,6 +1056,13 @@ class Fixture:
                 return "killed" if observed["MainPID"] == "0" else False
 
             outcome = self.wait(observed_outcome, 3, "exact health executor signal outcome")
+            identity = {"pid": pid, "generation": generation, "invocation": invocation, "start": started}
+            if series is None:
+                self.health_signal_operation_snapshot = operation
+                self.health_signal_snapshot = json.loads(json.dumps(operation["supervised"]))
+            else:
+                series["invocations"][invocation] = identity
+            self.health_signal_identity = identity
             self.health_signal_observation["readiness"] = "outcome_verified"
             print(f"SUPERVISED_TUN_EXECUTOR_FAULT_RECEIPT=pid:{pid} generation:{generation} invocation:{invocation} start:{started} signal:{int(requested_signal)} outcome:{outcome}", flush=True)
             return True
@@ -986,7 +1083,7 @@ class Fixture:
         elif kind in ("failed", "hung"):
             self.pause_upstream()
             requested_signal = signal.SIGKILL if kind == "failed" else signal.SIGSTOP
-            self.wait_for_health_executor(requested_signal)
+            self.sustain_health_executor_fault(requested_signal)
         else:
             path = UNITS / HEALTH
             original = UNITS / (HEALTH + ".scqa-supervised-original")

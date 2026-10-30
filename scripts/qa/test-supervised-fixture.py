@@ -1341,6 +1341,329 @@ class FinalReceiptTests(unittest.TestCase):
         self.assertEqual(events, ["present", "absent", "uptime", "drain", "drain", "off_and_direct"])
 
 
+class FakeFaultSeries(FakeHealthProcess):
+    """Serial authenticated timer invocations with synthetic boot and wall clocks."""
+
+    def __init__(self, modes=None):
+        super().__init__(modes or ["correct"])
+        self.now, self.boot_base_ms = 0.0, 100000
+        self.fixed_uptime_ms = None
+        self.successors, self.successor_interval = True, 0.75
+        self.next_successor_at = None
+        self.fixture, self.series = None, None
+        self.context_hook = self.readiness_hook = self.observation_hook = None
+        self.unit_observations, self.first_wait_count = 0, 0
+        self.dispatch_times = []
+        self.probe_due_ms = self.boot_base_ms
+        self.journal_data.update(boot_id="a1234567-89ab-cdef-0123-456789abcdef", config_sha256="d" * 64)
+        self.journal_data["supervised"].update(heartbeat_uptime_ms=70000, lease_deadline_uptime_ms=105000,
+                                               last_probe_uptime_ms=99000, next_probe_uptime_ms=self.probe_due_ms)
+        self.original_operation = copy.deepcopy(self.journal_data)
+
+    def monotonic(self):
+        self.now += 0.001
+        self.elapsed = self.now
+        return self.now
+
+    def sleep(self, seconds):
+        assert 0 <= seconds <= 1, "unexpected blocking wait in ordinary regression"
+        self.now += seconds
+
+    def uptime_ms(self):
+        return self.fixed_uptime_ms if self.fixed_uptime_ms is not None else self.boot_base_ms + int(self.now * 1000)
+
+    def path(self, name):
+        if name == "/proc/uptime":
+            return argparse.Namespace(read_text=lambda: f"{self.uptime_ms() / 1000:.3f} 0\n")
+        return super().path(name)
+
+    def journal(self):
+        current = super().journal()
+        if self.fixture is not None and self.fixture.health_fault_series is not None:
+            self.series = self.fixture.health_fault_series
+            if self.context_hook is not None:
+                current = self.context_hook(self, current)
+        self.last_journal_return = current
+        return current
+
+    def command(self, argv, *, timeout):
+        assert argv[:3] == ["systemctl", "show", driver.HEALTH] and timeout == 3
+        self.unit_observations += 1
+        if (self.descriptor is None and self.completed_signal is not None and self.successors and
+                self.next_successor_at is not None and self.now >= self.next_successor_at):
+            self.pid += 1
+            self.completed_signal = None
+            self.next_successor_at = None
+        if self.descriptor is None and self.completed_signal is not None:
+            # systemd retains the previous outcome until a successor is started.
+            # A stopped oneshot remains the same live invocation across polls.
+            killed = self.completed_signal == driver.signal.SIGKILL
+            values = {"MainPID": "0" if killed else str(self.pid), "InvocationID": f"{self.pid:032x}",
+                      "ExecMainPID": str(self.pid), "ExecMainCode": "2" if killed else "0",
+                      "ExecMainStatus": "9" if killed else "0", "ActiveState": "failed" if killed else "activating",
+                      "Result": "signal" if killed else "success", "ExecMainStartTimestampMonotonic": str(1000 + self.pid)}
+        else:
+            result = super().command(argv, timeout=timeout)
+            values = dict(line.split("=", 1) for line in result.stdout.splitlines())
+        if self.delivered and self.descriptor is None and self.completed_signal is None and self.readiness_hook is not None:
+            hook, self.readiness_hook = self.readiness_hook, None
+            hook(self)
+        if self.observation_hook is not None:
+            self.observation_hook(self, values)
+        fields = argv[4::2]
+        assert set(fields) == set(values)
+        return subprocess.CompletedProcess(argv, 0, stdout="".join(field + "=" + values[field] + "\n" for field in fields), stderr="")
+
+    def send(self, descriptor, requested_signal):
+        super().send(descriptor, requested_signal)
+        self.dispatch_times.append({"pid": self.bound_pids[descriptor], "monotonic": self.now, "uptime_ms": self.uptime_ms()})
+        self.next_successor_at = self.now + self.successor_interval
+
+
+class SustainedFaultTests(unittest.TestCase):
+    def exercise(self, fake, requested_signal=driver.signal.SIGKILL):
+        fixture = ForeignCleanupTests.new_fixture()
+        fixture.op, fake.fixture = fake.operation, fixture
+        fake_os = argparse.Namespace(pidfd_open=fake.open, stat=fake.stat, close=fake.close, CLD_KILLED=2)
+        fake_signal = argparse.Namespace(SIGKILL=driver.signal.SIGKILL, SIGSTOP=driver.signal.SIGSTOP,
+                                         pidfd_send_signal=fake.send)
+        with patch.object(driver, "os", fake_os), patch.object(driver, "signal", fake_signal), \
+                patch.object(driver, "Path", side_effect=fake.path), \
+                patch.object(fixture, "show", side_effect=fake.show), \
+                patch.object(fixture, "command", side_effect=fake.command), \
+                patch.object(fixture, "journal", side_effect=fake.journal), \
+                patch.object(fixture, "wait_for_health_executor", wraps=fixture.wait_for_health_executor) as first_wait, \
+                patch.object(driver.subprocess, "run", side_effect=AssertionError("unexpected real process")), \
+                patch.object(driver.subprocess, "Popen", side_effect=AssertionError("unexpected real process")), \
+                patch.object(driver.time, "monotonic", side_effect=fake.monotonic), \
+                patch.object(driver.time, "sleep", side_effect=fake.sleep), contextlib.redirect_stdout(fake.output):
+            try:
+                fixture.sustain_health_executor_fault(requested_signal)
+            finally:
+                fake.first_wait_count = first_wait.call_count
+                fake.health_signal_snapshot = getattr(fixture, "health_signal_snapshot", None)
+                fake.operation_snapshot = getattr(fixture, "health_signal_operation_snapshot", None)
+                self.assertEqual(fake.closed, fake.opened, "sustained fault leaked a process descriptor")
+                self.assertIsNone(fixture.health_fault_series, "series authority escaped its bounded scope")
+
+    def receipt(self, fake):
+        prefix = "SUPERVISED_TUN_SUSTAINED_EXECUTOR_FAULT="
+        lines = [line for line in fake.output.getvalue().splitlines() if line.startswith(prefix)]
+        self.assertEqual(len(lines), 1)
+        return json.loads(lines[0][len(prefix):])
+
+    def assert_no_series_receipt(self, fake):
+        self.assertNotIn("SUPERVISED_TUN_SUSTAINED_EXECUTOR_FAULT=", fake.output.getvalue())
+
+    def test_distinct_successors_are_faulted_once_without_replacing_first_snapshot(self):
+        for requested_signal in (driver.signal.SIGKILL, driver.signal.SIGSTOP):
+            with self.subTest(signal=requested_signal):
+                fake = FakeFaultSeries()
+                fake.context_hook = lambda state, current: None if len(state.delivered) == 3 else current
+                self.exercise(fake, requested_signal)
+                self.assertEqual([item["pid"] for item in fake.dispatch_times], [41, 42, 43])
+                self.assertEqual(len(fake.opened), 3)
+                self.assertEqual(fake.first_wait_count, 1, "a successor restarted the readiness budget")
+                self.assertEqual(fake.operation_snapshot, fake.original_operation)
+                self.assertEqual(fake.health_signal_snapshot, fake.original_operation["supervised"])
+                self.assertEqual(set(fake.series["invocations"]), {f"{pid:032x}" for pid in (41, 42, 43)})
+                self.assertEqual(fake.output.getvalue().count("SUPERVISED_TUN_EXECUTOR_FAULT_RECEIPT="), 3)
+                receipt = self.receipt(fake)
+                self.assertEqual((receipt["invocations"], receipt["stop_reason"]), (3, "operation_absent"))
+                self.assertEqual(receipt["original_lease_deadline_uptime_ms"], 105000)
+
+    def test_same_hung_invocation_is_never_signalled_again(self):
+        fake = FakeFaultSeries()
+        fake.successors = False
+        self.exercise(fake, driver.signal.SIGSTOP)
+        self.assertGreater(fake.unit_observations, 10)
+        self.assertEqual(len(fake.opened), 1)
+        self.assertEqual(len(fake.dispatch_attempts), 1)
+        self.assertEqual(self.receipt(fake)["stop_reason"], "original_lease_due")
+
+    def test_successors_share_original_lease_and_one_monotonic_ceiling(self):
+        for frozen_uptime in (False, True):
+            with self.subTest(frozen_uptime=frozen_uptime):
+                fake = FakeFaultSeries()
+                if frozen_uptime:
+                    fake.fixed_uptime_ms = fake.boot_base_ms
+                self.exercise(fake)
+                self.assertGreater(len(fake.delivered), 2)
+                self.assertEqual(fake.first_wait_count, 1)
+                self.assertEqual(fake.series["lease_deadline_uptime_ms"], 105000)
+                self.assertLessEqual(fake.series["monotonic_deadline"], 5.1)
+                self.assertLessEqual(fake.now, 5.2)
+                self.assertTrue(all(item["uptime_ms"] < 105000 and item["monotonic"] < fake.series["monotonic_deadline"]
+                                    for item in fake.dispatch_times))
+                expected = "absolute_polling_window_elapsed" if frozen_uptime else "original_lease_due"
+                self.assertEqual(self.receipt(fake)["stop_reason"], expected)
+
+    def test_eight_invocation_bound_prevents_a_ninth_signal(self):
+        fake = FakeFaultSeries()
+        fake.successor_interval = 0.01
+        with self.assertRaisesRegex(AssertionError, "eight distinct invocations"):
+            self.exercise(fake)
+        self.assertEqual(len(fake.delivered), 8)
+        self.assertEqual(len(fake.series["invocations"]), 8)
+        self.assertEqual(fake.first_wait_count, 1)
+        self.assert_no_series_receipt(fake)
+
+    def test_seen_invocation_with_changed_pid_or_start_fails_before_opening(self):
+        for changed in ("pid", "start"):
+            with self.subTest(changed=changed):
+                fake = FakeFaultSeries()
+                fake.successors = False
+
+                def changed_identity(state, values):
+                    if state.delivered and state.descriptor is None:
+                        if changed == "pid":
+                            values["MainPID"] = values["ExecMainPID"] = "99"
+                        else:
+                            values["ExecMainStartTimestampMonotonic"] = "9999"
+
+                fake.observation_hook = changed_identity
+                with self.assertRaisesRegex(AssertionError, "faulted health invocation changed process identity"):
+                    self.exercise(fake, driver.signal.SIGSTOP)
+                self.assertEqual(len(fake.opened), 1)
+                self.assertEqual(len(fake.delivered), 1)
+                self.assert_no_series_receipt(fake)
+
+    def test_same_operation_cleanup_or_absence_stops_readiness_and_dispatch_races(self):
+        for boundary in ("entry", "readiness", "dispatch"):
+            for absent in (False, True):
+                with self.subTest(boundary=boundary, absent=absent):
+                    fake = FakeFaultSeries()
+                    transition = [False]
+
+                    def terminal(state, current):
+                        if boundary == "entry" or transition[0] or (boundary == "dispatch" and
+                                state.descriptor is not None and state.unit_reads >= 2):
+                            if absent:
+                                return None
+                            current.update(phase="trial_cleanup_pending", revision=4)
+                        return current
+
+                    fake.context_hook = terminal
+                    if boundary == "readiness":
+                        fake.readiness_hook = lambda state: transition.__setitem__(0, True)
+                    self.exercise(fake)
+                    self.assertEqual(len(fake.delivered), 1, "cleanup executor received a successor fault")
+                    self.assertEqual(len(fake.opened), 1 if boundary == "entry" else 2)
+                    expected = "operation_absent" if absent else "operation_cleanup"
+                    self.assertEqual(self.receipt(fake)["stop_reason"], expected)
+
+    def test_original_time_authority_is_rechecked_immediately_before_dispatch(self):
+        for clock in ("uptime", "monotonic"):
+            with self.subTest(clock=clock):
+                fake = FakeFaultSeries()
+                if clock == "monotonic":
+                    fake.fixed_uptime_ms = fake.boot_base_ms
+
+                def expire(state, current):
+                    if state.descriptor is not None and state.unit_reads >= 2:
+                        if clock == "uptime":
+                            state.fixed_uptime_ms = state.series["lease_deadline_uptime_ms"]
+                        else:
+                            state.now = state.series["monotonic_deadline"] + 0.001
+                    return current
+
+                fake.context_hook = expire
+                self.exercise(fake)
+                self.assertEqual(len(fake.opened), 2)
+                self.assertEqual(len(fake.delivered), 1)
+                expected = "original_lease_due" if clock == "uptime" else "absolute_polling_window_elapsed"
+                self.assertEqual(self.receipt(fake)["stop_reason"], expected)
+
+    def test_pending_publication_lease_or_recovery_drift_aborts_the_series(self):
+        changes = (("confirmed", False), ("state", "reconnecting"), ("attempts", 1), ("failures", 1),
+                   ("recovery_deadline_uptime_ms", 110000), ("rounds", 4), ("last_probe_uptime_ms", 100000),
+                   ("next_probe_uptime_ms", 101000), ("heartbeat_uptime_ms", 71000),
+                   ("lease_deadline_uptime_ms", 106000), ("evidence", {"probe_count": 7, "elapsed_ms": 11}))
+        for field, value in changes:
+            with self.subTest(field=field):
+                fake = FakeFaultSeries()
+
+                def changed(state, current):
+                    current["supervised"][field] = value
+                    return current
+
+                fake.context_hook = changed
+                with self.assertRaisesRegex(AssertionError, "health publication, lease renewal, or retry"):
+                    self.exercise(fake)
+                self.assertEqual(len(fake.delivered), 1)
+                self.assertEqual(fake.operation_snapshot, fake.original_operation)
+                self.assert_no_series_receipt(fake)
+
+    def test_foreign_identity_and_unrecognized_cleanup_transition_are_rejected(self):
+        for cleanup in (False, True):
+            for field, value in (("operation_id", "e" * 32), ("boot_id", "different boot"), ("config_sha256", "e" * 64)):
+                with self.subTest(cleanup=cleanup, field=field):
+                    fake = FakeFaultSeries()
+
+                    def foreign(state, current):
+                        if cleanup:
+                            current.update(phase="trial_cleanup_pending", revision=4)
+                        current[field] = value
+                        return current
+
+                    fake.context_hook = foreign
+                    with self.assertRaisesRegex(AssertionError, "lost the original operation identity"):
+                        self.exercise(fake)
+                    self.assertEqual(len(fake.delivered), 1)
+                    self.assert_no_series_receipt(fake)
+        for phase, revision in (("trial_cleanup_pending", 3), ("trial_active", 4), ("trial_cleared", 5.0)):
+            with self.subTest(phase=phase, revision=revision):
+                fake = FakeFaultSeries()
+
+                def invalid_phase(state, current):
+                    current.update(phase=phase, revision=revision)
+                    return current
+
+                fake.context_hook = invalid_phase
+                with self.assertRaisesRegex(AssertionError, "unexpected operation transition"):
+                    self.exercise(fake)
+                self.assertEqual(len(fake.delivered), 1)
+                self.assert_no_series_receipt(fake)
+
+    def test_unproven_first_fault_or_successor_never_earns_a_series_receipt(self):
+        for successor in (False, True):
+            for requested_signal, mode in ((driver.signal.SIGKILL, "kill_ordinary_exit"),
+                                            (driver.signal.SIGSTOP, "stop_unobserved")):
+                with self.subTest(successor=successor, signal=requested_signal):
+                    fake = FakeFaultSeries((["correct"] if successor else []) + [mode])
+                    with self.assertRaises(AssertionError):
+                        self.exercise(fake, requested_signal)
+                    self.assertEqual(len(fake.dispatch_attempts), 2 if successor else 1)
+                    self.assertEqual(fake.output.getvalue().count("SUPERVISED_TUN_EXECUTOR_FAULT_RECEIPT="), 1 if successor else 0)
+                    if successor:
+                        self.assertEqual(len(fake.series["invocations"]), 1)
+                        self.assertEqual(fake.operation_snapshot, fake.original_operation)
+                    else:
+                        self.assertIsNone(fake.operation_snapshot)
+                    self.assert_no_series_receipt(fake)
+
+    def test_cleanup_after_ordinary_retries_cannot_be_accepted_as_supervisor_off(self):
+        fake = FakeFaultSeries()
+
+        def ordinary_retry_cleanup(state, current):
+            current.update(phase="trial_cleanup_pending", revision=4)
+            current["supervised"].update(state="stopped", attempts=2, failures=1,
+                                          recovery_deadline_uptime_ms=110000, reason="reconnect_exhausted")
+            return current
+
+        fake.context_hook = ordinary_retry_cleanup
+        self.exercise(fake)
+        self.assertEqual(len(fake.delivered), 1)
+        self.assertEqual(self.receipt(fake)["stop_reason"], "operation_cleanup")
+        self.assertNotIn("SUPERVISED_TUN_FINAL_RECEIPT=", fake.output.getvalue())
+        final = FakeFinalReceipt("reconnect_exhausted")
+        final.snapshot = copy.deepcopy(fake.health_signal_snapshot)
+        final.value.update(reconnect_attempts=2, health_failures=1, recovery_deadline_uptime_ms=110000)
+        with self.assertRaises(AssertionError):
+            FinalReceiptTests.exercise(self, final)
+        self.assertNotIn("SUPERVISED_TUN_FINAL_RECEIPT=", final.output.getvalue())
+
+
 if __name__ == "__main__":
     result = unittest.main(exit=False).result
     if not result.wasSuccessful():
@@ -1352,3 +1675,4 @@ if __name__ == "__main__":
     print("SUPERVISED_FIXTURE_EXACT_FAILED_TIMER_RECONCILIATION=PASS")
     print("SUPERVISED_FIXTURE_EXECUTOR_FAULT_CAUSAL_CONTEXT=PASS")
     print("SUPERVISED_FIXTURE_SUPERVISOR_OFF_CAUSAL_RECEIPTS=PASS")
+    print("SUPERVISED_FIXTURE_SUSTAINED_EXECUTOR_FAULT_BOUNDS=PASS")
