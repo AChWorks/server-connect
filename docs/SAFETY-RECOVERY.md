@@ -95,6 +95,21 @@ authority. Invalid or missing saved input is rejected before prearm. A saved
 policy change detected during prearm blocks TUN activation and reconciles only
 an uncommitted guard; it cannot disarm another journaled operation.
 
+Native and legacy trial recovery share one owned core-stop proof. An acknowledged
+`systemctl stop` may leave an already failed service in `failed`
+([systemd stop handling](https://github.com/systemd/systemd/blob/v257/src/core/unit.c)).
+Before normalizing that bookkeeping, require the same installed unit identity
+and digest, no queued job or main/control PID, and a released systemd cgroup.
+During [systemd's inactive/failed cleanup](https://github.com/systemd/systemd/blob/v257/src/core/cgroup.c),
+the path is released only after recursive emptiness.
+Only that quiescent, authenticated core, with a durable core-start attempt and
+an unchanged operation-bound credential, may have its failed state reset. Then
+reobserve the same unit as `inactive`/`dead` with no live work before declaring
+containment complete. Preserve the original pre-stop state for credential-trust
+decisions. Query/stop/reset uncertainty, residual work or changed provenance
+retains recovery evidence and native protection. This deactivation-only action
+does not reset a failed guard or authorize another activation.
+
 #### Native ownership and containment
 
 New pending trials use exact intent `smart_tun_native_pending_trial_v1` and a
