@@ -140,10 +140,15 @@ activation. Publishing confirmation requires the unchanged complete journal and
 current native ownership proof; interrupted publication retains recovery state.
 
 The installed health oneshot has a 20-second systemd execution limit and a
-separate 5-second timer. It publishes operation-bound progress; independent
-recovery checks actual executor provenance, state and bounded progress, not
-just an active timer. Dead, failed, disabled, masked, missing or hung supervision
-must end in exact owned restoration or explicit uncertainty. The health role
+separate 5-second timer. Independent recovery checks recorded executor
+provenance, current role state and a 35-second operation-bound progress lease.
+A single interrupted invocation may be replaced by the unchanged trusted timer
+and resume valid progress before that lease expires. An observed failed or
+unavailable health role, or an expired progress lease, triggers exact owned Off
+recovery; incomplete ownership or finalization remains explicit uncertainty.
+A replacement invocation cannot renew expired authority, but it can perform
+owned Off itself. The emitting service's journal provenance distinguishes that
+outcome from Off completed by the independent recovery role. The health role
 also refuses to keep routing when independent recovery is unavailable. Network
 probes run outside the manager lock, and their results require exact journal,
 boot and ownership revalidation before publication. Stale concurrent results
