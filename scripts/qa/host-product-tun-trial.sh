@@ -264,4 +264,71 @@ print(d["operation_id"])')
   require_recovered "$op"
   clear_recovered "$op"
   echo PRODUCT_TUN_PRE_CREDENTIAL_SIGKILL_INDEPENDENT_ROLLBACK=PASS
+
+  # Negative path: the manager DID durably attempt to start the core.
+  # Removing its source credential must never be accepted as the benign
+  # "crash before credential" case, even after systemd has stopped the
+  # core and the native kernel baseline has returned to Direct.
+  apply 30 >/run/sc-qa-product-tun-apply.json
+  op=$(pending_receipt)
+  credential=/var/lib/server-connect/smart-tun-trial.json
+  saved=/run/sc-qa-product-tun-credential.saved
+  test -f "$credential" && test ! -e "$saved"
+  python3 - "$op" <<'PYSTARTED'
+import json,sys
+with open('/var/lib/server-connect/route-activation-journal.json') as f:r=json.load(f)
+assert r['operation_id']==sys.argv[1] and r['phase']=='trial_pending',r
+assert r['core_start_attempted'] is True,r
+PYSTARTED
+  mv -- "$credential" "$saved"
+  test ! -e "$credential"
+  # The installed independent recovery executor must stop the owned unit
+  # and refuse to clear the operation until its exact credential returns.
+  conflict=no
+  for n in $(seq 1 30); do
+    if [ "$(systemctl show server-connect-activation-recover.service -p Result --value)" = exit-code ] &&
+       [ "$(systemctl show server-connect-smart-tun.service -p ActiveState --value)" = inactive ] &&
+       [ ! -e /sys/class/net/sctunqa0 ]; then
+      conflict=yes
+      break
+    fi
+    sleep 1
+  done
+  [ "$conflict" = yes ] || {
+    echo 'PRODUCT_TUN_CREDENTIAL_CONFLICT=FAIL (watchdog did not stop TUN)' >&2
+    return 1
+  }
+  [ "$(ip -N -j -4 route show table all)" = "$before_routes" ]
+  [ "$(ip -N -j -4 rule show)" = "$before_rules" ]
+  [ "$(ip -N -j -6 route show table all)" = "$before_v6_routes" ]
+  [ "$(ip -N -j -6 rule show)" = "$before_v6_rules" ]
+  [ "$(nft -j list ruleset)" = "$before_nft" ]
+  # A second independent invocation must still refuse a false success
+  # after the first one changed the service state to inactive.
+  for n in 1 2; do
+    if "$sc" --json activation-trial-recover >/run/sc-qa-product-tun-conflict.json; then
+      echo 'Missing credential was silently accepted on repeated recovery' >&2
+      return 1
+    fi
+    python3 - "$op" <<'PYMISSING'
+import json,sys
+with open('/run/sc-qa-product-tun-conflict.json') as f:r=json.load(f)
+assert not r['ok'] and r['error']['code']=='trial_resource_conflict',r
+with open('/var/lib/server-connect/route-activation-journal.json') as f:j=json.load(f)
+assert j['operation_id']==sys.argv[1] and j['revision']==1,r
+assert j['phase']=='trial_pending' and j['core_start_attempted'] is True,j
+PYMISSING
+  done
+  echo PRODUCT_TUN_CREDENTIAL_REMOVAL_PERSISTENT_CONFLICT=PASS
+
+  # Explicit isolated operator intervention supplies the original bytes;
+  # only a *freshly executed* independent recovery unit may then confirm
+  # the unchanged kernel baseline and permit exact operation clearance.
+  mv -- "$saved" "$credential"
+  systemctl reset-failed server-connect-activation-recover.service
+  systemctl start server-connect-activation-recover.service
+  require_recovered "$op"
+  clear_recovered "$op"
+  rm -f /run/sc-qa-product-tun-apply.json /run/sc-qa-product-tun-conflict.json
+  echo PRODUCT_TUN_CREDENTIAL_CONFLICT_RECONCILED=PASS
 }

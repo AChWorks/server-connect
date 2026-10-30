@@ -21,10 +21,13 @@ func trialV4Example() smartTUNTrialJournal {
 
 func TestSmartTUNJournalCanonicalPhasesAndMinimalReceipt(t *testing.T) {
 	pending := trialV4Example()
-	for _, record := range []smartTUNTrialJournal{pending, func() smartTUNTrialJournal {
-		pending.Phase, pending.Revision = "trial_recovered", 2
-		return pending
-	}()} {
+	started := pending
+	started.CoreStartAttempted = true
+	recovered := started
+	recovered.Phase, recovered.Revision = "trial_recovered", 2
+	precredentialRecovery := pending
+	precredentialRecovery.Phase, precredentialRecovery.Revision = "trial_recovered", 2
+	for _, record := range []smartTUNTrialJournal{pending, started, recovered, precredentialRecovery} {
 		raw, err := json.Marshal(record)
 		if err != nil {
 			t.Fatal(err)
@@ -81,6 +84,7 @@ func TestSmartTUNJournalRejectsUnknownDuplicateAndTrailingData(t *testing.T) {
 	raw, _ := json.Marshal(trialV4Example())
 	for _, bad := range [][]byte{
 		append(append([]byte{}, raw...), []byte(" {}")...),
+		[]byte(strings.Replace(string(raw), `"core_start_attempted":false,`, "", 1)),
 		append(append([]byte{}, raw[:len(raw)-1]...), []byte(`,"unknown":false}`)...),
 		append(append([]byte{}, raw[:len(raw)-1]...), []byte(`,"version":4}`)...),
 		[]byte("[]"), []byte("null"), []byte(""), []byte("{"),
@@ -88,6 +92,33 @@ func TestSmartTUNJournalRejectsUnknownDuplicateAndTrailingData(t *testing.T) {
 		if _, err := decodeSmartTUNTrial(bad); err == nil {
 			t.Fatalf("accepted invalid persisted JSON %q", bad)
 		}
+	}
+}
+
+func TestSmartTUNCredentialRecoveryNeverLosesStartIntentOnRepeatedGuardTicks(t *testing.T) {
+	for _, tc := range []struct {
+		name                      string
+		started, present, matches bool
+		beforeStop                string
+		accept                    bool
+	}{
+		{"journal-first SIGKILL before credentials", false, false, false, "inactive", true},
+		{"crash before core start with staged credential", false, true, true, "inactive", true},
+		{"started core with original credential", true, true, true, "active", true},
+		{"stopped failed core with original credential", true, true, true, "failed", true},
+		{"missing credential after core start, first timer", true, false, false, "active", false},
+		{"missing credential after core start, next timer", true, false, false, "inactive", false},
+		{"changed credential after core start, next timer", true, true, false, "inactive", false},
+		{"no durable start intent but unexpected core", false, true, true, "active", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := trialV4Example()
+			r.CoreStartAttempted = tc.started
+			err := smartTUNTrialCredentialRecoveryCheck(r, tc.beforeStop, tc.present, tc.matches)
+			if tc.accept != (err == nil) {
+				t.Fatalf("unsafe credential recovery decision: accepted=%v err=%v", err == nil, err)
+			}
+		})
 	}
 }
 

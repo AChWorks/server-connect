@@ -29,9 +29,14 @@ The installed experimental v4 journal deliberately has only
 `trial_pending` (revision 1) and `trial_recovered` (revision 2), **not**
 `ACTIVE_VERIFIED`. It binds the operation, profile, synthetic endpoint,
 native baseline digest, sing-box configuration digest, boot ID and monotonic
-deadline. It records the journal **before** the credential, then starts the actual
-pinned sing-box Linux TUN in a separate static service after both are durable, while the prearmed recovery oneshot
-and 5-second timer have been independently exercised. The default expiry
+deadline. It records the journal **before** the credential, then durably records a
+`core_start_attempted` transition before invoking the actual pinned sing-box
+Linux TUN in a separate static service. A missing credential from a journal-first
+crash is distinguishable from a vanished credential after start intent, even
+on successive independent recovery ticks. A credential mismatch is not an
+owned resource to discard simply because the kernel returned to baseline.
+The recovery oneshot and 5-second systemd timer are independently prearmed
+and verified before starting the TUN. The default expiry
 is 600 seconds, configurable from 4 to 600 seconds in disconnected QA only.
 A failed/uncertain restoration retains the journal, never presents Direct
 as safely verified and blocks installer/update/profile/Proxy Only transitions.

@@ -31,21 +31,22 @@ const (
 )
 
 type smartTUNTrialJournal struct {
-	Version           int    `json:"version"`
-	Revision          uint64 `json:"revision"`
-	OperationID       string `json:"operation_id"`
-	IntentType        string `json:"intent_type"`
-	Phase             string `json:"phase"`
-	CreatedUnix       int64  `json:"created_unix"`
-	BootID            string `json:"boot_id"`
-	DeadlineUptimeSec int64  `json:"deadline_uptime_sec"`
-	ProfileID         string `json:"profile_id"`
-	EndpointIP        string `json:"endpoint_ip"`
-	ManagementPeerIP  string `json:"management_peer_ip"`
-	TunnelInterface   string `json:"tunnel_interface"`
-	UnderlayInterface string `json:"underlay_interface"`
-	ConfigSHA256      string `json:"config_sha256"`
-	BaselineSHA256    string `json:"baseline_sha256"`
+	Version            int    `json:"version"`
+	Revision           uint64 `json:"revision"`
+	OperationID        string `json:"operation_id"`
+	IntentType         string `json:"intent_type"`
+	Phase              string `json:"phase"`
+	CreatedUnix        int64  `json:"created_unix"`
+	BootID             string `json:"boot_id"`
+	DeadlineUptimeSec  int64  `json:"deadline_uptime_sec"`
+	ProfileID          string `json:"profile_id"`
+	EndpointIP         string `json:"endpoint_ip"`
+	ManagementPeerIP   string `json:"management_peer_ip"`
+	TunnelInterface    string `json:"tunnel_interface"`
+	UnderlayInterface  string `json:"underlay_interface"`
+	ConfigSHA256       string `json:"config_sha256"`
+	CoreStartAttempted bool   `json:"core_start_attempted"`
+	BaselineSHA256     string `json:"baseline_sha256"`
 }
 
 var smartTUNTrialFields = map[string]bool{
@@ -53,7 +54,7 @@ var smartTUNTrialFields = map[string]bool{
 	"phase": true, "created_unix": true, "boot_id": true, "deadline_uptime_sec": true,
 	"profile_id": true, "endpoint_ip": true, "management_peer_ip": true,
 	"tunnel_interface": true, "underlay_interface": true,
-	"config_sha256": true, "baseline_sha256": true,
+	"config_sha256": true, "core_start_attempted": true, "baseline_sha256": true,
 }
 
 // This receipt is a *pending, unconfirmed trial*, NEVER production readiness
@@ -518,6 +519,19 @@ func (m *Manager) BeginSmartTUNTrial(opts SmartTUNCandidateOptions, managementPe
 		if err := put(cfgPath, policy); err != nil {
 			return Fault("trial_pending_recovery", "guarded journal durable but TUN credential staging failed; independent recovery required")
 		}
+		// Record the *durable* intention to start before invoking systemd.
+		// A later missing credential can therefore never be confused with
+		// a legitimate precredential crash, even on the NEXT guard tick
+		// after the service has been stopped. No sensitive policy is stored
+		// in this journal: only immutable operation and hash evidence.
+		_, identity, err := store.readJournal()
+		if err != nil {
+			return Fault("trial_pending_recovery", "cannot reidentify persisted TUN journal before core start")
+		}
+		record.CoreStartAttempted = true
+		if err := writeSmartTUNTrialLocked(store, record, &identity); err != nil {
+			return Fault("trial_pending_recovery", "cannot durably record TUN start intent; independent recovery required")
+		}
 		if err := smartTUNTrialSystemctl("start", smartTUNTrialUnit); err != nil {
 			return Fault("trial_pending_recovery", "TUN service failed after durable pending journal; independent guard must reconcile")
 		}
@@ -596,6 +610,22 @@ func (m *Manager) tryRecoverSmartTUNTrial() (TrialReceipt, bool, error) {
 	return receipt, handled, err
 }
 
+// An absent credential is legitimate ONLY for journal-first failure before
+// a core start could be attempted. An exact restored kernel baseline does not
+// license silently discarding a tampered or vanished start credential.
+func smartTUNTrialCredentialRecoveryCheck(record smartTUNTrialJournal, originalUnitState string, present, matches bool) error {
+	if present && !matches {
+		return Fault("trial_resource_conflict", "pending TUN credential was replaced")
+	}
+	if !present && record.CoreStartAttempted {
+		return Fault("trial_resource_conflict", "credential missing after durable TUN start intent")
+	}
+	if !record.CoreStartAttempted && originalUnitState != "inactive" {
+		return Fault("trial_resource_conflict", "TUN unit has unexpected activity before any durable start intent")
+	}
+	return nil
+}
+
 func recoverSmartTUNTrialLocked(store *activationJournalDir, identity activationJournalFileIdentity, record smartTUNTrialJournal) (SmartTUNTrialReceipt, error) {
 	// Never silently recover a physical host or unowned systemd unit even if
 	// a journal is copied to it. Persist an unresolved receipt for console.
@@ -646,6 +676,7 @@ func recoverSmartTUNTrialLocked(store *activationJournalDir, identity activation
 	}
 	// Expired, rebooted, stopped or failed: stop ONLY the trusted,
 	// pinned systemd service and demand EXACT baseline restoration.
+	originalUnitState := status
 	if err := smartTUNTrialSystemctl("stop", smartTUNTrialUnit); err != nil {
 		return SmartTUNTrialReceipt{}, err
 	}
@@ -657,15 +688,12 @@ func recoverSmartTUNTrialLocked(store *activationJournalDir, identity activation
 	if err != nil || current != record.BaselineSHA256 {
 		return SmartTUNTrialReceipt{}, Fault("trial_recovery_uncertain", "host routing or firewall baseline differs after TUN stop")
 	}
-	// A modified credential is an external resource conflict, not an
-	// owned object to delete. A missing credential is legitimate only for
-	// the journal-first, pre-start crash; exact TUN service stop is still
-	// independently required before marking recovered.
-	if credentialPresent && !credentialValid {
-		return SmartTUNTrialReceipt{}, Fault("trial_resource_conflict", "pending TUN credential was replaced")
-	}
-	if !credentialPresent && status != "inactive" {
-		return SmartTUNTrialReceipt{}, Fault("trial_resource_conflict", "running TUN unit lost its original credential; owned service stopped but operation is uncertain")
+	// Stopping a service changes ActiveState to inactive. Do not use its
+	// *post-stop* state to decide whether a missing credential was ever
+	// trusted. The journal's prior durable start intent is authoritative
+	// across repeated watchdog ticks and missing/modified credential bytes.
+	if err := smartTUNTrialCredentialRecoveryCheck(record, originalUnitState, credentialPresent, credentialValid); err != nil {
+		return SmartTUNTrialReceipt{}, err
 	}
 	record.Phase, record.Revision = "trial_recovered", 2
 	if err := writeSmartTUNTrialLocked(store, record, &identity); err != nil {
