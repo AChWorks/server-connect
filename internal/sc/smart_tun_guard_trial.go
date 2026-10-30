@@ -114,6 +114,15 @@ func decodeSmartTUNTrial(data []byte) (smartTUNTrialJournal, error) {
 	if err := requireExactJournalKeys(data, smartTUNTrialFields); err != nil {
 		return record, err
 	}
+	// encoding/json treats null as the zero value for a Go bool. A
+	// missing-or-null start-intent could then turn a once-started core into
+	// an apparently benign precredential crash during recovery. Reject any
+	// non-boolean wire value before decoding this safety-critical field.
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil ||
+		(string(fields["core_start_attempted"]) != "true" && string(fields["core_start_attempted"]) != "false") {
+		return record, activationJournalError("guarded Smart Routing start-intent type invalid")
+	}
 	dec := json.NewDecoder(bytes.NewReader(data))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&record); err != nil {
@@ -626,6 +635,15 @@ func smartTUNTrialCredentialRecoveryCheck(record smartTUNTrialJournal, originalU
 	return nil
 }
 
+// A kernel-visible active service is not authority to keep a pending TUN.
+// The owner must first have durably recorded core-start intent on this boot,
+// while the same operation still has time and its credential still matches.
+func smartTUNTrialMayRemainPending(record smartTUNTrialJournal, unitState string, credentialValid, sameBoot bool, uptime int64) bool {
+	return record.Phase == "trial_pending" && record.CoreStartAttempted &&
+		credentialValid && sameBoot && uptime < record.DeadlineUptimeSec &&
+		(unitState == "active" || unitState == "activating")
+}
+
 func recoverSmartTUNTrialLocked(store *activationJournalDir, identity activationJournalFileIdentity, record smartTUNTrialJournal) (SmartTUNTrialReceipt, error) {
 	// Never silently recover a physical host or unowned systemd unit even if
 	// a journal is copied to it. Persist an unresolved receipt for console.
@@ -667,8 +685,7 @@ func recoverSmartTUNTrialLocked(store *activationJournalDir, identity activation
 	if err != nil {
 		return SmartTUNTrialReceipt{}, err
 	}
-	if boot == record.BootID && uptime < record.DeadlineUptimeSec &&
-		(status == "active" || status == "activating") && credentialValid {
+	if smartTUNTrialMayRemainPending(record, status, credentialValid, boot == record.BootID, uptime) {
 		if err := trialGuardScheduled(); err != nil {
 			return SmartTUNTrialReceipt{}, err
 		}
@@ -733,6 +750,23 @@ func (m *Manager) InspectSmartTUNTrial() (SmartTUNTrialReceipt, error) {
 	return receipt, err
 }
 
+// Inspect the exact private credential before disarming the final recovery
+// supervisor. Clearing a recovered operation cannot silently discard altered
+// bytes, or a vanished credential after a durable core-start attempt.
+func smartTUNTrialCredentialForClear(record smartTUNTrialJournal, path string) error {
+	data, err := readRegular(path)
+	if errors.Is(err, os.ErrNotExist) {
+		if record.CoreStartAttempted {
+			return Fault("trial_resource_conflict", "guarded TUN credential disappeared after core start intent")
+		}
+		return nil // journal-before-credential crash: no secret was staged
+	}
+	if err != nil || sha256Hex(data) != record.ConfigSHA256 {
+		return Fault("trial_resource_conflict", "guarded TUN credential was replaced or cannot be read")
+	}
+	return nil
+}
+
 func (m *Manager) ClearSmartTUNTrial(operationID string, revision uint64) error {
 	if m.Dir != DefaultDir || !journalHex32.MatchString(operationID) || revision != 2 {
 		return Fault("invalid_arguments", "exact recovered TUN trial operation and revision 2 required")
@@ -749,13 +783,18 @@ func (m *Manager) ClearSmartTUNTrial(operationID string, revision uint64) error 
 		if _, err := recoverSmartTUNTrialLocked(store, identity, record); err != nil {
 			return err
 		}
-		if err := smartTUNTrialSystemctl("disable", "--now", trialRecoveryTimer); err != nil {
-			return err
-		}
 		if err := trialDisposableContext(); err != nil {
 			return err
 		}
 		path := filepath.Join(m.Dir, smartTUNTrialConfigFile)
+		if err := smartTUNTrialCredentialForClear(record, path); err != nil {
+			return err
+		}
+		// All conflicts are rejected while the independent guard is still
+		// armed. Only a fully recovered, exact operation may disarm it.
+		if err := smartTUNTrialSystemctl("disable", "--now", trialRecoveryTimer); err != nil {
+			return err
+		}
 		configuration, err := readRegular(path)
 		if err == nil {
 			if sha256Hex(configuration) != record.ConfigSHA256 {

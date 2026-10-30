@@ -85,6 +85,8 @@ func TestSmartTUNJournalRejectsUnknownDuplicateAndTrailingData(t *testing.T) {
 	for _, bad := range [][]byte{
 		append(append([]byte{}, raw...), []byte(" {}")...),
 		[]byte(strings.Replace(string(raw), `"core_start_attempted":false,`, "", 1)),
+		[]byte(strings.Replace(string(raw), `"core_start_attempted":false`, `"core_start_attempted":null`, 1)),
+		[]byte(strings.Replace(string(raw), `"core_start_attempted":false`, `"core_start_attempted":"false"`, 1)),
 		append(append([]byte{}, raw[:len(raw)-1]...), []byte(`,"unknown":false}`)...),
 		append(append([]byte{}, raw[:len(raw)-1]...), []byte(`,"version":4}`)...),
 		[]byte("[]"), []byte("null"), []byte(""), []byte("{"),
@@ -92,6 +94,36 @@ func TestSmartTUNJournalRejectsUnknownDuplicateAndTrailingData(t *testing.T) {
 		if _, err := decodeSmartTUNTrial(bad); err == nil {
 			t.Fatalf("accepted invalid persisted JSON %q", bad)
 		}
+	}
+}
+
+func TestSmartTUNActiveUnitWithoutDurableStartIntentCannotRemainPending(t *testing.T) {
+	record := trialV4Example()
+	for _, tc := range []struct {
+		name                  string
+		attempted             bool
+		unit                  string
+		credential, bootValid bool
+		uptime                int64
+		want                  bool
+	}{
+		{"unauthorized active before durable start", false, "active", true, true, 10, false},
+		{"unauthorized activating before durable start", false, "activating", true, true, 10, false},
+		{"legitimate active before deadline", true, "active", true, true, 10, true},
+		{"legitimate activating before deadline", true, "activating", true, true, 10, true},
+		{"missing credential after start", true, "active", false, true, 10, false},
+		{"stopped core", true, "inactive", true, true, 10, false},
+		{"failed core", true, "failed", true, true, 10, false},
+		{"boot changed", true, "active", true, false, 10, false},
+		{"deadline reached", true, "active", true, true, record.DeadlineUptimeSec, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			record.CoreStartAttempted = tc.attempted
+			got := smartTUNTrialMayRemainPending(record, tc.unit, tc.credential, tc.bootValid, tc.uptime)
+			if got != tc.want {
+				t.Fatalf("unsafe pending admission: got=%v want=%v", got, tc.want)
+			}
+		})
 	}
 }
 
@@ -187,6 +219,42 @@ func TestSmartTUNPendingRejectsCorruptAndUntrustedLocalJournal(t *testing.T) {
 	}
 	if _, err := m.pendingSmartTUNTrial(); err == nil {
 		t.Fatal("accepted untrusted symlink journal")
+	}
+}
+
+func TestSmartTUNClearCredentialConflictBeforeGuardDisarm(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "smart-tun-trial.json")
+	record := trialV4Example()
+	record.Phase, record.Revision = "trial_recovered", 2
+	if err := smartTUNTrialCredentialForClear(record, path); err != nil {
+		t.Fatalf("precredential crash should allow an absent config: %v", err)
+	}
+	record.CoreStartAttempted = true
+	if err := smartTUNTrialCredentialForClear(record, path); ErrorCode(err) != "trial_resource_conflict" {
+		t.Fatalf("start-attempt credential loss must block guard disarm: %v", err)
+	}
+	if err := os.WriteFile(path, []byte("changed configuration"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := smartTUNTrialCredentialForClear(record, path); ErrorCode(err) != "trial_resource_conflict" {
+		t.Fatalf("changed credential must block guard disarm: %v", err)
+	}
+	original := []byte("unchanged guarded credential")
+	record.ConfigSHA256 = sha256Hex(original)
+	if err := os.WriteFile(path, original, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := smartTUNTrialCredentialForClear(record, path); err != nil {
+		t.Fatalf("exact recovered credential must be clearable: %v", err)
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("/dev/null", path); err != nil {
+		t.Fatal(err)
+	}
+	if err := smartTUNTrialCredentialForClear(record, path); ErrorCode(err) != "trial_resource_conflict" {
+		t.Fatalf("symlink credential must block guard disarm: %v", err)
 	}
 }
 

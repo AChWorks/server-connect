@@ -328,6 +328,24 @@ PYMISSING
   systemctl reset-failed server-connect-activation-recover.service
   systemctl start server-connect-activation-recover.service
   require_recovered "$op"
+  # Once the kernel is clean and the journal is recovered, a second
+  # credential tamper must not disable its last independent timer BEFORE
+  # rejecting an exact operation/revision clearance. This specifically
+  # catches partial-success cleanup with the wrong ordering.
+  mv -- "$credential" "$saved"
+  if "$sc" --json smart-tun-trial-clear --operation-id "$op" --revision 2 > /run/sc-qa-product-tun-conflict.json; then
+    echo 'Tampered recovered credential was wrongly cleared' >&2; return 1
+  fi
+  python3 - <<'PYCLEARREFUSED'
+import json
+with open('/run/sc-qa-product-tun-conflict.json') as f:r=json.load(f)
+assert not r['ok'] and r['error']['code']=='trial_resource_conflict',r
+PYCLEARREFUSED
+  systemctl is-active --quiet server-connect-activation-recover.timer
+  [ "$(systemctl is-enabled server-connect-activation-recover.timer)" = enabled ]
+  [ -f /var/lib/server-connect/route-activation-journal.json ]
+  echo PRODUCT_TUN_CLEAR_CONFLICT_GUARD_STAYS_ARMED=PASS
+  mv -- "$saved" "$credential"
   clear_recovered "$op"
   rm -f /run/sc-qa-product-tun-apply.json /run/sc-qa-product-tun-conflict.json
   echo PRODUCT_TUN_CREDENTIAL_CONFLICT_RECONCILED=PASS
