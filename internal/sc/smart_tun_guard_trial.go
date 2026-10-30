@@ -387,8 +387,14 @@ func (m *Manager) admitSmartTUNTrialLocked(store *activationJournalDir, opts Sma
 	if err != nil {
 		return smartTUNTrialAdmission{}, err
 	}
-	if host.Firewall == nil || host.Firewall.ObjectCount != 0 {
-		return smartTUNTrialAdmission{}, Fault("trial_unsupported", "disposable guest cannot contain existing nftables owners")
+	// The disposable guest can contain preexisting nftables owners. A
+	// strict empty-ruleset admission would incorrectly reject exactly the
+	// interoperability case we must test. Never adopt/delete any of their
+	// resources: retain the full normalized native firewall fingerprint and
+	// demand exact equality after stopping only our trusted TUN service.
+	// This is *not* authorization to run on physical/production hosts.
+	if host.Firewall == nil || !host.Firewall.Observed {
+		return smartTUNTrialAdmission{}, Fault("trial_observation_uncertain", "complete native nftables observation required before guarded guest trial")
 	}
 	baseline, err := smartTUNTrialSnapshot(host)
 	if err != nil {

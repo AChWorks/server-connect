@@ -35,8 +35,9 @@ and 5-second timer have been independently exercised. The default expiry
 is 600 seconds, configurable from 4 to 600 seconds in disconnected QA only.
 A failed/uncertain restoration retains the journal, never presents Direct
 as safely verified and blocks installer/update/profile/Proxy Only transitions.
-Only full native IP/nftables equality after stopping the verified service
-permits `trial_recovered`, followed by exact operation-ID/revision clearance.
+Preexisting guest nftables owners are fingerprinted and must remain
+unchanged; the product never adopts or deletes their objects. Only full
+native IP/nftables equality after stopping the verified service permits `trial_recovered`, followed by exact operation-ID/revision clearance.
 
 This is one step toward the real activation state machine, **not** a
 substitute for privileged third-party ownership/conntrack proof, SSH

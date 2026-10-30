@@ -166,3 +166,45 @@ func TestSmartTUNTrialRefusesNoninstalledContextBeforeAnySystemctl(t *testing.T)
 		t.Fatalf("trial on arbitrary state directory did not fail closed: %v", err)
 	}
 }
+
+// Existing foreign nftables owners must be in the protected baseline, not
+// silently rejected, stripped, ignored or treated as product-owned. The
+// counter normalization from the native PR #66 preflight remains relevant.
+func TestSmartTUNSnapshotIncludesPreexistingNftablesOwners(t *testing.T) {
+	firewall, err := decodeNFTSnapshot([]byte(exampleNFT))
+	if err != nil || firewall.ObjectCount == 0 {
+		t.Fatalf("invalid foreign firewall fixture: %+v %v", firewall, err)
+	}
+	host := driftFixture()
+	host.Mode = "observation_with_nftables"
+	host.Firewall = &firewall
+	before, err := smartTUNTrialSnapshot(host)
+	if err != nil || !journalHex64.MatchString(before) {
+		t.Fatalf("complete foreign-owner guest snapshot rejected: %v", err)
+	}
+	trafficOnly := strings.Replace(exampleNFT, `"packets":12`, `"packets":2000`, 1)
+	trafficOnly = strings.Replace(trafficOnly, `"bytes":8192`, `"bytes":500000`, 1)
+	trafficObservation, err := decodeNFTSnapshot([]byte(trafficOnly))
+	if err != nil {
+		t.Fatal(err)
+	}
+	host.Firewall = &trafficObservation
+	unchanged, err := smartTUNTrialSnapshot(host)
+	if err != nil || unchanged != before {
+		t.Fatalf("traffic-only counters caused false firewall baseline drift: %v", err)
+	}
+	foreignMutation := strings.Replace(exampleNFT, "8.8.8.8", "9.9.9.9", 1)
+	mutated, err := decodeNFTSnapshot([]byte(foreignMutation))
+	if err != nil {
+		t.Fatal(err)
+	}
+	host.Firewall = &mutated
+	changed, err := smartTUNTrialSnapshot(host)
+	if err != nil || changed == before {
+		t.Fatalf("foreign firewall rule drift was not detected: %v", err)
+	}
+	host.Firewall = nil
+	if _, err := smartTUNTrialSnapshot(host); err == nil {
+		t.Fatal("accepted missing native firewall evidence")
+	}
+}

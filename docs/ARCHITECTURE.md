@@ -63,7 +63,8 @@ any of them is active.
 short-lived, v4-journal-bound real sing-box test *only* in the known disconnected
 two-interface Docker systemd fixture, with synthetic VLESS endpoint and CIDRs.
 It first validates selected profile, pinned core and complete native
-route/rule/link/nftables baseline, then independently prearms and executes
+route/rule/link/nftables baseline (including any pre-existing QA-guest
+firewall owners), then independently prearms and executes
 the installed recovery oneshot **outside** the shared journal lock. A second
 locked admission must match, followed by fsynced pending journal, credential persistence
 and only then an explicit `systemctl start` of the exact owned
