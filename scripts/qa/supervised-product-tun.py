@@ -216,7 +216,7 @@ class Fixture:
                 port = {"tcp": 19220, "udp": 19221, "dns": 19222}[protocol]
                 rules.append(f'iifname "scqapeer0" {family} daddr {address} {transport} dport {port} counter comment "health-{number}-{protocol}"')
         rules.extend(("}", "}"))
-        self.command(["ip", "netns", "exec", PEER, "nft", "-f", "-"], data="\n".join(rules))
+        self.command(["ip", "netns", "exec", PEER, "nft", "-f", "-"], data="\n".join(rules) + "\n")
         self.wires("direct")
         time.sleep(0.1)
         self.direct_counts = self.counters()
@@ -391,20 +391,56 @@ class Fixture:
     def foreign_bytes(self):
         return self.command(["nft", "-j", "-a", "list", "table", "inet", "scqasupforeign"]).stdout
 
+    def foreign_exists(self):
+        # A failed table read does not establish absence. Require a successful,
+        # structurally valid inventory before clearing unreceipted intent.
+        value = json.loads(self.command(["nft", "-j", "list", "tables"]).stdout)
+        assert isinstance(value, dict) and set(value) == {"nftables"}, "invalid nft table inventory"
+        assert isinstance(value["nftables"], list), "invalid nft table inventory"
+        tables = set()
+        metadata_seen = False
+        for row in value["nftables"]:
+            assert isinstance(row, dict) and len(row) == 1, "invalid nft inventory entry"
+            if "metainfo" in row:
+                metadata = row["metainfo"]
+                assert not metadata_seen and isinstance(metadata, dict), "invalid nft inventory metadata"
+                assert type(metadata.get("json_schema_version")) is int and metadata["json_schema_version"] == 1, \
+                    "unsupported nft inventory schema"
+                metadata_seen = True
+                continue
+            assert "table" in row and isinstance(row["table"], dict), "unexpected nft inventory object"
+            table = row["table"]
+            assert table.get("family") in ("ip", "ip6", "inet", "arp", "bridge", "netdev"), \
+                "invalid nft table family"
+            assert isinstance(table.get("name"), str) and table["name"], "invalid nft table name"
+            identity = (table["family"], table["name"])
+            assert identity not in tables, "ambiguous nft table inventory"
+            tables.add(identity)
+        assert metadata_seen, "missing nft inventory metadata"
+        return ("inet", "scqasupforeign") in tables
+
     def add_foreign(self):
-        result = self.command(["nft", "-j", "list", "table", "inet", "scqasupforeign"], check=False)
-        assert result.returncode, "foreign fixture name already exists"
+        assert not self.foreign and self.foreign_snapshot is None, "foreign fixture intent remains unresolved"
+        assert not self.foreign_exists(), "foreign fixture name already exists"
         # Record creation intent before issuing the native mutation, and keep
         # exact returned table bytes before any operation can remove it.
         self.foreign = True
-        self.command(["nft", "-f", "-"], data="table inet scqasupforeign { chain unrelated { } }\n")
+        self.command(["nft", "-f", "-"], data=(
+            "add table inet scqasupforeign\n"
+            "add chain inet scqasupforeign unrelated\n"))
         self.foreign_snapshot = self.foreign_bytes()
 
     def remove_foreign(self):
-        assert self.foreign and self.foreign_snapshot is not None
-        assert self.foreign_bytes() == self.foreign_snapshot
+        assert self.foreign, "no foreign fixture creation intent"
+        if self.foreign_snapshot is None:
+            assert not self.foreign_exists(), \
+                "unreceipted foreign fixture table retained; cleanup cannot establish ownership"
+            self.foreign = False
+            return
+        assert self.foreign_bytes() == self.foreign_snapshot, "foreign fixture receipt changed; table retained"
         self.command(["nft", "delete", "table", "inet", "scqasupforeign"])
         self.foreign = False
+        self.foreign_snapshot = None
 
     def reject_installer_mutation(self):
         before = {str(path): path.read_bytes() for path in UNITS.glob("server-connect*.service")}
@@ -788,6 +824,7 @@ def main():
     args = parser.parse_args()
     assert re.fullmatch("[0-9a-f]{16}", args.profile) and args.upstream_pid > 1
     fixture = Fixture(args)
+    original_failure = False
     try:
         fixture.start()
         fixture.confirmations_and_health()
@@ -801,10 +838,17 @@ def main():
         print("SUPERVISED_TUN_RESOURCE_BOUND_SECONDS=" + str(round(time.monotonic() - fixture.started, 2)), flush=True)
         fixture.marker("COMPLETE_EXPERIMENTAL_ONLY")
     except BaseException:
+        original_failure = True
         fixture.diagnostics()
         raise
     finally:
-        fixture.cleanup()
+        try:
+            fixture.cleanup()
+        except BaseException as error:
+            print("SUPERVISED_TUN_FAILURE_CLEANUP_UNRESOLVED=" + type(error).__name__ +
+                  ": " + str(error)[:2000], flush=True)
+            if not original_failure:
+                raise
 
 
 if __name__ == "__main__":

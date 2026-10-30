@@ -42,6 +42,7 @@ PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/qa/test-tun-payload-wire.py
 PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/qa/test-tun-ipv6-wire.py
 PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/qa/test-tun-wp-check.py
 PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/qa/test-smart-health-wire.py
+PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/qa/test-supervised-fixture.py
 sh -n scripts/qa/tun-wordpress-fpm.sh
 # The guard feasibility probe must be strictly guest-local and must reject
 # ambiguous kernel identities before the privileged disconnected guest runs.
