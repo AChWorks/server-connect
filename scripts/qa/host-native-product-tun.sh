@@ -536,6 +536,27 @@ j=json.load(open('/var/lib/server-connect/route-activation-journal.json'));n=j['
 assert j['operation_id']==operation and j['intent_type']=='smart_tun_native_pending_trial_v1'
 def query(*args):return json.loads(subprocess.check_output(args))
 def run(*args):subprocess.run(args,check=True)
+def nft_after_deleted_tun(saved,current,link,remaining_links,operation):
+    # nftables 1.1.3 renders an indexed meta oif as a name while that link
+    # exists, then as a decimal JSON string after deletion, even with -n.
+    # Authenticate absence of BOTH identities before allowing this one edit.
+    assert isinstance(operation,str) and len(operation)==32 and all(c in '0123456789abcdef' for c in operation)
+    index=link['ifindex']
+    assert type(index) is int and 0<index<2**31 and link['ifname']=='sctunqa0'
+    assert link['ifalias']=='server-connect:'+operation
+    assert isinstance(remaining_links,list)
+    for row in remaining_links:
+        assert type(row.get('ifindex')) is int and row['ifindex']>0 and isinstance(row.get('ifname'),str)
+        assert row['ifindex']!=index and row['ifname']!='sctunqa0', 'deleted TUN identity still present or replaced'
+    expected=json.loads(json.dumps(saved));changed=0
+    match={'match':{'op':'==','left':{'meta':{'key':'oif'}},'right':'sctunqa0'}}
+    for item in expected['nftables']:
+        for expression in item.get('rule',{}).get('expr',[]):
+            if expression==match:
+                expression['match']['right']=str(index);changed+=1
+    assert changed>0, 'no exact indexed TUN expression in receipt'
+    # Preserve JSON types, unknown fields, every handle and all list ordering.
+    return json.dumps(current,sort_keys=True,separators=(',',':'))==json.dumps(expected,sort_keys=True,separators=(',',':'))
 def link_children():
     result={'addresses':query('ip','-N','-j','addr','show','dev','sctunqa0')[0]['addr_info']}
     for family,table in (('-4',42424),('-6',42426)):
@@ -596,11 +617,13 @@ else:
         run('ip',family,'rule','del','priority','10400','fwmark','0x530000/0xff0000','table',table,'protocol','247')
         run('ip',family,'route','del','default','dev','sctunqa0','table',table,'metric','100','protocol','247','src',source)
         run('ip',family,'route','del','unreachable','default','table',table,'metric','42760','protocol','247')
-    assert query('ip','-N','-j','link','show','dev','sctunqa0')[0]['ifindex']==n['link_index']
+    link=query('ip','-N','-j','link','show','dev','sctunqa0')[0]
+    assert link['ifindex']==n['link_index'] and link['ifname']=='sctunqa0' and link['ifalias']=='server-connect:'+operation
     assert link_children()==saved['graph']['children'], 'link children changed; retained'
     run('ip','link','del','dev','sctunqa0')
     table_now=query('nft','-n','-j','-a','list','table','inet',n['nft_name'])
-    assert table_now==saved['graph']['nft'], 'native nft graph changed during operator teardown'
+    remaining_links=query('ip','-N','-j','link','show')
+    assert nft_after_deleted_tun(saved['graph']['nft'],table_now,saved['graph']['link'],remaining_links,operation), 'native nft graph changed during operator teardown'
     deletion={'nftables':[{'delete':{'table':{'family':'inet','handle':n['nft_handle']}}}]}
     subprocess.run(['nft','-j','-f','-'],input=json.dumps(deletion).encode(),check=True)
     tables=query('nft','-j','list','tables')['nftables']

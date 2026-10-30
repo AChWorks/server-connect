@@ -203,3 +203,83 @@ check("duplicate receipt field", records(duplicate_key))
 check("empty journal", [])
 print(f"HOST_QA_RECOVERY_RECEIPT_REGRESSIONS=PASS ({cases} attribution/completion cases)")
 PYRECOVERYFIXTURES
+
+# Exercise only the pure comparison from the installed helper. Do not source
+# or execute its privileged fixture/journal/command paths in this regression.
+python3 - "$root/scripts/qa/host-native-product-tun.sh" <<'PYNATIVEIFINDEXFIXTURES'
+import ast,copy,json,sys
+from pathlib import Path
+source=Path(sys.argv[1]).read_text().split("<<'PYNATIVEGUARDGRAPH'\n",1)[1].split('\nPYNATIVEGUARDGRAPH\n',1)[0]
+nodes=[node for node in ast.parse(source).body if isinstance(node,ast.FunctionDef) and node.name=='nft_after_deleted_tun']
+assert len(nodes)==1
+namespace={'json':json}
+exec(compile(ast.Module(body=nodes,type_ignores=[]),'<native nft observer>','exec'),namespace)
+compare=namespace['nft_after_deleted_tun']
+operation='a'*32;name='scnt_'+operation
+link={'ifindex':22,'ifname':'sctunqa0','ifalias':'server-connect:'+operation}
+remaining=[{'ifindex':1,'ifname':'lo'},{'ifindex':20,'ifname':'scqaedge0'}]
+before={'nftables':[
+    {'metainfo':{'version':'1.1.3','json_schema_version':1}},
+    {'table':{'family':'inet','name':name,'handle':16}},
+    {'chain':{'family':'inet','table':name,'name':'guard','handle':15}},
+    {'rule':{'family':'inet','table':name,'chain':'guard','handle':28,
+             'expr':[{'match':{'op':'==','left':{'meta':{'key':'oif'}},'right':'sctunqa0'}},{'return':None}]}},
+    {'rule':{'family':'inet','table':name,'chain':'guard','handle':30,
+             'expr':[{'match':{'op':'==','left':{'meta':{'key':'oifname'}},'right':'sctunqa0'}},
+                     {'match':{'op':'==','left':{'meta':{'key':'oif'}},'right':'scqaedge0'}},
+                     {'counter':{'packets':0,'bytes':0}}]}}]}
+after=copy.deepcopy(before)
+after['nftables'][3]['rule']['expr'][0]['match']['right']='22'
+cases=0
+def check(label,current,accepted=False,saved=before,inventory=remaining,original=link):
+    global cases
+    snapshots=copy.deepcopy((saved,current,original,inventory))
+    try:result=compare(saved,current,original,inventory,operation)
+    except AssertionError:result=False
+    assert result is accepted,label
+    assert snapshots==(saved,current,original,inventory),label+' mutated evidence'
+    cases+=1
+check('exact deleted index decimal string',after,True)
+check('unchanged name after observed deletion',before)
+for value in ('23','022',22,22.0,True):
+    changed=copy.deepcopy(after);changed['nftables'][3]['rule']['expr'][0]['match']['right']=value
+    check('wrong index representation '+repr(value),changed)
+check('replacement under original name',after,inventory=remaining+[{'ifindex':23,'ifname':'sctunqa0'}])
+check('original index reused under another name',after,inventory=remaining+[{'ifindex':22,'ifname':'foreign0'}])
+check('original link remains',after,inventory=remaining+[link])
+check('wrong authenticated alias',after,original=dict(link,ifalias='server-connect:'+'b'*32))
+check('wrong authenticated index',after,original=dict(link,ifindex=23))
+for field,value in (('handle',29),('unexpected',True)):
+    changed=copy.deepcopy(after);changed['nftables'][3]['rule'][field]=value
+    check('rule '+field+' changed',changed)
+changed=copy.deepcopy(after);changed['nftables'][1]['table']['handle']=17
+check('table handle changed',changed)
+changed=copy.deepcopy(after);changed['nftables'][3]['rule']['expr'][0]['match']['unknown']='new'
+check('unknown match field added',changed)
+changed=copy.deepcopy(after);changed['nftables'][3]['rule']['expr'].reverse()
+check('expression order changed',changed)
+changed=copy.deepcopy(after);changed['nftables'][3:]=reversed(changed['nftables'][3:])
+check('rule order changed',changed)
+changed=copy.deepcopy(after);changed['nftables'][4]['rule']['expr'][0]['match']['right']='22'
+check('oifname is not an index',changed)
+changed=copy.deepcopy(after);changed['nftables'][4]['rule']['expr'][1]['match']['right']='20'
+check('unrelated indexed interface changed',changed)
+changed=copy.deepcopy(after);changed['nftables'][4]['rule']['expr'][2]['counter']['packets']=1
+check('counter effect changed',changed)
+changed=copy.deepcopy(after);changed['nftables'][4]['rule']['expr'][2]['counter']['packets']=False
+check('JSON boolean is not numeric zero',changed)
+saved=copy.deepcopy(before);changed=copy.deepcopy(after)
+saved['nftables'][3]['rule']['expr'][0]['match']['unknown']='same'
+changed['nftables'][3]['rule']['expr'][0]['match']['unknown']='same'
+check('extra match fields do not gain normalization',changed,saved=saved)
+saved=copy.deepcopy(before);changed=copy.deepcopy(after)
+for value in (saved,changed):value['nftables'][3]['rule']['unknown']='retained'
+check('unrelated unknown fields retained exactly',changed,True,saved=saved)
+changed['nftables'][3]['rule']['unknown']='different'
+check('different unknown field refused',changed,saved=saved)
+saved=copy.deepcopy(before);changed=copy.deepcopy(after)
+saved['nftables'].append(copy.deepcopy(saved['nftables'][3]));saved['nftables'][-1]['rule']['handle']=31
+changed['nftables'].append(copy.deepcopy(changed['nftables'][3]));changed['nftables'][-1]['rule']['handle']=31
+check('both enabled family rules keep exact indices',changed,True,saved=saved)
+print(f'HOST_QA_NATIVE_DELETED_IFINDEX_REGRESSIONS=PASS ({cases} exact identity/graph cases)')
+PYNATIVEIFINDEXFIXTURES
