@@ -118,8 +118,10 @@ boundary. Failed or incomplete start observation cannot be converted into
 success by a later snapshot.
 
 Every mutating `ip`/`nft` subprocess inherits the existing shared lock's open
-file description and a parent-death SIGKILL. The manager joins it before normal
-unlock. On controller death, the independent executor must wait until that
+file description and a parent-death SIGKILL. The creating OS thread is pinned
+through synchronous Run/Wait because Linux binds that signal to the creating
+thread's lifetime. The manager joins the child before releasing the thread or
+normally unlocking. On controller death, the independent executor waits until that
 child releases the inherited lock; a late command must not install policy after
 an absence snapshot was finalized. This reuses the existing serialization
 boundary and does not reserve resources against independent privileged owners.

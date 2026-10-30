@@ -10,6 +10,7 @@ import (
 	"net/netip"
 	"os"
 	"os/exec"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -88,6 +89,10 @@ func nativeTUNRunIP(store *activationJournalDir, args ...string) error {
 	if err := nativeTUNBindMutator(cmd, store); err != nil {
 		return err
 	}
+	// Linux Pdeathsig follows the spawning OS thread. Keep that thread alive
+	// through the synchronous wait; the inherited lock remains the exclusion proof.
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
 	if cmd.Run() != nil || ctx.Err() != nil {
 		return nativeTUNUncertain("native ip operation outcome requires independent observation")
 	}
@@ -109,6 +114,9 @@ func nativeTUNRunNFT(store *activationJournalDir, input []byte, args ...string) 
 		if err := nativeTUNBindMutator(cmd, store); err != nil {
 			return nil, err
 		}
+		// Match the mutation lifetime to Pdeathsig's spawning OS thread.
+		runtime.LockOSThread()
+		defer runtime.UnlockOSThread()
 	}
 	var output boundedFirewallOutput
 	cmd.Stdout = &output
@@ -192,11 +200,17 @@ func nativeTUNLinkShape(row map[string]json.RawMessage, rpFilter string) (string
 	if multi, ok := data["multi_queue"].(bool); !ok || multi {
 		return "", false, nativeTUNConflict("native TUN queue mode changed")
 	}
-	// Queue/carrier activity is the expected effect of attaching/stopping the
+	// Linux tun_fill_info emits queue counts only for IFF_MULTI_QUEUE. They
+	// cannot authenticate our single-queue attachment or be normalized away.
+	if _, present := data["num_queues"]; present {
+		return "", false, nativeTUNConflict("native single-queue TUN has multiqueue details")
+	}
+	if _, present := data["num_disabled_queues"]; present {
+		return "", false, nativeTUNConflict("native single-queue TUN has multiqueue details")
+	}
+	// Carrier activity is the expected effect of attaching/stopping the
 	// exact core. It does not authorize changes to other persistent attributes.
 	delete(data, "persist")
-	delete(data, "num_queues")
-	delete(data, "num_disabled_queues")
 	delete(object, "operstate")
 	delete(object, "carrier")
 	delete(object, "carrier_changes")
@@ -753,6 +767,53 @@ func (watch *nativeTUNLinkWatch) drain(record smartTUNTrialJournal) error {
 	return nativeTUNUncertain("native attach event budget exceeded")
 }
 
+// The pinned Linux TUN driver omits queue-count attributes in single-queue
+// mode, refuses a second attachment with EBUSY, clears carrier on last clean
+// detach, and enables carrier after successful TUNSETIFF unless NO_CARRIER
+// was requested. Even explicit carrier-on requires an attached queue. Thus
+// LOWER_UP is affirmative attachment evidence under this bounded mode; mere
+// absence of multiqueue counters is not. Full link identity, the installed
+// core start and the construction-time event watch are checked by the caller.
+func nativeTUNSingleQueueAttached(row map[string]json.RawMessage) (bool, error) {
+	var info struct {
+		Kind string                     `json:"info_kind"`
+		Data map[string]json.RawMessage `json:"info_data"`
+	}
+	if json.Unmarshal(row["linkinfo"], &info) != nil || info.Kind != "tun" || selectiveText(info.Data["type"]) != "tun" {
+		return false, nativeTUNConflict("native attach TUN detail unavailable")
+	}
+	if !bytes.Equal(bytes.TrimSpace(info.Data["multi_queue"]), []byte("false")) || !bytes.Equal(bytes.TrimSpace(info.Data["persist"]), []byte("true")) {
+		return false, nativeTUNConflict("native attach requires a persistent single-queue TUN")
+	}
+	if _, present := info.Data["num_queues"]; present {
+		return false, nativeTUNConflict("native single-queue TUN has multiqueue details")
+	}
+	if _, present := info.Data["num_disabled_queues"]; present {
+		return false, nativeTUNConflict("native single-queue TUN has multiqueue details")
+	}
+	var flags []string
+	if json.Unmarshal(row["flags"], &flags) != nil || len(flags) == 0 {
+		return false, nativeTUNConflict("native attach carrier flags unavailable")
+	}
+	seen := map[string]bool{}
+	for _, flag := range flags {
+		if flag == "" || seen[flag] {
+			return false, nativeTUNConflict("native attach carrier flags inconsistent")
+		}
+		seen[flag] = true
+	}
+	if !seen["UP"] || seen["LOWER_UP"] && seen["NO-CARRIER"] {
+		return false, nativeTUNConflict("native attach carrier flags inconsistent")
+	}
+	if raw, present := row["carrier"]; present {
+		carrier, ok := selectiveInt(raw)
+		if !ok || (carrier != 0 && carrier != 1) || (carrier == 1) != seen["LOWER_UP"] {
+			return false, nativeTUNConflict("native attach carrier observation inconsistent")
+		}
+	}
+	return seen["LOWER_UP"], nil
+}
+
 func (watch *nativeTUNLinkWatch) verify(record smartTUNTrialJournal) error {
 	for attempt := 0; attempt < 12; attempt++ {
 		if err := watch.drain(record); err != nil {
@@ -776,18 +837,11 @@ func (watch *nativeTUNLinkWatch) verify(record smartTUNTrialJournal) error {
 		if !ok || index != record.Native.LinkIndex {
 			return nativeTUNConflict("native attach queue belongs to another interface")
 		}
-		var info struct {
-			Data map[string]json.RawMessage `json:"info_data"`
+		attached, err := nativeTUNSingleQueueAttached(rows[0])
+		if err != nil {
+			return err
 		}
-		if json.Unmarshal(rows[0]["linkinfo"], &info) != nil {
-			return nativeTUNUncertain("native attach queue detail unavailable")
-		}
-		queues, qok := selectiveInt(info.Data["num_queues"])
-		disabled, dok := selectiveInt(info.Data["num_disabled_queues"])
-		if !qok || !dok || queues > 1 || disabled != 0 {
-			return nativeTUNConflict("native attach queue ownership ambiguous")
-		}
-		if queues == 1 {
+		if attached {
 			return watch.drain(record)
 		}
 		time.Sleep(50 * time.Millisecond)

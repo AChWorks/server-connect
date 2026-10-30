@@ -125,10 +125,13 @@ func TestSmartTUNNativeFailedStartDoesNotUnlockManager(t *testing.T) {
 	}
 }
 
+// Source-derived Linux single-queue detail: tun_fill_info deliberately omits
+// both queue-count attributes when IFF_MULTI_QUEUE is clear.
+const nativeSingleQueueLinkJSON = `{"ifindex":7,"ifname":"sctunqa0","flags":["POINTOPOINT","MULTICAST","NOARP","UP","LOWER_UP"],"mtu":1400,"operstate":"UNKNOWN","ifalias":"server-connect:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","linkinfo":{"info_kind":"tun","info_data":{"type":"tun","persist":true,"multi_queue":false}}}`
+
 func TestSmartTUNNativeCarrierDoesNotHideIdentityChanges(t *testing.T) {
-	before := `{"ifindex":7,"ifname":"sctunqa0","flags":["POINTOPOINT","MULTICAST","NOARP","UP","LOWER_UP"],"mtu":1400,"operstate":"UNKNOWN","ifalias":"server-connect:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","linkinfo":{"info_kind":"tun","info_data":{"type":"tun","persist":true,"multi_queue":false,"num_queues":1,"num_disabled_queues":0}}}`
+	before := nativeSingleQueueLinkJSON
 	after := strings.Replace(before, `"LOWER_UP"`, `"NO-CARRIER"`, 1)
-	after = strings.Replace(after, `"num_queues":1`, `"num_queues":0`, 1)
 	decode := func(raw string) map[string]json.RawMessage {
 		var row map[string]json.RawMessage
 		if err := json.Unmarshal([]byte(raw), &row); err != nil {
@@ -154,9 +157,64 @@ func TestSmartTUNNativeCarrierDoesNotHideIdentityChanges(t *testing.T) {
 	if err == nil && changed == a {
 		t.Fatal("rp_filter drift hidden")
 	}
+	for _, field := range []string{`"num_queues":1`, `"num_disabled_queues":0`} {
+		inconsistent := strings.Replace(before, `"multi_queue":false`, `"multi_queue":false,`+field, 1)
+		if _, _, err := nativeTUNLinkShape(decode(inconsistent), "2"); ErrorCode(err) != "trial_resource_conflict" {
+			t.Fatal("single-queue ownership normalized away multiqueue details")
+		}
+	}
 	rows, _ := selectiveRows(json.RawMessage(`[{"priority":10399,"src":"all","goto":10400}]`))
 	if _, _, err := nativeTUNResourceRows(rows, nativeTrialExample(true), 4, "rule"); ErrorCode(err) != "trial_resource_conflict" {
 		t.Fatal("foreign goto adopted as independent rule")
+	}
+}
+
+func TestSmartTUNNativeSingleQueueAttachNeedsPositiveCarrier(t *testing.T) {
+	base := nativeSingleQueueLinkJSON
+	detached := strings.Replace(base, `"LOWER_UP"`, `"NO-CARRIER"`, 1)
+	withCarrier := func(raw, value string) string { return strings.TrimSuffix(raw, "}") + `,"carrier":` + value + `}` }
+	for _, tc := range []struct {
+		name, raw          string
+		attached, conflict bool
+	}{
+		{"attached without multiqueue counters", base, true, false},
+		{"detached without multiqueue counters", detached, false, false},
+		{"missing positive carrier", strings.Replace(base, `,"LOWER_UP"`, "", 1), false, false},
+		{"running alone is not carrier proof", strings.Replace(base, `"LOWER_UP"`, `"RUNNING"`, 1), false, false},
+		{"matching numeric carrier", withCarrier(base, "1"), true, false},
+		{"matching detached carrier", withCarrier(detached, "0"), false, false},
+		{"contradictory carrier flags", strings.Replace(base, `"LOWER_UP"`, `"LOWER_UP","NO-CARRIER"`, 1), false, true},
+		{"carrier disagrees with lower up", withCarrier(base, "0"), false, true},
+		{"carrier alone cannot establish attachment", withCarrier(detached, "1"), false, true},
+		{"null carrier is not absence", withCarrier(base, "null"), false, true},
+		{"unsupported carrier value", withCarrier(base, "2"), false, true},
+		{"administratively down", strings.Replace(base, `"UP",`, "", 1), false, true},
+		{"duplicate flags", strings.Replace(base, `"LOWER_UP"`, `"LOWER_UP","LOWER_UP"`, 1), false, true},
+		{"multiqueue mode", strings.Replace(base, `"multi_queue":false`, `"multi_queue":true`, 1), false, true},
+		{"missing queue mode", strings.Replace(base, `,"multi_queue":false`, "", 1), false, true},
+		{"null queue mode", strings.Replace(base, `"multi_queue":false`, `"multi_queue":null`, 1), false, true},
+		{"nonpersistent creator attachment", strings.Replace(base, `"persist":true`, `"persist":false`, 1), false, true},
+		{"other link kind", strings.Replace(base, `"info_kind":"tun"`, `"info_kind":"dummy"`, 1), false, true},
+		{"tap mode", strings.Replace(base, `"type":"tun"`, `"type":"tap"`, 1), false, true},
+		{"unsupported queue details", strings.Replace(base, `"multi_queue":false`, `"multi_queue":false,"num_queues":1,"num_disabled_queues":0`, 1), false, true},
+		{"null queue count is not absence", strings.Replace(base, `"multi_queue":false`, `"multi_queue":false,"num_queues":null`, 1), false, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var row map[string]json.RawMessage
+			if err := json.Unmarshal([]byte(tc.raw), &row); err != nil {
+				t.Fatal(err)
+			}
+			attached, err := nativeTUNSingleQueueAttached(row)
+			if tc.conflict {
+				if attached || ErrorCode(err) != "trial_resource_conflict" {
+					t.Fatalf("unsupported attachment accepted: attached=%v err=%v", attached, err)
+				}
+				return
+			}
+			if err != nil || attached != tc.attached {
+				t.Fatalf("attachment=%v want=%v err=%v", attached, tc.attached, err)
+			}
+		})
 	}
 }
 
