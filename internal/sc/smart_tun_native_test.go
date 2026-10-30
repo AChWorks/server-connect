@@ -484,6 +484,98 @@ func TestSmartTUNNativeIPv6RouteUsesKernelUniverseScope(t *testing.T) {
 	}
 }
 
+func TestSmartTUNNativeIPv6FallbackUsesKernelLoopbackDevice(t *testing.T) {
+	record := nativeTrialExample(true)
+	// Source-derived fixture, not an observed installed-run row: Linux v7.0
+	// fib6_nh_init selects loopback for reject routes; rt6_fill_node emits
+	// its device and universe scope. Normal route dumps pass dst=NULL, so
+	// cacheinfo error is zero and pinned iproute2 does not print an error key.
+	base := `{"type":"7","dst":"default","dev":"lo","table":"42426","protocol":"247","metric":42760,"flags":[],"pref":"medium"}`
+	decode := func(raw string) map[string]json.RawMessage {
+		t.Helper()
+		var row map[string]json.RawMessage
+		if err := json.Unmarshal([]byte(raw), &row); err != nil {
+			t.Fatal(err)
+		}
+		return row
+	}
+	var baseHash string
+	for _, scope := range []string{"", `,"scope":0`, `,"scope":"0"`, `,"scope":"global"`} {
+		row := decode(strings.TrimSuffix(base, "}") + scope + "}")
+		present, hash, err := nativeTUNResourceRows([]map[string]json.RawMessage{row}, record, 6, "fallback")
+		if err != nil || !present || !journalHex64.MatchString(hash) {
+			t.Fatalf("kernel IPv6 reject-route representation refused (%s): %v", scope, err)
+		}
+		if scope == "" {
+			baseHash = hash
+		}
+		// Recognizing its representation is not evidence that an ambiguous
+		// post-effect operation acquired authority to delete this route.
+		if ErrorCode(nativeTUNObjectRecovery(smartTUNNativeObject{Stage: "effect_possible"}, true, hash)) != "trial_recovery_uncertain" {
+			t.Fatal("exact-looking IPv6 fallback adopted without a durable receipt")
+		}
+		if err := nativeTUNObjectRecovery(smartTUNNativeObject{Stage: "observed", SHA256: hash}, true, hash); err != nil {
+			t.Fatalf("exact observed fallback receipt refused: %v", err)
+		}
+	}
+	for _, device := range []string{`"sctunqa0"`, `"foreign0"`, `""`, `null`, `1`} {
+		row := decode(strings.Replace(base, `"dev":"lo"`, `"dev":`+device, 1))
+		if nativeTUNRouteMatches(row, record, 6, "fallback") {
+			t.Fatalf("foreign or malformed fallback device accepted: %s", device)
+		}
+	}
+	missing := decode(strings.Replace(base, `,"dev":"lo"`, "", 1))
+	if nativeTUNRouteMatches(missing, record, 6, "fallback") {
+		t.Fatal("IPv6 reject route without its kernel device accepted")
+	}
+	for _, scope := range []string{`253`, `"253"`, `"link"`, `254`, `"host"`, `null`, `""`, `0.0`, `false`} {
+		row := decode(strings.TrimSuffix(base, "}") + `,"scope":` + scope + "}")
+		if nativeTUNRouteMatches(row, record, 6, "fallback") {
+			t.Fatalf("foreign or malformed IPv6 fallback scope accepted: %s", scope)
+		}
+	}
+	for _, bad := range []string{
+		strings.Replace(base, `"type":"7"`, `"type":"1"`, 1),
+		strings.Replace(base, `"dst":"default"`, `"dst":"2001:db8::/32"`, 1),
+		strings.Replace(base, `"table":"42426"`, `"table":"42424"`, 1),
+		strings.Replace(base, `"protocol":"247"`, `"protocol":"246"`, 1),
+		strings.Replace(base, `"metric":42760`, `"metric":42761`, 1),
+		strings.Replace(base, `"pref":"medium"`, `"pref":"high"`, 1),
+	} {
+		if nativeTUNRouteMatches(decode(bad), record, 6, "fallback") {
+			t.Fatalf("unrelated IPv6 fallback selector was relaxed: %s", bad)
+		}
+	}
+	for _, extra := range []string{`,"prefsrc":"fd73:99::1"`, `,"gateway":"fd73:99::2"`, `,"nhid":9`, `,"unknown":true`, `,"error":0`, `,"error":-101`} {
+		row := decode(strings.TrimSuffix(base, "}") + extra + "}")
+		if _, _, err := nativeTUNResourceRows([]map[string]json.RawMessage{row}, record, 6, "fallback"); ErrorCode(err) != "trial_resource_conflict" {
+			t.Fatalf("unsupported fallback field accepted (%s): %v", extra, err)
+		}
+	}
+	// The observed device stays in the complete receipt hash. Neither the
+	// parser repair nor later recovery may normalize it into anonymous state.
+	changed := decode(strings.Replace(base, `"dev":"lo"`, `"dev":"foreign0"`, 1))
+	changedHash, err := nativeTUNRouteCanonical(changed)
+	if err != nil || changedHash == baseHash {
+		t.Fatalf("fallback receipt lost its observed device: %v", err)
+	}
+	if ErrorCode(nativeTUNObjectRecovery(smartTUNNativeObject{Stage: "observed", SHA256: baseHash}, true, changedHash)) != "trial_resource_conflict" {
+		t.Fatal("changed IPv6 fallback device acquired old receipt authority")
+	}
+	// IPv4's already-proven representation remains device/scope-free.
+	v4 := strings.Replace(base, `"table":"42426"`, `"table":"42424"`, 1)
+	if nativeTUNRouteMatches(decode(v4), record, 4, "fallback") {
+		t.Fatal("IPv6 fallback device exception leaked into IPv4")
+	}
+	v4 = strings.Replace(v4, `,"dev":"lo"`, "", 1)
+	if present, _, err := nativeTUNResourceRows([]map[string]json.RawMessage{decode(v4)}, record, 4, "fallback"); err != nil || !present {
+		t.Fatalf("unchanged IPv4 fallback representation refused: %v", err)
+	}
+	if nativeTUNRouteMatches(decode(strings.TrimSuffix(v4, "}")+`,"scope":0}`), record, 4, "fallback") {
+		t.Fatal("IPv6 fallback scope exception leaked into IPv4")
+	}
+}
+
 func TestSmartTUNNativeForeignNFTMasksAndIndirectInterfaces(t *testing.T) {
 	record := nativeTrialExample(true)
 	for _, tc := range []struct {

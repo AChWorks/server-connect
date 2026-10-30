@@ -1026,6 +1026,13 @@ func nativeTUNRouteMatches(row map[string]json.RawMessage, record smartTUNTrialJ
 		if nativeTUNRouteType(row["type"]) != "unreachable" || metric != nativeTUNFallbackMetric {
 			return false
 		}
+		// Linux IPv6 fib6_nh_init binds reject routes to this namespace's
+		// loopback device, and rt6_fill_node includes its RTA_OIF in dumps.
+		// This bounded fixture requires its dump name lo. This is route identity,
+		// never authority to adopt or remove the loopback device itself.
+		if family == 6 && selectiveText(row["dev"]) != "lo" {
+			return false
+		}
 	} else {
 		if typ := nativeTUNRouteType(row["type"]); typ != "" && typ != "unicast" {
 			return false
@@ -1033,29 +1040,32 @@ func nativeTUNRouteMatches(row map[string]json.RawMessage, record smartTUNTrialJ
 		if metric != nativeTUNMetric || selectiveText(row["dev"]) != record.TunnelInterface || selectiveText(row["prefsrc"]) != netip.MustParsePrefix(f.Address).Addr().String() {
 			return false
 		}
-		// Linux IPv6 rt6_fill_node always reports RT_SCOPE_UNIVERSE,
-		// including a device route requested with "scope link". IPv4
-		// preserves RT_SCOPE_LINK. Do not mistake that family-specific
-		// kernel representation for a foreign route or accept another scope.
-		scope, present := row["scope"]
-		if family == 6 {
-			if present {
-				number, ok := selectiveInt(scope)
-				if (!ok || number != 0) && selectiveText(scope) != "global" {
-					return false
-				}
-			}
-		} else {
+	}
+	// IPv6 rt6_fill_node reports RT_SCOPE_UNIVERSE for both device and
+	// reject routes. IPv4 device routes preserve RT_SCOPE_LINK; its fallback
+	// still permits neither a device nor an explicit scope.
+	scope, present := row["scope"]
+	if family == 6 {
+		if present {
 			number, ok := selectiveInt(scope)
-			if (!ok || number != 253) && selectiveText(scope) != "link" {
+			if (!ok || number != 0) && selectiveText(scope) != "global" {
 				return false
 			}
+		}
+	} else if kind != "fallback" {
+		number, ok := selectiveInt(scope)
+		if (!ok || number != 253) && selectiveText(scope) != "link" {
+			return false
 		}
 	}
 	for key := range row {
 		switch key {
 		case "type", "dst", "table", "protocol", "metric", "flags", "pref":
-		case "dev", "scope", "prefsrc":
+		case "dev", "scope":
+			if kind == "fallback" && family != 6 {
+				return false
+			}
+		case "prefsrc":
 			if kind == "fallback" {
 				return false
 			}
