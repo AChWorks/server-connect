@@ -389,20 +389,21 @@ PYNATIVEPACKETFIXTURES
 
 # Pure admission/ownership predicates only; never acquire a lock or control a unit.
 python3 - "$root/scripts/qa/host-native-product-tun.sh" <<'PYNATIVEPAUSEFIXTURES'
-import ast,copy,json,re,stat,sys
+import ast,copy,hashlib,json,re,stat,sys
 from pathlib import Path
 from types import SimpleNamespace
 source=Path(sys.argv[1]).read_text().split("<<'PYNATIVEPAUSE'\n",1)[1].split('\nPYNATIVEPAUSE\n',1)[0]
-names={'pause_unit_valid','pause_journal_valid','canonical','private_file','pause_receipt_valid'}
+names={'pause_unit_valid','pause_unit_diagnostic','pause_journal_valid','canonical','private_file','pause_receipt_valid','pause_completion_binding'}
 nodes=[x for x in ast.parse(source).body if isinstance(x,ast.FunctionDef) and x.name in names]
 assert {x.name for x in nodes}==names
 timer='server-connect-activation-recover.timer';executor='server-connect-activation-recover.service';core='server-connect-smart-tun.service'
 operation='a'*32;boot='11111111-2222-3333-4444-555555555555';ns=SimpleNamespace(st_dev=4,st_ino=4026532000)
 lock=SimpleNamespace(st_dev=8,st_ino=101)
-namespace={'json':json,'re':re,'stat':stat,'timer':timer,'executor':executor,'core':core,
+namespace={'json':json,'re':re,'stat':stat,'hashlib':hashlib,'timer':timer,'executor':executor,'core':core,
            'units':(timer,executor,core),'operation':operation,'boot':boot,'ns':ns,'lock_identity':lambda:lock}
 exec(compile(ast.Module(body=nodes,type_ignores=[]),'<native recovery pause predicates>','exec'),namespace)
 unit=namespace['pause_unit_valid'];journal=namespace['pause_journal_valid'];receipt_valid=namespace['pause_receipt_valid'];canonical=namespace['canonical']
+diagnostic=namespace['pause_unit_diagnostic'];completion_binding=namespace['pause_completion_binding']
 cases=0
 def check(label,call,valid=False):
     global cases
@@ -418,6 +419,8 @@ executor_fields={'Id':executor,'LoadState':'loaded','FragmentPath':'/etc/systemd
                  'DropInPaths':'','Transient':'no','UnitFileState':'static','ActiveState':'inactive',
                  'SubState':'dead','Job':'0','MainPID':'0','ControlPID':'0'}
 check('original active enabled timer',lambda:unit(timer_fields,timer,'active'),True)
+check('triggered timer active/running',lambda:unit(dict(timer_fields,SubState='running'),timer,'active'),True)
+check('active elapsed timer',lambda:unit(dict(timer_fields,SubState='elapsed'),timer,'active'),True)
 check('idle timer',lambda:unit(idle_timer,timer,'idle'),True)
 check('idle executor',lambda:unit(executor_fields,executor,'idle'),True)
 check('initially paused is not owned rearm obligation',lambda:unit(idle_timer,timer,'active'))
@@ -428,6 +431,24 @@ for field,value in (('FragmentPath','/run/systemd/system/'+timer),('LoadState','
 for field,value in (('ActiveState','activating'),('ActiveState','failed'),('Job','42'),('MainPID','123'),('ControlPID','456')):
     check('executor not positively idle '+field,lambda field=field,value=value:unit(dict(executor_fields,**{field:value}),executor,'idle'))
 check('empty job is idle',lambda:unit(dict(executor_fields,Job=''),executor,'idle'),True)
+completed_timer=dict(idle_timer,UnitFileState='disabled')
+completed_executor=dict(executor_fields,Result='success',ExecMainStatus='0')
+check('completed timer is disarmed',lambda:unit(completed_timer,timer,'completed'),True)
+check('completed executor is successful and idle',lambda:unit(completed_executor,executor,'completed'),True)
+check('enabled timer is not completed',lambda:unit(idle_timer,timer,'completed'))
+check('disarmed timer cannot authorize normal resume',lambda:unit(completed_timer,timer,'owned'))
+for field,value in (('ActiveState','active'),('SubState','running'),('Job','42')):
+    check('completed timer refuses '+field,lambda field=field,value=value:unit(dict(completed_timer,**{field:value}),timer,'completed'))
+for field,value in (('Job','42'),('MainPID','123'),('ControlPID','456'),('Result','exit-code'),('ExecMainStatus','1')):
+    check('completed executor refuses '+field,lambda field=field,value=value:unit(dict(completed_executor,**{field:value}),executor,'completed'))
+safe=diagnostic(dict(timer_fields,SubState='running'),timer)
+assert safe['SubState']=='running' and safe['fragment_scope']=='installed' and safe['executor_matches']
+untrusted=dict(timer_fields,FragmentPath='/secret/UNTRUSTED',DropInPaths='UNTRUSTED',Id='UNTRUSTED',Unit='UNTRUSTED',
+               ActiveState='UNTRUSTED',SubState='UNTRUSTED',Job='UNTRUSTED',ExecStart='UNTRUSTED')
+safe=diagnostic(untrusted,timer)
+assert 'UNTRUSTED' not in repr(safe) and safe['fragment_scope']=='other-redacted'
+assert not safe['id_matches'] and not safe['executor_matches'] and safe['Job']=='other-redacted'
+cases+=2
 record={'version':4,'intent_type':'smart_tun_native_pending_trial_v1','operation_id':operation,
         'phase':'trial_pending','revision':1,'deadline_uptime_sec':160,'boot_id':boot,
         'tunnel_interface':'sctunqa0','underlay_interface':'scqaedge0','core_start_attempted':True,
@@ -468,6 +489,19 @@ check('partial receipt bytes',lambda:receipt_valid(receipt,info,canonical(receip
 check('extra raw data',lambda:receipt_valid(receipt,info,canonical(receipt)+b'secret'))
 changed=dict(receipt,journal={'private':'must not be persisted'})
 check('no copied product journal',lambda:receipt_valid(changed,info,canonical(changed)))
+raw=canonical(receipt);invocation='d'*32
+binding=json.dumps([info.st_dev,info.st_ino,hashlib.sha256(raw).hexdigest()],separators=(',',':'))
+check('same pre-proof receipt binding',lambda:completion_binding(binding,receipt,info,raw,invocation),True)
+for value in ('','0'*32,'not-an-invocation'):
+    check('no terminal disposal without invocation identity',lambda value=value:completion_binding(binding,receipt,info,raw,value))
+check('different operation is not terminal authority',lambda:completion_binding(binding,dict(receipt,operation_id='e'*32),info,raw,invocation))
+check('guard-recovered receipt alone is not Off completion',lambda:completion_binding(binding,dict(receipt,kind='guard'),info,raw,invocation))
+check('receipt bytes changed during proof',lambda:completion_binding(binding,receipt,info,raw+b' ',invocation))
+replaced=SimpleNamespace(**dict(vars(info),st_ino=info.st_ino+1))
+replacement=dict(receipt,receipt_ino=replaced.st_ino);replacement_raw=canonical(replacement)
+check('self-consistent replacement still differs from original proof binding',lambda:completion_binding(binding,replacement,replaced,replacement_raw,invocation))
+for value in ('[]',json.dumps([True,info.st_ino,hashlib.sha256(raw).hexdigest()]),json.dumps([info.st_dev,info.st_ino,'bad'])):
+    check('malformed terminal binding',lambda value=value:completion_binding(value,receipt,info,raw,invocation))
 print(f'HOST_QA_NATIVE_RECOVERY_PAUSE_REGRESSIONS=PASS ({cases} ownership/state cases)')
 PYNATIVEPAUSEFIXTURES
 

@@ -701,18 +701,21 @@ native_recovery_control() {
   # Test isolation, not guard-loss injection. The installed /etc unit outranks
   # a /run mask. Hold its existing manager lock while pausing timer/executor,
   # then release it before any product CLI or packet operation.
-  /usr/bin/timeout --signal=KILL 12s /usr/bin/python3 - "$1" "$2" "$op" <<'PYNATIVEPAUSE'
+  /usr/bin/timeout --signal=KILL 12s /usr/bin/python3 - "$1" "$2" "$op" "${3-}" "${4-}" <<'PYNATIVEPAUSE'
 import fcntl,hashlib,json,os,re,resource,stat,subprocess,sys,tempfile,time
-action,expected,operation=sys.argv[1:]
-assert action in ('pause','check','resume') and re.fullmatch('[0-9a-f]{32}',operation)
+action,expected,operation,extra,witness=sys.argv[1:]
+assert action in ('pause','check','resume','retire') and re.fullmatch('[0-9a-f]{32}',operation)
+if action=='retire':assert expected=='completed' and extra and re.fullmatch('[0-9a-f]{32}',witness) and witness!='0'*32
+else:
+    assert witness=='' and (extra=='' or (action=='resume' and expected=='off' and extra=='qa-after-timer-start'))
 timer='server-connect-activation-recover.timer';executor='server-connect-activation-recover.service'
 core='server-connect-smart-tun.service';units=(timer,executor,core)
 receipt_name='sc-qa-native-recovery-pause.json'
 def pause_unit_valid(fields,name,state):
-    assert name in (timer,executor,core) and state in ('owned','active','idle','stopped')
+    assert name in (timer,executor,core) and state in ('owned','active','idle','stopped','completed')
     assert fields['Id']==name and fields['LoadState']=='loaded' and fields['FragmentPath']=='/etc/systemd/system/'+name
     assert fields['DropInPaths']=='' and fields['Transient']=='no'
-    assert fields['UnitFileState']==('enabled' if name==timer else 'static')
+    assert fields['UnitFileState']==(('disabled' if state=='completed' else 'enabled') if name==timer else 'static')
     assert fields['Job']=='' or re.fullmatch('[0-9]{1,20}',fields['Job'])
     if name==timer:assert fields['Unit']==executor
     else:
@@ -720,12 +723,37 @@ def pause_unit_valid(fields,name,state):
     if state!='owned':assert fields['Job'] in ('','0')
     if state=='active':
         assert fields['ActiveState']=='active'
-        if name==timer:assert fields['SubState'] in ('waiting','elapsed')
+        # systemd 257 TIMER_RUNNING is UNIT_ACTIVE while its triggered unit runs.
+        if name==timer:assert fields['SubState'] in ('waiting','elapsed','running')
         else:assert fields['SubState']=='running' and int(fields['MainPID'])>1 and fields['ControlPID']=='0'
-    if state in ('idle','stopped'):
+    if state in ('idle','stopped','completed'):
         assert fields['ActiveState'] in (('inactive','failed') if state=='stopped' else ('inactive',))
         assert fields['SubState'] in (('dead','failed') if state=='stopped' else ('dead',))
         if name!=timer:assert fields['MainPID']==fields['ControlPID']=='0'
+    if state=='completed' and name==executor:assert fields['Result']=='success' and fields['ExecMainStatus']=='0'
+def pause_unit_diagnostic(fields,name):
+    # Fixed whitelists only: unexpected paths, messages and values are redacted.
+    assert name in (timer,executor,core) and isinstance(fields,dict)
+    safe={'unit':name}
+    enums={'LoadState':{'loaded','masked','not-found','error','bad-setting','merged','stub'},
+           'ActiveState':{'active','inactive','activating','deactivating','failed','reloading','maintenance','refreshing'},
+           'SubState':{'dead','waiting','elapsed','running','failed','exited','start','start-pre','start-post','stop','stop-post',
+                       'stop-sigterm','stop-sigkill','final-sigterm','final-sigkill','auto-restart','auto-restart-queued','cleaning'},
+           'UnitFileState':{'enabled','enabled-runtime','disabled','static','masked','masked-runtime','indirect','generated','transient'},
+           'Transient':{'yes','no'},'Result':{'success','exit-code','signal','core-dump','timeout','start-limit-hit','resources','protocol','watchdog','oom-kill','exec-condition'}}
+    for key,values in enums.items():
+        if key in fields:safe[key]=fields[key] if isinstance(fields[key],str) and fields[key] in values else 'other-redacted'
+    for key in ('Job','MainPID','ControlPID','ExecMainStatus'):
+        if key in fields:
+            value=fields[key]
+            safe[key]=value if isinstance(value,str) and (value=='' or re.fullmatch('[0-9]{1,20}',value)) else 'other-redacted'
+    path=fields.get('FragmentPath')
+    safe['fragment_scope']=('installed' if path=='/etc/systemd/system/'+name else 'runtime' if path=='/run/systemd/system/'+name
+                            else 'empty' if path=='' else 'other-redacted')
+    safe['drop_ins']='none' if fields.get('DropInPaths')=='' else 'nonempty-or-unavailable-redacted'
+    safe['id_matches']=fields.get('Id')==name
+    if name==timer:safe['executor_matches']=fields.get('Unit')==executor
+    return safe
 def pause_journal_valid(record,operation,expected,uptime):
     assert record['version']==4 and record['intent_type']=='smart_tun_native_pending_trial_v1' and record['operation_id']==operation
     phases={'trial_pending':(1,),'trial_stop_requested':(2,),'trial_recovered':(2,3),'trial_cleanup_pending':(4,)}
@@ -755,7 +783,7 @@ def pause_journal_valid(record,operation,expected,uptime):
 def canonical(value):return (json.dumps(value,sort_keys=True,separators=(',',':'))+'\n').encode('ascii')
 def private_file(info):
     return stat.S_ISREG(info.st_mode) and info.st_uid==0 and stat.S_IMODE(info.st_mode)==0o600 and info.st_nlink==1
-fds=[];links=[];lock_fd=None;step='scope'
+fds=[];links=[];lock_fd=None;step='scope';scope_verified=False
 def directory(path,private=False):
     current=os.open('/',os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW|os.O_CLOEXEC);fds.append(current)
     for name in path.strip('/').split('/'):
@@ -782,22 +810,24 @@ def read_at(parent,name,limit,private=False):
         current=os.stat(name,dir_fd=parent,follow_symlinks=False)
         assert (current.st_dev,current.st_ino)==(initial.st_dev,initial.st_ino)
         return raw,initial
-def capture(argv):
+def capture(argv,timeout=2):
     def bound():resource.setrlimit(resource.RLIMIT_FSIZE,(16384,16384))
     with tempfile.TemporaryFile(dir='/run') as out:
-        subprocess.run(argv,stdout=out,stderr=subprocess.DEVNULL,timeout=2,check=True,close_fds=True,
+        subprocess.run(argv,stdout=out,stderr=subprocess.DEVNULL,timeout=timeout,check=True,close_fds=True,
                        preexec_fn=bound,env={'PATH':'/usr/sbin:/usr/bin:/sbin:/bin','LC_ALL':'C'})
         assert out.tell()<16384;out.seek(0);return out.read(16384)
-def snapshot(name):
+def unit_fields(name,timeout=2):
     properties=['Id','LoadState','FragmentPath','DropInPaths','Transient','UnitFileState','ActiveState','SubState','Job']
-    properties+=['Unit'] if name==timer else ['MainPID','ControlPID']
+    properties+=['Unit'] if name==timer else ['MainPID','ControlPID','Result','ExecMainStatus']
     argv=['/usr/bin/systemctl','show',name]
     for key in properties:argv+=['-p',key]
     fields={}
-    for line in capture(argv).decode('utf-8').splitlines():
+    for line in capture(argv,timeout).decode('utf-8').splitlines():
         key,separator,value=line.partition('=');assert separator and key in properties and key not in fields
         fields[key]=value
-    assert set(fields)==set(properties);pause_unit_valid(fields,name,'owned');return fields
+    assert set(fields)==set(properties);return fields
+def snapshot(name,state='owned'):
+    fields=unit_fields(name);pause_unit_valid(fields,name,state);return fields
 def owned_units():
     digests={}
     for name in units:
@@ -841,6 +871,18 @@ def pause_receipt_valid(receipt,info,raw):
     assert private_file(info) and (receipt['receipt_dev'],receipt['receipt_ino'])==(info.st_dev,info.st_ino)
     assert (receipt['namespace_dev'],receipt['namespace_ino'])==(ns.st_dev,ns.st_ino)
     pinned=lock_identity();assert (receipt['lock_dev'],receipt['lock_ino'])==(pinned.st_dev,pinned.st_ino)
+def pause_completion_binding(binding,receipt,info,raw,invocation):
+    assert isinstance(binding,str) and len(binding)<=256 and receipt['kind']=='pending' and receipt['operation_id']==operation
+    assert isinstance(invocation,str) and re.fullmatch('[0-9a-f]{32}',invocation) and invocation!='0'*32
+    value=json.loads(binding)
+    assert isinstance(value,list) and len(value)==3
+    assert all(type(x) is int and 0<x<2**64 for x in value[:2])
+    assert isinstance(value[2],str) and re.fullmatch('[0-9a-f]{64}',value[2])
+    assert value==[info.st_dev,info.st_ino,hashlib.sha256(raw).hexdigest()]
+def remove_receipt(saved,info):
+    current,again=read_at(run_fd,receipt_name,4096,True)
+    assert current==saved and (again.st_dev,again.st_ino)==(info.st_dev,info.st_ino)
+    os.unlink(receipt_name,dir_fd=run_fd);os.fsync(run_fd)
 def idle():
     pause_unit_valid(snapshot(timer),timer,'idle');pause_unit_valid(snapshot(executor),executor,'idle')
 def core_expected(expect):
@@ -856,6 +898,7 @@ try:
     assert (ns.st_dev,ns.st_ino)==(pid1.st_dev,pid1.st_ino)
     boot=open('/proc/sys/kernel/random/boot_id').read(64).strip()
     assert re.fullmatch('[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}',boot)
+    scope_verified=True
     state_fd=directory('/var/lib/server-connect',True);run_fd=directory('/run')
     runtime_fd=directory('/run/systemd/system');unit_fd=directory('/etc/systemd/system');prefix_fd=directory('/opt/server-connect')
     step='existing-lock'
@@ -867,7 +910,7 @@ try:
         except BlockingIOError:
             assert time.monotonic()<until,'lock unavailable';time.sleep(0.02)
     pinned=lock_identity();step='owned-units';digests=owned_units()
-    for name in units:snapshot(name)
+    for name in units:snapshot(name,'completed' if action=='retire' else 'owned')
     if action=='pause':
         assert expected in ('pending','guard')
         try:os.stat(receipt_name,dir_fd=run_fd,follow_symlinks=False)
@@ -899,6 +942,28 @@ try:
         step='paused-proof';idle();core_expected(expected)
         after,record=current_journal(expected);assert after==raw and owned_units()==digests
         native_identity(record);lock_identity()
+    elif action=='retire':
+        # The caller first proved an exact-operation independent cleared
+        # receipt and full native baseline OUTSIDE this manager lock.
+        step='completed-pause-receipt';saved,info=read_at(run_fd,receipt_name,4096,True)
+        receipt=json.loads(saved);pause_receipt_valid(receipt,info,saved)
+        assert receipt['unit_sha256']==digests
+        pause_completion_binding(extra,receipt,info,saved,witness)
+        step='completed-state-absence'
+        for name in ('route-activation-journal.json','smart-tun-trial.json'):
+            try:os.stat(name,dir_fd=state_fd,follow_symlinks=False)
+            except FileNotFoundError:pass
+            else:raise AssertionError('completed operation state reappeared')
+        assert int(open('/sys/class/net/scqaedge0/ifindex').read(64))==receipt['underlay_index']
+        links_now=json.loads(capture(['/usr/bin/ip','-N','-j','link','show']))
+        assert isinstance(links_now,list) and all(x['ifname']!='sctunqa0' and x['ifindex']!=receipt['link_index'] for x in links_now)
+        assert any(x['ifname']=='lo' and x['ifindex']==1 for x in links_now)
+        tables_now=json.loads(capture(['/usr/sbin/nft','-n','-j','list','tables']))
+        assert not any(x.get('table',{}).get('family')=='inet' and x['table'].get('name')=='scnt_'+operation for x in tables_now['nftables'])
+        step='completed-idle-disarmed-proof'
+        for name in units:snapshot(name,'completed')
+        assert owned_units()==digests;lock_identity()
+        step='completed-receipt-remove';remove_receipt(saved,info)
     else:
         step='pause-receipt';saved,info=read_at(run_fd,receipt_name,4096,True)
         receipt=json.loads(saved);pause_receipt_valid(receipt,info,saved);assert receipt['unit_sha256']==digests
@@ -919,19 +984,54 @@ try:
                 step='resume-drain-executor';capture(['/usr/bin/systemctl','stop',executor])
             step='resume-idle-proof';idle()
             step='rearm-timer';capture(['/usr/bin/systemctl','start',timer])
+            if extra=='qa-after-timer-start':
+                # Real timer-start ACK, then a QA-only caller failure. The
+                # scheduled executor can proceed when finally closes .lock.
+                print('PRODUCT_NATIVE_POST_REARM_FAILURE=injected-after-timer-start-ack',file=sys.stderr,flush=True)
+                raise SystemExit(86)
             step='rearmed-proof';pause_unit_valid(snapshot(timer),timer,'active')
             assert owned_units()==digests;lock_identity()
-            current,again=read_at(run_fd,receipt_name,4096,True)
-            assert current==saved and (again.st_dev,again.st_ino)==(info.st_dev,info.st_ino)
-            os.unlink(receipt_name,dir_fd=run_fd);os.fsync(run_fd)
+            remove_receipt(saved,info)
     lock_identity()
 except Exception:
     print('PRODUCT_NATIVE_RECOVERY_PAUSE=FAIL (step='+step+'; ownership or bounded state proof unavailable)',file=sys.stderr)
+    if scope_verified:
+        for name in units:
+            try:
+                observed=pause_unit_diagnostic(unit_fields(name,0.5),name)
+                print('PRODUCT_NATIVE_RECOVERY_PAUSE_UNIT observation-only '+json.dumps(observed,separators=(',',':')),file=sys.stderr,flush=True)
+            except Exception:print('PRODUCT_NATIVE_RECOVERY_PAUSE_UNIT observation-only unit='+name+' unavailable=bounded-unit-observation',file=sys.stderr,flush=True)
     raise SystemExit(1)
 finally:
     # No product CLI runs under this lock; subprocesses close all inherited FDs.
     for fd in reversed(fds):os.close(fd)
 PYNATIVEPAUSE
+}
+
+native_pause_completed_cleanup() {
+  # Bind the original receipt before the unlocked finalization proof. File
+  # absence alone never authorizes receipt disposal or rearming a finished op.
+  native_pause_binding=$(/usr/bin/timeout --signal=KILL 2s /usr/bin/python3 - "$op" <<'PYNATIVEPAUSEBIND'
+import hashlib,json,os,stat,sys
+path='/run/sc-qa-native-recovery-pause.json'
+fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK|os.O_CLOEXEC)
+with os.fdopen(fd,'rb') as stream:
+    before=os.fstat(stream.fileno())
+    assert stat.S_ISREG(before.st_mode) and before.st_uid==0 and stat.S_IMODE(before.st_mode)==0o600 and before.st_nlink==1 and before.st_size<=4096
+    raw=stream.read(4097);after=os.fstat(stream.fileno())
+    assert len(raw)<=4096 and (before.st_size,before.st_mtime_ns)==(after.st_size,after.st_mtime_ns)
+    current=os.stat(path,follow_symlinks=False)
+    assert (current.st_dev,current.st_ino)==(before.st_dev,before.st_ino)
+value=json.loads(raw)
+assert value['operation_id']==sys.argv[1] and (value['receipt_dev'],value['receipt_ino'])==(before.st_dev,before.st_ino)
+print(json.dumps([before.st_dev,before.st_ino,hashlib.sha256(raw).hexdigest()],separators=(',',':')))
+PYNATIVEPAUSEBIND
+  ) || return 1
+  # Includes native baseline, exact current-boot/cursor/operation receipt and
+  # product status. None of this runs while the helper owns the manager flock.
+  require_independent_finalization || return 1
+  native_recovery_control retire completed "$native_pause_binding" "$proven_invocation" || return 1
+  test ! -e "$native_pause_file" && test ! -L "$native_pause_file"
 }
 
 native_product_cleanup() {
@@ -940,7 +1040,15 @@ native_product_cleanup() {
   native_cleanup_rc=0
   if [ -n "$native_fixture_kind" ]; then native_foreign_remove || native_cleanup_rc=1; fi
   if [ -e "$native_pause_file" ] || [ -L "$native_pause_file" ]; then
-    native_recovery_control resume cleanup || native_cleanup_rc=1
+    if [ -e /var/lib/server-connect/route-activation-journal.json ] || [ -L /var/lib/server-connect/route-activation-journal.json ]; then
+      # Recovery may finish between this hint and acquiring the helper lock.
+      # The fallback still requires full independent completion evidence.
+      if ! native_recovery_control resume cleanup; then
+        native_pause_completed_cleanup || native_cleanup_rc=1
+      fi
+    else
+      native_pause_completed_cleanup || native_cleanup_rc=1
+    fi
   fi
   test ! -e "$native_pause_file" && test ! -L "$native_pause_file" || native_cleanup_rc=1
   native_executor_unmask || native_cleanup_rc=1
@@ -1197,13 +1305,20 @@ native_loss_cases() {
     "$sc" --json smart-tun-trial-disconnect --operation-id "$op" --revision 1 \
       --qa-kill-at after-stop-request >/dev/null 2>&1 || killed=$?
     test "$killed" = 137
-    native_recovery_control resume off
+    if [ "$native_loss" = route ]; then
+      native_rearm_rc=0
+      native_recovery_control resume off qa-after-timer-start || native_rearm_rc=$?
+      test "$native_rearm_rc" = 86
+      native_pause_completed_cleanup
+      echo PRODUCT_NATIVE_POST_REARM_FAILURE_FINALIZATION=PASS
+    else
+      native_recovery_control resume off
+      require_independent_finalization
+    fi
     test ! -e "$native_pause_file" && test ! -L "$native_pause_file"
-    systemctl start server-connect-activation-recover.service
-    require_independent_finalization
     echo "PRODUCT_NATIVE_LOSS_FAIL_CLOSED($native_loss)=PASS"
   done
-  echo PRODUCT_NATIVE_LOSS_RECOVERY=explicit-installed-executor
+  echo PRODUCT_NATIVE_LOSS_RECOVERY=rearmed-installed-timer
   echo PRODUCT_NATIVE_ROUTE_RULE_CAPTURE_CORE_FAIL_CLOSED=PASS
 }
 
