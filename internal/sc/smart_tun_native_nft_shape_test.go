@@ -44,6 +44,30 @@ func nativeNFTObservedShapeFixture(t *testing.T) (smartTUNTrialJournal, []map[st
 	return r, objects, indices
 }
 
+// This is a source-derived policy clone, NOT an observed native roundtrip.
+// Keep the historical bytes unchanged. The only intended changes are the
+// guard hook and its local-origin final-drop condition; native QA must prove
+// the real hook placement, ingress identity and resulting packet paths.
+func nativeNFTDerivedPostroutingShapeFixture(t *testing.T) (smartTUNTrialJournal, []map[string]any, map[string]int) {
+	t.Helper()
+	r, objects, indices := nativeNFTObservedShapeFixture(t)
+	chain := objects[2]["chain"].(map[string]any)
+	if chain["name"] != "guard" || chain["hook"] != "output" {
+		t.Fatal("historical guard fixture changed")
+	}
+	chain["hook"] = "postrouting"
+	last := objects[len(objects)-1]["rule"].(map[string]any)
+	expressions := last["expr"].([]any)
+	if last["chain"] != "guard" || len(expressions) != 2 {
+		t.Fatal("historical final-drop fixture changed")
+	}
+	// Pinned nft's ifindex renderer serializes the no-ingress sentinel as
+	// decimal string "0". It is a typed value, never a real link-name lookup.
+	local := map[string]any{"match": map[string]any{"op": "==", "left": map[string]any{"meta": map[string]any{"key": "iif"}}, "right": "0"}}
+	last["expr"] = append([]any{local}, expressions...)
+	return r, objects, indices
+}
+
 func nativeNFTObserveShapeFixture(t *testing.T, r smartTUNTrialJournal, objects []map[string]any, indices map[string]int) nativeTUNNFTObservation {
 	t.Helper()
 	if err := nativeNFTPinInterfaces(objects, indices); err != nil {
@@ -56,8 +80,34 @@ func nativeNFTObserveShapeFixture(t *testing.T, r smartTUNTrialJournal, objects 
 	return observed
 }
 
-func TestSmartTUNNativeNFTMatchesActualPinnedListing(t *testing.T) {
+func TestSmartTUNNativeNFTHistoricalOutputGuardIsRejected(t *testing.T) {
 	r, objects, indices := nativeNFTObservedShapeFixture(t)
+	observed := nativeNFTObserveShapeFixture(t, r, objects, indices)
+	if observed.Matches {
+		t.Fatal("historical OUTPUT guard was accepted as the new egress policy")
+	}
+	wanted := nativeNFTObjects(r)
+	differences := 0
+	if len(objects) != len(wanted) {
+		t.Fatal("historical fixture object count unexpectedly changed")
+	}
+	for i := range objects {
+		a, _ := nativeNFTObjectHash([]map[string]any{objects[i]}, true)
+		b, _ := nativeNFTObjectHash([]map[string]any{wanted[i]}, true)
+		if a != b {
+			differences++
+			if i != 2 && i != len(objects)-1 {
+				t.Fatalf("unrelated historical policy object %d changed", i)
+			}
+		}
+	}
+	if differences != 2 {
+		t.Fatal("historical rejection must distinguish guard hook and local-origin drop")
+	}
+}
+
+func TestSmartTUNNativeNFTMatchesDerivedPostroutingShape(t *testing.T) {
+	r, objects, indices := nativeNFTDerivedPostroutingShapeFixture(t)
 	observed := nativeNFTObserveShapeFixture(t, r, objects, indices)
 	if !observed.Matches || observed.Count != 22 {
 		wanted := nativeNFTObjects(r)
@@ -71,19 +121,19 @@ func TestSmartTUNNativeNFTMatchesActualPinnedListing(t *testing.T) {
 				t.Logf("native object %d differs: observed=%v expected=%v", i, objects[i], wanted[i])
 			}
 		}
-		t.Fatalf("actual native graph not recognized: matches=%v count=%d", observed.Matches, observed.Count)
+		t.Fatalf("source-derived postrouting graph not recognized: matches=%v count=%d", observed.Matches, observed.Count)
 	}
 	bindNativeNFTReceipt(&r, observed)
 	if err := validateSmartTUNNative(r); err != nil {
-		t.Fatalf("actual receipt is not bound to intended manifest: %v", err)
+		t.Fatalf("derived receipt is not bound to intended manifest: %v", err)
 	}
 	if !nativeTUNNFTReceiptCovers(r, observed, true) || !nativeTUNGuardIntact(r, observed) {
-		t.Fatal("actual complete ownership/guard receipt rejected")
+		t.Fatal("derived complete ownership/guard receipt rejected")
 	}
 
 	// The same unchanged rule becomes an exact decimal string when the TUN
 	// is removed. Preserve its original index and handles in the receipt.
-	_, after, remaining := nativeNFTObservedShapeFixture(t)
+	_, after, remaining := nativeNFTDerivedPostroutingShapeFixture(t)
 	delete(remaining, r.TunnelInterface)
 	r.Native.LinkStage = "removed"
 	for _, object := range after {
@@ -104,11 +154,11 @@ func TestSmartTUNNativeNFTMatchesActualPinnedListing(t *testing.T) {
 	}
 }
 
-func TestSmartTUNNativeNFTActualShapeRejectsPolicyAndOrderChanges(t *testing.T) {
-	original, objects, indices := nativeNFTObservedShapeFixture(t)
+func TestSmartTUNNativeNFTDerivedShapeRejectsPolicyAndOrderChanges(t *testing.T) {
+	original, objects, indices := nativeNFTDerivedPostroutingShapeFixture(t)
 	baseline := nativeNFTObserveShapeFixture(t, original, objects, indices)
 	if !baseline.Matches {
-		t.Fatal("actual fixture must match before negative checks")
+		t.Fatal("derived fixture must match before negative checks")
 	}
 	bindNativeNFTReceipt(&original, baseline)
 	rule := func(objects []map[string]any, index int) map[string]any {
@@ -122,7 +172,11 @@ func TestSmartTUNNativeNFTActualShapeRejectsPolicyAndOrderChanges(t *testing.T) 
 		{"chain header order", func(o []map[string]any) { o[1], o[2] = o[2], o[1] }},
 		{"rule order with original handles", func(o []map[string]any) { o[12], o[13] = o[13], o[12] }},
 		{"expression order", func(o []map[string]any) { e := exprs(o, 18); e[0], e[1] = e[1], e[0] }},
-		{"drop changed to accept", func(o []map[string]any) { exprs(o, 21)[1] = map[string]any{"accept": nil} }},
+		{"drop changed to accept", func(o []map[string]any) { e := exprs(o, 21); e[len(e)-1] = map[string]any{"accept": nil} }},
+		{"local-origin gate removed", func(o []map[string]any) { rule(o, 21)["expr"] = exprs(o, 21)[1:] }},
+		{"foreign ingress dropped", func(o []map[string]any) {
+			exprs(o, 21)[0].(map[string]any)["match"].(map[string]any)["right"] = json.Number("9")
+		}},
 		{"public destination exemption", func(o []map[string]any) {
 			m := exprs(o, 15)[0].(map[string]any)["match"].(map[string]any)
 			m["right"].(map[string]any)["set"].([]any)[0].(map[string]any)["prefix"].(map[string]any)["len"] = json.Number("0")
@@ -148,7 +202,7 @@ func TestSmartTUNNativeNFTActualShapeRejectsPolicyAndOrderChanges(t *testing.T) 
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			r, current, mapping := nativeNFTObservedShapeFixture(t)
+			r, current, mapping := nativeNFTDerivedPostroutingShapeFixture(t)
 			if err := nativeNFTPinInterfaces(current, mapping); err != nil {
 				t.Fatal(err)
 			}
@@ -161,7 +215,7 @@ func TestSmartTUNNativeNFTActualShapeRejectsPolicyAndOrderChanges(t *testing.T) 
 	}
 	// Handles are stripped for intended semantic comparison only. A replaced
 	// handle must still fail the durable ownership receipt, independently.
-	r, current, mapping := nativeNFTObservedShapeFixture(t)
+	r, current, mapping := nativeNFTDerivedPostroutingShapeFixture(t)
 	if err := nativeNFTPinInterfaces(current, mapping); err != nil {
 		t.Fatal(err)
 	}
@@ -176,6 +230,7 @@ func TestSmartTUNNativeNFTInterfaceMappingMustRemainCurrent(t *testing.T) {
 	r, _, indices := nativeNFTObservedShapeFixture(t)
 	base := `[{"ifindex":1,"ifname":"lo"},{"ifindex":3,"ifname":"scqaedge0"},{"ifindex":22,"ifname":"sctunqa0","ifalias":"server-connect:` + r.OperationID + `"}]`
 	for _, raw := range []string{
+		strings.Replace(base, `"ifindex":1`, `"ifindex":0`, 1),
 		strings.Replace(base, `"ifindex":3`, `"ifindex":4`, 1),
 		strings.Replace(base, `"ifindex":22`, `"ifindex":23`, 1),
 		strings.Replace(base, `"ifname":"sctunqa0"`, `"ifname":"replacement0"`, 1),
@@ -250,11 +305,22 @@ func TestSmartTUNNativeNFTNormalizesOnlyTypedInterfaceOperands(t *testing.T) {
 	if !bytes.Equal(before, after) {
 		t.Fatal("name-based semantics or arbitrary strings were rewritten")
 	}
-	for _, value := range []string{"unknown0", "+22", "-1", "022", "22 ", "22.0", "1e1", "4294967296"} {
+	for _, value := range []string{"unknown0", "+22", "-1", "022", "22 ", "22.0", "1e1", "4294967296", "00", "+0", "-0", "0 ", "0.0"} {
 		if _, err := nativeNFTInterfaceValue(value, indices); ErrorCode(err) != "trial_resource_conflict" {
 			t.Fatalf("unresolved/noncanonical interface %q accepted", value)
 		}
 	}
+	for _, sentinel := range []any{json.Number("0"), "0"} {
+		value, err := nativeNFTInterfaceValue(sentinel, indices)
+		if err != nil || value != json.Number("0") {
+			t.Fatal("exact no-ingress sentinel was not retained")
+		}
+	}
+	indices["0"] = 33
+	if _, err := nativeNFTInterfaceValue("0", indices); ErrorCode(err) != "trial_resource_conflict" {
+		t.Fatal("numeric link name was mistaken for no ingress")
+	}
+	delete(indices, "0")
 	delete(indices, r.TunnelInterface)
 	value, err := nativeNFTInterfaceValue("22", indices)
 	if err != nil || value != json.Number("22") {

@@ -214,7 +214,8 @@ func TestSmartTUNNativeManifestSeparatesOwnershipAndContainment(t *testing.T) {
 	}
 	// Actual dropped packets change counters, never ownership or containment.
 	last := objects[len(objects)-1]["rule"].(map[string]any)
-	last["expr"].([]any)[0].(map[string]any)["counter"] = map[string]any{"packets": json.Number("900"), "bytes": json.Number("80000")}
+	lastExpr := last["expr"].([]any)
+	lastExpr[len(lastExpr)-2].(map[string]any)["counter"] = map[string]any{"packets": json.Number("900"), "bytes": json.Number("80000")}
 	changed, err := nativeTUNNFTFromRows(objects, record, 43)
 	if err != nil || !nativeTUNNFTReceiptCovers(record, changed, true) {
 		t.Fatalf("counter activity became false ownership drift: %v", err)

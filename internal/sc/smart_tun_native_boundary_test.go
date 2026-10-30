@@ -219,10 +219,10 @@ func TestSmartTUNNativeSingleQueueAttachNeedsPositiveCarrier(t *testing.T) {
 }
 
 type nativeGuardPacket struct {
-	family, protocol, oif, icmpType, sport, dport int
-	mark                                          uint32
-	reply                                         bool
-	destination                                   string
+	family, protocol, iif, oif, icmpType, sport, dport int
+	mark                                               uint32
+	reply                                              bool
+	destination                                        string
 }
 
 func nativeGuardNumber(value any) (uint64, bool) {
@@ -251,6 +251,8 @@ func nativeGuardOperand(value any, p nativeGuardPacket) any {
 			return p.family
 		case "l4proto":
 			return p.protocol
+		case "iif":
+			return p.iif
 		case "oif":
 			return p.oif
 		}
@@ -371,6 +373,24 @@ func nativeGuardAllows(t *testing.T, record smartTUNTrialJournal, p nativeGuardP
 
 func TestSmartTUNNativeIndependentClassifierKeepsColdNeighborControl(t *testing.T) {
 	r := nativeTrialExample(true)
+	// These are inputs at the selected hook, not a kernel hook-order model.
+	// Native QA must prove actual POSTROUTING egress and ingress identities.
+	for _, object := range nativeNFTObjects(r) {
+		chain, ok := object["chain"].(map[string]any)
+		if !ok {
+			continue
+		}
+		switch chain["name"] {
+		case "capture":
+			if chain["type"] != "route" || chain["hook"] != "output" {
+				t.Fatal("capture left the OUTPUT rerouting hook")
+			}
+		case "guard":
+			if chain["type"] != "filter" || chain["hook"] != "postrouting" {
+				t.Fatal("guard cannot inspect final egress in the original OUTPUT hook")
+			}
+		}
+	}
 	for _, tc := range []struct {
 		name    string
 		p       nativeGuardPacket
@@ -390,6 +410,9 @@ func TestSmartTUNNativeIndependentClassifierKeepsColdNeighborControl(t *testing.
 		{"DHCP ports cannot exempt TCP", nativeGuardPacket{family: 2, protocol: 6, oif: 3, sport: 68, dport: 67, destination: "255.255.255.255"}, false},
 		{"broadcast arbitrary UDP denied", nativeGuardPacket{family: 2, protocol: 17, oif: 3, sport: 1234, dport: 1234, destination: "255.255.255.255"}, false},
 		{"local IPv4 link control", nativeGuardPacket{family: 2, protocol: 2, oif: 3, destination: "224.0.0.1"}, true},
+		{"forwarded IPv4 public TCP remains foreign-owned", nativeGuardPacket{family: 2, protocol: 6, iif: 9, oif: 3, destination: "8.8.8.8"}, true},
+		{"forwarded IPv6 public UDP remains foreign-owned", nativeGuardPacket{family: 10, protocol: 17, iif: 9, oif: 3, destination: "2001:db8:8::8"}, true},
+		{"forwarded unsupported public protocol remains foreign-owned", nativeGuardPacket{family: 10, protocol: 58, iif: 9, oif: 3, icmpType: 128, destination: "2001:db8:8::8"}, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := nativeGuardAllows(t, r, tc.p); got != tc.allowed {

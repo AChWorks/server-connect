@@ -407,11 +407,13 @@ func nativeNFTObjects(record smartTUNTrialJournal) []map[string]any {
 	// nft lists all chain headers before each chain's ordered rules. Keep
 	// creation and expected receipt in that shape without sorting observations.
 	for _, chain := range []string{"capture", "guard"} {
-		kind, priority := "route", -150
+		kind, hook, priority := "route", "output", -150
+		// OUTPUT route rerouting changes skb_dst, not that hook's original
+		// state.out. POSTROUTING exposes the actual selected egress device.
 		if chain == "guard" {
-			kind, priority = "filter", 0
+			kind, hook, priority = "filter", "postrouting", 0
 		}
-		objects = append(objects, map[string]any{"chain": map[string]any{"family": "inet", "table": n.NFTName, "name": chain, "type": kind, "hook": "output", "prio": priority, "policy": "accept"}})
+		objects = append(objects, map[string]any{"chain": map[string]any{"family": "inet", "table": n.NFTName, "name": chain, "type": kind, "hook": hook, "prio": priority, "policy": "accept"}})
 	}
 	for _, chain := range []string{"capture", "guard"} {
 		add := func(expr ...any) {
@@ -452,7 +454,10 @@ func nativeNFTObjects(record smartTUNTrialJournal) []map[string]any {
 			add(expr...)
 		}
 		if chain == "guard" {
-			add(map[string]any{"counter": map[string]any{"packets": 0, "bytes": 0}}, map[string]any{"drop": nil})
+			// Pinned Linux preserves the incoming device into POSTROUTING;
+			// its absence is the local-origin sentinel. Forwarded traffic
+			// must retain this chain's accept policy, including public flows.
+			add(match(meta("iif"), 0), map[string]any{"counter": map[string]any{"packets": 0, "bytes": 0}}, map[string]any{"drop": nil})
 		}
 	}
 	return objects

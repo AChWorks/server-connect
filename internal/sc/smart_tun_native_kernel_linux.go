@@ -1602,7 +1602,7 @@ func nativeNFTForeignConflict(value any, record smartTUNTrialJournal) bool {
 // The native fixture supports foreign observation/filtering, not another
 // packet-path owner. A separate table or an unrelated mark is insufficient:
 // late NAT, payload/metadata writes, queueing, duplication or offload could
-// invalidate a decision already made by our OUTPUT guard. Keep this allowlist
+// invalidate a decision already made by our final-egress guard. Keep this allowlist
 // local to native admission/recovery; the legacy snapshot remains opaque.
 func nativeNFTForeignRulePassive(fields map[string]any) bool {
 	expressions, ok := fields["expr"].([]any)
