@@ -1236,6 +1236,173 @@ func nativeNFTForeignConflict(value any, record smartTUNTrialJournal) bool {
 	return false
 }
 
+// The native fixture supports foreign observation/filtering, not another
+// packet-path owner. A separate table or an unrelated mark is insufficient:
+// late NAT, payload/metadata writes, queueing, duplication or offload could
+// invalidate a decision already made by our OUTPUT guard. Keep this allowlist
+// local to native admission/recovery; the legacy snapshot remains opaque.
+func nativeNFTForeignRulePassive(fields map[string]any) bool {
+	expressions, ok := fields["expr"].([]any)
+	if !ok || len(expressions) == 0 {
+		return false
+	}
+	for _, expression := range expressions {
+		statement, ok := expression.(map[string]any)
+		if !ok || len(statement) != 1 {
+			return false
+		}
+		for kind, value := range statement {
+			if !nativeNFTPassiveStatement(kind, value) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func nativeNFTPassiveStatement(kind string, value any) bool {
+	text := func(v any) bool { s, ok := v.(string); return ok && s != "" && strings.TrimSpace(s) == s }
+	fields, object := value.(map[string]any)
+	switch kind {
+	case "accept", "drop", "continue", "return":
+		return value == nil
+	case "jump", "goto":
+		return object && len(fields) == 1 && text(fields["target"])
+	case "match":
+		if !object || len(fields) != 3 || fields["left"] == nil || fields["right"] == nil {
+			return false
+		}
+		switch fields["op"] {
+		case "==", "!=", "<", ">", "<=", ">=", "in":
+			return true
+		}
+		return false
+	case "counter":
+		return text(value) || (object && len(fields) == 2 && validNftCounterValues(fields))
+	case "reject":
+		if !object {
+			return false
+		}
+		for key, v := range fields {
+			switch key {
+			case "type":
+				switch v {
+				case "tcp reset", "icmpx", "icmp", "icmpv6":
+				default:
+					return false
+				}
+			case "expr":
+				if !text(v) && !nativeNFTUnsignedScalar(v) {
+					return false
+				}
+			default:
+				return false
+			}
+		}
+		return true
+	case "log":
+		if !object {
+			return false
+		}
+		for key, v := range fields {
+			switch key {
+			case "prefix":
+				if _, ok := v.(string); !ok {
+					return false
+				}
+			case "group", "snaplen", "queue-threshold":
+				if !nativeNFTUnsignedScalar(v) {
+					return false
+				}
+			case "level":
+				switch v {
+				case "emerg", "alert", "crit", "err", "warn", "notice", "info", "debug", "audit":
+				default:
+					return false
+				}
+			case "flags":
+				flags, ok := v.([]any)
+				if !ok {
+					flags = []any{v}
+				}
+				for _, flag := range flags {
+					switch flag {
+					case "tcp sequence", "tcp options", "ip options", "skuid", "ether", "all":
+					default:
+						return false
+					}
+				}
+			default:
+				return false
+			}
+		}
+		return true
+	case "limit", "quota":
+		if text(value) {
+			return true
+		}
+		if !object {
+			return false
+		}
+		required := "rate"
+		if kind == "quota" {
+			required = "val"
+		}
+		if !nativeNFTUnsignedScalar(fields[required]) {
+			return false
+		}
+		for key, v := range fields {
+			if key == "inv" {
+				if _, ok := v.(bool); !ok {
+					return false
+				}
+				continue
+			}
+			if kind == "limit" {
+				switch key {
+				case "rate", "burst":
+					if !nativeNFTUnsignedScalar(v) {
+						return false
+					}
+				case "rate_unit", "per", "burst_unit":
+					if !text(v) {
+						return false
+					}
+				default:
+					return false
+				}
+			} else {
+				switch key {
+				case "val", "used":
+					if !nativeNFTUnsignedScalar(v) {
+						return false
+					}
+				case "val_unit", "used_unit":
+					if !text(v) {
+						return false
+					}
+				default:
+					return false
+				}
+			}
+		}
+		return true
+	default:
+		// Includes NAT/redirect/tproxy, mangle, dup/fwd, queue, notrack,
+		// conntrack assignment, flow/offload, verdict maps and future effects.
+		return false
+	}
+}
+
+func nativeNFTUnsignedScalar(value any) bool {
+	number, ok := value.(json.Number)
+	if !ok {
+		return false
+	}
+	_, err := strconv.ParseUint(number.String(), 10, 64)
+	return err == nil
+}
+
 func nativeTUNNFTFromRows(objects []map[string]any, record smartTUNTrialJournal, generation uint32) (nativeTUNNFTObservation, error) {
 	selected := []map[string]any{}
 	var handle uint64
@@ -1256,8 +1423,13 @@ func nativeTUNNFTFromRows(objects []map[string]any, record smartTUNTrialJournal,
 					}
 				}
 				selected = append(selected, object)
-			} else if nativeNFTForeignConflict(fields, record) {
-				return nativeTUNNFTObservation{}, nativeTUNConflict("foreign nft policy overlaps native mark or interface boundary")
+			} else {
+				if kind == "flowtable" || (kind == "rule" && !nativeNFTForeignRulePassive(fields)) {
+					return nativeTUNNFTObservation{}, nativeTUNConflict("foreign nft packet-path effects are unsupported by the native fixture")
+				}
+				if nativeNFTForeignConflict(fields, record) {
+					return nativeTUNNFTObservation{}, nativeTUNConflict("foreign nft policy overlaps native mark or interface boundary")
+				}
 			}
 		}
 	}

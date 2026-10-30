@@ -402,6 +402,84 @@ func TestSmartTUNNativeForeignNFTMasksAndIndirectInterfaces(t *testing.T) {
 	}
 }
 
+func TestSmartTUNNativeForeignNFTAllowsOnlyPassiveStatements(t *testing.T) {
+	record := nativeTrialExample(true)
+	fixture := func(statement string) []map[string]any {
+		t.Helper()
+		// This complete foreign table is outside the operation's table, and
+		// deliberately has a later OUTPUT hook. Its name/address never use
+		// a native reserved resource, so overlap-string checks cannot stand
+		// in for packet-effect admission.
+		raw := `[
+		{"table":{"family":"inet","name":"foreign_observer","handle":900}},
+		{"chain":{"family":"inet","table":"foreign_observer","name":"observe","handle":901,"type":"filter","hook":"output","prio":100,"policy":"accept"}},
+		{"rule":{"family":"inet","table":"foreign_observer","chain":"observe","handle":902,"expr":[` + statement + `]}},
+		{"chain":{"family":"inet","table":"foreign_observer","name":"delegate","handle":903}},
+		{"counter":{"family":"inet","table":"foreign_observer","name":"observer_packets","handle":905,"packets":8,"bytes":640}},
+		{"quota":{"family":"inet","table":"foreign_observer","name":"observer_quota","handle":906,"bytes":1024,"used":10,"inv":false}},
+		{"limit":{"family":"inet","table":"foreign_observer","name":"observer_rate","handle":907,"rate":20,"per":"second","burst":4,"unit":"packets","inv":false}},
+		{"rule":{"family":"inet","table":"foreign_observer","chain":"delegate","handle":904,"expr":[{"return":null}]}}
+		]`
+		dec := json.NewDecoder(strings.NewReader(raw))
+		dec.UseNumber()
+		var objects []map[string]any
+		if err := dec.Decode(&objects); err != nil {
+			t.Fatal(err)
+		}
+		return objects
+	}
+	for _, statement := range []string{
+		`{"match":{"op":"==","left":{"payload":{"protocol":"ip","field":"daddr"}},"right":"198.51.100.20"}}`,
+		`{"match":{"op":"==","left":{"&":[{"meta":{"key":"mark"}},16]},"right":16}}`,
+		`{"counter":{"packets":8,"bytes":640}}`, `{"counter":"observer_packets"}`,
+		`{"accept":null}`, `{"drop":null}`, `{"continue":null}`, `{"return":null}`, `{"reject":{"type":"tcp reset"}}`,
+		`{"log":{"prefix":"foreign observer","level":"info","flags":["skuid"]}}`,
+		`{"limit":{"rate":20,"per":"second","burst":4}}`, `{"limit":"observer_rate"}`,
+		`{"quota":{"val":1024,"used":10,"inv":false}}`, `{"quota":"observer_quota"}`,
+		`{"jump":{"target":"delegate"}}`, `{"goto":{"target":"delegate"}}`,
+	} {
+		objects := fixture(statement)
+		before, _ := json.Marshal(objects)
+		observed, err := nativeTUNNFTFromRows(objects, record, 91)
+		if err != nil || observed.Present {
+			t.Fatalf("disjoint passive foreign rule refused: %s: %v", statement, err)
+		}
+		after, _ := json.Marshal(objects)
+		if !bytes.Equal(before, after) {
+			t.Fatal("foreign admission changed observed evidence")
+		}
+	}
+	for _, statement := range []string{
+		`{"dnat":{"family":"ip","addr":"9.9.9.9","port":443}}`,
+		`{"snat":{"family":"ip","addr":"198.51.100.1"}}`, `{"masquerade":null}`, `{"redirect":{"port":8080}}`,
+		`{"tproxy":{"family":"ip","addr":"127.0.0.1","port":8080}}`,
+		`{"mangle":{"key":{"payload":{"protocol":"ip","field":"daddr"}},"value":"9.9.9.9"}}`,
+		`{"dup":{"addr":"9.9.9.9","dev":"scqaedge0"}}`, `{"fwd":{"dev":"scqaedge0"}}`,
+		`{"queue":{"num":0}}`, `{"notrack":null}`, `{"flow":{"op":"add","flowtable":"foreign_flow"}}`,
+		`{"ct helper":"foreign_helper"}`, `{"ct timeout":"foreign_timeout"}`, `{"ct expectation":"foreign_expectation"}`,
+		`{"future_packet_rewrite":{"target":"9.9.9.9"}}`,
+		`{"accept":{"unknown_effect":true}}`, `{"match":{"op":"future_effect","left":1,"right":1}}`,
+		`{"counter":{"packets":0,"bytes":0,"future_effect":1}}`, `{"log":{"unknown_effect":true}}`,
+		// Passive form does not bypass the existing ownership dependency gate.
+		`{"match":{"op":"==","left":{"&":[{"meta":{"key":"mark"}},16711680]},"right":0}}`,
+	} {
+		objects := fixture(statement)
+		if _, err := nativeTUNNFTFromRows(objects, record, 92); ErrorCode(err) != "trial_resource_conflict" {
+			t.Fatalf("unsupported foreign effect escaped admission: %s: %v", statement, err)
+		}
+	}
+	objects := fixture(`{"jump":{"target":"delegate"}}`)
+	objects[len(objects)-1]["rule"].(map[string]any)["expr"] = []any{map[string]any{"dnat": map[string]any{"family": "ip", "addr": "9.9.9.9"}}}
+	if _, err := nativeTUNNFTFromRows(objects, record, 93); ErrorCode(err) != "trial_resource_conflict" {
+		t.Fatal("passive jump hid a rewriting target chain")
+	}
+	objects = fixture(`{"counter":{"packets":0,"bytes":0}}`)
+	objects = append(objects, map[string]any{"flowtable": map[string]any{"family": "inet", "table": "foreign_observer", "name": "foreign_flow", "handle": json.Number("910"), "hook": "ingress", "prio": json.Number("0"), "dev": "scqaedge0"}})
+	if _, err := nativeTUNNFTFromRows(objects, record, 94); ErrorCode(err) != "trial_resource_conflict" {
+		t.Fatal("foreign offload object escaped admission")
+	}
+}
+
 func nativeLinkEvent(index int, name string, typ uint16) syscall.NetlinkMessage {
 	value := append([]byte(name), 0)
 	size := 4 + len(value)
