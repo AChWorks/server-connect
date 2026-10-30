@@ -7,23 +7,44 @@ native_fixture_kind=
 native_fixture_receipt=
 native_executor_masked=no
 native_trace_dir=
+native_readiness_reported=no
+native_transit_receipt=
 
-native_apply_failure_diagnostic() {
-  # Failure-only observations, before cleanup can erase the failed attach.
-  # The caller preserves the failed Apply even if this bounded observer fails.
-  timeout --signal=KILL 20s python3 - <<'PYNATIVEAPPLYDIAG'
-import json,os,re,resource,stat,subprocess,tempfile
+native_failure_observation() {
+  # Sample silently before a probe; report only its first failure, before
+  # recovery erases evidence. Neither diagnostics nor timeouts change QA status.
+  case "$1" in sample) native_observer_limit=2;; apply|readiness) native_observer_limit=6;; *) return 2;; esac
+  timeout --signal=KILL "${native_observer_limit}s" python3 - "$@" <<'PYNATIVEAPPLYDIAG'
+import json,os,re,resource,stat,subprocess,sys,tempfile
+mode=sys.argv[1]
+assert (mode=='apply' and len(sys.argv)==2) or (mode=='sample' and len(sys.argv)==3) or (mode=='readiness' and len(sys.argv)==7)
+if mode=='readiness':
+    stage,destination,expected,before=sys.argv[3:]
+    assert (stage,destination,expected) in (('domestic','5.22.0.10','10.254.72.1'),('vpn','8.8.8.8','8.8.8.8'))
+prefix='PRODUCT_NATIVE_APPLY_DIAGNOSTIC' if mode=='apply' else 'PRODUCT_NATIVE_READINESS_DIAGNOSTIC'
 def unavailable(label,reason):
-    print('PRODUCT_NATIVE_APPLY_DIAGNOSTIC '+label+' unavailable='+reason,flush=True)
+    if mode!='sample':print(prefix+' '+label+' unavailable='+reason,flush=True)
 def show(label,value):
-    print('PRODUCT_NATIVE_APPLY_DIAGNOSTIC '+label+' '+json.dumps(value,separators=(',',':')),flush=True)
+    print(prefix+' '+label+' '+json.dumps(value,separators=(',',':')),flush=True)
 def read(path,limit=4096):
     with open(path) as f:return f.read(limit)
+def native_readiness_delta(before,after):
+    identity=('operation_id','link_index','nft_handle','drop_handle')
+    metrics=('tx_packets','rx_packets','guard_packets','guard_bytes')
+    for sample in (before,after):
+        assert isinstance(sample,dict) and set(sample)==set(identity+metrics)
+        op=sample['operation_id']
+        assert isinstance(op,str) and len(op)==32 and all(c in '0123456789abcdef' for c in op)
+        assert all(type(sample[k]) is int and 0<sample[k]<2**64 for k in identity[1:])
+        assert all(type(sample[k]) is int and 0<=sample[k]<2**64 for k in metrics)
+    assert all(before[k]==after[k] for k in identity), 'counter owner changed'
+    assert all(after[k]>=before[k] for k in metrics), 'counter reset'
+    return {k:after[k]-before[k] for k in metrics}
 def capture(argv):
     # A regular-file size limit bounds capture itself, not just printed output.
     def limit():resource.setrlimit(resource.RLIMIT_FSIZE,(16384,16384))
     with tempfile.TemporaryFile(dir='/run') as out:
-        try:r=subprocess.run(argv,stdout=out,stderr=subprocess.DEVNULL,timeout=2,preexec_fn=limit)
+        try:r=subprocess.run(argv,stdout=out,stderr=subprocess.DEVNULL,timeout=1,preexec_fn=limit)
         except subprocess.TimeoutExpired:raise ValueError('timeout')
         if r.returncode:raise ValueError('command-exit-'+str(r.returncode))
         if out.tell()>=16384:raise ValueError('output-limit')
@@ -52,6 +73,8 @@ try:
         j=json.loads(f.read(131073))
     assert j['version']==4 and j['intent_type']=='smart_tun_native_pending_trial_v1'
     op=j['operation_id'];assert isinstance(op,str) and re.fullmatch('[0-9a-f]{32}',op)
+    if mode!='apply':assert op==sys.argv[2]
+    if mode=='sample':assert j['phase']=='trial_pending' and j['revision']==1
     assert j['tunnel_interface']=='sctunqa0' and j['underlay_interface']=='scqaedge0'
     n=j['native'];assert n['version']==1 and (n['namespace_dev'],n['namespace_ino'])==(ns.st_dev,ns.st_ino)
     assert n['nft_name']=='scnt_'+op and n['ipv4']['table']==42424 and n['ipv6']['table']==42426
@@ -59,19 +82,8 @@ try:
     assert type(n['underlay_index']) is int and 0<n['underlay_index']<2**31
     assert int(read('/sys/class/net/scqaedge0/ifindex',64))==n['underlay_index']
 except Exception:
-    unavailable('scope','fixture-or-operation-identity');raise SystemExit(0)
+    unavailable('scope','fixture-or-operation-identity');raise SystemExit(1)
 ip=['/usr/bin/ip','-N','-j']
-try:
-    assert n['link_index']>0 and int(read('/sys/class/net/sctunqa0/ifindex',64))==n['link_index']
-    assert read('/sys/class/net/sctunqa0/ifalias',128).strip()=='server-connect:'+op
-except Exception:unavailable('tun','operation-link-absent-or-mismatched')
-else:
-    def link(rows):return isinstance(rows,list) and len(rows)==1 and rows[0].get('ifindex')==n['link_index'] and rows[0].get('ifname')=='sctunqa0'
-    observe('tun-detail',ip+['-d','link','show','dev','sctunqa0'],lambda rows:link(rows) and rows[0].get('ifalias')=='server-connect:'+op)
-    observe('tun-addresses',ip+['addr','show','dev','sctunqa0'],link)
-for family,table in (('-4',42424),('-6',42426)):
-    observe('routes-'+str(table),ip+[family,'route','show','table',str(table)],lambda rows:isinstance(rows,list) and all(str(r.get('table',table))==str(table) for r in rows))
-    observe('rules-'+family[1:],ip+[family,'rule','show','priority','10400'],lambda rows:isinstance(rows,list) and all(r.get('priority')==10400 for r in rows))
 def nft_table(value):
     if not isinstance(value,dict) or not isinstance(value.get('nftables'),list):return False
     for item in value['nftables']:
@@ -80,8 +92,234 @@ def nft_table(value):
         kind,fields=next(iter(item.items()))
         if fields.get('family')!='inet' or fields.get('name' if kind=='table' else 'table')!=n['nft_name']:return False
     return True
-observe('nft-'+n['nft_name'],['/usr/sbin/nft','-n','-j','-a','list','table','inet',n['nft_name']],nft_table)
+table_now=None
+try:
+    table_now=capture(['/usr/sbin/nft','-n','-j','-a','list','table','inet',n['nft_name']])
+    assert nft_table(table_now)
+except Exception:
+    table_now=None;unavailable('nft-'+n['nft_name'],'observation-or-identity')
+if mode!='sample' and table_now is not None:show('nft-'+n['nft_name'],table_now)
+if mode!='apply':
+    if mode=='readiness':show('probe',{'stage':stage,'destination':destination,'expected_source':expected,'operation_id':op})
+    try:
+        assert n['link_index']>0 and int(read('/sys/class/net/sctunqa0/ifindex',64))==n['link_index']
+        assert read('/sys/class/net/sctunqa0/ifalias',128).strip()=='server-connect:'+op
+        objects=table_now['nftables']
+        tables=[x['table'] for x in objects if 'table' in x]
+        assert len(tables)==1 and tables[0]['handle']==n['nft_handle']>0
+        drops=[x['rule'] for x in objects if x.get('rule',{}).get('chain')=='guard' and {'drop':None} in x['rule']['expr']]
+        assert len(drops)==1 and drops[0]['comment']=='server-connect:'+op
+        assert any(x['kind']=='rule' and x['name']=='guard' and x['handle']==drops[0]['handle'] for x in n['nft_objects'][:n['nft_count']])
+        counters=[x['counter'] for x in drops[0]['expr'] if 'counter' in x]
+        assert len(counters)==1 and set(counters[0])=={'packets','bytes'}
+        current={'operation_id':op,'link_index':n['link_index'],'nft_handle':n['nft_handle'],'drop_handle':drops[0]['handle'],
+                 'guard_packets':counters[0]['packets'],'guard_bytes':counters[0]['bytes']}
+        for key in ('tx_packets','rx_packets'):
+            text=read('/sys/class/net/sctunqa0/statistics/'+key,64).strip()
+            assert len(text)<64 and re.fullmatch('[0-9]+',text)
+            current[key]=int(text)
+        assert int(read('/sys/class/net/sctunqa0/ifindex',64))==n['link_index']
+        native_readiness_delta(current,current)
+        if mode=='sample':print(json.dumps(current,separators=(',',':')));raise SystemExit(0)
+        show('counters-after',current)
+        assert len(before)<=1024
+        previous=json.loads(before);delta=native_readiness_delta(previous,current)
+        show('counters-before',previous);show('counter-delta',delta)
+    except Exception:
+        unavailable('counters','missing-or-changed-owner-or-counter')
+        if mode=='sample':raise SystemExit(1)
+    # These lookups do not simulate OUTPUT hooks. They expose the exact
+    # selected destination's initial, captured and core-bypass route choices.
+    for label,mark in (('initial','0'),('capture','0x530000'),('bypass','0x540000')):
+        observe('route-get-'+label,ip+['-4','route','get',destination,'from','10.254.72.1','mark',mark],
+                lambda rows:isinstance(rows,list) and len(rows)==1 and rows[0].get('dst') in (destination,destination+'/32'))
+try:
+    assert n['link_index']>0 and int(read('/sys/class/net/sctunqa0/ifindex',64))==n['link_index']
+    assert read('/sys/class/net/sctunqa0/ifalias',128).strip()=='server-connect:'+op
+except Exception:unavailable('tun','operation-link-absent-or-mismatched')
+else:
+    def link(rows):return isinstance(rows,list) and len(rows)==1 and rows[0].get('ifindex')==n['link_index'] and rows[0].get('ifname')=='sctunqa0'
+    observe('tun-detail',ip+['-s','-d','link','show','dev','sctunqa0'],lambda rows:link(rows) and rows[0].get('ifalias')=='server-connect:'+op)
+    observe('tun-addresses',ip+['addr','show','dev','sctunqa0'],link)
+for family,table in (('-4',42424),('-6',42426)):
+    observe('routes-'+str(table),ip+[family,'route','show','table',str(table)],lambda rows:isinstance(rows,list) and all(str(r.get('table',table))==str(table) for r in rows))
+    observe('rules-'+family[1:],ip+[family,'rule','show','priority','10400'],lambda rows:isinstance(rows,list) and all(r.get('priority')==10400 for r in rows))
 PYNATIVEAPPLYDIAG
+}
+
+native_readiness_probe() {
+  case "$1" in
+    domestic) native_probe_destination=5.22.0.10; native_probe_expected=10.254.72.1;;
+    vpn) native_probe_destination=8.8.8.8; native_probe_expected=8.8.8.8;;
+    *) return 2;;
+  esac
+  native_probe_before=null
+  if [ "$native_product" = yes ] && [ "$native_readiness_reported" = no ]; then
+    native_probe_before=$(native_failure_observation sample "$op") || native_probe_before=null
+  fi
+  echo "PRODUCT_TUN_READINESS_PROBE stage=$1 destination=$native_probe_destination expected_source=$native_probe_expected"
+  if expect_source "$native_probe_destination" "$native_probe_expected"; then return 0; fi
+  if [ "$native_product" = yes ] && [ "$native_readiness_reported" = no ]; then
+    native_readiness_reported=yes
+    native_failure_observation readiness "$op" "$1" "$native_probe_destination" "$native_probe_expected" "$native_probe_before" ||
+      echo 'PRODUCT_NATIVE_READINESS_DIAGNOSTIC observer unavailable=bounded-observer-failed' >&2
+  fi
+  return 1
+}
+
+native_ipv4_transit() {
+  # This proves one real IPv4 forwarding hop, not an application connection
+  # or general forwarding support. Port 19257 matches no Direct-leak witness.
+  test "$edge" = scqaedge0 && test "$peer" = scqapeer || return 1
+  test "$edge_added" = yes && test "$peer_added" = yes || return 1
+  if [ "$1" = active ]; then assert_product_tun_policy_active || return 1; fi
+  native_transit_result=$(python3 - "$1" "${op-}" "$native_transit_receipt" <<'PYNATIVEFORWARD'
+import ctypes,json,os,resource,select,secrets,signal,socket,stat,struct,subprocess,sys,tempfile,time
+phase,operation,receipt=sys.argv[1:]
+assert phase in ('baseline','active')
+def read(path):
+    with open(path) as f:
+        value=f.read(4097);assert len(value)<=4096
+        return value.strip()
+def query(*args):
+    def limit():resource.setrlimit(resource.RLIMIT_FSIZE,(8192,8192))
+    with tempfile.TemporaryFile(dir='/run') as out:
+        subprocess.run(['/usr/bin/ip',*args],stdout=out,stderr=subprocess.DEVNULL,timeout=1,check=True,preexec_fn=limit)
+        assert out.tell()<8192
+        out.seek(0);return json.loads(out.read(8192))
+def link(peer=False):
+    rows=query(*(['-n','scqapeer'] if peer else []),'-N','-j','-d','link','show','dev','scqapeer0' if peer else 'scqaedge0')
+    assert len(rows)==1 and rows[0]['linkinfo']['info_kind']=='veth'
+    return {key:rows[0][key] for key in ('ifindex','ifname','link_index','address')}
+def checksum(value):
+    if len(value)%2:value+=b'\0'
+    total=sum(struct.unpack('!%dH'%(len(value)//2),value))
+    while total>>16:total=(total&65535)+(total>>16)
+    return (~total)&65535
+def transit_frame(source_mac,destination_mac,token,identity,ttl):
+    assert len(source_mac)==len(destination_mac)==6 and len(token)==16 and 0<=identity<=65535 and ttl in (36,37)
+    source=socket.inet_aton('198.51.100.42');destination=socket.inet_aton('8.8.8.8')
+    payload=b'scqa-ipv4-transit:'+token
+    udp=struct.pack('!HHHH',19256,19257,8+len(payload),0)+payload
+    udp_sum=checksum(source+destination+struct.pack('!BBH',0,17,len(udp))+udp) or 65535
+    udp=udp[:6]+struct.pack('!H',udp_sum)+udp[8:]
+    header=struct.pack('!BBHHHBBH4s4s',0x45,0,20+len(udp),identity,0x4000,ttl,17,0,source,destination)
+    header=header[:10]+struct.pack('!H',checksum(header))+header[12:]
+    return destination_mac+source_mac+b'\x08\x00'+header+udp
+def forwarded_frame_matches(value,host_mac,peer_mac,token,identity):
+    return value==transit_frame(host_mac,peer_mac,token,identity,36)
+assert os.geteuid()==0 and os.environ.get('SC_QA_TUN_PRODUCT_LAB')=='yes'
+assert os.path.isfile('/.dockerenv') and socket.gethostname()=='sc-qa' and read('/proc/1/comm')=='systemd'
+assert 'ID=debian' in read('/etc/os-release').splitlines() and any(x in read('/etc/os-release').splitlines() for x in ('VERSION_ID=13','VERSION_ID="13"'))
+ns=os.stat('/proc/self/ns/net');pid1=os.stat('/proc/1/ns/net')
+assert (ns.st_dev,ns.st_ino)==(pid1.st_dev,pid1.st_ino)
+peer_fd=os.open('/run/netns/scqapeer',os.O_RDONLY|os.O_NOFOLLOW)
+peer_ns=os.fstat(peer_fd)
+host_link,peer_link=link(),link(True)
+assert host_link['ifname']=='scqaedge0' and peer_link['ifname']=='scqapeer0'
+assert host_link['link_index']==peer_link['ifindex'] and peer_link['link_index']==host_link['ifindex']
+assert all(type(x['ifindex']) is int and x['ifindex']>0 for x in (host_link,peer_link))
+host_mac=bytes.fromhex(host_link['address'].replace(':',''));peer_mac=bytes.fromhex(peer_link['address'].replace(':',''))
+assert len(host_mac)==len(peer_mac)==6 and not host_mac[0]&1 and not peer_mac[0]&1 and host_mac!=peer_mac
+global_paths=('/proc/sys/net/ipv4/ip_forward','/proc/sys/net/ipv4/conf/all/forwarding','/proc/sys/net/ipv4/conf/default/forwarding')
+globals_before=[read(path) for path in global_paths]
+setting='/proc/sys/net/ipv4/conf/scqaedge0/forwarding';prior=read(setting)
+assert prior in ('0','1') and all(x in ('0','1') for x in globals_before)
+identity={'host':host_link,'peer':peer_link,'namespace':[ns.st_dev,ns.st_ino],
+          'peer_namespace':[peer_ns.st_dev,peer_ns.st_ino],'forwarding':prior,'globals':globals_before}
+if phase=='baseline':
+    assert not receipt and not os.path.lexists('/var/lib/server-connect/route-activation-journal.json')
+else:assert len(receipt)<=2048 and json.loads(receipt)==identity, 'forwarding fixture identity changed'
+def check_operation():
+    if phase=='baseline':return
+    fd=os.open('/var/lib/server-connect/route-activation-journal.json',os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
+    with os.fdopen(fd,'rb') as f:
+        st=os.fstat(f.fileno());assert stat.S_ISREG(st.st_mode) and st.st_uid==0 and st.st_size<=131072
+        journal=json.loads(f.read(131073))
+    assert len(operation)==32 and all(c in '0123456789abcdef' for c in operation)
+    assert journal['operation_id']==operation and journal['version']==4 and journal['intent_type']=='smart_tun_native_pending_trial_v1'
+    assert journal['phase']=='trial_pending' and journal['revision']==1
+    assert journal['native']['underlay_index']==host_link['ifindex'] and (journal['native']['namespace_dev'],journal['native']['namespace_ino'])==(ns.st_dev,ns.st_ino)
+def unchanged():
+    assert link()==host_link and link(True)==peer_link, 'forwarding link identity changed'
+    observed=os.stat('/run/netns/scqapeer')
+    assert (observed.st_dev,observed.st_ino)==(peer_ns.st_dev,peer_ns.st_ino), 'peer namespace replaced'
+def interrupted(signum,frame):raise RuntimeError('forwarding witness interrupted')
+signal.signal(signal.SIGTERM,interrupted);signal.signal(signal.SIGINT,interrupted)
+child=None;read_fd=None;failure=False;cleanup_failure=False;stage='preflight';cleanup_stage='child'
+try:
+    unchanged();check_operation()
+    stage='enable-owned-interface'
+    # finally restores even if this write takes effect before raising.
+    with open(setting,'w') as f:f.write('1')
+    assert read(setting)=='1' and [read(path) for path in global_paths]==globals_before
+    stage='bounded-packet-proof'
+    token=secrets.token_bytes(16);packet_id=secrets.randbelow(65536)
+    read_fd,write_fd=os.pipe()
+    child=os.fork()
+    if child==0:
+        os.close(read_fd)
+        try:
+            assert ctypes.CDLL(None,use_errno=True).setns(peer_fd,0)==0
+            actual=os.stat('/proc/self/ns/net');assert (actual.st_dev,actual.st_ino)==(peer_ns.st_dev,peer_ns.st_ino)
+            assert socket.if_nametoindex('scqapeer0')==peer_link['ifindex']
+            with socket.socket(socket.AF_PACKET,socket.SOCK_RAW,socket.htons(0x0800)) as wire:
+                wire.bind(('scqapeer0',0));wire.settimeout(0.1)
+                sent=transit_frame(peer_mac,host_mac,token,packet_id,37)
+                assert wire.send(sent)==len(sent)
+                end=time.monotonic()+2;seen=0;matched=False
+                while time.monotonic()<end and seen<64:
+                    try:value,address=wire.recvfrom(512)
+                    except socket.timeout:continue
+                    seen+=1
+                    if address[2]!=socket.PACKET_OUTGOING and forwarded_frame_matches(value,host_mac,peer_mac,token,packet_id):
+                        matched=True;break
+                assert matched
+            os.write(write_fd,b'verified-token-ttl36-host-mac')
+            os._exit(0)
+        except BaseException:os._exit(1)
+    os.close(write_fd)
+    assert select.select([read_fd],[],[],3)[0], 'forwarding packet deadline'
+    proof=os.read(read_fd,128)
+    waited,status=os.waitpid(child,0);child=None
+    assert os.WIFEXITED(status) and os.WEXITSTATUS(status)==0 and proof==b'verified-token-ttl36-host-mac'
+    stage='postflight'
+    unchanged();check_operation()
+except BaseException:failure=True
+finally:
+    # Finish the bounded owned-interface restoration even after termination.
+    signal.signal(signal.SIGTERM,signal.SIG_IGN);signal.signal(signal.SIGINT,signal.SIG_IGN)
+    if child:
+        try:os.kill(child,signal.SIGKILL)
+        except ProcessLookupError:pass
+        os.waitpid(child,0)
+    if read_fd is not None:os.close(read_fd)
+    os.close(peer_fd)
+    try:
+        cleanup_stage='owned-link-identity'
+        assert link()==host_link, 'owned forwarding interface changed'
+        cleanup_stage='restore-owned-setting'
+        with open(setting,'w') as f:f.write(prior)
+        cleanup_stage='readback-and-global-preservation'
+        assert read(setting)==prior and [read(path) for path in global_paths]==globals_before
+        cleanup_stage='peer-identity'
+        unchanged()
+    except BaseException:cleanup_failure=True
+if cleanup_failure:raise SystemExit('PRODUCT_NATIVE_IPV4_TRANSIT=FAIL (phase='+phase+' cleanup='+cleanup_stage+')')
+if failure:raise SystemExit('PRODUCT_NATIVE_IPV4_TRANSIT=FAIL (phase='+phase+' stage='+stage+')')
+print(json.dumps(identity,sort_keys=True,separators=(',',':')))
+PYNATIVEFORWARD
+  ) || return 1
+  if [ "$1" = baseline ]; then
+    native_transit_receipt=$native_transit_result
+    native_transit_marker=BASELINE
+  else
+    test "$1" = active && test "$native_transit_result" = "$native_transit_receipt" || return 1
+    assert_product_tun_policy_active || return 1
+    native_transit_marker=ACTIVE
+  fi
+  echo 'PRODUCT_NATIVE_IPV4_TRANSIT_DETAIL=token, host MAC, TTL 37 to 36; not end-to-end application proof'
+  echo "PRODUCT_NATIVE_IPV4_TRANSIT_$native_transit_marker=PASS"
 }
 
 native_product_detect() {

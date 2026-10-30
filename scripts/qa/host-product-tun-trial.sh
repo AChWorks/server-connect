@@ -316,6 +316,7 @@ PYSTALEDISCONNECT
   }
 
   . /root/qa-native-product-tun.sh
+  native_ipv4_transit baseline
 
   if [ "$ipv6_trial" = yes ]; then
     # No arbitrary IPv6 Apply. Refuse a partial/modified dual-stack
@@ -365,8 +366,8 @@ PYV6REFUSED
     for n in $(seq 1 35); do
       if assert_product_tun_policy_active &&
          ip -6 route show table all | grep -F 'dev sctunqa0' >/dev/null &&
-         expect_source 5.22.0.10 10.254.72.1 &&
-         expect_source 8.8.8.8 8.8.8.8; then
+         native_readiness_probe domestic &&
+         native_readiness_probe vpn; then
         ready=yes
         break
       fi
@@ -403,6 +404,7 @@ PYV6REFUSED
     echo PRODUCT_TUN_IPV6_REAL_SELECTED=PASS
     if [ "$native_product" = yes ]; then
       native_product_identity
+      native_ipv4_transit active
       native_cold_neighbors
       native_visitor_origin
     fi
@@ -487,7 +489,7 @@ PYV6REFUSED
   # First: live normal product Apply and actual synthetic foreign/domestic
   # packet paths. Do not mistake TUN device creation for installed policy.
   if ! apply 32 > /run/sc-qa-product-tun-apply.json; then
-    native_apply_failure_diagnostic || :
+    native_failure_observation apply || :
     python3 - <<'PYAPPLYFAIL'
 import json
 with open('/run/sc-qa-product-tun-apply.json') as f:
@@ -530,8 +532,8 @@ PYSTATUS
   ready=no
   for n in $(seq 1 35); do
     if assert_product_tun_policy_active &&
-       expect_source 5.22.0.10 10.254.72.1 &&
-       expect_source 8.8.8.8 8.8.8.8; then
+       native_readiness_probe domestic &&
+       native_readiness_probe vpn; then
       ready=yes
       break
     fi
@@ -545,6 +547,7 @@ PYSTATUS
   echo PRODUCT_TUN_INSTALLED_REAL_TCP_DIRECT_AND_VLESS=PASS
   if [ "$native_product" = yes ]; then
     native_product_identity
+    native_ipv4_transit active
     native_visitor_origin
   fi
   udp_path 8.8.8.8 8.8.8.8 product-foreign-udp reply

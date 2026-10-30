@@ -283,3 +283,56 @@ changed['nftables'].append(copy.deepcopy(changed['nftables'][3]));changed['nftab
 check('both enabled family rules keep exact indices',changed,True,saved=saved)
 print(f'HOST_QA_NATIVE_DELETED_IFINDEX_REGRESSIONS=PASS ({cases} exact identity/graph cases)')
 PYNATIVEIFINDEXFIXTURES
+
+python3 - "$root/scripts/qa/host-native-product-tun.sh" <<'PYNATIVEPACKETFIXTURES'
+import ast,copy,socket,struct,sys
+from pathlib import Path
+source=Path(sys.argv[1]).read_text()
+def functions(marker,names,namespace):
+    block=source.split("<<'"+marker+"'\n",1)[1].split('\n'+marker+'\n',1)[0]
+    nodes=[x for x in ast.parse(block).body if isinstance(x,ast.FunctionDef) and x.name in names]
+    assert {x.name for x in nodes}==set(names)
+    exec(compile(ast.Module(body=nodes,type_ignores=[]),'<native packet observers>','exec'),namespace)
+    return namespace
+delta=functions('PYNATIVEAPPLYDIAG',('native_readiness_delta',),{})['native_readiness_delta']
+before={'operation_id':'a'*32,'link_index':22,'nft_handle':16,'drop_handle':29,
+        'tx_packets':10,'rx_packets':7,'guard_packets':0,'guard_bytes':0}
+after=dict(before,tx_packets=14,rx_packets=9,guard_packets=2,guard_bytes=120)
+assert delta(before,after)=={'tx_packets':4,'rx_packets':2,'guard_packets':2,'guard_bytes':120}
+assert delta(before,before)==dict.fromkeys(('tx_packets','rx_packets','guard_packets','guard_bytes'),0)
+cases=2
+def reject_counter(value):
+    global cases
+    try:delta(before,value)
+    except AssertionError:pass
+    else:raise AssertionError('unsafe counter attribution accepted: '+repr(value))
+    cases+=1
+for key,value in (('operation_id','b'*32),('link_index',23),('nft_handle',17),('drop_handle',30),
+                  ('tx_packets',9),('guard_packets',-1),('guard_bytes',True),('rx_packets',9.0),
+                  ('nft_handle',True),('guard_packets',2**64)):
+    reject_counter(dict(after,**{key:value}))
+changed=dict(after);del changed['guard_bytes'];reject_counter(changed)
+reject_counter(dict(after,unexpected=0));reject_counter(None)
+namespace=functions('PYNATIVEFORWARD',('checksum','transit_frame','forwarded_frame_matches'),{'socket':socket,'struct':struct})
+build=namespace['transit_frame'];matches=namespace['forwarded_frame_matches']
+host=bytes.fromhex('020000000001');peer=bytes.fromhex('020000000002');token=bytes(range(16));identity=0x1234
+valid=build(host,peer,token,identity,36)
+assert matches(valid,host,peer,token,identity)
+assert valid[:6]==peer and valid[6:12]==host and valid[12:14]==b'\x08\x00'
+ip=valid[14:34];udp=valid[34:]
+assert ip[0]==0x45 and ip[8:10]==bytes((36,17)) and struct.unpack('!H',ip[2:4])[0]==len(valid)-14
+assert ip[12:16]==socket.inet_aton('198.51.100.42') and ip[16:20]==socket.inet_aton('8.8.8.8')
+assert struct.unpack('!HHH',udp[:6])==(19256,19257,len(udp))
+assert udp[8:]==b'scqa-ipv4-transit:'+token
+for checked in (ip,ip[12:20]+struct.pack('!BBH',0,17,len(udp))+udp):
+    checked+=b'\0'*(len(checked)%2)
+    total=sum(struct.unpack('!%dH'%(len(checked)//2),checked))
+    while total>65535:total=(total&65535)+(total>>16)
+    assert total==65535, 'generated IPv4/UDP checksum invalid'
+frames=[build(peer,host,token,identity,37),build(host,peer,token,identity,37),
+        valid[:-1],valid+b'\0',build(host,peer,b'x'*16,identity,36),build(host,peer,token,identity+1,36)]
+for offset in (0,6,12,14,16,18,20,22,23,24,26,30,34,36,38,40,len(valid)-1):
+    changed=bytearray(valid);changed[offset]^=1;frames.append(bytes(changed))
+for frame in frames:assert not matches(frame,host,peer,token,identity), 'invalid transit frame accepted'
+print(f'HOST_QA_NATIVE_PACKET_OBSERVER_REGRESSIONS=PASS ({cases} counter cases, {len(frames)+1} frame cases)')
+PYNATIVEPACKETFIXTURES
