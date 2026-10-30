@@ -1,13 +1,17 @@
 package sc
 
 import (
+	"bytes"
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"syscall"
+	"time"
 )
 
-// Supported Debian 13 APT tools are a fixed, root-owned, non-writable system
+// Supported native APT tools are a fixed, root-owned, non-writable system
 // installation. Never execute a caller-supplied basename/path or resolve the
 // credentials-bearing child by searching PATH.
 const (
@@ -15,6 +19,69 @@ const (
 	systemAPT       = "/usr/bin/apt"
 	systemAPTConfig = "/usr/bin/apt-config"
 )
+
+type aptCompatibility uint8
+
+const (
+	aptStrictNative aptCompatibility = iota
+	aptDebian12Native261
+)
+
+// These banners select a bounded stock-layout compatibility mode; they do NOT
+// identify the separately loaded libapt-pkg. Acquisition always enforces the
+// wrapper-owned disabled-method policy after rejecting inherited enablers.
+// APT 3 removed the default ftp/rsh/ssh guard, so legacy inventory also remains
+// rejected outside this observed Debian12/2.6.1 layout boundary.
+// https://github.com/Debian/apt/blob/a626a66fece0a7d680e40b9e35b66e29fe9ae12c/apt-pkg/acquire-worker.cc
+func aptCompatibilityForVersions(target, nativeVersion, configVersion string) aptCompatibility {
+	if target == "debian-12-amd64" && nativeVersion == "apt 2.6.1 (amd64)" && configVersion == nativeVersion {
+		return aptDebian12Native261
+	}
+	return aptStrictNative
+}
+
+func nativeAPTVersion(installed string) (string, error) {
+	if err := verifyNativeAPTExecutable(installed); err != nil {
+		return "", err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, installed, "--version")
+	cmd.WaitDelay = time.Second
+	// No inherited APT config, loader, proxy or caller-selected executable path;
+	// these bounded version probes never receive the proxy credential descriptor.
+	cmd.Env = []string{"PATH=/usr/sbin:/usr/bin:/sbin:/bin", "LC_ALL=C"}
+	var out, stderr bytes.Buffer
+	cmd.Stdout = &limitedAptOutput{out: &out, limit: 64 << 10}
+	cmd.Stderr = &limitedAptOutput{out: &stderr, limit: 64 << 10}
+	if err := cmd.Run(); err != nil {
+		return "", Fault("apt_untrusted_executable", "native APT compatibility version cannot be verified")
+	}
+	first, _, _ := strings.Cut(out.String(), "\n")
+	return first, nil
+}
+
+func observedAPTCompatibility(nativeAPT string) (aptCompatibility, error) {
+	if err := verifyNativeAPTExecutable(nativeAPT); err != nil {
+		return aptStrictNative, err
+	}
+	if _, err := trustedAPTConfig(); err != nil {
+		return aptStrictNative, err
+	}
+	target, err := currentInstallerHostTarget()
+	if err != nil || target != "debian-12-amd64" {
+		return aptStrictNative, nil
+	}
+	nativeVersion, err := nativeAPTVersion(nativeAPT)
+	if err != nil {
+		return aptStrictNative, err
+	}
+	configVersion, err := nativeAPTVersion(systemAPTConfig)
+	if err != nil {
+		return aptStrictNative, err
+	}
+	return aptCompatibilityForVersions(target, nativeVersion, configVersion), nil
+}
 
 func trustedAPTCommand(token string) (string, error) {
 	var installed string
@@ -88,12 +155,37 @@ var nativeAPTMethodAliases = map[string]string{
 	"mirror+copy":  "mirror",
 }
 
+// These stock Debian12 files are not authorization to run remote transports.
+// Every caller/inherited enabler remains forbidden. Explicit wrapper-owned
+// method denial also protects against ABI-compatible newer libapt-pkg builds.
+var debian12APT261MethodExecutables = map[string]bool{"ftp": true, "rsh": true}
+var debian12APT261MethodAliases = map[string]string{"mirror+ftp": "mirror", "ssh": "rsh"}
+
+func nativeAPTMethodAlias(name string, compatibility aptCompatibility) (string, bool) {
+	if target, ok := nativeAPTMethodAliases[name]; ok {
+		return target, true
+	}
+	if compatibility == aptDebian12Native261 {
+		target, ok := debian12APT261MethodAliases[name]
+		return target, ok
+	}
+	return "", false
+}
+
 // Only the base transport/signature paths are required on every supported
 // installation. Other native Debian 13 handlers may be absent, but if they
 // exist they must pass the identical trust checks before any APT execution.
 var requiredAPTMethods = []string{"http", "https", "file", "gpgv"}
 
 func verifyNativeAPTMethods() error {
+	compatibility, err := observedAPTCompatibility(systemAPTGet)
+	if err != nil {
+		return err
+	}
+	return verifyNativeAPTMethodsWithCompatibility(compatibility)
+}
+
+func verifyNativeAPTMethodsWithCompatibility(compatibility aptCompatibility) error {
 	for _, dir := range []string{
 		"/", "/usr", "/usr/lib", "/usr/lib/apt", "/usr/lib/apt/methods",
 	} {
@@ -102,13 +194,17 @@ func verifyNativeAPTMethods() error {
 			return Fault("apt_untrusted_executable", "native APT method directory ownership is unsafe")
 		}
 	}
-	return verifyNativeAPTMethodInventory("/usr/lib/apt/methods", 0)
+	return verifyNativeAPTMethodInventoryWithCompatibility("/usr/lib/apt/methods", 0, compatibility)
 }
 
 // expectedUID is hardcoded to root at the sole production call site. It is
 // passed explicitly here to make the same filesystem checks testable without
 // privileged ownership changes on a disposable non-root test workspace.
 func verifyNativeAPTMethodInventory(dir string, expectedUID uint32) error {
+	return verifyNativeAPTMethodInventoryWithCompatibility(dir, expectedUID, aptStrictNative)
+}
+
+func verifyNativeAPTMethodInventoryWithCompatibility(dir string, expectedUID uint32, compatibility aptCompatibility) error {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return Fault("apt_untrusted_executable", "native APT acquisition method inventory unavailable")
@@ -116,8 +212,9 @@ func verifyNativeAPTMethodInventory(dir string, expectedUID uint32) error {
 	seen := make(map[string]bool, len(entries))
 	for _, entry := range entries {
 		name := entry.Name()
-		target, alias := nativeAPTMethodAliases[name]
-		if !alias && !nativeAPTMethodExecutables[name] {
+		target, alias := nativeAPTMethodAlias(name, compatibility)
+		legacy := compatibility == aptDebian12Native261 && debian12APT261MethodExecutables[name]
+		if !alias && !nativeAPTMethodExecutables[name] && !legacy {
 			return Fault("apt_untrusted_executable", "unsupported APT acquisition method installed")
 		}
 		path := filepath.Join(dir, name)
@@ -145,8 +242,9 @@ func verifyNativeAPTMethodInventory(dir string, expectedUID uint32) error {
 			return Fault("apt_untrusted_executable", "required native APT acquisition method missing")
 		}
 	}
-	for alias, target := range nativeAPTMethodAliases {
-		if seen[alias] && !seen[target] {
+	for name := range seen {
+		target, alias := nativeAPTMethodAlias(name, compatibility)
+		if alias && !seen[target] {
 			return Fault("apt_untrusted_executable", "native APT method alias target is missing")
 		}
 	}

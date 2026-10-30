@@ -33,7 +33,8 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  debian13-systemd-lifecycle:
+  debian-systemd-lifecycle:
+    name: debian${{ matrix.debian }}-systemd-lifecycle
     # Admission comes from trusted default-branch YAML, NOT PR-modifiable YAML.
     # A same-name fork or forged PR title is insufficient: require repository
     # identity AND name. Dispatch requires repository Actions write permission
@@ -45,9 +46,14 @@ jobs:
       github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: ubuntu-24.04
     timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        debian: ['13', '12']
     env:
       GOPROXY: 'off'
       GOTOOLCHAIN: 'local'
+      SC_QA_DEBIAN_VERSION: ${{ matrix.debian }}
     steps:
       # The trusted job executes code only from a head repository that is
       # identical to this repository (enforced by the base-defined job gate).
@@ -96,6 +102,8 @@ jobs:
         run: |
           set -euo pipefail
           python3 scripts/qa/test-installed-workflow-policy.py
+          python3 scripts/qa/test-package-targets.py
+          sh -n scripts/qa/host-bundle-target-refusal.sh
           sh -n scripts/qa/host-qa-assertions.sh
           sh -n scripts/qa/host-coexistence.sh
           sh -n scripts/qa/host-proxy-only.sh
@@ -140,19 +148,80 @@ jobs:
             --output build/installed-qa/sing-box.tar.gz \
             https://github.com/SagerNet/sing-box/releases/download/v1.14.3/sing-box-1.14.3-linux-amd64.tar.gz
           printf '%s\n' 'e2bdf179c15a3652955dc44867e33ca0965c9c9b91b34267dcc5a5d639a5feee  build/installed-qa/sing-box.tar.gz' | sha256sum --check
-          scripts/package.sh "$PWD/build/installed-qa/sing-box.tar.gz"
-          scripts/qa/make-update-fixtures.sh dist/server-connect-0.1.0-dev-debian13-amd64-local-qa.tar.gz build/installed-qa
-          test -f dist/server-connect-0.1.0-dev-debian13-amd64-local-qa.tar.gz
-          sha256sum dist/server-connect-0.1.0-dev-debian13-amd64-local-qa.tar.gz
+          scripts/package.sh "$PWD/build/installed-qa/sing-box.tar.gz" "debian-${SC_QA_DEBIAN_VERSION}-amd64"
+          bundle="dist/server-connect-0.1.0-dev-debian${SC_QA_DEBIAN_VERSION}-amd64-local-qa.tar.gz"
+          scripts/qa/make-update-fixtures.sh "$bundle" build/installed-qa
+          test -f "$bundle"
+          sha256sum "$bundle"
 
-      - name: Exercise private Debian 13 systemd installation with no external network
+      - name: Exercise target-specific private systemd installation with no external network
         shell: bash
         run: |
           set -euo pipefail
           docker info --format 'Docker engine ready: {{.ServerVersion}}'
           sh -n scripts/qa/test-installed-host.sh
           bash scripts/qa/test-installed-host.sh \
-            dist/server-connect-0.1.0-dev-debian13-amd64-local-qa.tar.gz \
+            "dist/server-connect-0.1.0-dev-debian${SC_QA_DEBIAN_VERSION}-amd64-local-qa.tar.gz" \
             scripts/bootstrap-online.sh \
             build/installed-qa/server-connect-hostqa-update-valid.tar.gz \
             build/installed-qa/server-connect-hostqa-update-invalid-unit.tar.gz
+
+      # Metadata-only identities for all three successful CI archives.
+      # Only the normal base archive may be privately reproduced for authorized
+      # field checks; both distinct-manager update fixtures remain isolated CI
+      # evidence and must not be generated outside CI.
+      # Installable archives and binaries must never be uploaded here.
+      - name: Record successful Debian 12 QA build evidence
+        if: ${{ success() && github.event_name == 'workflow_dispatch' && matrix.debian == '12' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ $(git rev-parse HEAD) == "$GITHUB_SHA" ]]
+          python3 - <<'PYQA'
+          import hashlib, json, os, subprocess
+          from pathlib import Path
+          archive_paths = (
+              'dist/server-connect-0.1.0-dev-debian12-amd64-local-qa.tar.gz',
+              'build/installed-qa/server-connect-hostqa-update-valid.tar.gz',
+              'build/installed-qa/server-connect-hostqa-update-invalid-unit.tar.gz',
+          )
+          archives = []
+          for name in archive_paths:
+              path = Path(name)
+              if path.is_symlink() or not path.is_file():
+                  raise SystemExit(f'QA evidence requires a regular archive: {name}')
+              with path.open('rb') as artifact:
+                  digest = hashlib.file_digest(artifact, 'sha256').hexdigest()
+              archives.append({'path': name, 'bytes': path.stat().st_size, 'sha256': digest})
+          source_tree = subprocess.check_output(['git', 'rev-parse', 'HEAD^{tree}'], text=True).strip()
+          source_date_epoch = int(subprocess.check_output(['git', 'show', '-s', '--format=%ct', 'HEAD'], text=True).strip())
+          compiler_version = subprocess.check_output(['go', 'version'], text=True).strip()
+          identity = {
+              'schema': 1,
+              'purpose': 'metadata-only QA build evidence; no installable bytes or public release',
+              'repository': os.environ['GITHUB_REPOSITORY'],
+              'candidate_sha': os.environ['GITHUB_SHA'],
+              'source_tree': source_tree,
+              'source_date_epoch': source_date_epoch,
+              'compiler_version': compiler_version,
+              'run_id': os.environ['GITHUB_RUN_ID'],
+              'run_attempt': os.environ['GITHUB_RUN_ATTEMPT'],
+              'target': 'debian-12-amd64',
+              'archives': archives,
+          }
+          with Path('build/installed-qa/debian12-qa-handoff.json').open('x', encoding='utf-8') as output:
+              json.dump(identity, output, indent=2, sort_keys=True)
+              output.write('\n')
+          PYQA
+
+      - name: Upload successful Debian 12 QA evidence metadata
+        if: ${{ success() && github.event_name == 'workflow_dispatch' && matrix.debian == '12' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: server-connect-debian12-qa-evidence-${{ github.sha }}-attempt-${{ github.run_attempt }}
+          retention-days: 1
+          compression-level: 0
+          if-no-files-found: error
+          overwrite: false
+          path: |
+            build/installed-qa/debian12-qa-handoff.json

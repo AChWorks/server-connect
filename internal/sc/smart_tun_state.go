@@ -289,6 +289,9 @@ func (m *Manager) BeginSavedSmartTUNTrial(deadlineSeconds int, qaKillPoint strin
 	if m.Dir != DefaultDir || m.Core != DefaultCore {
 		return SmartTUNTrialReceipt{}, Fault("trial_unsupported", "installed trial paths required")
 	}
+	if err := nativeTrialApplyPlatform(); err != nil {
+		return SmartTUNTrialReceipt{}, err
+	}
 	var policy smartTUNSavedPolicy
 	var binding smartTUNSavedPolicyBinding
 	err := m.withActivationJournalLock(syscall.Fsync, func(store *activationJournalDir) error {

@@ -16,6 +16,37 @@ import (
 	"github.com/AChWorks/server-connect/internal/sc"
 )
 
+func TestInstallerTargetCheckRejectsOverridesWithoutState(t *testing.T) {
+	manager := sc.New(filepath.Join(t.TempDir(), "state"), "", 0)
+	old := os.Stdout
+	defer func() { os.Stdout = old }()
+	for _, args := range [][]string{
+		{"installer-check-target"},
+		{"installer-check-target", "--manifest", ""},
+		{"installer-check-target", "--manifest", "/private/manifest.json", "--target", "debian-12-amd64"},
+		{"installer-check-target", "--manifest", "/private/manifest.json", "--os-release", "/private/os-release"},
+		{"installer-check-target", "--manifest", "/private/manifest.json", "extra"},
+	} {
+		reader, writer, err := os.Pipe()
+		if err != nil {
+			t.Fatal(err)
+		}
+		os.Stdout = writer
+		code := run(true, manager, args)
+		writer.Close()
+		os.Stdout = old
+		var result envelope
+		err = json.NewDecoder(reader).Decode(&result)
+		reader.Close()
+		if err != nil || code != 1 || result.OK || result.Error == nil || result.Error.Code != "invalid_arguments" {
+			t.Fatalf("installer input/host override was not rejected: %v, %+v, %v", args, result, err)
+		}
+		if _, err := os.Stat(manager.Dir); !os.IsNotExist(err) {
+			t.Fatal("installer target refusal initialized product state")
+		}
+	}
+}
+
 func TestUntrustedUnitFlagRefusedWithoutServiceOperation(t *testing.T) {
 	for _, args := range [][]string{
 		{"--unit", "ssh.service", "disconnect"},

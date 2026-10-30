@@ -192,10 +192,10 @@ func TestRealAptConfigPreflightWithAnonymousFD(t *testing.T) {
 func TestStrictAPTUpdateModesAndOptionOrdering(t *testing.T) {
 	for _, args := range [][]string{
 		{"update"},
-		{"-t", "testing", "update"},
-		{"-a", "amd64", "update"},
-		{"--target-release", "testing", "update"},
-		{"-o", "Dir::Etc::sourcelist=/tmp/qa", "update"},
+		{"update", "-t", "testing"},
+		{"update", "-a", "amd64"},
+		{"update", "--target-release", "testing"},
+		{"update", "-o", "Dir::Etc::sourcelist=/tmp/qa"},
 	} {
 		_, action, err := validateAptArgs(args)
 		if err != nil || action != "update" {
@@ -220,20 +220,20 @@ func TestStrictAPTUpdateModesAndOptionOrdering(t *testing.T) {
 func TestCombinedAPTUpdateNeverForwardsToPackageOperation(t *testing.T) {
 	requireNativeAPT(t)
 	for _, args := range [][]string{
-		{"-U", "install", "safe-test-package"},
-		{"--update", "install", "safe-test-package"},
-		{"--update=true", "install", "safe-test-package"},
+		{"install", "safe-test-package", "-U"},
+		{"install", "safe-test-package", "--update"},
+		{"install", "--update=true", "safe-test-package"},
 		{"install", "--update", "safe-test-package"},
 		{"install", "-U", "safe-test-package"},
-		{"-qqU", "install", "safe-test-package"},
-		{"-Uq", "install", "safe-test-package"},
-		{"-yU", "install", "safe-test-package"},
-		{"--option=APT::Get::Update=true", "install", "safe-test-package"},
-		{"-o", "APT::Update::Error-Mode=persistent", "install", "safe-test-package"},
-		{"--error-on=none", "update"},
-		{"--error-on", "none", "update"},
-		{"-eany", "update"},
-		{"-e", "none", "update"},
+		{"install", "-qqU", "safe-test-package"},
+		{"install", "-Uq", "safe-test-package"},
+		{"install", "-yU", "safe-test-package"},
+		{"install", "--option=APT::Get::Update=true", "safe-test-package"},
+		{"install", "-o", "APT::Update::Error-Mode=persistent", "safe-test-package"},
+		{"update", "--error-on=none"},
+		{"update", "--error-on", "none"},
+		{"update", "-eany"},
+		{"update", "-e", "none"},
 	} {
 		_, _, err := validateAptArgs(args)
 		if err == nil {
@@ -265,8 +265,8 @@ func TestCombinedAPTUpdateNeverForwardsToPackageOperation(t *testing.T) {
 func TestStandaloneUpdateAndOrdinaryPackageOpsRemainSupported(t *testing.T) {
 	for _, args := range [][]string{
 		{"update"},
-		{"-q", "update"},
-		{"-o", "Dir::Etc::sourcelist=/tmp/test-repo", "update"},
+		{"update", "-q"},
+		{"update", "-o", "Dir::Etc::sourcelist=/tmp/test-repo"},
 	} {
 		_, action, err := validateAptArgs(args)
 		if err != nil || action != "update" {
@@ -279,7 +279,7 @@ func TestStandaloneUpdateAndOrdinaryPackageOpsRemainSupported(t *testing.T) {
 	}
 	for _, args := range [][]string{
 		{"install", "safe-test-package"}, {"download", "safe-test-package"},
-		{"--assume-yes", "install", "safe-test-package"},
+		{"install", "--assume-yes", "safe-test-package"},
 	} {
 		_, action, err := validateAptArgs(args)
 		if err != nil {
@@ -313,8 +313,8 @@ func TestAptExecutionMethodRedirectionCallerPolicy(t *testing.T) {
 		t.Run(strings.SplitN(argument, "=", 2)[0], func(t *testing.T) {
 			for _, args := range [][]string{
 				{"update", "-o", argument},
-				{"-o" + argument, "update"},
-				{"--option=" + argument, "update"},
+				{"update", "-o" + argument},
+				{"update", "--option=" + argument},
 			} {
 				_, _, err := validateAptArgs(args)
 				if ErrorCode(err) != "apt_policy_conflict" {
@@ -492,5 +492,459 @@ func TestNativeAPTOptionalCompressorCompatibility(t *testing.T) {
 		if err := verifyAptDump(base+entry, proxy); ErrorCode(err) != "apt_policy_conflict" {
 			t.Fatalf("untrusted compressor execution still allowed: %v", err)
 		}
+	}
+}
+
+func TestAPT261MayOmitOnlyNativeDirUsr(t *testing.T) {
+	proxy := "http://sc:synthetic-never-expose@127.0.0.1:20807"
+	base := nativeAptDumpForTest() + "Acquire::http::Proxy \"" + proxy + "\";\n" +
+		"Acquire::https::Proxy \"" + proxy + "\";\n"
+	withoutUsr := strings.Replace(base, "Dir::Usr \"usr\";\n", "", 1)
+	if err := verifyAptDumpWithCompatibility(withoutUsr, proxy, aptDebian12Native261); err != nil {
+		t.Fatal("observed Debian12/2.6.1 layout rejected:", err)
+	}
+	if err := verifyAptDumpWithCompatibility(base, proxy, aptDebian12Native261); err != nil {
+		t.Fatal("exact optional Dir::Usr rejected:", err)
+	}
+	for _, mode := range []aptCompatibility{aptStrictNative, aptCompatibility(255)} {
+		if err := verifyAptDumpWithCompatibility(withoutUsr, proxy, mode); ErrorCode(err) != "apt_policy_conflict" {
+			t.Fatal("Dir::Usr omission accepted outside verified Debian12/2.6.1")
+		}
+	}
+	for _, setting := range []string{"Dir::Usr \"\";\n", "Dir::Usr \"/tmp/foreign\";\n", "Dir::Usr:: \"usr\";\n"} {
+		if err := verifyAptDumpWithCompatibility(withoutUsr+setting, proxy, aptDebian12Native261); ErrorCode(err) != "apt_policy_conflict" {
+			t.Fatal("unsafe Dir::Usr spelling accepted in compatibility mode")
+		}
+	}
+	for key, value := range nativeAPTBinConfig {
+		missing := strings.Replace(withoutUsr, key+" \""+value+"\";\n", "", 1)
+		if err := verifyAptDumpWithCompatibility(missing, proxy, aptDebian12Native261); ErrorCode(err) != "apt_policy_conflict" {
+			t.Fatalf("mandatory native path became optional: %s", key)
+		}
+	}
+	if err := verifyAptDumpWithCompatibility(strings.Replace(withoutUsr, "Dir \"/\";\n", "", 1), proxy, aptDebian12Native261); ErrorCode(err) != "apt_policy_conflict" {
+		t.Fatal("mandatory native root became optional")
+	}
+}
+
+func TestAPTLegacyEnablersRemainRejectedBeforeAcquisition(t *testing.T) {
+	proxy := "http://sc:synthetic-never-expose@127.0.0.1:20807"
+	base := nativeAptDumpForTest() + "Acquire::http::Proxy \"" + proxy + "\";\n" +
+		"Acquire::https::Proxy \"" + proxy + "\";\n"
+	for _, method := range []string{"ftp", "rsh", "ssh", "mirror+ftp"} {
+		for _, prefix := range []string{"", "Binary::apt::", "Binary::apt-get::", "bInArY::ApT-gEt::"} {
+			key := prefix + "dIr::bIn::mEtHoDs::" + method
+			for _, value := range []string{method, "/usr/lib/apt/methods/" + method, "false", ""} {
+				if _, _, err := validateAptArgs([]string{"update", "-o", key + "=" + value}); ErrorCode(err) != "apt_policy_conflict" {
+					t.Fatalf("caller legacy enabler reached credential phase: %s", key)
+				}
+				for _, mode := range []aptCompatibility{aptStrictNative, aptDebian12Native261} {
+					dump := base + key + " \"" + value + "\";\n"
+					if err := verifyAptDumpWithCompatibility(dump, proxy, mode); ErrorCode(err) != "apt_policy_conflict" {
+						t.Fatalf("inherited legacy enabler accepted: %s", key)
+					}
+				}
+			}
+		}
+	}
+}
+
+func ownedDisabledAptDumpForTest() string {
+	var result strings.Builder
+	for _, method := range []string{"ftp", "rsh", "ssh", "mirror+ftp"} {
+		result.WriteString("Dir::Bin::Methods::" + method + " \"" + aptDisabledMethodPath + "\";\n")
+	}
+	return result.String()
+}
+
+func TestAPTOwnedDisabledPolicyMustBeExactAndComplete(t *testing.T) {
+	proxy := "http://sc:synthetic-never-expose@127.0.0.1:20807"
+	base := nativeAptDumpForTest() + "Acquire::http::Proxy \"" + proxy + "\";\n" +
+		"Acquire::https::Proxy \"" + proxy + "\";\n"
+	owned := ownedDisabledAptDumpForTest()
+	for _, mode := range []aptCompatibility{aptStrictNative, aptDebian12Native261} {
+		if err := verifyAptDumpPolicy(base+owned, proxy, mode, true); err != nil {
+			t.Fatal("exact owned disabled policy refused:", err)
+		}
+		if mode == aptDebian12Native261 {
+			withoutUsr := strings.Replace(base+owned, "Dir::Usr \"usr\";\n", "", 1)
+			if err := verifyAptDumpPolicy(withoutUsr, proxy, mode, true); err != nil {
+				t.Fatal("owned policy refused the exact Debian12/2.6.1 layout:", err)
+			}
+		}
+		if err := verifyAptDumpPolicy(base+owned, proxy, mode, false); ErrorCode(err) != "apt_policy_conflict" {
+			t.Fatal("first inspection accepted inherited method overrides")
+		}
+		for _, method := range []string{"ftp", "rsh", "ssh", "mirror+ftp"} {
+			line := "Dir::Bin::Methods::" + method + " \"" + aptDisabledMethodPath + "\";\n"
+			for _, broken := range []string{
+				strings.Replace(owned, line, "", 1),
+				strings.Replace(owned, line, "Dir::Bin::Methods::"+method+" \""+method+"\";\n", 1),
+				strings.Replace(owned, line, "Dir::Bin::Methods::"+method+" \"\";\n", 1),
+				owned + line,
+			} {
+				if err := verifyAptDumpPolicy(base+broken, proxy, mode, true); ErrorCode(err) != "apt_policy_conflict" {
+					t.Fatal("missing, enabled, empty or duplicate method denial accepted")
+				}
+			}
+		}
+		for _, extra := range []string{
+			"Dir::Bin::Methods::http \"" + aptDisabledMethodPath + "\";\n",
+			"Binary::apt::Dir::Bin::Methods::ftp \"ftp\";\n",
+			"RootDir \"/tmp/foreign\";\n",
+			"Acquire::http::Proxy::mirror.invalid \"DIRECT\";\n",
+		} {
+			if err := verifyAptDumpPolicy(base+owned+extra, proxy, mode, true); ErrorCode(err) != "apt_policy_conflict" {
+				t.Fatal("owned-denial phase weakened another native guard")
+			}
+		}
+	}
+}
+
+func TestAPTOwnedDisabledArgumentsFollowValidatedCallerOptions(t *testing.T) {
+	for _, args := range [][]string{
+		{"update"}, {"update", "-t", "testing"},
+		{"update", "-o", "Dir::Etc::sourcelist=/tmp/qa.list"},
+		{"install", "safe-test-package"}, {"download", "safe-test-package"},
+	} {
+		_, action, err := validateAptArgs(args)
+		if err != nil {
+			t.Fatal(err)
+		}
+		argv := aptExecArgs(args, action)
+		start := 2 + len(args)
+		want := []string{
+			"-o", "Dir::Bin::Methods::ftp=/usr/lib/apt/methods/false",
+			"-o", "Dir::Bin::Methods::rsh=/usr/lib/apt/methods/false",
+			"-o", "Dir::Bin::Methods::ssh=/usr/lib/apt/methods/false",
+			"-o", "Dir::Bin::Methods::mirror+ftp=/usr/lib/apt/methods/false",
+		}
+		if len(argv) < start+len(want) || strings.Join(argv[start:start+len(want)], "\x00") != strings.Join(want, "\x00") {
+			t.Fatal("owned method denial was not appended after all caller arguments")
+		}
+	}
+	for _, args := range [][]string{{"--", "update"}, {"update", "--"}, {"install", "safe-test-package", "--", "-oDir::Bin::Methods::ftp=ftp"}} {
+		if _, _, err := validateAptArgs(args); err == nil {
+			t.Fatal("argument separator could hide appended wrapper-owned options")
+		}
+	}
+}
+
+func TestRealAPTTwoStageDisabledMethodPolicy(t *testing.T) {
+	requireNativeAPT(t)
+	compatibility, err := observedAPTCompatibility(systemAPTGet)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := verifyNativeAPTMethodsWithCompatibility(compatibility); err != nil {
+		t.Fatal(err)
+	}
+	proxy, _ := url.Parse("http://sc:synthetic-never-expose@127.0.0.1:20807")
+	fd, err := privateAptConfig(t.TempDir(), proxy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer fd.Close()
+	if err := verifyEffectiveAptProxyWithCompatibility(fd, proxy.String(), nil, compatibility); err != nil {
+		t.Fatal("baseline native policy refused:", err)
+	}
+	if err := verifyEffectiveAptProxyPolicy(fd, proxy.String(), aptOwnedDisabledOpts(nil), compatibility, true); err != nil {
+		t.Fatal("native APT did not retain exact wrapper-owned denial:", err)
+	}
+	if err := verifyEffectiveAptProxyWithCompatibility(fd, proxy.String(), aptOwnedDisabledOpts(nil), compatibility); ErrorCode(err) != "apt_policy_conflict" {
+		t.Fatal("baseline phase accepted inherited per-method overrides")
+	}
+}
+
+// These are native parser ambiguities, not merely unusual text. Each refusal
+// must occur before Manager.Apt can load private state or create credentials.
+func TestAPTActionAndShortOptionBoundaryBeforeCredentials(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		args []string
+		code string
+	}{
+		{"missing action", nil, "invalid_arguments"},
+		{"empty action", []string{""}, "invalid_arguments"},
+		{"pre-action quiet", []string{"-q", "update"}, "invalid_arguments"},
+		{"pre-action quiet value", []string{"-q", "2", "update"}, "invalid_arguments"},
+		{"pre-action boolean value", []string{"-y", "false", "update"}, "invalid_arguments"},
+		{"pre-action long quiet value", []string{"--quiet", "2", "update"}, "invalid_arguments"},
+		{"pre-action target release", []string{"-t", "stable", "update"}, "invalid_arguments"},
+		{"pre-action architecture", []string{"-a", "amd64", "update"}, "invalid_arguments"},
+		{"pre-action configuration", []string{"-o", "Dir::Etc::sourcelist=/tmp/qa.list", "update"}, "invalid_arguments"},
+		{"pre-action default release alias", []string{"--default-release", "stable", "update"}, "invalid_arguments"},
+		{"pre-action operand resembling command", []string{"--with-source", "install", "update"}, "invalid_arguments"},
+		{"grouped HTTP Direct", []string{"update", "-qoAcquire::http::Proxy=DIRECT"}, "apt_policy_conflict"},
+		{"grouped HTTPS Direct", []string{"update", "-qqoAcquire::https::Proxy=DIRECT"}, "apt_policy_conflict"},
+		{"grouped binary policy", []string{"install", "-yoBinary::apt::Acquire::http::Proxy=DIRECT"}, "apt_policy_conflict"},
+		{"grouped legacy enabler", []string{"update", "-qoDir::Bin::Methods::ftp=ftp"}, "apt_policy_conflict"},
+		{"grouped empty legacy enabler", []string{"update", "-qoDir::Bin::Methods::ssh="}, "apt_policy_conflict"},
+		{"grouped separate enabler", []string{"update", "-qo", "Dir::Bin::Methods::rsh=rsh"}, "apt_policy_conflict"},
+		{"grouped config include", []string{"update", "-qc/tmp/untrusted.conf"}, "apt_policy_conflict"},
+		{"grouped separate include", []string{"update", "-qc", "/tmp/untrusted.conf"}, "apt_policy_conflict"},
+		{"grouped strictness override", []string{"update", "-qenone"}, "apt_policy_conflict"},
+		{"grouped target release", []string{"update", "-qt", "stable"}, "apt_policy_conflict"},
+		{"grouped architecture", []string{"build-dep", "-qa", "amd64", "safe-test-package"}, "apt_policy_conflict"},
+		{"boolean a hides Direct", []string{"show", "-aoAcquire::http::Proxy=DIRECT", "safe-test-package"}, "apt_policy_conflict"},
+		{"boolean a hides include", []string{"list", "-ac/tmp/untrusted.conf"}, "apt_policy_conflict"},
+		{"bare boolean a cannot skip override", []string{"show", "-a", "-oAcquire::http::Proxy=DIRECT"}, "apt_policy_conflict"},
+		{"bare boolean a cannot skip long override", []string{"list", "-a", "--option", "Dir::Bin::Methods::ftp=ftp"}, "apt_policy_conflict"},
+		{"bare t cannot skip override", []string{"update", "-t", "-oAcquire::http::Proxy=DIRECT"}, "apt_policy_conflict"},
+		{"attached target release requires separate operand", []string{"update", "-tstable"}, "apt_policy_conflict"},
+		{"attached architecture requires separate operand", []string{"build-dep", "-aamd64"}, "apt_policy_conflict"},
+		{"other short group requires separation", []string{"install", "-yq", "safe-test-package"}, "apt_policy_conflict"},
+		{"numeric quiet with hidden tail", []string{"update", "-q2oAcquire::http::Proxy=DIRECT"}, "apt_policy_conflict"},
+		{"explicit quiet with hidden tail", []string{"update", "-q=2oAcquire::http::Proxy=DIRECT"}, "apt_policy_conflict"},
+		{"empty attached quiet level", []string{"update", "-q="}, "apt_policy_conflict"},
+		{"missing option assignment", []string{"update", "-o"}, "invalid_arguments"},
+		{"empty option assignment", []string{"update", "--option", ""}, "invalid_arguments"},
+		{"option cannot swallow a later flag", []string{"update", "-o", "-qoAcquire::http::Proxy=DIRECT"}, "invalid_arguments"},
+		{"mixed-case error policy", []string{"update", "--ErRoR-On=none"}, "apt_policy_conflict"},
+		{"mixed-case separate error policy", []string{"update", "--ERROR-ON", "none"}, "apt_policy_conflict"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, _, err := validateAptArgs(tc.args); ErrorCode(err) != tc.code {
+				t.Fatalf("ambiguous native arguments were not refused precisely: %v", err)
+			}
+			t.Run("public entrypoint", func(t *testing.T) {
+				requireNativeAPT(t)
+				for _, binary := range []string{"apt", "apt-get"} {
+					dir := filepath.Join(t.TempDir(), "state-must-not-exist")
+					args := append([]string{binary}, tc.args...)
+					code, err := New(dir, "", 0).Apt(args)
+					if code != 1 || ErrorCode(err) != tc.code {
+						t.Fatalf("ambiguous arguments crossed private-state boundary: exit=%d error=%v", code, err)
+					}
+					if _, err := os.Stat(dir); !os.IsNotExist(err) {
+						t.Fatal("refused arguments created product state")
+					}
+				}
+			})
+		})
+	}
+}
+
+func TestAPTCombinedUpdateNativeLongAliasesAreRefused(t *testing.T) {
+	for _, flag := range []string{
+		"--UPDATE", "--uPdAtE=true", "--yes-update", "--no-update=true",
+		"--anything-update=true", "--YeS-UpDaTe=false", "--yes-U", "--no-U=true",
+		"---update", "---UPDATE=true", "---U", "---U=true",
+	} {
+		t.Run(flag, func(t *testing.T) {
+			args := []string{"install", "safe-test-package", flag}
+			if _, _, err := validateAptArgs(args); ErrorCode(err) != "apt_combined_update_unsupported" {
+				t.Fatalf("native Boolean update alias was not refused: %v", err)
+			}
+			t.Run("public entrypoint", func(t *testing.T) {
+				requireNativeAPT(t)
+				for _, binary := range []string{"apt", "apt-get"} {
+					dir := filepath.Join(t.TempDir(), "state-must-not-exist")
+					code, err := New(dir, "", 0).Apt(append([]string{binary}, args...))
+					if code != 1 || ErrorCode(err) != "apt_combined_update_unsupported" {
+						t.Fatalf("native update alias crossed credential boundary: exit=%d error=%v", code, err)
+					}
+					if _, err := os.Stat(dir); !os.IsNotExist(err) {
+						t.Fatal("refused native update alias created product state")
+					}
+				}
+			})
+		})
+	}
+}
+
+func TestAPTActionFirstKeepsOptionalOperandsAndSeparateFlags(t *testing.T) {
+	for _, args := range [][]string{
+		{"update", "-q", "2"}, {"update", "--quiet", "2"},
+		{"update", "-y", "false"}, {"update", "--assume-yes", "false"},
+		{"update", "-t", "stable"}, {"update", "--default-release", "stable"},
+		{"update", "--with-source", "install"},
+		{"update", "-oDir::Etc::sourcelist=/tmp/qa.list"},
+		{"update", "--OPTION=Dir::Etc::sourcelist=/tmp/qa.list"},
+		{"build-dep", "-a", "amd64", "safe-test-package"},
+		{"install", "-q", "-y", "safe-test-package"},
+		{"install", "--yes-u", "safe-test-package"},
+		{"install", "--default-release", "update", "safe-test-package"},
+		{"install", "update"}, {"show", "-a", "safe-test-package"},
+		{"list", "-a", "safe-test-package"},
+	} {
+		_, action, err := validateAptArgs(args)
+		if err != nil || action != args[0] {
+			t.Fatalf("canonical action-first arguments rejected or reclassified: %v", err)
+		}
+		argv := aptExecArgs(args, action)
+		strict := argv[len(argv)-1] == "--error-on=any"
+		if strict != (args[0] == "update") {
+			t.Fatal("optional native operands changed strict update classification")
+		}
+	}
+	for _, flag := range []string{"-q", "-qq", "-qqq", "-q0", "-q2", "-q=2", "-qq2", "-qq=10"} {
+		args := []string{"update", flag}
+		_, action, err := validateAptArgs(args)
+		if err != nil || action != "update" {
+			t.Fatalf("canonical quiet spelling rejected: %s (%v)", flag, err)
+		}
+		argv := aptExecArgs(args, action)
+		if argv[len(argv)-1] != "--error-on=any" {
+			t.Fatal("canonical quiet spelling lost strict update policy")
+		}
+	}
+	for _, args := range [][]string{
+		{"update", "-oDir::Etc::sourcelist=/tmp/qa.list"},
+		{"update", "-o", "Dir::Etc::sourcelist=/tmp/qa.list"},
+		{"update", "--OPTION", "Dir::Etc::sourcelist=/tmp/qa.list"},
+	} {
+		opts, _, err := validateAptArgs(args)
+		if err != nil || len(opts) != 2 || opts[0] != "-o" || opts[1] != "Dir::Etc::sourcelist=/tmp/qa.list" {
+			t.Fatal("admitted configuration assignment was not included in effective inspection")
+		}
+	}
+}
+
+// apt-config leaves apt/apt-get Binary subtrees inactive. Both inspection
+// stages must refuse policy that becomes unsafe when the real binary uses it.
+func TestAPTInheritedUpdateAndWorkerDebugRefusal(t *testing.T) {
+	proxy := "http://sc:synthetic-never-expose@127.0.0.1:20807"
+	base := nativeAptDumpForTest() + "Acquire::http::Proxy \"" + proxy + "\";\n" +
+		"Acquire::https::Proxy \"" + proxy + "\";\n"
+	var entries []string
+	for _, key := range []string{
+		"Binary::apt::Debug::pkgAcquire::Worker",
+		"Binary::apt-get::Debug::pkgAcquire::Worker",
+		"bInArY::ApT::DeBuG::PkGaCqUiRe::WoRkEr",
+		"BiNaRy::ApT-GeT::dEbUg::pKgAcQuIrE::Worker",
+		"Binary::apt::Debug::pkgAcquire",
+	} {
+		entries = append(entries, key+" \"true\";\n")
+	}
+	for _, key := range []string{
+		"APT::Update", "Binary::apt::APT::Update", "Binary::apt-get::APT::Update",
+		"aPt::uPdAtE", "bInArY::ApT-GeT::aPt::UpDaTe",
+	} {
+		for _, value := range []string{
+			"1", "yes", "true", "with", "on", "enable", "TrUe",
+			"+1", "01", "0x1", "unsupported", "synthetic-never-expose",
+		} {
+			entries = append(entries, key+" \""+value+"\";\n")
+		}
+		entries = append(entries, key+"\n", key+" \"true\"; \"false\";\n")
+	}
+	for _, mode := range []struct {
+		name  string
+		value aptCompatibility
+	}{{"strict", aptStrictNative}, {"debian12", aptDebian12Native261}} {
+		t.Run(mode.name, func(t *testing.T) {
+			for _, owned := range []bool{false, true} {
+				dump := base
+				stage := "inherited"
+				if owned {
+					dump += ownedDisabledAptDumpForTest()
+					stage = "owned-denial"
+				}
+				t.Run(stage, func(t *testing.T) {
+					if err := verifyAptDumpPolicy(dump, proxy, mode.value, owned); err != nil {
+						t.Fatal("positive policy control failed:", err)
+					}
+					for _, entry := range entries {
+						t.Run(strings.TrimSpace(entry), func(t *testing.T) {
+							err := verifyAptDumpPolicy(dump+entry, proxy, mode.value, owned)
+							if ErrorCode(err) != "apt_policy_conflict" {
+								t.Fatal("inherited acquisition policy was not refused:", err)
+							}
+							if strings.Contains(err.Error(), "synthetic-never-expose") {
+								t.Fatal("refusal disclosed synthetic private data")
+							}
+						})
+					}
+				})
+			}
+		})
+	}
+}
+
+func TestAPTInheritedHarmlessUpdateAndPresentationPolicy(t *testing.T) {
+	proxy := "http://sc:synthetic-never-expose@127.0.0.1:20807"
+	base := nativeAptDumpForTest() + "Acquire::http::Proxy \"" + proxy + "\";\n" +
+		"Acquire::https::Proxy \"" + proxy + "\";\n" +
+		"APT::Update::Post-Invoke:: \"/bin/true\";\n" +
+		"Binary::apt::APT::Color \"true\";\n" +
+		"Binary::apt::DPkg::Progress-Fancy \"1\";\n" +
+		"Binary::apt-get::APT::Get::Show-Versions \"true\";\n"
+	for _, mode := range []aptCompatibility{aptStrictNative, aptDebian12Native261} {
+		for _, owned := range []bool{false, true} {
+			dump := base
+			if owned {
+				dump += ownedDisabledAptDumpForTest()
+			}
+			for _, key := range []string{"APT::Update", "Binary::apt::APT::Update", "Binary::apt-get::APT::Update", "bInArY::ApT::aPt::UpDaTe"} {
+				for _, value := range []string{"", "0", "no", "false", "without", "off", "disable", "FaLsE", "OFF"} {
+					if err := verifyAptDumpPolicy(dump+key+" \""+value+"\";\n", proxy, mode, owned); err != nil {
+						t.Fatalf("harmless inherited policy rejected: key=%s value=%q: %v", key, value, err)
+					}
+				}
+			}
+		}
+	}
+}
+
+// These options simulate inherited policy in the actual native apt-config
+// process. No host APT policy is changed and no acquisition process is run.
+func TestRealAPTInheritedUpdateAndWorkerDebugPolicy(t *testing.T) {
+	requireNativeAPT(t)
+	compatibility, err := observedAPTCompatibility(systemAPTGet)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxy, _ := url.Parse("http://sc:synthetic-never-expose@127.0.0.1:20807")
+	fd, err := privateAptConfig(t.TempDir(), proxy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer fd.Close()
+	for _, owned := range []bool{false, true} {
+		stage := "inherited"
+		if owned {
+			stage = "owned-denial"
+		}
+		t.Run(stage, func(t *testing.T) {
+			check := func(setting string) error {
+				var opts []string
+				if setting != "" {
+					opts = []string{"-o", setting}
+				}
+				if owned {
+					opts = aptOwnedDisabledOpts(opts)
+				}
+				return verifyEffectiveAptProxyPolicy(fd, proxy.String(), opts, compatibility, owned)
+			}
+			for _, setting := range []string{
+				"", "APT::Update=", "APT::Update=false", "Binary::apt::APT::Update=0",
+				"Binary::apt-get::APT::Update=off", "APT::Update::Post-Invoke::=/bin/true",
+				"Binary::apt::APT::Color=true", "Binary::apt::DPkg::Progress-Fancy=1",
+			} {
+				if err := check(setting); err != nil {
+					t.Fatal("native positive policy control failed:", err)
+				}
+			}
+			for _, setting := range []string{
+				"Binary::apt::Debug::pkgAcquire::Worker=true",
+				"Binary::apt-get::Debug::pkgAcquire::Worker=true",
+				"bInArY::ApT::DeBuG::PkGaCqUiRe::WoRkEr=true",
+				"BiNaRy::ApT-GeT::DeBuG::PkGaCqUiRe::WoRkEr=1",
+				"APT::Update=true", "APT::Update=with", "APT::Update=0x1",
+				"Binary::apt::APT::Update=yes", "Binary::apt-get::APT::Update=1",
+				"bInArY::ApT-GeT::aPt::UpDaTe=enable",
+			} {
+				t.Run(setting, func(t *testing.T) {
+					err := check(setting)
+					if ErrorCode(err) != "apt_policy_conflict" {
+						t.Fatal("native inherited policy crossed acquisition admission:", err)
+					}
+					if strings.Contains(err.Error(), "synthetic-never-expose") {
+						t.Fatal("native refusal disclosed synthetic private data")
+					}
+				})
+			}
+		})
 	}
 }

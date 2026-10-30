@@ -327,17 +327,23 @@ class Fixture:
                 future.result()
         self.wire("tcp", "10.254.72.2", "direct")
 
-    def apply(self, deadline=30, **options):
+    def apply(self, deadline=30, *, saved=False, **options):
         assert not JOURNAL.exists()
-        args = ["smart-tun-trial-apply", "--tunnel-if", "sctunqa0", "--underlay-if", "scqaedge0",
-                "--tunnel-ipv4", "172.31.99.1/30", "--management-peer", "10.254.72.2",
-                "--domestic-cidr", "5.22.0.10/32", "--protected-cidr", "10.254.72.0/30",
-                "--deadline-seconds", str(deadline), "--supervised", "--health-interval", "5",
-                "--health-grace", "0", "--health-failures", "1", "--health-attempts", "2",
-                "--health-recovery-seconds", "30"]
-        if self.args.ipv6:
-            args += ["--tunnel-ipv6", "fd73:99::1/64", "--domestic-ipv6-cidr", "2001:db8:5::/64",
-                     "--ipv6-vpn-cidr", "2001:db8:5::10/128", "--ipv6-direct-cidr", "2001:db8:8::9/128"]
+        saved_before = self.saved() if saved else None
+        previous_op = self.op
+        args = ["smart-tun-trial-apply"]
+        if saved:
+            args += ["--saved"]
+        else:
+            args += ["--tunnel-if", "sctunqa0", "--underlay-if", "scqaedge0",
+                     "--tunnel-ipv4", "172.31.99.1/30", "--management-peer", "10.254.72.2",
+                     "--domestic-cidr", "5.22.0.10/32", "--protected-cidr", "10.254.72.0/30"]
+            if self.args.ipv6:
+                args += ["--tunnel-ipv6", "fd73:99::1/64", "--domestic-ipv6-cidr", "2001:db8:5::/64",
+                         "--ipv6-vpn-cidr", "2001:db8:5::10/128", "--ipv6-direct-cidr", "2001:db8:8::9/128"]
+        args += ["--deadline-seconds", str(deadline), "--supervised", "--health-interval", "5",
+                 "--health-grace", "0", "--health-failures", "1", "--health-attempts", "2",
+                 "--health-recovery-seconds", "30"]
         for key, value in options.items():
             flag = "--" + key.replace("_", "-")
             if flag in args:
@@ -351,6 +357,9 @@ class Fixture:
         assert re.fullmatch("[0-9a-f]{32,128}", self.challenge)
         assert not value["management_confirmed"] and value["experiment_only"] and not value["activation_ready"], value
         self.saved_before = self.saved()
+        if saved:
+            assert self.saved_before == saved_before, "saved reapply changed saved input"
+            assert previous_op is None or self.op != previous_op, "saved reapply reused an operation"
         self.wires("vpn")
         assert self.counters() == self.direct_counts, "health targets silently escaped through Direct"
         return value
@@ -642,7 +651,11 @@ class Fixture:
 
         # Separate short-deadline operation proves confirmed continuation,
         # and keeps the large negative-confirmation budget out of this case.
-        self.apply(12)
+        # The preceding IPv4 operation saved this policy. The IPv6 lane
+        # starts before the pending dual-stack fixture, so it stays explicit.
+        self.apply(12, saved=not self.args.ipv6)
+        if not self.args.ipv6:
+            self.marker("SAVED_REAPPLY")
         self.confirmed()
         deadline = self.health()["confirmation_deadline_uptime_ms"] if "confirmation_deadline_uptime_ms" in self.health() else self.state()["confirmation_deadline_uptime_ms"]
         while float(Path("/proc/uptime").read_text().split()[0]) * 1000 <= deadline + 1000:

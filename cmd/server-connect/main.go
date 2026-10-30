@@ -160,6 +160,15 @@ func run(j bool, m *sc.Manager, args []string) int {
 		args = rest
 	}
 	switch name {
+	case "installer-check-target":
+		opts := flag.NewFlagSet(name, flag.ContinueOnError)
+		opts.SetOutput(io.Discard)
+		manifest := opts.String("manifest", "", "verified local bundle manifest")
+		if err := opts.Parse(args); err != nil || len(opts.Args()) != 0 || *manifest == "" || os.Geteuid() != 0 {
+			return output(j, nil, sc.Fault("invalid_arguments", "installer-only target check requires --manifest FILE"))
+		}
+		report, err := sc.VerifyInstallerTarget(*manifest)
+		return output(j, report, err)
 	case "installer-check-guard-clear":
 		if len(args) != 0 || os.Geteuid() != 0 {
 			return output(j, nil, sc.Fault("invalid_arguments", "installer-only command"))
@@ -712,8 +721,11 @@ Commands:
 Import VLESS links from stdin or a mode-0600 file, not shell argv. 'exec'
 sets proxy variables for only the selected child process. 'apt' passes
 an anonymous private APT config to a verified native APT child, with no
-/etc/apt edits. Combined -U/--update package operations are unsupported;
-run an explicit strict update first. Neither mode routes unrelated host
+/etc/apt edits. Put the APT action first, then options, for example:
+  apt -- apt-get install -y package
+Options before the action and ambiguous short-option groups are refused.
+Combined -U/--update package operations are unsupported; run an explicit
+strict update first. Neither mode routes unrelated host
 traffic globally. Path diagnostics never fall back to Direct, do not echo
 targets in results, and do not establish tunnel health or start recovery.
 Host preflight is observational: a route lookup does not

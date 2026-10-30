@@ -32,17 +32,29 @@ func (m *Manager) Apt(args []string) (int, error) {
 	if _, err = trustedAPTConfig(); err != nil {
 		return 1, err
 	}
+	compatibility, err := observedAPTCompatibility(nativeAPT)
+	if err != nil {
+		return 1, err
+	}
 	proxy, err := m.proxyURL()
 	if err != nil {
 		return 1, err
 	}
-	return aptThroughSelectedProxy(nativeAPT, args[1:], m.Dir, proxy)
+	return aptThroughSelectedProxyChecked(nativeAPT, args[1:], m.Dir, proxy, compatibility)
 }
 
 // aptThroughSelectedProxy owns the *entire* credential-bearing subprocess
 // operation. This is also used by genuine-core isolated integration tests;
 // no test-only implementation of the APT transport is required.
 func aptThroughSelectedProxy(nativeAPT string, args []string, dir string, proxy *url.URL) (int, error) {
+	compatibility, err := observedAPTCompatibility(nativeAPT)
+	if err != nil {
+		return 1, err
+	}
+	return aptThroughSelectedProxyChecked(nativeAPT, args, dir, proxy, compatibility)
+}
+
+func aptThroughSelectedProxyChecked(nativeAPT string, args []string, dir string, proxy *url.URL, compatibility aptCompatibility) (int, error) {
 	if nativeAPT != systemAPT && nativeAPT != systemAPTGet {
 		return 1, Fault("apt_untrusted_executable", "APT command is not a trusted native executable")
 	}
@@ -59,7 +71,7 @@ func aptThroughSelectedProxy(nativeAPT string, args []string, dir string, proxy 
 	if _, err := trustedAPTConfig(); err != nil {
 		return 1, err
 	}
-	if err := verifyNativeAPTMethods(); err != nil {
+	if err := verifyNativeAPTMethodsWithCompatibility(compatibility); err != nil {
 		return 1, err
 	}
 	file, err := privateAptConfig(dir, proxy)
@@ -69,7 +81,12 @@ func aptThroughSelectedProxy(nativeAPT string, args []string, dir string, proxy 
 	defer file.Close()
 	// Host-specific and autodetected APT settings take precedence over the
 	// generic proxy. Inspect the effective configuration; never log its output.
-	if err = verifyEffectiveAptProxy(file, proxy.String(), opts); err != nil {
+	if err = verifyEffectiveAptProxyWithCompatibility(file, proxy.String(), opts, compatibility); err != nil {
+		return 1, err
+	}
+	// Reject inherited enablers FIRST. Then verify the stricter policy that the
+	// wrapper appends to the actual child, independent of libapt-pkg version.
+	if err = verifyEffectiveAptProxyPolicy(file, proxy.String(), aptOwnedDisabledOpts(opts), compatibility, true); err != nil {
 		return 1, err
 	}
 	argv := aptExecArgs(args, action)
@@ -92,21 +109,45 @@ func aptThroughSelectedProxy(nativeAPT string, args []string, dir string, proxy 
 func aptExecArgs(arguments []string, action string) []string {
 	argv := []string{"-c", "/proc/self/fd/3"}
 	argv = append(argv, arguments...)
+	argv = append(argv, aptOwnedDisabledOpts(nil)...)
 	if action == "update" {
 		argv = append(argv, "--error-on=any")
 	}
 	return argv
 }
 
+const aptDisabledMethodPath = "/usr/lib/apt/methods/false"
+
+var aptDisabledMethods = []string{"ftp", "rsh", "ssh", "mirror+ftp"}
+
+// Worker::Start in native APT2.6/2.9/3 honors an explicit method path before
+// dispatch. A missing path whose basename is false means disabled, before
+// fork/exec. The complete trusted inventory rejects any file named false;
+// this policy creates no files and changes no host APT settings.
+// https://github.com/Debian/apt/blob/a626a66fece0a7d680e40b9e35b66e29fe9ae12c/apt-pkg/acquire-worker.cc
+func aptOwnedDisabledOpts(opts []string) []string {
+	result := append([]string{}, opts...)
+	for _, method := range aptDisabledMethods {
+		result = append(result, "-o", "Dir::Bin::Methods::"+method+"="+aptDisabledMethodPath)
+	}
+	return result
+}
+
 // Validate caller overrides before forwarding them to apt-get. Proxy
 // overrides, extra config files, and wire-debugging are not supported.
 func validateAptArgs(args []string) ([]string, string, error) {
+	// Native APT keeps the first ordinary token as FileList[0]. Requiring the
+	// action here avoids guessing which later boolean/integer/HasArg option
+	// consumes a separate value and accidentally losing strict update handling.
+	if len(args) == 0 || args[0] == "" || strings.HasPrefix(args[0], "-") {
+		return nil, "", Fault("invalid_arguments", "put the APT action first, followed by its options and package arguments")
+	}
 	var opts []string
-	action := ""
-	for i := 0; i < len(args); i++ {
+	action := args[0]
+	for i := 1; i < len(args); i++ {
 		a := args[i]
 		lower := strings.ToLower(a)
-		if a == "--update" || strings.HasPrefix(a, "--update=") ||
+		if isCombinedAPTUpdateLongFlag(a) ||
 			isCombinedAPTUpdateShortFlag(a) {
 			return nil, "", Fault("apt_combined_update_unsupported",
 				"APT -U/--update is unsupported in Proxy Only; run a separate strict apt-get update before the package command")
@@ -114,12 +155,15 @@ func validateAptArgs(args []string) ([]string, string, error) {
 		// The wrapper, not caller input, owns the update error policy.
 		// Accepting -e/--error-on risks ambiguous APT precedence.
 		if a == "-e" || strings.HasPrefix(a, "-e") ||
-			a == "--error-on" || strings.HasPrefix(a, "--error-on=") {
+			lower == "--error-on" || strings.HasPrefix(lower, "--error-on=") {
 			return nil, "", Fault("apt_policy_conflict",
 				"APT update error policy is managed by Server Connect")
 		}
 		if a == "--" {
 			return nil, "", Fault("invalid_arguments", "APT argument separator not supported")
+		}
+		if !supportedAPTShortToken(a) {
+			return nil, "", Fault("apt_policy_conflict", "APT short options must be separate; only quiet forms and validated attached -o values are supported")
 		}
 		if lower == "-c" || lower == "--config-file" || strings.HasPrefix(lower, "--config-file=") ||
 			(strings.HasPrefix(lower, "-c") && len(a) > 2) {
@@ -129,7 +173,7 @@ func validateAptArgs(args []string) ([]string, string, error) {
 		switch {
 		case a == "-o" || lower == "--option":
 			i++
-			if i == len(args) {
+			if i == len(args) || args[i] == "" || strings.HasPrefix(args[i], "-") {
 				return nil, "", Fault("invalid_arguments", "APT configuration option value missing")
 			}
 			opt = args[i]
@@ -164,35 +208,67 @@ func validateAptArgs(args []string) ([]string, string, error) {
 			opts = append(opts, "-o", opt)
 			continue
 		}
-		// APT accepts options that consume separate arguments before its
-		// subcommand. Never misclassify an update as a different action:
-		// that would drop mandatory --error-on=any on a partial failure.
-		if lower == "-t" || lower == "-a" ||
-			lower == "--target-release" || lower == "--host-architecture" {
-			i++
-			if i == len(args) {
-				return nil, "", Fault("invalid_arguments", "APT option value missing")
-			}
-			continue
-		}
-		if !strings.HasPrefix(a, "-") && action == "" {
-			action = a
-		}
+		// Scan every other token. Native meanings depend on the command (e.g.
+		// -a is boolean for apt show/list but takes a value for build-dep).
+		// Only the validated -o assignment above may consume another token.
 	}
 	return opts, action, nil
 }
 
+// Native short options are parsed letter by letter: -qoX=Y hides an arbitrary
+// setting and -qcFILE hides a config include. Admit a small unambiguous grammar
+// instead of duplicating APT's optional boolean/integer argument parser.
+func supportedAPTShortToken(a string) bool {
+	if len(a) < 3 || !strings.HasPrefix(a, "-") || strings.HasPrefix(a, "--") {
+		return true
+	}
+	if strings.HasPrefix(a, "-o") {
+		return true // The complete assignment is separately validated.
+	}
+	if a[1] != 'q' {
+		return false
+	}
+	level := strings.TrimLeft(a[1:], "q")
+	if level == "" {
+		return true
+	}
+	level = strings.TrimPrefix(level, "=")
+	if level == "" {
+		return false
+	}
+	for _, digit := range level {
+		if digit < '0' || digit > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// Native long matching ignores case and permits one Boolean prefix, including
+// an empty prefix (---update) and the short alias (--yes-U). An explicit value
+// such as --no-update=true overrides the prefix, so reject every such spelling.
+// https://github.com/Debian/apt/blob/a626a66fece0a7d680e40b9e35b66e29fe9ae12c/apt-pkg/contrib/cmndline.cc
+func isCombinedAPTUpdateLongFlag(a string) bool {
+	if !strings.HasPrefix(a, "--") {
+		return false
+	}
+	name, _, _ := strings.Cut(a[2:], "=")
+	if strings.EqualFold(name, "update") {
+		return true
+	}
+	_, suffix, prefixed := strings.Cut(name, "-")
+	return prefixed && (strings.EqualFold(suffix, "update") || suffix == "U")
+}
+
 // APT permits short flag groups (e.g. -qU); never allow a combined update
-// phase to escape the strict standalone-update contract. Other options
-// taking attached values (-o, -t, -a, -e) are not groups.
+// phase to escape the strict standalone-update contract. The only admitted
+// arbitrary attached value is -o's separately validated assignment.
 func isCombinedAPTUpdateShortFlag(a string) bool {
 	if len(a) < 2 || !strings.HasPrefix(a, "-") || strings.HasPrefix(a, "--") {
 		return false
 	}
-	for _, prefix := range []string{"-o", "-t", "-a", "-e", "-c"} {
-		if strings.HasPrefix(a, prefix) {
-			return false
-		}
+	if strings.HasPrefix(a, "-o") {
+		return false
 	}
 	return strings.Contains(a[1:], "U")
 }
@@ -200,6 +276,18 @@ func isCombinedAPTUpdateShortFlag(a string) bool {
 // Inspect APT host policy and caller-supplied supported options with the
 // same anonymous config FD/environment. apt-config's stdout is a secret.
 func verifyEffectiveAptProxy(file *os.File, expected string, opts []string) error {
+	compatibility, err := observedAPTCompatibility(systemAPTGet)
+	if err != nil {
+		return err
+	}
+	return verifyEffectiveAptProxyWithCompatibility(file, expected, opts, compatibility)
+}
+
+func verifyEffectiveAptProxyWithCompatibility(file *os.File, expected string, opts []string, compatibility aptCompatibility) error {
+	return verifyEffectiveAptProxyPolicy(file, expected, opts, compatibility, false)
+}
+
+func verifyEffectiveAptProxyPolicy(file *os.File, expected string, opts []string, compatibility aptCompatibility, ownedDisabled bool) error {
 	if _, err := file.Seek(0, 0); err != nil {
 		return Fault("apt_configuration", "private APT configuration unavailable")
 	}
@@ -218,7 +306,7 @@ func verifyEffectiveAptProxy(file *os.File, expected string, opts []string) erro
 	if err := cmd.Run(); err != nil {
 		return Fault("apt_policy_conflict", "cannot verify effective APT configuration; refusing Direct fallback")
 	}
-	return verifyAptDump(out.String(), expected)
+	return verifyAptDumpPolicy(out.String(), expected, compatibility, ownedDisabled)
 }
 
 type limitedAptOutput struct {
@@ -269,9 +357,18 @@ var nativeAPTCompressors = map[string][]string{
 }
 
 func verifyAptDump(dump, expected string) error {
+	return verifyAptDumpWithCompatibility(dump, expected, aptStrictNative)
+}
+
+func verifyAptDumpWithCompatibility(dump, expected string, compatibility aptCompatibility) error {
+	return verifyAptDumpPolicy(dump, expected, compatibility, false)
+}
+
+func verifyAptDumpPolicy(dump, expected string, compatibility aptCompatibility, ownedDisabled bool) error {
 	seenHTTP, seenHTTPS := false, false
 	seenDir, seenUsr := false, false
 	seenBins := make(map[string]bool, len(nativeAPTBinConfig))
+	seenDisabled := make(map[string]bool, len(aptDisabledMethods))
 	for _, line := range strings.Split(dump, "\n") {
 		fields := strings.Fields(line)
 		if len(fields) == 0 {
@@ -288,12 +385,28 @@ func verifyAptDump(dump, expected string) error {
 			(strings.Contains(key, "::acquire") || strings.Contains(key, "::proxy") ||
 				strings.Contains(key, "::dir") || strings.Contains(key, "::rootdir") ||
 				strings.Contains(key, "::apt::compressor") ||
-				strings.Contains(key, "::debug::acquire"))
+				strings.Contains(key, "::debug::acquire") ||
+				strings.Contains(key, "::debug::pkgacquire"))
 		// APT's HTTP wire debugging can print Proxy-Authorization (secrets).
 		debug := strings.HasPrefix(key, "debug::acquire") ||
 			strings.HasPrefix(key, "debug::pkgacquire")
 		if binary || auto || debug || (proxyPath && key != "acquire::http::proxy" && key != "acquire::https::proxy") {
 			return Fault("apt_policy_conflict", "APT per-host proxy, auto-detection or binary policy may bypass selected route")
+		}
+		// Native apt/apt-get can run an implicit update before a package
+		// action. Only an explicit update receives our final strict flag.
+		// Preserve empty namespace parents/hooks and canonical false values.
+		if key == "apt::update" || key == "binary::apt::apt::update" || key == "binary::apt-get::apt::update" {
+			disabled := false
+			if len(fields) == 2 {
+				switch strings.ToLower(fields[1]) {
+				case "\"\";", "\"0\";", "\"no\";", "\"false\";", "\"without\";", "\"off\";", "\"disable\";":
+					disabled = true
+				}
+			}
+			if !disabled {
+				return Fault("apt_policy_conflict", "inherited APT combined update policy is unsupported in Proxy Only")
+			}
 		}
 		// RootDir prepends even absolute APT paths. A new Dir root or usr
 		// prefix can also change where method executables are resolved.
@@ -318,6 +431,19 @@ func verifyAptDump(dump, expected string) error {
 			}
 		}
 		if key == "dir::bin" || strings.HasPrefix(key, "dir::bin::") {
+			if strings.HasPrefix(key, "dir::bin::methods::") {
+				known := false
+				for _, method := range aptDisabledMethods {
+					if key == "dir::bin::methods::"+method {
+						known = true
+					}
+				}
+				if !ownedDisabled || !known || seenDisabled[key] || len(fields) != 2 || fields[1] != "\""+aptDisabledMethodPath+"\";" {
+					return Fault("apt_policy_conflict", "APT per-method execution override is not the verified disabled policy")
+				}
+				seenDisabled[key] = true
+				continue
+			}
 			want, known := nativeAPTBinConfig[key]
 			approved := known && len(fields) == 2 && fields[1] == "\""+want+"\";"
 			// Debian 13's minimal image selects the native lzma program
@@ -360,7 +486,12 @@ func verifyAptDump(dump, expected string) error {
 	if !seenHTTP || !seenHTTPS {
 		return Fault("apt_policy_conflict", "effective APT HTTP(S) proxy settings not verified")
 	}
-	if !seenDir || !seenUsr || len(seenBins) != len(nativeAPTBinConfig) {
+	if ownedDisabled && len(seenDisabled) != len(aptDisabledMethods) {
+		return Fault("apt_policy_conflict", "APT disabled acquisition method policy not established")
+	}
+	// Native APT2.6.1 has no Dir::Usr default. Only the independently observed
+	// Debian12/2.6.1 mode may omit it; a present value was still checked above.
+	if !seenDir || (!seenUsr && compatibility != aptDebian12Native261) || len(seenBins) != len(nativeAPTBinConfig) {
 		return Fault("apt_policy_conflict", "trusted native APT executable path configuration not established")
 	}
 	return nil

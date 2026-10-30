@@ -9,8 +9,10 @@ from __future__ import annotations
 import gzip
 import hashlib
 import io
+import json
 import os
 from pathlib import Path
+import shlex
 import shutil
 import subprocess
 import tarfile
@@ -52,7 +54,9 @@ class ZeroSource:
         return b"\x00" * count
 
 
-def archive(path: Path, *, abnormal: str | None = None) -> str:
+def archive(path: Path, *, abnormal: str | None = None,
+            contents: dict[str, bytes] | None = None,
+            executable_members: tuple[str, ...] = ()) -> str:
     if abnormal == "compressed_oversized":
         # Actual ~192 MiB expansion, tiny gzip. Budget gate must reject the
         # member before creating any extracted data on the host filesystem.
@@ -92,8 +96,10 @@ def archive(path: Path, *, abnormal: str | None = None) -> str:
             body = b"INERT QA ONLY\n"
             if name == "server-connect/install.sh":
                 body = b"#!/bin/sh\nexit 93\n"  # Never executed by --verify-only.
+            if contents is not None:
+                body = contents.get(name, body)
             entry = tarfile.TarInfo(name)
-            entry.mode = 0o755 if name.endswith("/install.sh") else 0o644
+            entry.mode = 0o755 if name.endswith("/install.sh") or name in executable_members else 0o644
             entry.size = len(body)
             if abnormal == "pax_metadata" and name.endswith("/install.sh"):
                 entry.pax_headers = {"comment": "x" * 3_000_000}
@@ -174,6 +180,97 @@ class LocalHTTPHandler(SimpleHTTPRequestHandler):
         return super().do_GET()
 
 
+class BootstrapIdentityParserTest(unittest.TestCase):
+    """Execute only the actual pure parser; never read or replace host identity."""
+
+    @classmethod
+    def setUpClass(cls):
+        body = BOOTSTRAP.read_text()
+        start = body.index("bootstrap_parse_os_identity() (\n")
+        end = body.index("\n)\n", start) + len("\n)\n")
+        cls.parser = "set -eu\n" + body[start:end] + "\nbootstrap_parse_os_identity\n"
+
+    def parse(self, identity):
+        raw = identity.encode() if isinstance(identity, str) else identity
+        return subprocess.run(
+            ["/bin/sh", "-c", self.parser], input=raw,
+            capture_output=True, timeout=5,
+        )
+
+    def test_canonical_supported_identity_is_literal(self):
+        for version in ("12", "13"):
+            for quote in ("", "'", '"'):
+                with self.subTest(version=version, quote=quote):
+                    raw = (
+                        "# canonical native identity\n"
+                        "PRETTY_NAME=\"Debian GNU/Linux\"\n"
+                        f"ID={quote}debian{quote}\n"
+                        f"VERSION_ID={quote}{version}{quote}\n"
+                    )
+                    result = self.parse(raw)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(result.stdout, (version + "\n").encode())
+        result = self.parse(" \t# comment\n\tVERSION_ID='12' \t\n  ID=debian\n")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, b"12\n")
+
+    def test_missing_unsupported_and_ambiguous_identity_is_rejected(self):
+        cases = (
+            "", "ID=debian\n", "VERSION_ID=12\n",
+            "ID=ubuntu\nID_LIKE=debian\nVERSION_ID=12\n",
+            "ID=debian\nVERSION_ID=11\n", "ID=debian\nVERSION_ID=14\n",
+            "ID=debian\nVERSION_ID=12.0\n",
+            "ID=debian\nID=debian\nVERSION_ID=12\n",
+            "ID=debian\nVERSION_ID=12\nVERSION_ID=13\n",
+            "ID=debian\nid=debian\nVERSION_ID=12\n",
+            "Id=debian\nVERSION_ID=12\n", "ID=debian\nversion_id=12\n",
+            "ID=debian\nVersion_ID=12\n",
+            "ID =debian\nVERSION_ID=12\n", "export ID=debian\nVERSION_ID=12\n",
+            "ID=debian\nVERSION_ID= 12\n", "ID=\"debian\nVERSION_ID=12\n",
+            "ID=de\\bian\nVERSION_ID=12\n", "ID='de'bian\nVERSION_ID=12\n",
+            "ID=debian;true\nVERSION_ID=12\n", "ID=debian\nVERSION_ID=12 # comment\n",
+            "ID=debian\nVERSION_ID=12\nnot-an-assignment\n",
+            "ID=debian\nVERSION_ID=12\n1INVALID=value\n",
+            b"ID=de\x00bian\nVERSION_ID=12\n",
+            b"ID=debian\nVERSION_ID=12\n\x01", b"ID=debian\nVERSION_ID=12\n\xff",
+        )
+        for raw in cases:
+            with self.subTest(identity=raw):
+                result = self.parse(raw)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(result.stdout, b"")
+
+    def test_byte_limit_includes_trailing_newlines(self):
+        prefix = b"ID=debian\nVERSION_ID=12\n#"
+        boundary = prefix + b"x" * (16384 - len(prefix))
+        result = self.parse(boundary)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, b"12\n")
+        for raw in (boundary + b"x", prefix + b"\n" * (16385 - len(prefix))):
+            result = self.parse(raw)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual(result.stdout, b"")
+
+    def test_shell_like_identity_and_description_never_execute(self):
+        with tempfile.TemporaryDirectory(prefix="sc-os-identity-witness-") as scratch:
+            marker = Path(scratch) / "metadata-was-executed"
+            quoted = shlex.quote(str(marker))
+            cases = (
+                (f"ID=$(: > {quoted}; printf debian)\nVERSION_ID=12\n", False),
+                (f"ID=debian\nVERSION_ID=`: > {quoted}; printf 12`\n", False),
+                (f"ID=debian\nVERSION_ID=12; : > {quoted}\n", False),
+                (f"ID=debian\nVERSION_ID=13\nPRETTY_NAME=\"$(: > {quoted})\"\n", True),
+                (f"ID=debian\nVERSION_ID=13\nUNKNOWN=`: > {quoted}`\n", True),
+            )
+            for raw, allowed in cases:
+                with self.subTest(identity=raw, allowed=allowed):
+                    self.assertFalse(marker.exists())
+                    result = self.parse(raw)
+                    self.assertEqual(result.returncode == 0, allowed, result.stderr)
+                    self.assertEqual(result.stdout, b"13\n" if allowed else b"")
+                    self.assertFalse(marker.exists(), "OS metadata executed as shell code")
+
+
 class BootstrapSecurityTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -230,6 +327,43 @@ class BootstrapSecurityTest(unittest.TestCase):
     def test_valid_local_archive(self):
         result = self.bootstrap()
         self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_verify_only_does_not_admit_targets_or_execute_payloads(self):
+        # Target admission belongs to the shared installer. These archives
+        # prove only acquisition/layout verification, including when their
+        # target metadata is unsupported; no fixture payload may execute.
+        executable_names = (
+            "server-connect/install.sh",
+            "server-connect/bin/server-connect",
+            "server-connect/bin/sing-box",
+        )
+        for target in ("debian-12-amd64", "debian-13-amd64", "unsupported-qa-target"):
+            with self.subTest(target=target):
+                contents = {
+                    "server-connect/manifest.json": json.dumps(
+                        {"schema": 1, "target": target},
+                    ).encode(),
+                }
+                markers = []
+                for name in executable_names:
+                    marker = self.directory / f"verify-{target}-{Path(name).name}.executed"
+                    self.assertFalse(marker.exists())
+                    markers.append(marker)
+                    contents[name] = (
+                        "#!/bin/sh\n"
+                        f": > {shlex.quote(str(marker))}\n"
+                        "exit 93\n"
+                    ).encode()
+                filename = f"verify-{target}.tar.gz"
+                digest = archive(
+                    self.directory / filename, contents=contents,
+                    executable_members=executable_names,
+                )
+                result = self.bootstrap(filename, digest=digest)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn("Installation was not attempted.", result.stdout)
+                for marker in markers:
+                    self.assertFalse(marker.exists(), "verify-only executed a release payload")
 
     def test_inherited_tar_options_are_ignored(self):
         result = self.bootstrap(changes={"TAR_OPTIONS": "--help", "GZIP": "--bad-option"})

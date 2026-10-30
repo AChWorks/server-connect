@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-# Exact QA-only lifecycle in ephemeral Debian 13 systemd containers.
+# Exact QA-only lifecycle in ephemeral Debian 12/13 systemd containers.
+# Debian13 retains the full native experiment. Debian12 proves installed
+# Direct/Proxy Only compatibility and an explicit native-Apply refusal.
 # The original installer/lifecycle guest remains Docker --network none.
 # A separate short-lived connected guest tests online prerequisite acquisition
 # before its own network is disconnected. NEVER run on a production host;
@@ -16,6 +18,13 @@ if [[ $# != 4 || ! -f $1 || ! -f $2 || ! -f $3 || ! -f $4 ]]; then
   echo 'Usage: test-installed-host.sh BASE.tar.gz BOOTSTRAP.sh UPDATE.tar.gz BAD-UPDATE.tar.gz' >&2
   exit 2
 fi
+qa_version=${SC_QA_DEBIAN_VERSION:-13}
+case "$qa_version" in
+  12) qa_suite=bookworm ;;
+  13) qa_suite=trixie ;;
+  *) echo 'QA target must be Debian 12 or Debian 13' >&2; exit 2 ;;
+esac
+export SC_QA_DEBIAN_VERSION=$qa_version
 bundle=$(realpath -- "$1")
 bootstrap=$(realpath -- "$2")
 update_bundle=$(realpath -- "$3")
@@ -32,6 +41,8 @@ cd "$root"
 # Exercise the actual guest APT negative classifier with disposable fakes
 # before any privileged Docker work; this is not a substitute for real APT.
 bash scripts/qa/test-host-apt-only.sh
+PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/qa/test-package-targets.py
+sh -n scripts/qa/host-bundle-target-refusal.sh
 # Run candidate-version WordPress fail-closed regressions inside this script,
 # since pull_request_target uses the trusted main workflow definition.
 PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/qa/test-wp-fcgi-check.py
@@ -105,10 +116,14 @@ trap 'exit 143' TERM
 
 # Compile only on the build host. Privileged native tests execute solely in
 # the explicitly gated disconnected guest below, never on the runner/Dev.
-CGO_ENABLED=0 go test -c -o "$scratch/qa-native-nft-cas-test" ./internal/sc
+if [[ $qa_version == 13 ]]; then
+  CGO_ENABLED=0 go test -c -o "$scratch/qa-native-nft-cas-test" ./internal/sc
+fi
 
-echo '=== Disposable Debian 13 preparation (network permitted BEFORE isolation) ==='
-docker build --pull -f scripts/qa/Dockerfile.host-systemd -t "$image" scripts/qa
+printf '=== Disposable Debian %s preparation (network permitted BEFORE isolation) ===\n' "$qa_version"
+docker build --pull -f scripts/qa/Dockerfile.host-systemd \
+  --build-arg "DEBIAN_SUITE=$qa_suite" \
+  --build-arg "SC_QA_DEBIAN_VERSION=$qa_version" -t "$image" scripts/qa
 # Delegate the container's PRIVATE cgroup v2 filesystem through Docker.
 # NEVER bind-mount the host cgroup root into a private cgroup namespace:
 # it creates inconsistent ownership and can stop systemd before boot.
@@ -138,10 +153,10 @@ for attempt in $(seq 1 30); do
   sleep 2
 done
 [[ $ready == yes ]] || { echo 'Isolated systemd PID1 did not become ready' >&2; exit 1; }
-docker exec "$container" /bin/sh -c '
+docker exec -e "SC_QA_DEBIAN_VERSION=$qa_version" "$container" /bin/sh -c '
   set -eu
   . /etc/os-release
-  test "$ID" = debian && test "$VERSION_ID" = 13
+  test "$ID" = debian && test "$VERSION_ID" = "$SC_QA_DEBIAN_VERSION"
   test "$(ps -p 1 -o comm=)" = systemd
   test "$(uname -m)" = x86_64
   test "$(systemctl show server-connect.service -p LoadState --value)" = not-found
@@ -216,6 +231,7 @@ docker exec "$container" /bin/sh -c '
 '
 
 docker cp "$root/scripts/qa/host-qa-assertions.sh" "$container:/root/qa-host-assertions.sh"
+if [[ $qa_version == 13 ]]; then
 docker cp "$root/scripts/qa/host-native-product-tun.sh" "$container:/root/qa-native-product-tun.sh"
 
 # Run before foreign nft fixtures or TUN topology exist. This proves the
@@ -247,6 +263,9 @@ assert_network_unchanged native-mutator-lifetime "$native_nft_network_before"
 native_mutator_nft_after=$(docker exec "$container" /usr/sbin/nft -j list ruleset)
 [[ $native_mutator_nft_after == "$native_nft_before" ]]
 echo NATIVE_MUTATOR_INDEPENDENT_BASELINE=PASS
+else
+  echo 'NATIVE_KERNEL_PRIMITIVES=NOT_RUN (Debian12 installation compatibility lane)'
+fi
 
 docker cp "$bundle" "$container:/root/sc-qa-bundle.tar.gz"
 docker cp "$update_bundle" "$container:/root/sc-qa-update.tar.gz"
@@ -337,6 +356,20 @@ verify_direct_install() {
     test "$(systemctl show server-connect-smart-health.timer -p ActiveState --value)" = inactive
     test "$(systemctl is-enabled server-connect-smart-health.timer)" = disabled
     test "$(systemctl show server-connect-activation-recover.service -p LoadState --value)" = loaded
+    for name in server-connect-activation-recover.service server-connect-smart-tun.service server-connect-smart-health.service; do
+      test "$(systemctl show "$name" -p FragmentPath --value)" = "/etc/systemd/system/$name"
+      test -z "$(systemctl show "$name" -p DropInPaths --value)"
+      test "$(systemctl show "$name" -p Transient --value)" = no
+      test "$(systemctl show "$name" -p UnitFileState --value)" = static
+      test "$(systemctl show "$name" -p ActiveState --value)" = inactive
+      test "$(systemctl show "$name" -p MainPID --value)" = 0
+      test "$(systemctl show "$name" -p ControlPID --value)" = 0
+      test -z "$(systemctl show "$name" -p Job --value)"
+    done
+    for name in server-connect-activation-recover.timer server-connect-smart-health.timer; do
+      test "$(systemctl show "$name" -p ActiveState --value)" = inactive
+      test -z "$(systemctl show "$name" -p Job --value)"
+    done
     /usr/local/bin/server-connect version --json
   '
 }
@@ -362,6 +395,132 @@ run_offline verify-only --verify-only
 assert_network_unchanged verify-only "$offline_before"
 verify_host_services verify-only
 docker exec "$container" /bin/sh -c 'test ! -e /opt/server-connect && test ! -e /var/lib/server-connect'
+docker cp "$root/scripts/qa/host-bundle-target-refusal.sh" "$container:/root/qa-bundle-target-refusal.sh"
+docker exec "$container" /bin/sh /root/qa-bundle-target-refusal.sh
+assert_network_unchanged bundle-target-refusals "$offline_before"
+verify_host_services bundle-target-refusals
+docker exec "$container" /bin/rm -- /root/qa-bundle-target-refusal.sh
+
+if [[ $qa_version == 12 ]]; then
+  saved_refusal_nft=$(docker exec "$container" /usr/sbin/nft -j list ruleset)
+  # Real saved-Apply entry points, before installation, in the disconnected
+  # guest only. Failed assertions retain unexpected state for guest teardown.
+  docker exec -i "$container" python3 - <<'PYSAVEDREFUSAL'
+import hashlib
+import json
+import os
+from pathlib import Path
+import stat
+import subprocess
+
+state = Path('/var/lib/server-connect')
+policy = state / 'smart-tun-policy.json'
+manager = '/root/server-connect/bin/server-connect'
+expected = {
+    'code': 'trial_unsupported',
+    'message': 'native trials require Debian 13; Debian 12 installation supports Direct/Proxy Only only',
+}
+units = (
+    'server-connect.service',
+    'server-connect-activation-recover.service',
+    'server-connect-activation-recover.timer',
+    'server-connect-smart-tun.service',
+    'server-connect-smart-health.service',
+    'server-connect-smart-health.timer',
+)
+
+def absent_product():
+    for path in ('/opt/server-connect', '/usr/local/bin/server-connect'):
+        assert not os.path.lexists(path), 'unexpected installed product path'
+    for unit in units:
+        assert not os.path.lexists('/etc/systemd/system/' + unit), 'unexpected product unit'
+        result = subprocess.run(
+            ['systemctl', 'show', unit, '-p', 'LoadState', '--value'],
+            capture_output=True, text=True, timeout=10)
+        assert result.returncode in (0, 1) and result.stdout.strip() == 'not-found', \
+            'product unit no longer absent'
+
+def snapshot():
+    if not os.path.lexists(state):
+        return None
+    root = state.lstat()
+    assert stat.S_ISDIR(root.st_mode) and root.st_uid == 0
+    paths = [state] + sorted(state.iterdir())
+    records = []
+    for path in paths:
+        info = path.lstat()
+        record = [
+            str(path.relative_to(state)), info.st_dev, info.st_ino,
+            info.st_mode, info.st_uid, info.st_gid, info.st_nlink,
+            info.st_size, info.st_mtime_ns, info.st_ctime_ns,
+        ]
+        if path != state:
+            assert stat.S_ISREG(info.st_mode) and info.st_nlink == 1, \
+                'unexpected state object'
+            record.append(hashlib.sha256(path.read_bytes()).hexdigest())
+        records.append(record)
+    return records
+
+valid = {
+    'version': 1,
+    'management_peer_ip': '10.254.72.2',
+    'options': {
+        'tunnel_interface': 'sctunqa0',
+        'underlay_interface': 'scqaedge0',
+        'tunnel_ipv4': '172.31.99.1/30',
+        'tunnel_ipv6': '',
+        'protected_cidrs': ['10.254.72.0/30'],
+        'protected_ipv6_cidrs': [],
+        'domestic_cidrs': ['5.22.0.10/32'],
+        'domestic_ipv6_cidrs': [],
+        'exceptions': [],
+        'ipv6_exceptions': [],
+        'domain_exceptions': [],
+    },
+}
+cases = (
+    ('absent', None),
+    ('empty', None),
+    ('malformed', b'{"version":'),
+    ('valid', (json.dumps(valid, separators=(',', ':')) + '\n').encode()),
+)
+absent_product()
+for label, content in cases:
+    assert not os.path.lexists(state), 'prior state fixture remains'
+    if label != 'absent':
+        state.mkdir(mode=0o700)
+    if content is not None:
+        fd = os.open(policy, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, 'wb') as stream:
+            stream.write(content)
+    before = snapshot()
+    for supervised in (False, True):
+        args = [manager, '--json', 'smart-tun-trial-apply',
+                '--saved', '--deadline-seconds', '600']
+        if supervised:
+            args.append('--supervised')
+        result = subprocess.run(args, capture_output=True, text=True, timeout=15)
+        assert result.returncode == 1, 'saved Apply was not refused'
+        reply = json.loads(result.stdout)
+        assert reply['ok'] is False and reply['error'] == expected, \
+            'saved Apply did not report the platform refusal'
+        assert snapshot() == before, 'saved Apply mutated private state'
+        absent_product()
+        form = 'supervised' if supervised else 'pending'
+        print(f'DEBIAN12_SAVED_APPLY_REFUSAL({label},{form})=PASS', flush=True)
+    # Delete only exact unchanged fixtures; never erase unexpected state.
+    assert snapshot() == before
+    if content is not None:
+        policy.unlink()
+    if label != 'absent':
+        state.rmdir()
+assert not os.path.lexists(state)
+PYSAVEDREFUSAL
+  [[ $(docker exec "$container" /usr/sbin/nft -j list ruleset) == "$saved_refusal_nft" ]]
+  assert_network_unchanged debian12-saved-apply-refusals "$offline_before"
+  verify_host_services debian12-saved-apply-refusals
+  echo 'DEBIAN12_SAVED_APPLY_PLATFORM_REFUSAL=PASS (both forms, four state cases, inert product)'
+fi
 
 echo '=== Negative offline acceptance: missing pinned core must reject BEFORE mutation ==='
 # This test mutates ONLY the private disposable source bundle, restores the
@@ -401,6 +560,53 @@ assert_no_offline_fetch missing-core
 echo 'OFFLINE_MISSING_CORE_FAIL_CLOSED=PASS (installer NOT applied)'
 run_offline first-install --offline
 verify_direct_install
+if [[ $qa_version == 12 ]]; then
+  native_refusal_nft=$(docker exec "$container" /usr/sbin/nft -j list ruleset)
+  private_state_digest() {
+    docker exec -i "$container" python3 - <<'PYSTATE'
+import hashlib,json,os,stat
+from pathlib import Path
+root=Path('/var/lib/server-connect')
+records=[]
+for directory,dirs,files in os.walk(root,followlinks=False):
+    for name in ['.']+sorted(dirs+files):
+        path=Path(directory) if name=='.' else Path(directory)/name
+        info=path.lstat()
+        record=[str(path.relative_to(root)),stat.S_IFMT(info.st_mode),stat.S_IMODE(info.st_mode),info.st_uid,info.st_gid]
+        if stat.S_ISREG(info.st_mode):record.append(hashlib.sha256(path.read_bytes()).hexdigest())
+        elif stat.S_ISLNK(info.st_mode):record.append(os.readlink(path))
+        records.append(record)
+print(hashlib.sha256(json.dumps(sorted(records),separators=(',',':')).encode()).hexdigest())
+PYSTATE
+  }
+  native_refusal_state=$(private_state_digest)
+  if docker exec "$container" /usr/local/bin/server-connect --json smart-tun-trial-apply \
+      --tunnel-if sctunqa0 --underlay-if scqaedge0 --tunnel-ipv4 172.31.99.1/30 \
+      --management-peer 10.254.72.2 --domestic-cidr 5.22.0.10/32 \
+      --protected-cidr 10.254.72.0/30 --deadline-seconds 600 \
+      >"$scratch/debian12-native-refusal.json"; then
+    echo 'DEBIAN12_NATIVE_APPLY_PLATFORM_REFUSAL=FAIL (Apply accepted)' >&2
+    exit 1
+  else
+    native_refusal_rc=$?
+  fi
+  [[ $native_refusal_rc == 1 ]]
+  python3 - "$scratch/debian12-native-refusal.json" <<'PYNATIVEREFUSAL'
+import json,sys
+with open(sys.argv[1],encoding='utf-8') as source: reply=json.load(source)
+assert reply['ok'] is False
+assert reply['error']=={
+    'code':'trial_unsupported',
+    'message':'native trials require Debian 13; Debian 12 installation supports Direct/Proxy Only only',
+}
+PYNATIVEREFUSAL
+  [[ $(private_state_digest) == "$native_refusal_state" ]]
+  [[ $(docker exec "$container" /usr/sbin/nft -j list ruleset) == "$native_refusal_nft" ]]
+  verify_direct_install
+  assert_network_unchanged debian12-native-apply-refusal "$offline_before"
+  verify_host_services debian12-native-apply-refusal
+  echo 'DEBIAN12_NATIVE_APPLY_PLATFORM_REFUSAL=PASS (exact OS reason, unchanged private/network state, inert guards)'
+fi
 # Exercise the INSTALLED manager, not only Go unit tests: its embedded IR
 # country estimate snapshot must work inside this --network none guest,
 # without a selected profile, a live sing-box process or any routed policy.
@@ -496,7 +702,7 @@ docker exec "$container" /usr/sbin/nft add counter inet sc_qa_foreign_fp sc_qa_n
 docker exec "$container" /usr/sbin/nft add chain inet sc_qa_foreign_fp sc_qa_unhooked
 docker exec "$container" /usr/sbin/nft add rule inet sc_qa_foreign_fp sc_qa_unhooked counter
 # The native exporter, unlike JSON rule-creation INPUT, must provide BOTH
-# uint64 counter members. This tests real named/anonymous Debian 13 output,
+# uint64 counter members. This tests real named/anonymous Debian 12/13 output,
 # not only our synthetic Go fixtures, without touching any packet path.
 docker exec "$container" /usr/sbin/nft -j list ruleset | python3 -c '
 import json,sys
@@ -564,6 +770,7 @@ run_offline reinstall --offline
 verify_direct_install
 assert_network_unchanged reinstall "$offline_before"
 verify_host_services reinstall
+if [[ $qa_version == 13 ]]; then
 # A REAL Linux TUN+VLESS path is exercised only in the disconnected
 # disposable guest; the installed product still has no public TUN Apply.
 echo 'REAL_TUN_LAB_STAGE=build-guest-generator'
@@ -822,7 +1029,7 @@ docker exec -e SC_QA_TUN_PRODUCT_LAB=yes -e SC_QA_TUN_SUPERVISED=yes \
   "$container" /bin/sh /root/qa-host-tun-path.sh | tee "$supervised_log"
 for marker in \
   'DIRECT_CONTROLS' 'OFF_DIRECT_TCP_UDP_DNS' 'FRESH_SSH_SINGLE_USE_AND_NEGATIVES' \
-  'ACTIVE_UPDATE_UNINSTALL_REFUSED' 'DISJOINT_FOREIGN_OWNER_PRESERVED' \
+  'ACTIVE_UPDATE_UNINSTALL_REFUSED' 'DISJOINT_FOREIGN_OWNER_PRESERVED' 'SAVED_REAPPLY' \
   'CONFIRMED_BEYOND_ACTIVATION_DEADLINE' 'ONE_TARGET_FALSE_ALARM_REJECTED' \
   'DNS_FAILURE_AND_TRANSIENT_RECOVERY' 'LIVE_CORE_UPSTREAM_FAILURE_NO_DIRECT_LEAK' \
   'FINITE_EXHAUSTION_FLAPPING_AND_SAVED_STATE' 'EXPIRED_OFF_AND_REPLAY_REJECTED' \
@@ -960,11 +1167,15 @@ docker cp "$root/scripts/qa/host-product-guard-trial.sh" "$container:/root/qa-pr
 docker exec "$container" /bin/sh /root/qa-product-guard-trial.sh
 assert_network_unchanged product-guard-recovered "$offline_before"
 verify_host_services product-guard-recovered
+else
+  echo 'NATIVE_TUN_AND_GUARDED_RULE_POSITIVES=NOT_RUN (Debian12 is not admitted; exact refusal checked separately)'
+fi
 echo '=== Installed real VLESS Proxy Only and owned offline update ==='
 docker cp "$root/scripts/qa/host-proxy-only.sh" "$container:/root/qa-proxy-only.sh"
 docker cp "$root/scripts/qa/host-apt-only.sh" "$container:/root/qa-apt-only.sh"
 docker exec "$container" /bin/sh /root/qa-proxy-only.sh setup
 docker exec "$container" /bin/sh /root/qa-apt-only.sh setup
+if [[ $qa_version == 13 ]]; then
 # Do not discard route invariants to make the FPM fixture start: verify the
 # full observed route/rule/link snapshot rather than brittle one-line CLI text.
 assert_network_unchanged wordpress-preflight "$offline_before"
@@ -973,15 +1184,22 @@ docker cp "$root/scripts/qa/wp-nonce-origin.py" "$container:/root/qa-wp-nonce-or
 docker cp "$root/scripts/qa/wp-fcgi-check.py" "$container:/root/qa-wp-fcgi-check.py"
 docker cp "$root/scripts/qa/wp-proxy-prepend.py" "$container:/root/qa-wp-proxy-prepend.py"
 docker exec "$container" /bin/sh /root/qa-wp-fpm.sh setup
+else
+  echo 'PHP_WORDPRESS_PHASES=NOT_RUN (Debian12 installation and Proxy Only lane; no PHP compatibility claim)'
+fi
 docker exec "$container" /bin/sh /root/qa-apt-only.sh positive initial
+docker exec "$container" /bin/sh /root/qa-apt-only.sh inherited-policy
+docker cp "$root/scripts/qa/apt-disabled-trace.py" "$container:/root/qa-apt-disabled-trace.py"
+docker exec "$container" /bin/sh /root/qa-apt-only.sh disabled-transports
+docker exec "$container" /bin/rm -- /root/qa-apt-disabled-trace.py
 assert_network_unchanged installed-vless-proxy "$offline_before"
 verify_host_services installed-vless-proxy
 docker exec "$container" /bin/sh /root/qa-proxy-only.sh upstream-failure
-docker exec "$container" /bin/sh /root/qa-wp-fpm.sh upstream-failure initial
+if [[ $qa_version == 13 ]]; then docker exec "$container" /bin/sh /root/qa-wp-fpm.sh upstream-failure initial; fi
 assert_network_unchanged vless-upstream-failure "$offline_before"
 verify_host_services vless-upstream-failure
 docker exec "$container" /bin/sh /root/qa-proxy-only.sh core-failure
-docker exec "$container" /bin/sh /root/qa-wp-fpm.sh core-failure
+if [[ $qa_version == 13 ]]; then docker exec "$container" /bin/sh /root/qa-wp-fpm.sh core-failure; fi
 assert_network_unchanged proxy-core-failure "$offline_before"
 verify_host_services proxy-core-failure
 
@@ -1001,10 +1219,12 @@ updated_manager=$(docker exec "$container" sha256sum \
 }
 docker exec "$container" /bin/sh /root/qa-proxy-only.sh positive
 docker exec "$container" /bin/sh /root/qa-apt-only.sh positive after-upgrade
+if [[ $qa_version == 13 ]]; then
 docker exec "$container" /bin/sh /root/qa-wp-fpm.sh positive after-upgrade
 docker exec "$container" /bin/sh /root/qa-wp-fpm.sh http-proxy-auth after-upgrade
+fi
 docker exec "$container" /bin/sh /root/qa-proxy-only.sh upstream-failure upstream-after-upgrade
-docker exec "$container" /bin/sh /root/qa-wp-fpm.sh upstream-failure after-upgrade
+if [[ $qa_version == 13 ]]; then docker exec "$container" /bin/sh /root/qa-wp-fpm.sh upstream-failure after-upgrade; fi
 assert_network_unchanged update-distinct "$offline_before"
 verify_host_services update-distinct
 echo 'INSTALLED_DISTINCT_BINARY_UPDATE=PASS (same-source QA builds)'
@@ -1045,10 +1265,12 @@ grep -F 'previous owned service state restored; profiles retained' \
 docker exec "$container" test ! -e "/opt/server-connect/$bad_release"
 docker exec "$container" /bin/sh /root/qa-proxy-only.sh positive
 docker exec "$container" /bin/sh /root/qa-apt-only.sh positive after-rollback
+if [[ $qa_version == 13 ]]; then
 docker exec "$container" /bin/sh /root/qa-wp-fpm.sh positive after-rollback
 docker exec "$container" /bin/sh /root/qa-wp-fpm.sh http-proxy-auth after-rollback
+fi
 docker exec "$container" /bin/sh /root/qa-proxy-only.sh upstream-failure upstream-after-rollback
-docker exec "$container" /bin/sh /root/qa-wp-fpm.sh upstream-failure after-rollback
+if [[ $qa_version == 13 ]]; then docker exec "$container" /bin/sh /root/qa-wp-fpm.sh upstream-failure after-rollback; fi
 assert_network_unchanged update-rollback "$offline_before"
 verify_host_services update-rollback
 echo 'INSTALLED_FAILED_UPDATE_ROLLBACK=PASS (active previous service restored)'
@@ -1064,17 +1286,18 @@ verify_host_services update-real-restore-fault
 
 docker exec "$container" /bin/sh /root/qa-proxy-only.sh disconnect
 docker exec "$container" /bin/sh /root/qa-apt-only.sh negative disconnected
-docker exec "$container" /bin/sh /root/qa-wp-fpm.sh negative-disconnected
+if [[ $qa_version == 13 ]]; then docker exec "$container" /bin/sh /root/qa-wp-fpm.sh negative-disconnected; fi
 docker exec "$container" /bin/sh /root/qa-apt-only.sh verify-host-policy
 assert_network_unchanged disconnect "$offline_before"
 verify_host_services disconnect
-docker exec "$container" /bin/sh /root/qa-wp-fpm.sh cleanup
+if [[ $qa_version == 13 ]]; then docker exec "$container" /bin/sh /root/qa-wp-fpm.sh cleanup; fi
 run_offline uninstall --uninstall
 verify_clean_uninstall
 assert_network_unchanged uninstall "$offline_before"
 verify_host_services uninstall
 
 echo 'DISCONNECTED_OFFLINE_CYCLE=PASS'
+if [[ $qa_version == 13 ]]; then
 echo 'LIMITATION: Proxy Only WordPress/PHP-FPM used guest loopback with QA-only WP_PROXY_*; transparent TUN WordPress used no application proxy and synthetic egress; physical host/foreign field acceptance is NOT_RUN'
 
 echo '=== Independent activation-deadline feasibility in disconnected guest (QA ONLY) ==='
@@ -1144,6 +1367,9 @@ for conflict_kind in address other-table-route altname; do
   echo "ISOLATED_ACTIVATION_GUARD_FOREIGN_${conflict_kind}=PASS"
 done
 echo 'ISOLATED_ACTIVATION_GUARD_FEASIBILITY=PASS (not product guard/reboot proof)'
+else
+  echo 'ACTIVATION_GUARD_FEASIBILITY=NOT_RUN (Debian12 native routing is outside this lane)'
+fi
 
 echo '=== Isolated LOOPBACK acquisition followed by the SAME real installer ==='
 # Docker --network none remains active; loopback was enabled for the existing
@@ -1216,5 +1442,10 @@ echo 'LIMITATION: QA bundle is digest-matched but NOT a publisher-authenticated 
 # and independently enabled boot service across two real Docker restarts.
 # Docker restart is NOT physical host reboot and resets its network namespace;
 # the positive path is a deliberate no-op observation, not route rollback.
-bash scripts/qa/test-activation-boot-qa.sh "$image" "$container"
+if [[ $qa_version == 13 ]]; then
+  bash scripts/qa/test-activation-boot-qa.sh "$image" "$container"
+else
+  echo 'NATIVE_ACTIVATION_BOOT_RECOVERY=NOT_RUN (Debian12 roles were verified inert; no reboot acceptance)'
+fi
+printf 'INSTALLED_DEBIAN%s_LIFECYCLE=PASS\n' "$qa_version"
 echo 'LIMITATION: guest-loopback SSH/HTTP checks do not prove external SSH/aaPanel, foreign VPN reachability, reboot or field safety'
