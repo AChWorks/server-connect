@@ -25,10 +25,14 @@
 
 ### Disposable v4 guarded TUN trial (not production acceptance)
 
-The installed experimental v4 journal deliberately has only
-`trial_pending` (revision 1) and `trial_recovered` (revision 2), **not**
-`ACTIVE_VERIFIED`. It binds the operation, profile, synthetic endpoint,
-native baseline digest, sing-box configuration digest, boot ID and monotonic
+The installed experimental v4 journal never reaches `ACTIVE_VERIFIED`.
+A pending trial is `trial_pending` (revision 1); ordinary timeout recovery
+retains `trial_recovered` (revision 2). Explicit Disconnect durably advances
+to `trial_stop_requested` (revision 2), then verified `trial_recovered`
+(revision 3). Finalization uses `trial_cleanup_pending` (revision 4) before
+credential removal. Its successful `trial_cleared` (revision 5) response is
+an operation receipt, not a retained journal or permission to reactivate.
+The journal binds the operation, profile, synthetic endpoint, native baseline digest, sing-box configuration digest, boot ID and monotonic
 deadline. One opt-in synthetic dual-stack fixture uses the same v4 journal
 and native IPv4/IPv6 baseline: the selected policy's exact bytes are bound by
 its configuration digest; the IPv6 addresses/rules do not grant arbitrary
@@ -56,6 +60,28 @@ Exact operation-ID/revision clearance disarms the remaining guard after
 rechecking the credential. This is an observed-loss containment path in the
 isolated guest, **not** a substitute for independent guard-liveness supervision
 or the future production Runtime Health Guard (#3).
+
+The dedicated trial Disconnect is bound to the exact current operation and
+revision. It durably records deactivation intent before stopping the trusted
+unit, verifies the complete native baseline, and finalizes only that operation.
+A stale command cannot stop a replacement trial. Cleanup intent must be durable
+before deleting a credential, so authorized removal can be resumed without
+accepting an unexplained missing credential from a running or recovered trial.
+Foreign-resource drift or changed credential/unit provenance retains evidence
+and blocks a successful Direct claim. The independent executor resumes durable
+stop and cleanup intent while its timer is armed; status inspection alone must
+not advance either phase. After native restoration and credential removal,
+a crash following timer disarm may leave only a cleanup journal. That interval
+requires an exact-operation retry of Disconnect or clearance at revision 4;
+it is not claimed as autonomous timer recovery. The retained journal continues
+to block installer/lifecycle changes until finalization succeeds.
+
+The selected profile and validated, non-secret saved trial settings survive
+Off. Saved reapply binds the policy and profile across both admission passes,
+repeats guard prearming, and creates a new operation instead of restoring old
+authority. Invalid or missing saved input is rejected before prearm. A saved
+policy change detected during prearm blocks TUN activation and reconciles only
+an uncommitted guard; it cannot disarm another journaled operation.
 
 This is one step toward the real activation state machine, **not** a
 substitute for privileged third-party ownership/conntrack proof, SSH

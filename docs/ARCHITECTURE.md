@@ -77,9 +77,21 @@ and only then an explicit `systemctl start` of the exact owned
 TUN unit. An independent systemd timer detects timeout, manager death, core
 exit or reboot, stops only that exact unit and requires the original semantic
 kernel and nftables baseline before recording `trial_recovered`. Exact
-operation-bound clearance disarms the timer and removes the sensitive trial
-credential and journal. Pending/recovered v4 trials block Proxy Only mode
-changes and prevent generic status from claiming ordinary Direct.
+operation-bound Disconnect records durable stop intent before stopping the
+owned TUN service. The independent executor can complete an interrupted stop;
+wrong or stale operation identities never authorize stopping a later trial.
+Finalization records its cleanup intent before sensitive credential removal,
+so interruption is distinguishable from unauthorized credential loss after
+core start. Only a verified restored native baseline permits clearance.
+Unresolved trial operations block Proxy Only mode changes and prevent generic
+status from claiming ordinary Direct.
+
+One private saved trial policy holds validated, non-secret settings separately
+from the transient sing-box credential and operation journal. Explicit Off,
+timeout and cleanup preserve this policy and the selected profile. Saved
+reapply validates the policy/profile again, repeats the full native admission
+and independent prearm, and creates a fresh operation/deadline. Stored policy
+alone is never authority to start a service or restore a prior active state.
 
 This deliberately cannot **commit** TUN, cannot authenticate foreign host
 owners or geographic data, and does not have fresh SSH/provider confirmation
