@@ -7,12 +7,15 @@ synthetic management/VPN proof as general-host production acceptance.
 
 import argparse
 import contextlib
+import hashlib
 import json
 import os
 from pathlib import Path
 import re
+import shlex
 import shutil
 import signal
+import stat
 import subprocess
 import time
 
@@ -29,6 +32,47 @@ ROOT = Path("/run/sc-qa-supervised")
 PUBLIC4 = ("8.8.8.8", "198.51.100.42")
 PUBLIC6 = ("2001:db8:8::8", "2001:db8:5::10")
 PROTOCOLS = ("tcp", "udp", "dns")
+CONFIRM_DEATH_WRAPPER = r'''
+import json, re, signal, subprocess, sys
+
+def main():
+    try:
+        raw = sys.stdin.buffer.read(4097)
+        if len(raw) > 4096:
+            return 2
+        request = json.loads(raw)
+        if not isinstance(request, dict) or set(request) != {"argv", "operation_id", "revision", "boundary"}:
+            return 2
+        operation, revision, boundary = request["operation_id"], request["revision"], request["boundary"]
+        argv = request["argv"]
+        if not isinstance(operation, str) or re.fullmatch("[0-9a-f]{32}", operation) is None:
+            return 2
+        if type(revision) is not int or revision != 1 or boundary not in ("before-confirm-publish", "after-confirm-publish"):
+            return 2
+        if not isinstance(argv, list) or len(argv) != 11 or not all(isinstance(item, str) for item in argv):
+            return 2
+        if re.fullmatch("[0-9a-f]{32,128}", argv[8]) is None:
+            return 2
+        expected = ["/usr/local/bin/server-connect", "--json", "smart-tun-trial-confirm",
+                    "--operation-id", operation, "--revision", "1", "--challenge", argv[8],
+                    "--qa-kill-at", boundary]
+        if argv != expected:
+            return 2
+        child = subprocess.run(argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                               stderr=subprocess.DEVNULL, timeout=20, check=False)
+        if child.returncode != -signal.SIGKILL:
+            return 3
+        receipt = {"kind": "scqa-confirm-death-v1", "operation_id": operation, "revision": revision,
+                   "boundary": boundary, "child_returncode": child.returncode}
+        sys.stdout.write(json.dumps(receipt, separators=(",", ":")) + "\n")
+        return 0
+    except Exception:
+        # A timeout may itself kill the child. It never earns a death receipt.
+        # Do not expose input, argv, captured child output, or exception text.
+        return 2
+
+raise SystemExit(main())
+'''
 
 
 class Fixture:
@@ -50,18 +94,23 @@ class Fixture:
         self.upstream_fd = None
         self.health_identity = None
         self.recovery_identity = None
+        self.health_role_originals = {}
+        self.fixture_boot_id = None
 
     def command(self, argv, *, check=True, timeout=20, data=None):
         elapsed = time.monotonic() - self.started
         if elapsed > 360 and not self.cleaning:
             raise AssertionError("supervised fixture exceeded its aggregate 360-second budget")
-        result = subprocess.run(argv, input=data, capture_output=True, text=True,
-                                timeout=timeout)
+        safe = ["<challenge>" if i and argv[i - 1] == "--challenge" else value
+                for i, value in enumerate(argv)]
+        try:
+            result = subprocess.run(argv, input=data, capture_output=True, text=True,
+                                    timeout=timeout)
+        except subprocess.TimeoutExpired as error:
+            raise subprocess.TimeoutExpired(safe, error.timeout) from None
         if check and result.returncode:
             # Fixed QA commands and keys are not user credentials. Redact the
             # one-time confirmation argument; diagnostics retain exit/stderr.
-            safe = ["<challenge>" if i and argv[i - 1] == "--challenge" else value
-                    for i, value in enumerate(argv)]
             raise AssertionError(f"command failed ({result.returncode}): {safe}: {result.stderr[-2000:]}")
         return result
 
@@ -172,6 +221,29 @@ class Fixture:
         self.processes.append(process)
         return process
 
+    def current_boot_id(self):
+        return Path("/proc/sys/kernel/random/boot_id").read_text().strip()
+
+    def read_health_role_file(self, path):
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+        try:
+            before = os.fstat(descriptor)
+            assert stat.S_ISREG(before.st_mode) and before.st_uid == 0 and not before.st_mode & 0o022
+            assert 0 < before.st_size <= 65536, "invalid health role file size"
+            body = os.read(descriptor, 65537)
+            after, named = os.fstat(descriptor), os.lstat(path)
+            fields = ("st_dev", "st_ino", "st_mode", "st_uid", "st_size", "st_mtime_ns", "st_ctime_ns")
+            assert all(getattr(before, field) == getattr(after, field) == getattr(named, field) for field in fields), \
+                "health role file changed during observation"
+            assert len(body) == before.st_size, "incomplete health role file"
+            return before.st_dev, before.st_ino, body
+        finally:
+            os.close(descriptor)
+
+    def health_role_files(self, name):
+        return (self.read_health_role_file(UNITS / name),
+                self.read_health_role_file(Path("/opt/server-connect") / (name + ".sha256")))
+
     def start(self):
         assert Path("/.dockerenv").is_file()
         assert Path("/proc/1/comm").read_text().strip() == "systemd"
@@ -182,9 +254,9 @@ class Fixture:
         recovery_path = UNITS / RECOVERY
         recovery_stat = recovery_path.stat()
         self.recovery_identity = (recovery_stat.st_dev, recovery_stat.st_ino, recovery_path.read_bytes())
-        health_path = UNITS / HEALTH
-        health_stat = health_path.stat()
-        self.health_identity = (health_stat.st_dev, health_stat.st_ino, health_path.read_bytes())
+        self.health_role_originals = {name: self.health_role_files(name) for name in (HEALTH, TIMER)}
+        self.health_identity = self.health_role_originals[HEALTH][0]
+        self.fixture_boot_id = self.current_boot_id()
         self.upstream_fd = os.pidfd_open(self.args.upstream_pid)
         upstream_argv = Path(f"/proc/{self.args.upstream_pid}/cmdline").read_bytes().rstrip(b"\0").split(b"\0")
         assert upstream_argv == [b"/root/server-connect/bin/sing-box", b"run", b"-c", b"/run/sc-qa-tun-upstream.json"], upstream_argv
@@ -290,6 +362,35 @@ class Fixture:
         return self.cli(*args, ssh=options.get("ssh", True), multiplex=options.get("multiplex", False),
                         check=options.get("check", True))
 
+    def confirm_publication_death(self, boundary):
+        assert boundary in ("before-confirm-publish", "after-confirm-publish")
+        child_argv = [SC, "--json", "smart-tun-trial-confirm", "--operation-id", self.op,
+                      "--revision", "1", "--challenge", self.challenge, "--qa-kill-at", boundary]
+        request = {"argv": child_argv, "operation_id": self.op, "revision": 1, "boundary": boundary}
+        remote = shlex.join(["/usr/bin/python3", "-I", "-B", "-c", CONFIRM_DEATH_WRAPPER])
+        result = self.command(self.ssh_arguments() + [remote], check=False, timeout=30,
+                              data=json.dumps(request, separators=(",", ":")))
+        assert result.returncode == 0, "remote confirmation death witness failed (SSH exit " + str(result.returncode) + ")"
+        assert len(result.stdout.encode()) <= 2048, "oversized remote confirmation death receipt"
+
+        def unique_object(pairs):
+            value = dict(pairs)
+            if len(value) != len(pairs):
+                raise ValueError("duplicate receipt field")
+            return value
+
+        try:
+            receipt = json.loads(result.stdout, object_pairs_hook=unique_object)
+        except ValueError:
+            raise AssertionError("invalid remote confirmation death receipt JSON") from None
+        expected = {"kind": "scqa-confirm-death-v1", "operation_id": self.op, "revision": 1,
+                    "boundary": boundary, "child_returncode": -signal.SIGKILL}
+        assert (isinstance(receipt, dict) and type(receipt.get("revision")) is int and
+                type(receipt.get("child_returncode")) is int and receipt == expected), \
+            "remote confirmation death receipt does not match the exact operation and boundary"
+        print("SUPERVISED_TUN_CONFIRM_DEATH_RECEIPT=operation:" + self.op +
+              " boundary:" + boundary + " signal:9", flush=True)
+
     def reject_confirmation(self, **options):
         result, value = self.confirm(check=False, **options)
         assert result.returncode != 0 and value and not value["ok"], value
@@ -317,13 +418,16 @@ class Fixture:
         assert self.native() == self.baseline, "native baseline was not restored"
         value = self.cli("status")
         assert value["desired"] == "direct" and value["observed"] == "inactive", value
+        self.verify_direct_delivery()
+        self.marker("OFF_DIRECT_TCP_UDP_DNS")
+
+    def verify_direct_delivery(self):
         self.wires("direct")
         counts = self.counters()
         assert set(counts) == set(self.direct_counts), "Direct witness identity changed after Off"
         assert all(counts[key] > self.direct_counts[key] for key in counts), \
             "fresh Direct delivery did not advance every peer witness after Off"
         self.direct_counts = counts
-        self.marker("OFF_DIRECT_TCP_UDP_DNS")
 
     def disconnect(self):
         value = self.cli("smart-tun-trial-disconnect", "--operation-id", self.op, "--revision", "1")
@@ -335,11 +439,20 @@ class Fixture:
         # Deliberately never invoke status/recover while waiting: only the
         # installed independent roles can complete this transition.
         self.wait(lambda: not JOURNAL.exists(), seconds, "independent verified Off")
+        off_uptime_ms = int(float(Path("/proc/uptime").read_text().split()[0]) * 1000)
         self.wait(lambda: self.show(HEALTH, "MainPID") == "0", 22, "bounded health executor termination")
         self.inactive()
+        return off_uptime_ms
 
-    def final_receipt(self, reason, attempts):
+    def final_receipt(self, reason, attempts, *, supervisor_snapshot=None, off_uptime_ms=None):
         """Select exact operation receipts from authenticated unit streams."""
+        supervisor_reasons = {"supervisor_unavailable", "supervisor_lease_expired"}
+        if isinstance(reason, str):
+            reasons = {reason}
+        else:
+            assert reason == supervisor_reasons and supervisor_snapshot is not None, \
+                "only an observed executor fault permits the explicit supervisor reason set"
+            reasons = supervisor_reasons
         boot = Path("/proc/sys/kernel/random/boot_id").read_text().strip().replace("-", "")
 
         def observed():
@@ -384,16 +497,36 @@ class Fixture:
                 if not isinstance(value, dict) or value.get("operation_id") != self.op or value.get("phase") != "trial_cleared":
                     continue
                 assert value.get("recovery_verified") and value.get("experiment_only") and not value.get("activation_ready"), value
-                assert value.get("health_reason") == reason and value.get("reconnect_attempts", 0) == attempts, value
+                actual_reason = value.get("health_reason")
+                assert actual_reason in reasons and value.get("reconnect_attempts", 0) == attempts, value
                 assert value.get("management_confirmed") and value.get("health_round", 0) > 0, value
                 evidence = value["health_evidence"]
                 assert evidence["probe_count"] == (13 if self.args.ipv6 else 7)
                 assert 0 <= evidence["elapsed_ms"] <= 4500, evidence
-                matches.append(identity)
+                if actual_reason in supervisor_reasons:
+                    assert attempts == 0 and all(type(value.get(key, 0)) is int and value.get(key, 0) == 0
+                        for key in ("reconnect_attempts", "health_failures", "recovery_deadline_uptime_ms")), \
+                        "supervisor Off was preceded by a path failure or recovery attempt"
+                    if supervisor_snapshot is not None:
+                        assert (value["health_round"] == supervisor_snapshot["rounds"] and
+                                value.get("health_last_uptime_ms") == supervisor_snapshot["last_probe_uptime_ms"] and
+                                evidence == supervisor_snapshot["evidence"]), \
+                            "supervisor Off substituted a later health round for the observed fault"
+                        if actual_reason == "supervisor_lease_expired":
+                            deadline = supervisor_snapshot["lease_deadline_uptime_ms"]
+                            assert (type(deadline) is int and deadline > 0 and type(off_uptime_ms) is int and
+                                    off_uptime_ms >= deadline), \
+                                "lease-expiry Off predates the captured boot-time lease deadline"
+                matches.append((identity, actual_reason))
             assert len(matches) <= 1, "ambiguous final operation provenance"
             if matches:
-                unit, invocation, _stream, _pid = matches[0]
-                print(f"SUPERVISED_TUN_FINAL_RECEIPT=operation:{self.op} unit:{unit} invocation:{invocation} reason:{reason} attempts:{attempts}", flush=True)
+                identity, actual_reason = matches[0]
+                unit, invocation, _stream, _pid = identity
+                timing = ""
+                if supervisor_snapshot is not None:
+                    timing = (f" round:{supervisor_snapshot['rounds']} last_probe_ms:{supervisor_snapshot['last_probe_uptime_ms']}"
+                              f" lease_deadline_ms:{supervisor_snapshot['lease_deadline_uptime_ms']} off_observed_ms:{off_uptime_ms}")
+                print(f"SUPERVISED_TUN_FINAL_RECEIPT=operation:{self.op} unit:{unit} invocation:{invocation} reason:{actual_reason} attempts:{attempts}" + timing, flush=True)
                 return True
             return False
 
@@ -609,19 +742,159 @@ class Fixture:
                       json.dumps(self.health_signal_observation, separators=(",", ":")), flush=True)
             raise
 
+    def unit_properties(self, unit, fields):
+        argv = ["systemctl", "show", unit]
+        for field in fields:
+            argv += ["-p", field]
+        raw = self.command(argv, timeout=3).stdout
+        assert len(raw.encode()) <= 4096, "oversized health executor observation"
+        values = {}
+        for line in raw.splitlines():
+            key, separator, value = line.partition("=")
+            assert separator and key in fields and key not in values, "invalid health executor observation"
+            values[key] = value
+        assert set(values) == set(fields), "incomplete health executor observation"
+        return values
+
+    def health_executor_observation(self):
+        return self.unit_properties(HEALTH, ("MainPID", "InvocationID", "ExecMainPID", "ExecMainCode", "ExecMainStatus",
+                                            "ExecMainStartTimestampMonotonic", "ActiveState", "Result"))
+
+    def timer_reconciliation_context(self, expected=None, allow_finalized=False):
+        current = self.journal()
+        if current is None:
+            assert allow_finalized and expected is not None, "timer reconciliation requires its cleanup journal"
+            current = expected
+        elif expected is not None:
+            assert current == expected, "cleanup journal changed before timer reconciliation"
+        assert (current["operation_id"] == self.op and current["boot_id"] == self.fixture_boot_id == self.current_boot_id() and
+                current["phase"] == "trial_cleanup_pending" and type(current["revision"]) is int and current["revision"] == 4), \
+            "timer reconciliation is not bound to the exact cleanup operation and boot"
+        assert not Path("/sys/class/net/sctunqa0").exists(), "native TUN still exists"
+        assert not Path("/var/lib/server-connect/smart-tun-trial.json").exists(), "trial credential remains"
+        assert self.native() == self.baseline and self.saved() == self.saved_before, "native Off or saved state is not restored"
+        core = self.unit_properties(CORE, ("ActiveState", "Result", "MainPID", "ControlPID", "ControlGroup", "Job"))
+        assert (core["ActiveState"] == "inactive" and core["Result"] == "success" and core["MainPID"] == core["ControlPID"] == "0" and
+                core["ControlGroup"] == "" and core["Job"] in ("", "0")), \
+            "core is not quiescent during timer reconciliation"
+        roles = current["supervised"]["roles"]
+        assert isinstance(roles, list) and len(roles) == 2, "invalid supervision role identities"
+        observed = {}
+        fields = ("Id", "LoadState", "FragmentPath", "DropInPaths", "Transient", "UnitFileState", "ActiveState", "Result", "Job")
+        for name, role in zip((HEALTH, TIMER), roles):
+            files = self.health_role_files(name)
+            assert files == self.health_role_originals[name], "health unit or digest was replaced"
+            unit_file, digest_file = files
+            digest = hashlib.sha256(unit_file[2]).hexdigest()
+            identity = {"unit_dev": unit_file[0], "unit_ino": unit_file[1], "digest_dev": digest_file[0],
+                        "digest_ino": digest_file[1], "sha256": digest}
+            assert (role == identity and all(type(role[key]) is int for key in ("unit_dev", "unit_ino", "digest_dev", "digest_ino")) and
+                    digest_file[2].decode("ascii").strip() == digest), "health role differs from the cleanup journal"
+            for override in (Path("/run/systemd/system") / name, Path("/run/systemd/system") / (name + ".d"),
+                             Path("/run/systemd/transient") / name):
+                assert not override.exists() and not override.is_symlink(), "health role has a runtime override"
+            properties = self.unit_properties(name, fields + (("MainPID", "ControlPID", "ControlGroup") if name == HEALTH else ("Unit",)))
+            assert (properties["Id"] == name and properties["LoadState"] == "loaded" and
+                    properties["FragmentPath"] == str(UNITS / name) and properties["DropInPaths"] == "" and
+                    properties["Transient"] == "no"), "health role runtime ownership changed"
+            assert self.health_role_files(name) == files, "health role changed during runtime inspection"
+            observed[name] = properties
+        service, timer = observed[HEALTH], observed[TIMER]
+        assert (service["ActiveState"] == "inactive" and service["MainPID"] == service["ControlPID"] == "0" and
+                service["ControlGroup"] == "" and service["Job"] in ("", "0") and service["UnitFileState"] == "static" and service["Result"] == "success"), \
+            "health executor is not a quiescent successful original role"
+        assert timer["Unit"] == HEALTH and timer["UnitFileState"] == "disabled" and timer["Job"] in ("", "0"), \
+            "timer is enabled, busy, or targets another unit"
+        return current, timer
+
+    def reconcile_failed_health_timer(self, kind, failure):
+        assert kind in ("masked", "missing"), "timer reconciliation is outside the unit-fault case"
+        assert (isinstance(failure, dict) and failure.get("ok") is False and failure.get("error") ==
+                {"code": "guard_unavailable", "message": "health timer disarm not verified"}), \
+            "recovery failed for a reason other than the exact timer disarm blocker"
+        journal, timer = self.timer_reconciliation_context()
+        assert ((timer["ActiveState"] == "failed" and timer["Result"] not in ("", "success")) or
+                (timer["ActiveState"] == "inactive" and timer["Result"] == "success")), \
+            "timer is active or has an unexplained state"
+        self.verify_direct_delivery()
+        journal, timer = self.timer_reconciliation_context(journal)
+        def quiescent_recovery():
+            observed = self.unit_properties(RECOVERY, ("ActiveState", "Result", "MainPID", "ControlPID", "ControlGroup", "Job",
+                                                       "ExecMainPID", "ExecMainCode", "ExecMainStatus", "InvocationID"))
+            assert all(len(value) <= 128 for value in observed.values()), "oversized recovery bookkeeping observation"
+            if (observed["ActiveState"] in ("inactive", "failed") and observed["MainPID"] == observed["ControlPID"] == "0" and
+                    observed["ControlGroup"] == "" and observed["Job"] in ("", "0")):
+                return observed
+            return None
+
+        recovery = self.wait(quiescent_recovery, 5, "quiescent recovery executor before timer bookkeeping")
+        evidence = {"operation_id": self.op, "phase": journal["phase"], "revision": journal["revision"],
+                    "timer": {key: timer[key] for key in ("ActiveState", "Result", "UnitFileState", "Unit", "Job")},
+                    "recovery": recovery, "direct_verified": True}
+        print("SUPERVISED_TUN_" + kind.upper() + "_OPERATOR_TIMER_RECONCILIATION=" +
+              json.dumps(evidence, separators=(",", ":")), flush=True)
+        journal, timer = self.timer_reconciliation_context(journal)
+        if timer["ActiveState"] == "inactive":
+            assert timer["Result"] == "success", "inactive timer has unexplained failure history"
+            return False
+        assert timer["ActiveState"] == "failed" and timer["Result"] not in ("", "success"), "timer failure changed"
+        self.command(["systemctl", "reset-failed", TIMER])
+        _journal, after = self.timer_reconciliation_context(journal, allow_finalized=True)
+        assert after["ActiveState"] == "inactive" and after["Result"] == "success", "timer-only reset did not reconcile the exact role"
+        return True
+
+    def health_process_generation(self, pid):
+        raw = Path(f"/proc/{pid}/stat").read_bytes()
+        closing = raw.rfind(b")")
+        assert len(raw) <= 4096 and raw.startswith(f"{pid} (".encode()) and closing > 0, \
+            "invalid health process generation"
+        fields = raw[closing + 1:].split()
+        assert len(fields) >= 20 and len(fields[0]) == 1 and fields[19].isdigit(), \
+            "invalid health process stat fields"
+        generation = int(fields[19])
+        assert generation > 0, "missing health process generation"
+        return generation, fields[0].decode("ascii")
+
+    def signal_operation_context(self):
+        current = self.journal()
+        assert (current is not None and current["operation_id"] == self.op and
+                current["phase"] == "trial_pending" and type(current["revision"]) is int and current["revision"] == 1), \
+            "executor fault is not bound to the original pending operation"
+        health = current["supervised"]
+        assert (health["confirmed"] is True and health["state"] == "healthy" and
+                type(health["attempts"]) is int and health["attempts"] == 0 and
+                type(health["failures"]) is int and health["failures"] == 0 and
+                type(health["recovery_deadline_uptime_ms"]) is int and health["recovery_deadline_uptime_ms"] == 0), \
+            "executor fault requires a confirmed healthy operation before any failure or reconnect"
+        return health
+
     def signal_health_executor(self, requested_signal):
         assert requested_signal in (signal.SIGKILL, signal.SIGSTOP), "unsupported executor fault"
-        pid = int(self.show(HEALTH, "MainPID"))
+        due = self.signal_operation_context()["next_probe_uptime_ms"]
+        assert type(due) is int and due >= 0, "invalid next health probe time"
+        if float(Path("/proc/uptime").read_text().split()[0]) * 1000 < due:
+            self.health_signal_observation = {"pid": None, "readiness": "probe_not_due"}
+            return False
+        initial = self.health_executor_observation()
+        pid = int(initial["MainPID"])
         self.health_signal_observation = {"pid": pid, "readiness": "awaiting_image"}
         if pid <= 1:
             self.health_signal_observation["readiness"] = "no_main_pid"
+            return False
+        invocation = initial["InvocationID"]
+        started = initial["ExecMainStartTimestampMonotonic"]
+        if (re.fullmatch("[0-9a-f]{32}", invocation) is None or not started.isdigit() or
+                int(started) <= 0 or initial["ExecMainPID"] != str(pid)):
+            self.health_signal_observation["readiness"] = "invocation_not_ready"
             return False
         try:
             descriptor = os.pidfd_open(pid)
         except ProcessLookupError:
             self.health_signal_observation["readiness"] = "process_unavailable"
             return False
+        dispatched = False
         try:
+            generation, _state = self.health_process_generation(pid)
             expected = os.stat("/opt/server-connect/current/bin/server-connect")
             expected_argv = (b"/opt/server-connect/current/bin/server-connect\0"
                              b"--json\0smart-tun-trial-health\0")
@@ -639,8 +912,15 @@ class Fixture:
                 if (after.st_dev, after.st_ino) != (expected.st_dev, expected.st_ino):
                     self.health_signal_observation["readiness"] = "executable_changed"
                     return False
+                if self.health_process_generation(pid)[0] != generation:
+                    self.health_signal_observation["readiness"] = "process_generation_changed"
+                    return False
                 self.health_signal_observation["readiness"] = "authenticated"
                 return True
+
+            def same_invocation(observed):
+                return (observed["InvocationID"] == invocation and observed["ExecMainPID"] == str(pid) and
+                        observed["ExecMainStartTimestampMonotonic"] == started)
 
             # systemd may publish MainPID while its child is still preparing
             # exec. An unmatched image/argv is not ready, never a signal target.
@@ -649,14 +929,50 @@ class Fixture:
             for _observation in range(2):
                 if not authenticated_image():
                     return False
-                if self.show(HEALTH, "MainPID") != str(pid):
-                    self.health_signal_observation["readiness"] = "unit_pid_changed"
+                observed = self.health_executor_observation()
+                if observed["MainPID"] != str(pid) or not same_invocation(observed):
+                    self.health_signal_observation["readiness"] = "unit_identity_changed"
                     return False
+            operation_health = self.signal_operation_context()
+            if operation_health["next_probe_uptime_ms"] != due:
+                self.health_signal_observation["readiness"] = "probe_deadline_changed"
+                return False
+            # Keep the exact pre-dispatch health publication for the final
+            # independent Off receipt; a later outage round cannot stand in.
+            self.health_signal_snapshot = json.loads(json.dumps(operation_health))
             signal.pidfd_send_signal(descriptor, requested_signal)
-            self.health_signal_observation["readiness"] = "signalled"
+            dispatched = True
+            self.health_signal_observation["readiness"] = "awaiting_signal_outcome"
+
+            def observed_outcome():
+                observed = self.health_executor_observation()
+                assert same_invocation(observed), "health fault outcome belongs to a different invocation/PID/start"
+                if requested_signal == signal.SIGSTOP:
+                    assert observed["MainPID"] == str(pid), "stopped health PID disappeared or changed"
+                    current_generation, state = self.health_process_generation(pid)
+                    assert current_generation == generation, "stopped health process generation changed"
+                    if state not in ("T", "t"):
+                        return False
+                    assert authenticated_image(), "stopped health image or argv changed"
+                    again = self.health_executor_observation()
+                    assert same_invocation(again) and again["MainPID"] == str(pid), \
+                        "stopped health invocation changed during observation"
+                    return state
+                code, status = observed["ExecMainCode"], observed["ExecMainStatus"]
+                if code == "0":
+                    return False
+                assert code == str(os.CLD_KILLED) and status == str(signal.SIGKILL), \
+                    "health executor did not die from the requested SIGKILL"
+                return "killed" if observed["MainPID"] == "0" else False
+
+            outcome = self.wait(observed_outcome, 3, "exact health executor signal outcome")
+            self.health_signal_observation["readiness"] = "outcome_verified"
+            print(f"SUPERVISED_TUN_EXECUTOR_FAULT_RECEIPT=pid:{pid} generation:{generation} invocation:{invocation} start:{started} signal:{int(requested_signal)} outcome:{outcome}", flush=True)
             return True
         except (ProcessLookupError, FileNotFoundError):
             self.health_signal_observation["readiness"] = "process_unavailable"
+            if dispatched:
+                raise AssertionError("health executor disappeared after dispatch without an exact outcome") from None
             return False
         finally:
             os.close(descriptor)
@@ -671,8 +987,6 @@ class Fixture:
             self.pause_upstream()
             requested_signal = signal.SIGKILL if kind == "failed" else signal.SIGSTOP
             self.wait_for_health_executor(requested_signal)
-            if kind == "failed":
-                self.wait(lambda: self.show(HEALTH, "ActiveState") == "failed" or not JOURNAL.exists(), 3, "failed executor")
         else:
             path = UNITS / HEALTH
             original = UNITS / (HEALTH + ".scqa-supervised-original")
@@ -686,7 +1000,12 @@ class Fixture:
             self.command(["systemctl", "daemon-reload"])
             assert self.show(HEALTH, "LoadState") == ("masked" if kind == "masked" else "not-found")
         if kind in ("dead", "failed", "hung"):
-            self.independent_off(30)
+            off_uptime_ms = self.independent_off(30)
+            if kind == "dead":
+                self.final_receipt("supervisor_unavailable", 0)
+            else:
+                self.final_receipt({"supervisor_unavailable", "supervisor_lease_expired"}, 0,
+                                   supervisor_snapshot=self.health_signal_snapshot, off_uptime_ms=off_uptime_ms)
         else:
             def terminal_or_uncertain():
                 journal = self.journal()
@@ -709,7 +1028,12 @@ class Fixture:
                     print("SUPERVISED_TUN_" + kind.upper() + "_AUTOMATIC=UNCERTAIN_CONTAINED", flush=True)
                 self.restore_units()
                 print("SUPERVISED_TUN_" + kind.upper() + "_OPERATOR_REMEDIATION=exact fixture unit restoration and product recovery", flush=True)
-                self.cli("activation-trial-recover")
+                result, receipt = self.cli("activation-trial-recover", check=False)
+                if result.returncode:
+                    self.reconcile_failed_health_timer(kind, receipt)
+                    self.cli("activation-trial-recover")
+                else:
+                    assert receipt and receipt.get("ok") is True, "recovery returned an inconsistent success receipt"
                 self.wait(lambda: not JOURNAL.exists(), 15, "post-remediation finalization")
             self.inactive()
         self.resume_upstream()
@@ -750,8 +1074,7 @@ class Fixture:
         print("SUPERVISED_TUN_CASE=publication-boundaries", flush=True)
         for boundary in ("before-confirm-publish", "after-confirm-publish"):
             self.apply(12)
-            result, _reply = self.confirm(kill=boundary, check=False)
-            assert result.returncode, "controller survived the requested publication boundary"
+            self.confirm_publication_death(boundary)
             if boundary == "before-confirm-publish":
                 assert not self.health()["confirmed"]
                 self.independent_off(25)
@@ -790,7 +1113,8 @@ class Fixture:
         rejected, value = self.confirm(operation=old_op, challenge=old_challenge, check=False)
         assert rejected.returncode and value and not value["ok"]
         self.inactive()
-        self.marker("EXPIRED_CONFIRMATION")
+        # This proves independent expiry to Off, then rejection of the stale operation.
+        self.marker("EXPIRED_OFF_AND_REPLAY_REJECTED")
 
     def protected_underlay_failure(self):
         print("SUPERVISED_TUN_CASE=protected-underlay-loss", flush=True)
