@@ -1,0 +1,26 @@
+# Inert-by-default, separate privileged data plane for *disposable* TUN trials.
+# Product activation/recovery must own the exact operation before starting it.
+# This unit must never be enabled at boot or used as a standalone VPN launcher.
+[Unit]
+Description=Server Connect guarded Smart Routing TUN trial (not released)
+Documentation=https://github.com/AChWorks/server-connect
+After=network.target
+
+[Service]
+Type=exec
+WorkingDirectory=/opt/server-connect/current/bin
+LoadCredential=tun-config:/var/lib/server-connect/smart-tun-trial.json
+ExecStart=/opt/server-connect/current/bin/sing-box run -c /run/credentials/server-connect-smart-tun.service/tun-config
+Restart=no
+KillMode=control-group
+TimeoutStopSec=15s
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+UMask=0077

@@ -373,6 +373,13 @@ dns_path() {
     /usr/bin/python3 -I -B /root/qa-tun-dns-client.py "$1" "$2" "$3" "$4" "$5"
 }
 
+case "${SC_QA_TUN_PRODUCT_LAB-}" in
+  ''|'yes') ;;
+  *) echo 'Invalid isolated installed-product TUN mode' >&2; exit 2 ;;
+esac
+if [ "${SC_QA_TUN_PRODUCT_LAB-}" = yes ] && [ "${SC_QA_TUN_GUARD_LAB-}" = yes ]; then
+  echo 'Concurrent distinct TUN guard modes are unsupported' >&2; exit 2
+fi
 case "${SC_QA_TUN_GUARD_LAB-}" in
   '' ) ;;
   yes ) . /root/qa-tun-guard-unit-lab.sh ;;
@@ -877,7 +884,7 @@ echo "REAL_TUN_DNS_DIRECT_WITNESS=PASS (native DNS UDP/TCP positive controls)"
 hosting_baseline=$(hosting_reply_packets)
 test "$hosting_baseline" -gt 0 || { echo 'FAIL: no positive control of foreign visitor hosting reply' >&2; exit 1; }
 echo "REAL_TUN_FOREIGN_HOSTING_BASELINE=PASS (foreign visitor request/reply, packets=$hosting_baseline)"
-if [ "${SC_QA_TUN_GUARD_LAB-}" = yes ]; then
+if [ "${SC_QA_TUN_GUARD_LAB-}" = yes ] || [ "${SC_QA_TUN_PRODUCT_LAB-}" = yes ]; then
   # The disposable VETH may still be doing IPv6 duplicate-address detection.
   # Its fe80:: local /128 route appears only after DAD finishes. Capturing
   # before then produces a false rollback failure 25s later even when the
@@ -908,6 +915,14 @@ if [ "${SC_QA_TUN_GUARD_LAB-}" = yes ]; then
   guard_rules_before=$(ip -N -j -4 rule show)
   guard_v6_routes_before=$(ip -N -j -6 route show table all)
   guard_v6_rules_before=$(ip -N -j -6 rule show)
+fi
+
+# Separate installed-product guard trial reuses the identical peer paths
+# but starts the real TUN through its installed manager/systemd ownership.
+if [ "${SC_QA_TUN_PRODUCT_LAB-}" = yes ]; then
+  . /root/qa-product-tun-trial.sh
+  product_tun_trial
+  exit 0
 fi
 
 # Generate the candidate via the actual manager compiler, not a manually

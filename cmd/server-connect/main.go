@@ -301,6 +301,43 @@ func run(j bool, m *sc.Manager, args []string) int {
 			return output(j, nil, err)
 		}
 		return output(j, check, nil)
+	case "smart-tun-trial-apply":
+		opts := flag.NewFlagSet(name, flag.ContinueOnError)
+		opts.SetOutput(io.Discard)
+		tunnel := opts.String("tunnel-if", "", "disposable TUN name")
+		underlay := opts.String("underlay-if", "", "disposable peer underlay")
+		tunnelIPv4 := opts.String("tunnel-ipv4", "", "private guest TUN CIDR")
+		peer := opts.String("management-peer", "", "synthetic guest management peer")
+		deadline := opts.Int("deadline-seconds", 600, "independent mandatory rollback deadline")
+		qaKill := opts.Bool("qa-kill-after-start", false, "isolated guest SIGKILL fault after managed TUN start")
+		var domestic, protected destinationFlags
+		opts.Var(&domestic, "domestic-cidr", "synthetic domestic CIDR; repeat")
+		opts.Var(&protected, "protected-cidr", "explicit guest control CIDR; repeat")
+		if e := opts.Parse(args); e != nil || len(opts.Args()) != 0 {
+			return output(j, nil, sc.Fault("invalid_arguments", "invalid guarded TUN trial options"))
+		}
+		result, err := m.BeginSmartTUNTrial(sc.SmartTUNCandidateOptions{
+			TunnelInterface: *tunnel, UnderlayInterface: *underlay,
+			TunnelIPv4: *tunnelIPv4, DomesticCIDRs: domestic,
+			ProtectedCIDRs: protected,
+		}, *peer, *deadline, *qaKill)
+		return output(j, result, err)
+	case "smart-tun-trial-status":
+		if len(args) != 0 {
+			return output(j, nil, sc.Fault("invalid_arguments", "guarded TUN status accepts no options"))
+		}
+		result, err := m.InspectSmartTUNTrial()
+		return output(j, result, err)
+	case "smart-tun-trial-clear":
+		opts := flag.NewFlagSet(name, flag.ContinueOnError)
+		opts.SetOutput(io.Discard)
+		id := opts.String("operation-id", "", "exact recovered trial operation ID")
+		revision := opts.Uint64("revision", 0, "exact recovered revision")
+		if e := opts.Parse(args); e != nil || len(opts.Args()) != 0 {
+			return output(j, nil, sc.Fault("invalid_arguments", "invalid guarded TUN clearance options"))
+		}
+		err := m.ClearSmartTUNTrial(*id, *revision)
+		return output(j, map[string]any{"cleared": err == nil}, err)
 	case "activation-trial-recover", "activation-trial-status":
 		qaPoint, qaFaultPoint := "", ""
 		if name == "activation-trial-recover" {
@@ -540,8 +577,18 @@ Commands:
                               DISPOSABLE DOCKER-ONLY rule-only trial; never VPN activation
   selective-route-trial-apply --operation-id HEX32 --revision 1 [--deadline-seconds 600]
                               DISPOSABLE DOCKER-ONLY lo route + RPDB rule trial; never VPN activation
+  smart-tun-trial-apply --tunnel-if sctunqa0 --underlay-if scqaedge0
+                        --tunnel-ipv4 172.31.99.1/30 --management-peer 10.254.72.2
+                        --domestic-cidr 5.22.0.10/32 --protected-cidr 10.254.72.0/30
+                        [--deadline-seconds 600]
+                              DISPOSABLE DOCKER GUEST ONLY: pending genuine sing-box
+                              TUN with mandatory independent timeout recovery.
+                              Not confirmed, no Runtime Guard, NOT production Apply
+  smart-tun-trial-status      Pending/recovered experimental TUN receipt
+  smart-tun-trial-clear --operation-id HEX32 --revision 2
+                              Clear only verified recovered v4 trial
   activation-trial-status     Inspect v2 rule-only or v3 loopback route+rule trial
-  activation-trial-recover    Independent systemd timeout/reboot trial recovery (v2/v3)
+  activation-trial-recover    Independent systemd timeout/reboot recovery (v2/v3/v4)
   activation-trial-clear --operation-id HEX32 --revision 3
                               Clear exact recovered v2/v3 experimental trial journal
   host-drift --baseline FILE Compare a prior private preflight JSON with now
@@ -583,6 +630,12 @@ Only selective-abandon-intent can discard the exact untouched revision;
 UNCERTAIN and modified journals cannot be abandoned. Even an absent journal
 cannot prove safe networking, guard arming or recovery. These commands may
 initialize a private state directory/lock but never change host routes.
+The guarded TUN trial runs the installed pinned sing-box on the synthetic
+disconnected 2-interface Docker guest, using an inert separate CAP_NET_ADMIN
+service, a private operation journal and an independently prearmed systemd
+deadline. It can only EXPIRE into verified Direct; it never confirms permanent
+activation. Synthetic CIDRs, absence of genuine SSH confirmation, and no
+Runtime Health Guard prohibit use on any physical/production host.
 An explicit underlay-tcp probe binds a TCP socket to the kernel-selected
 interface and sends no application data. With --hostname, current host name
 resolution must include the explicit pinned --endpoint IP before TCP probing.

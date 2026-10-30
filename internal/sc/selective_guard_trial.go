@@ -726,6 +726,14 @@ func (m *Manager) beginGuardedTrial(operationID string, revision uint64, ttlSeco
 // living initiating shell. The v2 record must survive a process crash. A
 // changed boot ID triggers recovery immediately, not a new 600s allowance.
 func (m *Manager) RecoverGuardedRuleTrial(qaCrashPoint, qaFaultPoint string) (TrialReceipt, error) {
+	if qaCrashPoint == "" && qaFaultPoint == "" {
+		// One installed recovery executor handles both legacy v2/v3 lab
+		// records and the real-core pending v4 TUN trial. Never interpret a
+		// v4 journal as a legacy rule/route to delete.
+		if result, handled, err := m.tryRecoverSmartTUNTrial(); handled || err != nil {
+			return result, err
+		}
+	}
 	if m.Dir != DefaultDir {
 		return TrialReceipt{}, Fault("trial_unsupported", "guard recovery requires the installed default private state directory")
 	}

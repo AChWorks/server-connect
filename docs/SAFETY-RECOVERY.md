@@ -23,6 +23,27 @@
 
 **Beware historical naming:** the developer's `selective-stage-intent` may report `prepared`, but its private **unarmed, non-atomic** journal is **not** the guarded `PREPARED` state above. QA-only v2 RPDB-rule and v3 loopback-route trials also do not create a real TUN or production Activation Guard. Their limits and reproducible tests are recorded in [ACCEPTANCE.md](ACCEPTANCE.md).
 
+### Disposable v4 guarded TUN trial (not production acceptance)
+
+The installed experimental v4 journal deliberately has only
+`trial_pending` (revision 1) and `trial_recovered` (revision 2), **not**
+`ACTIVE_VERIFIED`. It binds the operation, profile, synthetic endpoint,
+native baseline digest, sing-box configuration digest, boot ID and monotonic
+deadline. It starts the actual pinned sing-box Linux TUN in a separate
+static service after durable journaling, while the prearmed recovery oneshot
+and 5-second timer have been independently exercised. The default expiry
+is 600 seconds, configurable from 4 to 600 seconds in disconnected QA only.
+A failed/uncertain restoration retains the journal, never presents Direct
+as safely verified and blocks installer/update/profile/Proxy Only transitions.
+Only full native IP/nftables equality after stopping the verified service
+permits `trial_recovered`, followed by exact operation-ID/revision clearance.
+
+This is one step toward the real activation state machine, **not** a
+substitute for privileged third-party ownership/conntrack proof, SSH
+confirmation, permanent commit, Runtime Health Guard, VPN-bound health
+monitoring or physical crash/reboot tests. A restored guest baseline does
+not certify production rollback safety or authorize public installation.
+
 ## Activation Guard
 
 Default confirmation window: **600 seconds**, operator configurable. High-risk route changes require:
