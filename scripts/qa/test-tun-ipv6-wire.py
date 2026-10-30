@@ -46,7 +46,7 @@ class IPv6WireTests(unittest.TestCase):
         with patch.object(m, "tcp_probe", return_value=b"invalid"):
             with self.assertRaisesRegex(ValueError, "unexpectedly reached"):
                 m.probe("tcp", "2001:db8:8::8", "none", "no-reply")
-        with patch.object(m, "tcp_probe", side_effect=OSError(errno.EACCES, "denied")):
+        with patch.object(m, "tcp_probe", side_effect=OSError(errno.EBADF, "invalid socket")):
             with self.assertRaises(OSError):
                 m.probe("tcp", "2001:db8:8::8", "none", "no-reply")
         with patch.object(m, "udp_probe", side_effect=OSError(errno.ENETUNREACH, "offline")), \
@@ -59,6 +59,17 @@ class IPv6WireTests(unittest.TestCase):
                      ("dns", "2001:db8:8::8", "none", "no-reply")):
             with self.assertRaises(ValueError):
                 m.probe(*args)
+
+    def test_native_denial_is_negative_only(self):
+        for transport in ("tcp", "udp"):
+            for code in (errno.EPERM, errno.EACCES):
+                with self.subTest(transport=transport, errno=code), \
+                        patch.object(m, transport + "_probe", side_effect=OSError(code, "native denial")), \
+                        patch("sys.stdout", io.StringIO()) as out:
+                    m.probe(transport, "2001:db8:8::8", "none", "no-reply")
+                    self.assertIn("NO_REPLY=PASS", out.getvalue())
+                    with self.assertRaises(OSError):
+                        m.probe(transport, "2001:db8:8::8", "2001:db8:8::8", "reply")
 
     def test_udp_origin_bindings_cannot_fall_back_to_wildcard(self):
         self.assertEqual(set(m.UDP_BIND_ADDRESSES), {

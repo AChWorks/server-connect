@@ -48,6 +48,7 @@ sh -n scripts/qa/host-activation-guard.sh
 sh -n scripts/qa/host-product-guard-trial.sh
 sh -n scripts/qa/host-tun-path.sh
 sh -n scripts/qa/host-product-tun-trial.sh
+sh -n scripts/qa/host-native-product-tun.sh
 sh -n scripts/qa/host-owned-tun-boundary.sh
 sh -n scripts/qa/tun-guard-unit-lab.sh
 bash scripts/qa/test-installer-rollback-backups.sh
@@ -96,6 +97,10 @@ cleanup() {
 trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
+
+# Compile only on the build host. Privileged native tests execute solely in
+# the explicitly gated disconnected guest below, never on the runner/Dev.
+CGO_ENABLED=0 go test -c -o "$scratch/qa-native-nft-cas-test" ./internal/sc
 
 echo '=== Disposable Debian 13 preparation (network permitted BEFORE isolation) ==='
 docker build --pull -f scripts/qa/Dockerfile.host-systemd -t "$image" scripts/qa
@@ -206,6 +211,37 @@ docker exec "$container" /bin/sh -c '
 '
 
 docker cp "$root/scripts/qa/host-qa-assertions.sh" "$container:/root/qa-host-assertions.sh"
+docker cp "$root/scripts/qa/host-native-product-tun.sh" "$container:/root/qa-native-product-tun.sh"
+
+# Run before foreign nft fixtures or TUN topology exist. This proves the
+# kernel generation-conditioned deletion primitive, including negative CAS
+# and ACK-loss cases, without giving the test access to a routed host.
+native_nft_network_before=$(network_digest)
+native_nft_before=$(docker exec "$container" /usr/sbin/nft -j list ruleset)
+docker cp "$scratch/qa-native-nft-cas-test" "$container:/root/qa-native-nft-cas-test"
+native_nft_log="$scratch/native-nft-cas.log"
+docker exec -e SC_TEST_NATIVE_NFT_CAS=disconnected-systemd "$container" \
+  /root/qa-native-nft-cas-test -test.run='^TestNativeNFTTableCAS$' -test.v -test.timeout=90s |
+  tee "$native_nft_log"
+for marker in EXACT_DELETE FOREIGN_CHILD DISJOINT REPLACEMENT ACK_LOSS CLEANUP; do
+  grep -Fx "NATIVE_NFT_CAS_${marker}=PASS" "$native_nft_log" >/dev/null
+done
+assert_network_unchanged native-nft-cas "$native_nft_network_before"
+native_nft_after=$(docker exec "$container" /usr/sbin/nft -j list ruleset)
+[[ $native_nft_after == "$native_nft_before" ]] || {
+  echo 'NATIVE_NFT_CAS_INDEPENDENT_CLEANUP=FAIL (nftables drift)' >&2
+  exit 1
+}
+docker exec "$container" /bin/rm -- /root/qa-native-nft-cas-test
+echo NATIVE_NFT_CAS_INDEPENDENT_CLEANUP=PASS
+mutator_log="$scratch/native-mutator-lifetime.log"
+docker exec "$container" /bin/sh /root/qa-native-product-tun.sh mutator-lifetime | tee "$mutator_log"
+grep -Fx 'NATIVE_MUTATOR_IP_FD3_DEATH=PASS' "$mutator_log" >/dev/null
+grep -Fx 'NATIVE_MUTATOR_NFT_FD3_DEATH=PASS' "$mutator_log" >/dev/null
+assert_network_unchanged native-mutator-lifetime "$native_nft_network_before"
+native_mutator_nft_after=$(docker exec "$container" /usr/sbin/nft -j list ruleset)
+[[ $native_mutator_nft_after == "$native_nft_before" ]]
+echo NATIVE_MUTATOR_INDEPENDENT_BASELINE=PASS
 
 docker cp "$bundle" "$container:/root/sc-qa-bundle.tar.gz"
 docker cp "$update_bundle" "$container:/root/sc-qa-update.tar.gz"
@@ -739,16 +775,19 @@ for marker in \
   'PRODUCT_TUN_SIGKILL_INDEPENDENT_SYSTEMD_ROLLBACK=PASS' \
   'PRODUCT_TUN_PRE_CREDENTIAL_SIGKILL_INDEPENDENT_ROLLBACK=PASS' \
   'PRODUCT_TUN_GUARD_TIMER_LOSS_IMMEDIATE_CONTAINMENT=PASS' \
-  'PRODUCT_TUN_GUARD_EXECUTOR_LOSS_FOREIGN_CONFLICT_RETAINED=PASS' \
+  'PRODUCT_NATIVE_EXECUTOR_LOSS_DISJOINT_PRESERVED=PASS' \
   'PRODUCT_TUN_GUARD_EXECUTOR_LOSS_GUEST_CLEANUP=PASS' \
   'PRODUCT_TUN_CREDENTIAL_REMOVAL_PERSISTENT_CONFLICT=PASS' \
+  'PRODUCT_NATIVE_CREDENTIAL_CONFLICT_CONTAINMENT=PASS' \
   'PRODUCT_TUN_CLEAR_CONFLICT_GUARD_STAYS_ARMED=PASS' \
   'PRODUCT_TUN_CREDENTIAL_CONFLICT_RECONCILED=PASS' \
   'PRODUCT_TUN_EXPLICIT_OFF_EXACT_BASELINE=PASS' \
   'PRODUCT_TUN_INVALID_SAVED_POLICY_NO_PREARM=PASS' \
   'PRODUCT_TUN_STALE_DISCONNECT_NO_MUTATION=PASS' \
   'PRODUCT_TUN_SAVED_REAPPLY_NEW_OPERATION=PASS' \
-  'PRODUCT_TUN_OFF_FOREIGN_CONFLICT_RETAINED=PASS' \
+  'PRODUCT_NATIVE_DISJOINT_FOREIGN_SURVIVES_OFF=PASS' \
+  'PRODUCT_NATIVE_VISITOR_ORIGIN_DIRECT_CONTROL=PASS' \
+  'PRODUCT_NATIVE_VISITOR_REPLY_AND_NEW_EGRESS=PASS' \
   'PRODUCT_TUN_OFF_FIFO_CONTAINMENT_RETAINED=PASS' \
   'PRODUCT_TUN_OFF_SIGKILL_INDEPENDENT_FINALIZATION=PASS' \
   'PRODUCT_TUN_OFF_POST_DISARM_RECONCILIATION=PASS'; do
@@ -766,6 +805,27 @@ for marker in \
   'PRODUCT_TUN_IPV6_UNSUPPORTED_INPUT_REJECTED=PASS' \
   'PRODUCT_TUN_IPV6_REAL_SELECTED=PASS' \
   'PRODUCT_TUN_IPV6_EXPLICIT_OFF_SAVED_REAPPLY=PASS' \
+  'PRODUCT_NATIVE_PUBLIC_ICMP6_DIRECT_CONTROL=PASS' \
+  'PRODUCT_NATIVE_COLD_ND_AND_PUBLIC_ICMP_BOUNDARY=PASS' \
+  'PRODUCT_NATIVE_VISITOR_REPLY_AND_NEW_EGRESS=PASS' \
+  'PRODUCT_NATIVE_OVERLAP_RETAINED(address)=PASS' \
+  'PRODUCT_NATIVE_OVERLAP_RETAINED(route)=PASS' \
+  'PRODUCT_NATIVE_OVERLAP_RETAINED(rule)=PASS' \
+  'PRODUCT_NATIVE_OVERLAP_RETAINED(nft-child)=PASS' \
+  'PRODUCT_NATIVE_OVERLAP_FOREIGN_PRESERVATION=PASS' \
+  'PRODUCT_NATIVE_MUTATOR_FD3_ACTUAL_MODES=PASS' \
+  'PRODUCT_NATIVE_LOSS_FAIL_CLOSED(route)=PASS' \
+  'PRODUCT_NATIVE_LOSS_FAIL_CLOSED(rule)=PASS' \
+  'PRODUCT_NATIVE_LOSS_FAIL_CLOSED(capture)=PASS' \
+  'PRODUCT_NATIVE_LOSS_FAIL_CLOSED(core)=PASS' \
+  'PRODUCT_NATIVE_ROUTE_RULE_CAPTURE_CORE_FAIL_CLOSED=PASS' \
+  'PRODUCT_NATIVE_DURABLE_LINK_PERSIST_RECOVERY=PASS' \
+  'PRODUCT_NATIVE_AMBIGUOUS_ROUTE_REMEDIATION=explicit-QA-operator' \
+  'PRODUCT_NATIVE_AMBIGUOUS_ROUTE_EFFECT_RETAINED=PASS' \
+  'PRODUCT_NATIVE_POST_DELETE_SIGKILL_RECOVERY=PASS' \
+  'PRODUCT_NATIVE_GUARD_LOSS_UNCERTAIN_CONTAINED=PASS' \
+  'PRODUCT_NATIVE_GUARD_LOSS_REMEDIATION=explicit-QA-operator' \
+  'PRODUCT_NATIVE_GUARD_LOSS_OPERATOR_ASSISTED_DIRECT=PASS' \
   'PRODUCT_TUN_IPV6_OUTAGE_FAIL_CLOSED=PASS' \
   'PRODUCT_TUN_IPV6_GUARD_ROLLBACK=PASS'; do
   grep -Fx "$marker" "$product_v6_log" >/dev/null
@@ -834,6 +894,7 @@ echo 'REAL_TUN_CLEANUP_FAILURE_REJECTED=PASS (guest cleanup failure != expected 
 docker exec "$container" /bin/rm -f /root/qa-tun-config-qa /root/qa-host-tun-path.sh \
   /root/qa-tun-guard-unit-lab.sh /root/qa-product-tun-trial.sh /root/qa-tun-sni-client.py /root/qa-tun-native-apps.py \
   /root/qa-owned-tun-boundary.sh \
+  /root/qa-native-product-tun.sh \
   /root/qa-tun-dns-peer.py /root/qa-tun-dns-client.py /root/qa-tun-wordpress-fpm.sh \
   /root/qa-tun-wp-check.py /root/qa-tun-payload-wire.py /root/qa-tun-ipv6-wire.py
 # Product code + installed inactive-by-default independent recovery units.

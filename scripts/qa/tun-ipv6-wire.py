@@ -26,7 +26,10 @@ UDP_BIND_ADDRESSES = ("2001:db8:5::10", "2001:db8:5::11",
                       "2001:db8:8::8", "2001:db8:8::9")
 ALLOWED = {
     errno.ENETUNREACH, errno.EHOSTUNREACH, errno.ECONNREFUSED,
-    errno.ECONNRESET, errno.EPIPE, errno.ETIMEDOUT
+    errno.ECONNRESET, errno.EPIPE, errno.ETIMEDOUT,
+    # Native OUTPUT containment can reject before transmission. These are
+    # accepted only by negative probes; positive paths must still succeed.
+    errno.EPERM, errno.EACCES
 }
 HEADER = len(MAGIC) + 16 + 4
 
