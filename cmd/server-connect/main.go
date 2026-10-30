@@ -1,4 +1,4 @@
-// Server Connect is a minimal local CLI; it does not own the host routing table.
+// Server Connect manages explicit proxy use and precisely owned experimental TUN policy.
 package main
 
 import (
@@ -313,6 +313,12 @@ func run(j bool, m *sc.Manager, args []string) int {
 		peer := opts.String("management-peer", "", "synthetic guest management peer")
 		deadline := opts.Int("deadline-seconds", 600, "independent mandatory rollback deadline")
 		saved := opts.Bool("saved", false, "revalidate and apply the saved disposable trial policy")
+		supervised := opts.Bool("supervised", false, "enable fresh confirmation and bounded health in the disposable fixture only")
+		healthInterval := opts.Int("health-interval", 15, "selected-path probe interval in seconds")
+		healthGrace := opts.Int("health-grace", 30, "bounded startup grace in seconds")
+		healthFailures := opts.Int("health-failures", 3, "consecutive unhealthy rounds before reconnect")
+		healthAttempts := opts.Int("health-attempts", 3, "maximum reconnect attempts for this operation")
+		healthRecovery := opts.Int("health-recovery-seconds", 120, "overall outage recovery deadline")
 		qaKill := opts.String("qa-kill-at", "", "isolated guest SIGKILL after-journal or after-start")
 		var domestic, protected, domesticIPv6 destinationFlags
 		opts.Var(&domestic, "domestic-cidr", "synthetic domestic CIDR; repeat")
@@ -321,17 +327,33 @@ func run(j bool, m *sc.Manager, args []string) int {
 		if e := opts.Parse(args); e != nil || len(opts.Args()) != 0 {
 			return output(j, nil, sc.Fault("invalid_arguments", "invalid guarded TUN trial options"))
 		}
+		health := sc.SmartTUNHealthOptions{IntervalSeconds: *healthInterval,
+			StartupGraceSeconds: *healthGrace, FailureThreshold: *healthFailures,
+			MaxAttempts: *healthAttempts, RecoverySeconds: *healthRecovery}
+		explicitHealth := false
+		opts.Visit(func(option *flag.Flag) {
+			if strings.HasPrefix(option.Name, "health-") {
+				explicitHealth = true
+			}
+		})
+		if explicitHealth && !*supervised {
+			return output(j, nil, sc.Fault("invalid_arguments", "health options require --supervised"))
+		}
 		if *saved {
 			mixedPolicy := false
 			opts.Visit(func(option *flag.Flag) {
 				switch option.Name {
-				case "saved", "deadline-seconds", "qa-kill-at":
+				case "saved", "deadline-seconds", "qa-kill-at", "supervised", "health-interval", "health-grace", "health-failures", "health-attempts", "health-recovery-seconds":
 				default:
 					mixedPolicy = true
 				}
 			})
 			if mixedPolicy {
 				return output(j, nil, sc.Fault("invalid_arguments", "--saved cannot be combined with explicit routing or management options"))
+			}
+			if *supervised {
+				result, err := m.BeginSavedSupervisedSmartTUNTrial(*deadline, health, *qaKill)
+				return output(j, result, err)
 			}
 			result, err := m.BeginSavedSmartTUNTrial(*deadline, *qaKill)
 			return output(j, result, err)
@@ -343,12 +365,38 @@ func run(j bool, m *sc.Manager, args []string) int {
 		if *ipv6Direct != "" {
 			ipv6Exceptions = append(ipv6Exceptions, sc.SmartTUNCIDRException{CIDR: *ipv6Direct, Via: "direct"})
 		}
-		result, err := m.BeginSmartTUNTrial(sc.SmartTUNCandidateOptions{
+		candidate := sc.SmartTUNCandidateOptions{
 			TunnelInterface: *tunnel, UnderlayInterface: *underlay,
 			TunnelIPv4: *tunnelIPv4, TunnelIPv6: *tunnelIPv6,
 			DomesticCIDRs: domestic, ProtectedCIDRs: protected,
 			DomesticIPv6CIDRs: domesticIPv6, IPv6Exceptions: ipv6Exceptions,
-		}, *peer, *deadline, *qaKill)
+		}
+		if *supervised {
+			result, err := m.BeginSupervisedSmartTUNTrial(candidate, *peer, *deadline, health, *qaKill)
+			return output(j, result, err)
+		}
+		result, err := m.BeginSmartTUNTrial(candidate, *peer, *deadline, *qaKill)
+		return output(j, result, err)
+	case "smart-tun-trial-confirm":
+		opts := flag.NewFlagSet(name, flag.ContinueOnError)
+		opts.SetOutput(io.Discard)
+		id := opts.String("operation-id", "", "exact pending operation ID")
+		revision := opts.Uint64("revision", 0, "exact challenge control revision")
+		challenge := opts.String("challenge", "", "single-use operation confirmation challenge")
+		qaKill := opts.String("qa-kill-at", "", "disposable-only confirmation publication interruption")
+		if e := opts.Parse(args); e != nil || len(opts.Args()) != 0 {
+			return output(j, nil, sc.Fault("invalid_arguments", "invalid supervised TUN confirmation options"))
+		}
+		result, err := m.ConfirmSmartTUNTrial(*id, *revision, *challenge, *qaKill)
+		return output(j, result, err)
+	case "smart-tun-trial-health":
+		opts := flag.NewFlagSet(name, flag.ContinueOnError)
+		opts.SetOutput(io.Discard)
+		qaKill := opts.String("qa-kill-at", "", "disposable-only health publication interruption")
+		if e := opts.Parse(args); e != nil || len(opts.Args()) != 0 {
+			return output(j, nil, sc.Fault("invalid_arguments", "invalid supervised TUN health options"))
+		}
+		result, err := m.RunSmartTUNHealthRound(*qaKill)
 		return output(j, result, err)
 	case "smart-tun-trial-policy":
 		if len(args) != 0 {
@@ -631,9 +679,18 @@ Commands:
                         [--deadline-seconds 600]
                               DISPOSABLE DOCKER GUEST ONLY: pending genuine sing-box
                               TUN with mandatory independent timeout recovery.
-                              Not confirmed, no Runtime Guard, NOT production Apply
+                              Unconfirmed by default; NOT production Apply
   smart-tun-trial-apply --saved [--deadline-seconds 600]
                               Revalidate saved trial settings; always a new guarded operation
+  smart-tun-trial-apply --supervised [--saved] [--health-interval 15]
+                       [--health-grace 30] [--health-failures 3]
+                       [--health-attempts 3] [--health-recovery-seconds 120]
+                              Experimental confirmed lifecycle in the same fixture.
+                              Intervals and total recovery are seconds; bounds apply.
+  smart-tun-trial-confirm --operation-id HEX32 --revision N --challenge HEX
+                              Confirm once from a genuinely NEW root SSH connection.
+                              Old shells and multiplexed SSH channels are rejected.
+  smart-tun-trial-health      Bounded installed health executor; never general Apply
   smart-tun-trial-policy      Inspect saved non-secret trial policy; never activates routing
   smart-tun-trial-status      Experimental TUN operation/recovery receipt
   smart-tun-trial-disconnect --operation-id HEX32 --revision N
@@ -689,9 +746,12 @@ service, a private operation journal and an independently prearmed systemd
 deadline. Exact-operation Disconnect or expiry restores the native baseline;
 interrupted stop/cleanup retains recovery evidence. Saved trial settings and
 the selected profile survive Off. --saved performs fresh admission/prearm
-and creates a new operation; it never resumes an old activation. The trial
-never confirms permanent activation. Synthetic CIDRs, absence of genuine SSH
-confirmation, and no Runtime Health Guard prohibit use on physical/production hosts.
+and creates a new operation; it never resumes an old activation. Without
+--supervised, the trial cannot be confirmed. --supervised adds one-use fresh
+root SSH confirmation, bounded selected-path health and independent liveness
+recovery ONLY in that fixture. It never grants general ACTIVE_VERIFIED.
+Synthetic CIDRs and unaccepted general-host, field and reboot safety still
+prohibit physical/production-host use.
 An explicit underlay-tcp probe binds a TCP socket to the kernel-selected
 interface and sends no application data. With --hostname, current host name
 resolution must include the explicit pinned --endpoint IP before TCP probing.
