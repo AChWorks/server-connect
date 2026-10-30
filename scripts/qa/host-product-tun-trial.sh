@@ -116,7 +116,17 @@ assert r["ok"] and r["data"]["desired"]=="direct" and r["data"]["observed"]=="in
   }
   # First: live normal product Apply and actual synthetic foreign/domestic
   # packet paths. Do not mistake TUN device creation for installed policy.
-  apply 32 > /run/sc-qa-product-tun-apply.json
+  if ! apply 32 > /run/sc-qa-product-tun-apply.json; then
+    python3 - <<'PYAPPLYFAIL'
+import json
+with open('/run/sc-qa-product-tun-apply.json') as f:
+    result=json.load(f)
+assert not result.get("ok"),result
+err=result.get("error") or {}
+print("PRODUCT_TUN_APPLY_REFUSED="+str(err.get("code","unknown"))+": "+str(err.get("message","unspecified")))
+PYAPPLYFAIL
+    return 1
+  fi
   python3 - <<'PYAPPLIED'
 import json,re
 with open('/run/sc-qa-product-tun-apply.json') as handle:r=json.load(handle)
