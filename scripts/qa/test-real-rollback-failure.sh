@@ -27,6 +27,7 @@ docker exec "$container" /bin/sh -c '
 
 previous_service_sha=$(docker exec "$container" sha256sum /etc/systemd/system/server-connect-activation-recover.service | cut -d' ' -f1)
 previous_timer_sha=$(docker exec "$container" sha256sum /etc/systemd/system/server-connect-activation-recover.timer | cut -d' ' -f1)
+previous_tun_sha=$(docker exec "$container" sha256sum /etc/systemd/system/server-connect-smart-tun.service | cut -d' ' -f1)
 previous_unit_sha=$(docker exec "$container" sha256sum /etc/systemd/system/server-connect.service | cut -d' ' -f1)
 [[ $(docker exec "$container" readlink /opt/server-connect/current) == "$previous_release" ]]
 
@@ -44,6 +45,7 @@ docker exec "$container" /bin/sh -c '
  grep -qx "Type=oneshot" server-connect.service
  grep -qx "ExecStartPost=/usr/bin/false" server-connect.service
  printf "\n# QA-only changed recovery service bytes (not a release)\n" >> server-connect-activation-recover.service
+ printf "\n# QA-only changed TUN service bytes (not a release)\n" >> server-connect-smart-tun.service
  sha256sum bin/server-connect bin/sing-box bin/libcronet.so \
    server-connect.service server-connect-activation-recover.service \
    server-connect-activation-recover.timer server-connect-smart-tun.service install.sh \
@@ -97,7 +99,7 @@ log="$scratch/update-real-restore-fault.stdout"
 err="$scratch/update-real-restore-fault.stderr"
 for required in \
   'candidate failed; attempting owned lifecycle rollback' \
-  'RECOVERY_REQUIRED: prior recovery service unit restoration failed' \
+  'RECOVERY_REQUIRED: prior managed server-connect-activation-recover.service unit restoration failed' \
   'RECOVERY_REQUIRED: prior service state could not be completely restored' \
   'RECOVERY_REQUIRED: exact previous unit backups retained:';do
   grep -F "$required" "$log" >/dev/null || {
@@ -117,9 +119,9 @@ echo 'RESTORE_FAILURE_OPERATION=install(previous recovery service unit -> read-o
 # service unit still differs from those bytes. This cannot pass based solely
 # on an EXIT-hook test double or an already-successful restoration.
 docker exec -i "$container" /bin/sh -s "$previous_service_sha" "$previous_timer_sha" \
- "$previous_unit_sha" "$previous_release" <<'VERIFY'
+ "$previous_tun_sha" "$previous_unit_sha" "$previous_release" <<'VERIFY'
 set -eu
-expect_service=$1 expect_timer=$2 expect_unit=$3 expect_release=$4
+expect_service=$1 expect_timer=$2 expect_tun=$3 expect_unit=$4 expect_release=$5
 set -- /opt/server-connect/.guard-backup.*
 [ "$#" -eq 1 ] && [ -d "$1" ]
 backup=$1
@@ -128,6 +130,8 @@ set -- /opt/server-connect/.unit-backup.*
 unit_backup=$1
 [ "$(sha256sum "$backup/server-connect-activation-recover.service" | cut -d' ' -f1)" = "$expect_service" ]
 [ "$(sha256sum "$backup/server-connect-activation-recover.timer" | cut -d' ' -f1)" = "$expect_timer" ]
+[ "$(sha256sum "$backup/server-connect-smart-tun.service" | cut -d' ' -f1)" = "$expect_tun" ]
+[ "$(sha256sum /etc/systemd/system/server-connect-smart-tun.service | cut -d' ' -f1)" = "$expect_tun" ]
 [ "$(sha256sum "$unit_backup" | cut -d' ' -f1)" = "$expect_unit" ]
 [ "$(readlink /opt/server-connect/current)" = "$expect_release" ]
 [ "$(sha256sum /etc/systemd/system/server-connect.service | cut -d' ' -f1)" = "$expect_unit" ]
@@ -135,6 +139,7 @@ unit_backup=$1
  /etc/systemd/system/server-connect-activation-recover.service
 printf 'REAL_ROLLBACK_BACKUP_SERVICE_SHA256=%s\n' "$expect_service"
 printf 'REAL_ROLLBACK_BACKUP_TIMER_SHA256=%s\n' "$expect_timer"
+printf 'REAL_ROLLBACK_BACKUP_TUN_UNIT_SHA256=%s\n' "$expect_tun"
 printf 'REAL_ROLLBACK_BACKUP_MAIN_UNIT_SHA256=%s\n' "$expect_unit"
 printf 'REAL_ROLLBACK_AFTER_FAILURE=previous_release:%s service:%s guard_unit:CONFLICT\n' \
  "$expect_release" "$(systemctl is-active server-connect.service || true)"
@@ -145,27 +150,29 @@ VERIFY
 # previous service, then clear only this scenario's verified obsolete backups.
 docker exec "$container" umount /etc/systemd/system/server-connect-activation-recover.service
 docker exec -i "$container" /bin/sh -s "$previous_service_sha" "$previous_timer_sha" \
- "$previous_unit_sha" "$previous_release" "$bad_release" <<'REPAIR'
+ "$previous_tun_sha" "$previous_unit_sha" "$previous_release" "$bad_release" <<'REPAIR'
 set -eu
-expect_service=$1 expect_timer=$2 expect_unit=$3 expect_release=$4 bad_release=$5
+expect_service=$1 expect_timer=$2 expect_tun=$3 expect_unit=$4 expect_release=$5 bad_release=$6
 set -- /opt/server-connect/.guard-backup.*
 [ "$#" -eq 1 ] && [ -d "$1" ]
 backup=$1
 set -- /opt/server-connect/.unit-backup.*
 [ "$#" -eq 1 ] && [ -f "$1" ]
 unit_backup=$1
-for kind in service timer;do
- name=server-connect-activation-recover.$kind
+for name in server-connect-activation-recover.service server-connect-activation-recover.timer server-connect-smart-tun.service;do
  install -m 0644 "$backup/$name" "/etc/systemd/system/$name"
  install -m 0644 "$backup/$name.sha256" "/opt/server-connect/$name.sha256"
 done
 [ "$(sha256sum /etc/systemd/system/server-connect-activation-recover.service | cut -d' ' -f1)" = "$expect_service" ]
 [ "$(sha256sum /etc/systemd/system/server-connect-activation-recover.timer | cut -d' ' -f1)" = "$expect_timer" ]
+[ "$(sha256sum /etc/systemd/system/server-connect-smart-tun.service | cut -d' ' -f1)" = "$expect_tun" ]
 [ "$(sha256sum /etc/systemd/system/server-connect.service | cut -d' ' -f1)" = "$expect_unit" ]
 [ "$(readlink /opt/server-connect/current)" = "$expect_release" ]
 systemctl daemon-reload
 systemctl is-active --quiet server-connect.service
 [ "$(systemctl show server-connect-activation-recover.timer -p ActiveState --value)" = inactive ]
+[ "$(systemctl show server-connect-smart-tun.service -p UnitFileState --value)" = static ]
+[ "$(systemctl show server-connect-smart-tun.service -p ActiveState --value)" = inactive ]
 /usr/local/bin/server-connect installer-check-service >/dev/null
 /usr/local/bin/server-connect installer-check-guard-clear >/dev/null
 # The failed candidate was created by THIS attempt and never became current.
