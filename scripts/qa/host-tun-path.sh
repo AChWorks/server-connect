@@ -723,11 +723,18 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, *args):
         pass
 
-server = ThreadingHTTPServer(("0.0.0.0", 19181), Handler)
+# Do the TLS handshake INSIDE each worker thread, not on the listening
+# socket's main accept() loop. A deliberately failed VPN/SNI handshake must
+# not stall or reset an unrelated Direct positive control. The real packet
+# route/source witnesses remain unchanged and still fail if Direct fails.
 ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
 ctx.load_cert_chain(certfile=sys.argv[1], keyfile=sys.argv[2])
-server.socket = ctx.wrap_socket(server.socket, server_side=True)
-server.serve_forever()
+class TLSOrigin(ThreadingHTTPServer):
+    def finish_request(self, request, client_address):
+        request.settimeout(3)
+        with ctx.wrap_socket(request, server_side=True) as secured:
+            super().finish_request(secured, client_address)
+TLSOrigin(("0.0.0.0", 19181), Handler).serve_forever()
 PYTLSSERVER
 tls_pid=$!
 
@@ -1300,7 +1307,14 @@ test "$(domestic_tls_direct_packets)" -eq "$domestic_tls_active" &&
 test "$(foreign_tls_direct_packets)" -eq "$foreign_tls_baseline" || {
   echo 'REAL_TUN_TLS_SNI_NO_DIRECT_ON_UPSTREAM_LOSS=FAIL (native VPN-only TLS leak)' >&2; exit 1;
 }
-tls_path child.only-exact.test 5.22.0.10 10.254.72.1 reply
+if ! tls_path child.only-exact.test 5.22.0.10 10.254.72.1 reply; then
+  echo 'REAL_TUN_TLS_DIRECT_AFTER_UPSTREAM_LOSS=FAIL (fresh Direct positive control)' >&2
+  echo "QA_TLS_PEER_ALIVE=$(kill -0 "$tls_pid" 2>/dev/null && echo yes || echo no)" >&2
+  # Failure-only diagnostic evidence from the isolated synthetic server.
+  # Keep the original failure and do not retry away a routing regression.
+  tail -n 20 /run/sc-qa-tun-tls.log >&2 || :
+  exit 1
+fi
 test "$(domestic_tls_direct_packets)" -gt "$domestic_tls_active" || {
   echo 'REAL_TUN_TLS_SNI_NO_DIRECT_ON_UPSTREAM_LOSS=FAIL (Direct negative control missing)' >&2; exit 1;
 }
