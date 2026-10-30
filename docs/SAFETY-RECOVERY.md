@@ -155,15 +155,45 @@ boot and ownership revalidation before publication. Stale concurrent results
 cannot revive a stopped or replacement operation.
 
 Health separates a device/source/mark-bound protected underlay witness from
-ordinary selected-path TCP, UDP and DNS wire probes. The latter use fresh
-nonces and independent peer-observed source evidence; Direct responses cannot
-satisfy VPN health. Each enabled address family has two destinations, so one
-failed site is not a total-path failure. The custom TCP witness proves that
-fixture's TCP delivery; it does not imply TLS/HTTPS health or foreign Internet
-reachability. DNS is a fresh bounded wire exchange, not a cached host resolver
-answer. DNS evidence is UDP transport with an IN/A question, including when
-the transport uses IPv6; it does not establish system-resolver/bootstrap or
-AAAA-answer behavior. The aggregate probe round is bounded to four seconds.
+ordinary selected-path TCP, UDP, DNS and authenticated HTTPS probes. The latter
+use fresh nonces and independent peer-observed source evidence; Direct responses
+cannot satisfy VPN health. Each enabled address family has two fixed fixture
+destinations. One failed destination is a partial-target result when another
+destination supplies every required protocol for that family. A nonce-valid
+wrong-source response remains a critical path mismatch even if another target
+succeeds. IPv4 rounds contain nine probes; explicitly enabled dual-stack rounds
+contain seventeen. All workers and their connections share a four-second round
+bound, with a 2.5-second per-probe deadline.
+
+HTTPS dials only the fixed literal target on TCP19224, verifies
+`scqa-health.example.test` with normal certificate chain, SAN/hostname, wall-time
+and server-auth checks, and uses only the exact synthetic QA root. It requests
+`/health/<fresh-nonce>` and requires HTTP/1.1 200 plus the exact nonce/source
+body. Bounded headers/body, redirects, malformed/truncated responses and stale
+replies cannot become success. There is no ambient proxy/resolver, configurable
+URL or system trust fallback. Per-target status keeps fixed safe failure classes
+and numeric HTTP status, without response bodies or private error text. This
+deliberately public QA trust and leaf key authenticate only the disconnected
+fixture identity; they do not authenticate a real provider or publisher. Only
+the public root is embedded; QA private keys are excluded from normal installed
+payloads. Ordinary TCP delivery alone is insufficient for HTTPS health.
+
+DNS is a fresh bounded wire exchange, not a cached host resolver answer. DNS
+evidence is UDP transport with an IN/A question, including when the transport
+uses IPv6; it does not establish system-resolver/bootstrap or AAAA-answer
+behavior. These fixed fixture witnesses do not establish foreign Internet
+reachability.
+
+New operations use nested supervision Version2; the outer version4 journal,
+existing intent and native ownership ledger are unchanged. A valid Version1
+record retains its exact accepted wire shape through inspection, durable stop
+and cleanup writes. The new executor treats a live Version1 operation as
+recovery-only: `legacy_reapply_required` precedes confirmation, new probes and
+lease renewal, and existing owned recovery determines Off or uncertainty.
+There is no live migration or promotion of old TCP-only evidence to HTTPS proof.
+Public receipts identify `health_evidence_version` and render unmeasured legacy
+HTTPS as NOT_RUN. Unknown, mixed or corrupt records remain fail-closed and
+retained for reconciliation.
 
 Defaults are a 15-second probe interval, 30-second startup grace, three failed
 rounds, at most three reconnect attempts for the entire operation and a

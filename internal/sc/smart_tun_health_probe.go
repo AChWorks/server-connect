@@ -3,8 +3,8 @@ package sc
 // These witnesses belong only to the fixed disconnected native TUN fixture.
 // They are ordinary unproxied, unmarked host-origin VPN requests. The peer
 // echoes a fresh nonce and the source it actually observed. That is useful
-// synthetic path evidence, not TLS authentication, geographic evidence or a
-// configurable Internet health checker. Callers must revalidate the complete
+// synthetic path evidence, not geographic evidence or a configurable Internet
+// health checker. Callers must revalidate the complete
 // operation/native identity before publishing a round measured without locks.
 
 import (
@@ -32,18 +32,21 @@ const (
 // IPv6 fields remain false; VPNHealthy considers only the requested families.
 // ElapsedMS is observed elapsed time, not a clamped deadline claim.
 type SmartTUNHealthEvidence struct {
-	UnderlayHealthy bool   `json:"underlay_healthy"`
-	VPNHealthy      bool   `json:"vpn_healthy"`
-	IPv4TCP         bool   `json:"ipv4_tcp"`
-	IPv4UDP         bool   `json:"ipv4_udp"`
-	IPv4DNS         bool   `json:"ipv4_dns"`
-	IPv6TCP         bool   `json:"ipv6_tcp"`
-	IPv6UDP         bool   `json:"ipv6_udp"`
-	IPv6DNS         bool   `json:"ipv6_dns"`
-	FailedTargets   int    `json:"failed_targets"`
-	ProbeCount      int    `json:"probe_count"`
-	ElapsedMS       int64  `json:"elapsed_ms"`
-	Reason          string `json:"reason"`
+	IPv4HTTPS       bool                   `json:"ipv4_https"`
+	IPv6HTTPS       bool                   `json:"ipv6_https"`
+	HTTPSResults    [4]SmartTUNHTTPSResult `json:"https_results"`
+	UnderlayHealthy bool                   `json:"underlay_healthy"`
+	VPNHealthy      bool                   `json:"vpn_healthy"`
+	IPv4TCP         bool                   `json:"ipv4_tcp"`
+	IPv4UDP         bool                   `json:"ipv4_udp"`
+	IPv4DNS         bool                   `json:"ipv4_dns"`
+	IPv6TCP         bool                   `json:"ipv6_tcp"`
+	IPv6UDP         bool                   `json:"ipv6_udp"`
+	IPv6DNS         bool                   `json:"ipv6_dns"`
+	FailedTargets   int                    `json:"failed_targets"`
+	ProbeCount      int                    `json:"probe_count"`
+	ElapsedMS       int64                  `json:"elapsed_ms"`
+	Reason          string                 `json:"reason"`
 }
 
 type smartTUNHealthProbe struct {
@@ -57,7 +60,7 @@ type smartTUNHealthProbe struct {
 
 type smartTUNHealthSample struct {
 	probe  smartTUNHealthProbe
-	result string
+	result SmartTUNHTTPSResult
 }
 
 func smartTUNHealthPlan(ipv6 bool) []smartTUNHealthProbe {
@@ -72,7 +75,7 @@ func smartTUNHealthPlan(ipv6 bool) []smartTUNHealthProbe {
 		if target >= 2 {
 			family = 6
 		}
-		for _, protocol := range []string{"tcp", "udp", "dns"} {
+		for _, protocol := range []string{"tcp", "udp", "dns", "https"} {
 			plan = append(plan, smartTUNHealthProbe{family: family, protocol: protocol,
 				target: target, address: address, expectedSource: address})
 		}
@@ -86,15 +89,17 @@ func probeSmartTUNHealth(parent context.Context, ipv6 bool) SmartTUNHealthEviden
 
 // The private runner seam tests aggregation and cancellation without requiring
 // native networking. The production caller has no externally supplied targets,
-// dialer, proxy, resolver or callback. At most 13 workers/connections exist and
+// dialer, proxy, resolver or callback. At most 17 workers/connections exist and
 // every one is joined before returning, including cancellation/error paths.
 func runSmartTUNHealthProbes(parent context.Context, ipv6 bool,
-	probe func(context.Context, smartTUNHealthProbe) string) SmartTUNHealthEvidence {
+	probe func(context.Context, smartTUNHealthProbe) SmartTUNHTTPSResult) SmartTUNHealthEvidence {
 	started := time.Now()
 	ctx, cancel := context.WithTimeout(parent, smartTUNHealthRoundTimeout)
 	defer cancel()
 	if ctx.Err() != nil {
-		return SmartTUNHealthEvidence{Reason: "round_canceled"}
+		result := smartTUNHealthNotRunEvidence()
+		result.Reason = "round_canceled"
+		return result
 	}
 	plan := smartTUNHealthPlan(ipv6)
 	results := make(chan smartTUNHealthSample, len(plan))
@@ -116,8 +121,8 @@ func runSmartTUNHealthProbes(parent context.Context, ipv6 bool,
 		evidence.VPNHealthy = false
 		critical := false
 		for _, sample := range samples {
-			if sample.result == "path_mismatch" || sample.probe.underlay &&
-				sample.result != "pass" && sample.result != "canceled" {
+			if sample.result.Result == "path_mismatch" || sample.probe.underlay &&
+				sample.result.Result != "pass" && sample.result.Result != "canceled" {
 				critical = true
 			}
 		}
@@ -129,20 +134,24 @@ func runSmartTUNHealthProbes(parent context.Context, ipv6 bool,
 }
 
 func summarizeSmartTUNHealth(ipv6 bool, samples []smartTUNHealthSample) SmartTUNHealthEvidence {
-	result := SmartTUNHealthEvidence{ProbeCount: len(samples)}
+	result := smartTUNHealthNotRunEvidence()
+	result.ProbeCount = len(samples)
 	failed := [4]bool{}
 	pathMismatch := false
 	for _, sample := range samples {
 		p := sample.probe
-		ok := sample.result == "pass"
+		ok := sample.result.Result == "pass" && (p.protocol != "https" || sample.result.StatusCode == 200)
 		if p.underlay {
 			result.UnderlayHealthy = ok
 			continue
 		}
+		if p.protocol == "https" && p.target >= 0 && p.target < len(result.HTTPSResults) {
+			result.HTTPSResults[p.target] = sample.result
+		}
 		if p.target >= 0 && p.target < len(failed) && !ok {
 			failed[p.target] = true
 		}
-		if sample.result == "path_mismatch" {
+		if sample.result.Result == "path_mismatch" {
 			pathMismatch = true
 		}
 		if !ok {
@@ -155,12 +164,16 @@ func summarizeSmartTUNHealth(ipv6 bool, samples []smartTUNHealthSample) SmartTUN
 			result.IPv4UDP = true
 		case p.family == 4 && p.protocol == "dns":
 			result.IPv4DNS = true
+		case p.family == 4 && p.protocol == "https":
+			result.IPv4HTTPS = true
 		case p.family == 6 && p.protocol == "tcp":
 			result.IPv6TCP = true
 		case p.family == 6 && p.protocol == "udp":
 			result.IPv6UDP = true
 		case p.family == 6 && p.protocol == "dns":
 			result.IPv6DNS = true
+		case p.family == 6 && p.protocol == "https":
+			result.IPv6HTTPS = true
 		}
 	}
 	for _, bad := range failed {
@@ -168,8 +181,8 @@ func summarizeSmartTUNHealth(ipv6 bool, samples []smartTUNHealthSample) SmartTUN
 			result.FailedTargets++
 		}
 	}
-	result.VPNHealthy = result.IPv4TCP && result.IPv4UDP && result.IPv4DNS &&
-		(!ipv6 || result.IPv6TCP && result.IPv6UDP && result.IPv6DNS) && !pathMismatch
+	result.VPNHealthy = result.IPv4TCP && result.IPv4UDP && result.IPv4DNS && result.IPv4HTTPS &&
+		(!ipv6 || result.IPv6TCP && result.IPv6UDP && result.IPv6DNS && result.IPv6HTTPS) && !pathMismatch
 	switch {
 	case pathMismatch:
 		result.Reason = "vpn_path_mismatch"
@@ -181,12 +194,16 @@ func summarizeSmartTUNHealth(ipv6 bool, samples []smartTUNHealthSample) SmartTUN
 		result.Reason = "vpn_ipv4_udp_failed"
 	case !result.IPv4DNS:
 		result.Reason = "vpn_ipv4_dns_failed"
+	case !result.IPv4HTTPS:
+		result.Reason = "vpn_ipv4_https_failed"
 	case ipv6 && !result.IPv6TCP:
 		result.Reason = "vpn_ipv6_tcp_failed"
 	case ipv6 && !result.IPv6UDP:
 		result.Reason = "vpn_ipv6_udp_failed"
 	case ipv6 && !result.IPv6DNS:
 		result.Reason = "vpn_ipv6_dns_failed"
+	case ipv6 && !result.IPv6HTTPS:
+		result.Reason = "vpn_ipv6_https_failed"
 	case result.FailedTargets > 0:
 		result.Reason = "healthy_partial_targets"
 	default:
@@ -195,14 +212,14 @@ func summarizeSmartTUNHealth(ipv6 bool, samples []smartTUNHealthSample) SmartTUN
 	return result
 }
 
-func probeSmartTUNHealthEndpoint(ctx context.Context, probe smartTUNHealthProbe) string {
+func probeSmartTUNHealthEndpoint(ctx context.Context, probe smartTUNHealthProbe) SmartTUNHTTPSResult {
 	// One failed target must finish before the aggregate round deadline, so
 	// a healthy independent target can still establish the protocol result.
 	ctx, cancel := context.WithTimeout(ctx, smartTUNHealthProbeTimeout)
 	defer cancel()
 	nonce := make([]byte, 16)
 	if _, err := rand.Read(nonce); err != nil {
-		return "nonce_unavailable"
+		return SmartTUNHTTPSResult{Result: "nonce_unavailable"}
 	}
 	port := 19220
 	network := "tcp"
@@ -211,6 +228,9 @@ func probeSmartTUNHealthEndpoint(ctx context.Context, probe smartTUNHealthProbe)
 	}
 	if probe.protocol == "dns" {
 		port = 19222
+	}
+	if probe.protocol == "https" {
+		port = smartTUNHealthHTTPSPort
 	}
 	network += strconv.Itoa(probe.family)
 	dialer := net.Dialer{}
@@ -223,12 +243,12 @@ func probeSmartTUNHealthEndpoint(ctx context.Context, probe smartTUNHealthProbe)
 	}
 	connection, err := dialer.DialContext(ctx, network, net.JoinHostPort(probe.address, strconv.Itoa(port)))
 	if err != nil {
-		return smartTUNHealthTransportFailure(ctx, err)
+		return SmartTUNHTTPSResult{Result: smartTUNHealthTransportFailure(ctx, err)}
 	}
 	return smartTUNHealthExchangeWithDeadline(ctx, connection, probe, nonce)
 }
 
-func smartTUNHealthExchangeWithDeadline(ctx context.Context, connection net.Conn, probe smartTUNHealthProbe, nonce []byte) string {
+func smartTUNHealthExchangeWithDeadline(ctx context.Context, connection net.Conn, probe smartTUNHealthProbe, nonce []byte) SmartTUNHTTPSResult {
 	defer connection.Close()
 	closed := make(chan struct{})
 	stopClose := context.AfterFunc(ctx, func() {
@@ -242,9 +262,12 @@ func smartTUNHealthExchangeWithDeadline(ctx context.Context, connection net.Conn
 	}()
 	deadline, ok := ctx.Deadline()
 	if !ok || connection.SetDeadline(deadline) != nil {
-		return "deadline_unavailable"
+		return SmartTUNHTTPSResult{Result: "deadline_unavailable"}
 	}
-	return exchangeSmartTUNHealth(ctx, connection, probe, nonce)
+	if probe.protocol == "https" {
+		return exchangeSmartTUNHTTPSHealth(ctx, connection, probe, nonce)
+	}
+	return SmartTUNHTTPSResult{Result: exchangeSmartTUNHealth(ctx, connection, probe, nonce)}
 }
 
 func smartTUNHealthUnderlayControl(_, _ string, raw syscall.RawConn) error {
@@ -303,6 +326,10 @@ func exchangeSmartTUNHealth(ctx context.Context, connection net.Conn, probe smar
 		}
 		return "invalid_response"
 	}
+	return smartTUNHealthReply(reply, probe, nonce)
+}
+
+func smartTUNHealthReply(reply []byte, probe smartTUNHealthProbe, nonce []byte) string {
 	expected := "SCHEALTH1 " + hex.EncodeToString(nonce) + " " + probe.expectedSource + "\n"
 	if string(reply) == expected {
 		return "pass"

@@ -38,6 +38,34 @@ bad_update_digest=$(sha256sum "$bad_update_bundle" | cut -d' ' -f1)
 }
 root=$(cd -- "$(dirname -- "$0")/../.." && pwd -P)
 cd "$root"
+# Fixture trust is shared with Go tests, but its deliberately public private
+# key must never enter any ordinary installable archive, including the binary.
+PYTHONDONTWRITEBYTECODE=1 python3 -B - "$bundle" "$update_bundle" "$bad_update_bundle" <<'PYTLSARCHIVE'
+import base64, pathlib, sys, tarfile
+key = pathlib.Path('internal/sc/testdata/smart-health-tls/qa-server-key.pem').read_bytes().strip()
+der = base64.b64decode(b''.join(line for line in key.splitlines() if not line.startswith(b'-----')), validate=True)
+assert key.startswith(b'-----BEGIN PRIVATE KEY-----') and len(der) > 100
+needles = (key, der)
+overlap = max(map(len, needles)) - 1
+fixture_names = {path.name for path in pathlib.Path('internal/sc/testdata/smart-health-tls').glob('*.pem')}
+for archive in sys.argv[1:]:
+    with tarfile.open(archive, 'r:gz') as source:
+        for member in source:
+            assert 'smart-health-tls' not in member.name and pathlib.PurePosixPath(member.name).name not in fixture_names, \
+                'QA TLS fixture entered installation payload'
+            if not member.isfile():
+                continue
+            with source.extractfile(member) as handle:
+                tail = b''
+                while True:
+                    block = handle.read(65536)
+                    if not block:
+                        break
+                    data = tail + block
+                    assert not any(needle in data for needle in needles), 'QA private key entered an installation payload'
+                    tail = data[-overlap:]
+print('SMART_HEALTH_QA_KEYS_EXCLUDED_FROM_INSTALL_ARCHIVES=PASS')
+PYTLSARCHIVE
 # Exercise the actual guest APT negative classifier with disposable fakes
 # before any privileged Docker work; this is not a substitute for real APT.
 bash scripts/qa/test-host-apt-only.sh
@@ -829,6 +857,29 @@ docker cp "$root/scripts/qa/host-supervised-product-tun.sh" "$container:/root/qa
 docker cp "$root/scripts/qa/supervised-product-tun.py" "$container:/root/qa-supervised-product-tun.py"
 docker cp "$root/scripts/qa/smart-health-responder.py" "$container:/root/qa-smart-health-responder.py"
 docker cp "$root/scripts/qa/smart-health-client.py" "$container:/root/qa-smart-health-client.py"
+# Source-only synthetic certificates are copied outside every installed bundle.
+docker exec "$container" test ! -e /root/qa-smart-health-tls
+docker cp "$root/internal/sc/testdata/smart-health-tls" "$container:/root/qa-smart-health-tls"
+tls_fixture_manifest="$scratch/smart-health-tls.sha256"
+(cd "$root/internal/sc/testdata/smart-health-tls" && sha256sum ./*.pem) >"$tls_fixture_manifest"
+docker exec -i -w /root/qa-smart-health-tls "$container" sha256sum -c - <"$tls_fixture_manifest"
+docker exec "$container" /usr/bin/python3 -I -B -c '
+import hashlib, json, os, pathlib, stat
+root = pathlib.Path("/root/qa-smart-health-tls")
+info = root.lstat()
+assert stat.S_ISDIR(info.st_mode) and info.st_uid == 0 and not info.st_mode & 0o022
+receipt = {"directory": [info.st_dev, info.st_ino, info.st_mode, info.st_uid], "files": {}}
+for path in root.iterdir():
+    info = path.lstat()
+    assert stat.S_ISREG(info.st_mode) and info.st_uid == 0 and info.st_nlink == 1 and not info.st_mode & 0o022
+    receipt["files"][path.name] = [info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_size,
+                                  hashlib.sha256(path.read_bytes()).hexdigest()]
+descriptor = os.open("/root/qa-smart-health-tls-receipt.json", os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+with os.fdopen(descriptor, "w") as handle:
+    json.dump(receipt, handle, sort_keys=True)
+    handle.flush()
+    os.fsync(handle.fileno())
+'
 docker cp "$root/scripts/qa/host-owned-tun-boundary.sh" "$container:/root/qa-owned-tun-boundary.sh"
 docker cp "$root/scripts/qa/tun-guard-unit-lab.sh" "$container:/root/qa-tun-guard-unit-lab.sh"
 # Independently check resources omitted from the standard route/rule/link
@@ -1031,12 +1082,17 @@ for marker in \
   'DIRECT_CONTROLS' 'OFF_DIRECT_TCP_UDP_DNS' 'FRESH_SSH_SINGLE_USE_AND_NEGATIVES' \
   'ACTIVE_UPDATE_UNINSTALL_REFUSED' 'DISJOINT_FOREIGN_OWNER_PRESERVED' 'SAVED_REAPPLY' \
   'CONFIRMED_BEYOND_ACTIVATION_DEADLINE' 'ONE_TARGET_FALSE_ALARM_REJECTED' \
+  'HTTPS_AUTHENTICATED_DIRECT_CONTROLS' 'HTTPS_AUTHENTICATED_SELECTED_PATH' \
+  'HTTPS_TLS_HTTP_FAILURE_CLASSES' 'HTTPS_ONE_DESTINATION_PARTIAL_TOLERANCE' \
+  'HTTPS_WRONG_SOURCE_CRITICAL_OFF' 'HTTPS_ONLY_RECONNECT_EXHAUSTION_AND_SAVED_STATE' \
+  'OFF_DIRECT_AUTHENTICATED_HTTPS' \
   'DNS_FAILURE_AND_TRANSIENT_RECOVERY' 'LIVE_CORE_UPSTREAM_FAILURE_NO_DIRECT_LEAK' \
   'FINITE_EXHAUSTION_FLAPPING_AND_SAVED_STATE' 'EXPIRED_OFF_AND_REPLAY_REJECTED' \
   'PROTECTED_UNDERLAY_IMMEDIATE_OFF_NO_RETRY' \
   'SUPERVISOR_DEAD' 'SUPERVISOR_FAILED' 'SUPERVISOR_HUNG' \
   'SUPERVISOR_MASKED' 'SUPERVISOR_MISSING' \
   'CONFIRM_PUBLICATION_CONTROLLER_DEATH' 'HEALTH_PUBLICATION_CONTROLLER_DEATH' \
+  'LEGACY_V1_REAPPLY_REQUIRED_OWNED_OFF' 'LEGACY_V1_INTERRUPTED_DURABLE_STOP' \
   'COMPLETE_EXPERIMENTAL_ONLY'; do
   grep -Fx "SUPERVISED_TUN_${marker}=PASS" "$supervised_log" >/dev/null
 done
@@ -1048,6 +1104,8 @@ supervised_v6_log="$scratch/real-tun-product-supervised-ipv6.log"
 docker exec -e SC_QA_TUN_PRODUCT_LAB=yes -e SC_QA_TUN_SUPERVISED=yes -e SC_QA_TUN_IPV6=yes \
   "$container" /bin/sh /root/qa-host-tun-path.sh | tee "$supervised_v6_log"
 for marker in 'DIRECT_CONTROLS' 'OFF_DIRECT_TCP_UDP_DNS' 'CONFIRMED_BEYOND_ACTIVATION_DEADLINE' \
+  'HTTPS_AUTHENTICATED_DIRECT_CONTROLS' 'HTTPS_AUTHENTICATED_SELECTED_PATH' \
+  'OFF_DIRECT_AUTHENTICATED_HTTPS' 'DUALSTACK_AUTHENTICATED_HTTPS' \
   'DUALSTACK_SELECTED_TCP_UDP_DNS' 'COMPLETE_EXPERIMENTAL_ONLY'; do
   grep -Fx "SUPERVISED_TUN_${marker}=PASS" "$supervised_v6_log" >/dev/null
 done
@@ -1154,6 +1212,45 @@ assert_tun_native_cleanup real-tun-injected-cleanup-recovery
 echo 'REAL_TUN_CLEANUP_FAILURE_REJECTED=PASS (guest cleanup failure != expected TUN rejection)'
 # Remove exactly the QA helpers copied for the completed TUN trials. This
 # also closes the earlier WordPress intermediate guest-helper cleanup gap.
+docker exec -i -w /root/qa-smart-health-tls "$container" sha256sum -c - <"$tls_fixture_manifest"
+docker exec "$container" /usr/bin/python3 -I -B -c '
+import hashlib, json, os, pathlib, stat
+root = pathlib.Path("/root/qa-smart-health-tls")
+names = {"qa-root.pem", "qa-server.pem", "qa-server-key.pem", "qa-wrong-name.pem", "qa-wrong-trust.pem",
+         "qa-wrong-root.pem", "qa-expired.pem", "qa-client-auth-only.pem"}
+receipt_path = pathlib.Path("/root/qa-smart-health-tls-receipt.json")
+descriptor = os.open(receipt_path, os.O_RDONLY | os.O_NOFOLLOW)
+with os.fdopen(descriptor, "rb") as handle:
+    identity = os.fstat(handle.fileno())
+    assert stat.S_ISREG(identity.st_mode) and identity.st_uid == 0 and stat.S_IMODE(identity.st_mode) == 0o600
+    assert identity.st_nlink == 1 and 0 < identity.st_size <= 8192
+    raw = handle.read(8193)
+    assert len(raw) == identity.st_size
+receipt = json.loads(raw)
+info = root.lstat()
+assert [info.st_dev, info.st_ino, info.st_mode, info.st_uid] == receipt["directory"] and stat.S_ISDIR(info.st_mode)
+assert {path.name for path in root.iterdir()} == names
+assert set(receipt["files"]) == names
+for name in names:
+    path = root / name
+    info = path.lstat()
+    assert stat.S_ISREG(info.st_mode) and info.st_uid == 0 and info.st_nlink == 1
+    assert [info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_size,
+            hashlib.sha256(path.read_bytes()).hexdigest()] == receipt["files"][name], "TLS fixture ownership changed"
+for name in names:
+    path = root / name
+    info = path.lstat()
+    assert [info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_size,
+            hashlib.sha256(path.read_bytes()).hexdigest()] == receipt["files"][name]
+    path.unlink()
+root.rmdir()
+assert not root.exists()
+current = receipt_path.lstat()
+assert (current.st_dev, current.st_ino) == (identity.st_dev, identity.st_ino) and receipt_path.read_bytes() == raw
+receipt_path.unlink()
+assert not receipt_path.exists()
+'
+echo 'SMART_HEALTH_QA_TLS_FIXTURE_EXACT_CLEANUP=PASS'
 docker exec "$container" /bin/rm -f /root/qa-tun-config-qa /root/qa-host-tun-path.sh \
   /root/qa-tun-guard-unit-lab.sh /root/qa-product-tun-trial.sh /root/qa-tun-sni-client.py /root/qa-tun-native-apps.py \
   /root/qa-owned-tun-boundary.sh \

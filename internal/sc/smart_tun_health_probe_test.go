@@ -16,9 +16,9 @@ import (
 func TestSmartTUNHealthFixedPlanAndEvidence(t *testing.T) {
 	for _, dual := range []bool{false, true} {
 		plan := smartTUNHealthPlan(dual)
-		count := 7
+		count := 9
 		if dual {
-			count = 13
+			count = 17
 		}
 		if len(plan) != count || !plan[0].underlay || plan[0].address != "10.254.72.2" ||
 			plan[0].expectedSource != "10.254.72.1" {
@@ -32,11 +32,11 @@ func TestSmartTUNHealthFixedPlanAndEvidence(t *testing.T) {
 			}
 			seen[key] = true
 		}
-		result := runSmartTUNHealthProbes(context.Background(), dual,
+		result := runSmartTUNHealthTestProbes(context.Background(), dual,
 			func(context.Context, smartTUNHealthProbe) string { return "pass" })
 		if !result.VPNHealthy || !result.UnderlayHealthy || result.ProbeCount != count ||
 			result.Reason != "healthy" || result.FailedTargets != 0 || result.IPv6TCP != dual ||
-			result.IPv6UDP != dual || result.IPv6DNS != dual {
+			result.IPv6UDP != dual || result.IPv6DNS != dual || !result.IPv4HTTPS || result.IPv6HTTPS != dual {
 			t.Fatalf("positive bounded round invalid: %+v", result)
 		}
 		encoded, err := json.Marshal(result)
@@ -44,11 +44,11 @@ func TestSmartTUNHealthFixedPlanAndEvidence(t *testing.T) {
 			t.Fatal(err)
 		}
 		var fields map[string]json.RawMessage
-		if err := json.Unmarshal(encoded, &fields); err != nil || len(fields) != 12 {
+		if err := json.Unmarshal(encoded, &fields); err != nil || len(fields) != 15 {
 			t.Fatalf("journal evidence lost exact field set: %s %v", encoded, err)
 		}
 		for _, name := range []string{"underlay_healthy", "vpn_healthy", "ipv4_tcp", "ipv4_udp", "ipv4_dns",
-			"ipv6_tcp", "ipv6_udp", "ipv6_dns", "failed_targets", "probe_count", "elapsed_ms", "reason"} {
+			"ipv6_tcp", "ipv6_udp", "ipv6_dns", "ipv4_https", "ipv6_https", "https_results", "failed_targets", "probe_count", "elapsed_ms", "reason"} {
 			if _, ok := fields[name]; !ok {
 				t.Fatalf("required evidence field absent: %s", name)
 			}
@@ -114,7 +114,7 @@ func TestSmartTUNHealthRequiresEachProtocolButToleratesOneFailedTarget(t *testin
 			}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			result := runSmartTUNHealthProbes(context.Background(), tc.dual,
+			result := runSmartTUNHealthTestProbes(context.Background(), tc.dual,
 				func(_ context.Context, p smartTUNHealthProbe) string { return tc.result(p) })
 			if result.Reason != tc.reason || result.VPNHealthy != tc.vpn || result.UnderlayHealthy != tc.underlay ||
 				result.FailedTargets != tc.failed {
@@ -127,11 +127,11 @@ func TestSmartTUNHealthRequiresEachProtocolButToleratesOneFailedTarget(t *testin
 func TestSmartTUNHealthRoundCancellationJoinsEveryProbe(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	entered := make(chan struct{}, 13)
+	entered := make(chan struct{}, 17)
 	var completed atomic.Int32
 	finished := make(chan SmartTUNHealthEvidence, 1)
 	go func() {
-		finished <- runSmartTUNHealthProbes(ctx, true,
+		finished <- runSmartTUNHealthTestProbes(ctx, true,
 			func(ctx context.Context, _ smartTUNHealthProbe) string {
 				entered <- struct{}{}
 				<-ctx.Done()
@@ -139,8 +139,8 @@ func TestSmartTUNHealthRoundCancellationJoinsEveryProbe(t *testing.T) {
 				return "canceled"
 			})
 	}()
-	// All 13 must start before any finishes: no sequential 13*timeout chain.
-	for range 13 {
+	// All 17 must start before any finishes: no sequential 17*timeout chain.
+	for range 17 {
 		select {
 		case <-entered:
 		case <-time.After(time.Second):
@@ -150,14 +150,14 @@ func TestSmartTUNHealthRoundCancellationJoinsEveryProbe(t *testing.T) {
 	cancel()
 	select {
 	case result := <-finished:
-		if completed.Load() != 13 || result.VPNHealthy || result.Reason != "round_canceled" || result.ProbeCount != 13 {
+		if completed.Load() != 17 || result.VPNHealthy || result.Reason != "round_canceled" || result.ProbeCount != 17 {
 			t.Fatalf("cancellation leaked pending workers or passed: %+v completed=%d", result, completed.Load())
 		}
 	case <-time.After(time.Second):
 		t.Fatal("cancellation did not bound whole round")
 	}
 	called := false
-	result := runSmartTUNHealthProbes(ctx, false, func(context.Context, smartTUNHealthProbe) string {
+	result := runSmartTUNHealthTestProbes(ctx, false, func(context.Context, smartTUNHealthProbe) string {
 		called = true
 		return "pass"
 	})
@@ -173,7 +173,7 @@ func TestSmartTUNHealthCanceledRoundRetainsObservedCriticalFailure(t *testing.T)
 	for _, underlay := range []bool{false, true} {
 		ctx, cancel := context.WithCancel(context.Background())
 		observed := make(chan struct{})
-		result := runSmartTUNHealthProbes(ctx, false, func(_ context.Context, p smartTUNHealthProbe) string {
+		result := runSmartTUNHealthTestProbes(ctx, false, func(_ context.Context, p smartTUNHealthProbe) string {
 			if underlay && p.underlay || !underlay && p.target == 0 && p.protocol == "tcp" {
 				close(observed)
 				return "path_mismatch"
@@ -189,7 +189,7 @@ func TestSmartTUNHealthCanceledRoundRetainsObservedCriticalFailure(t *testing.T)
 		if underlay {
 			want = "protected_underlay_failed"
 		}
-		if result.VPNHealthy || result.Reason != want {
+		if result.VPNHealthy || result.Reason != want || !validSmartTUNHTTPSEvidence(result, false) {
 			t.Fatalf("cancellation hid observed critical failure: %+v want=%s", result, want)
 		}
 	}
@@ -221,7 +221,7 @@ func healthTestExchange(t *testing.T, protocol string, respond func([]byte, []by
 	case <-time.After(time.Second):
 		t.Fatal("probe did not close the bounded connection")
 	}
-	return result
+	return result.Result
 }
 
 func TestSmartTUNHealthTCPAndUDPRequireFreshExactPeerSource(t *testing.T) {
@@ -297,7 +297,7 @@ func TestSmartTUNHealthPartialTCPDoesNotOutliveContext(t *testing.T) {
 	result := make(chan string, 1)
 	go func() {
 		result <- smartTUNHealthExchangeWithDeadline(bounded, client,
-			smartTUNHealthProbe{protocol: "tcp", expectedSource: "8.8.8.8"}, nonce)
+			smartTUNHealthProbe{protocol: "tcp", expectedSource: "8.8.8.8"}, nonce).Result
 	}()
 	select {
 	case <-ready:
@@ -352,7 +352,19 @@ func TestSmartTUNHealthExchangeUsesActualLoopbackSocketAndIgnoresProxyEnvironmen
 	}
 	result := smartTUNHealthExchangeWithDeadline(ctx, connection,
 		smartTUNHealthProbe{protocol: "tcp", expectedSource: "127.0.0.1"}, bytes.Repeat([]byte{9}, 16))
-	if err := <-done; err != nil || result != "pass" {
-		t.Fatalf("real source-witness exchange failed: result=%s err=%v", result, err)
+	if err := <-done; err != nil || result.Result != "pass" {
+		t.Fatalf("real source-witness exchange failed: result=%+v err=%v", result, err)
 	}
+}
+
+// Existing protocol fixtures use safe strings; this adapter adds the parsed
+// status that a real HTTPS response supplies, while keeping those cases focused.
+func runSmartTUNHealthTestProbes(ctx context.Context, dual bool, probe func(context.Context, smartTUNHealthProbe) string) SmartTUNHealthEvidence {
+	return runSmartTUNHealthProbes(ctx, dual, func(ctx context.Context, p smartTUNHealthProbe) SmartTUNHTTPSResult {
+		result := SmartTUNHTTPSResult{Result: probe(ctx, p)}
+		if p.protocol == "https" && (result.Result == "pass" || result.Result == "invalid_response" || result.Result == "path_mismatch") {
+			result.StatusCode = 200
+		}
+		return result
+	})
 }

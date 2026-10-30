@@ -83,6 +83,7 @@ type SmartTUNTrialReceipt struct {
 	ReconnectAttempts            int                     `json:"reconnect_attempts,omitempty"`
 	RecoveryDeadlineUptimeMS     int64                   `json:"recovery_deadline_uptime_ms,omitempty"`
 	HealthReason                 string                  `json:"health_reason,omitempty"`
+	HealthEvidenceVersion        int                     `json:"health_evidence_version,omitempty"`
 	HealthEvidence               *SmartTUNHealthEvidence `json:"health_evidence,omitempty"`
 }
 
@@ -99,7 +100,18 @@ func smartTUNReceipt(record smartTUNTrialJournal, scheduled, recovered bool) Sma
 		receipt.HealthRound, receipt.HealthLastUptimeMS, receipt.HealthNextUptimeMS = s.Rounds, s.LastProbeMS, s.NextProbeMS
 		receipt.HealthFailures, receipt.ReconnectAttempts = s.Failures, s.Attempts
 		receipt.RecoveryDeadlineUptimeMS, receipt.HealthReason = s.RecoveryDeadlineMS, s.Reason
+		receipt.HealthEvidenceVersion = s.Version
 		evidence := s.Evidence
+		if s.Version == 1 || s.Rounds == 0 {
+			evidence.HTTPSResults = smartTUNHealthNotRunEvidence().HTTPSResults
+		}
+		if s.Version == 1 {
+			// Historical TCP proof remains identified as Version1. It cannot
+			// claim HTTPS execution or current supervised healthy authority.
+			if record.Phase == "trial_pending" {
+				receipt.SupervisionState, receipt.HealthReason = "reapply_required", "legacy_reapply_required"
+			}
+		}
 		receipt.HealthEvidence = &evidence
 	}
 	return receipt
@@ -845,7 +857,7 @@ func (m *Manager) beginSmartTUNTrial(opts SmartTUNCandidateOptions, managementPe
 				return err
 			}
 			record.IntentType = smartTUNSupervisedIntent
-			record.Supervised = &smartTUNSupervision{Version: 1, Generation: 1, State: "initializing", Options: *health, Roles: roles, HeartbeatMS: nowMS, LeaseDeadlineMS: nowMS + smartTUNHealthLeaseMS, ReconnectStage: "none"}
+			record.Supervised = &smartTUNSupervision{Version: smartTUNSupervisionVersion, Generation: 1, State: "initializing", Options: *health, Roles: roles, HeartbeatMS: nowMS, LeaseDeadlineMS: nowMS + smartTUNHealthLeaseMS, ReconnectStage: "none"}
 		}
 		if err := validateSmartTUNTrial(record); err != nil {
 			return err
@@ -1024,6 +1036,7 @@ func smartTUNRecoveryReceipt(result SmartTUNTrialReceipt) TrialReceipt {
 		HealthReason: result.HealthReason, HealthRound: result.HealthRound, HealthLastUptimeMS: result.HealthLastUptimeMS,
 		HealthFailures: result.HealthFailures, ReconnectAttempts: result.ReconnectAttempts,
 		RecoveryDeadlineUptimeMS: result.RecoveryDeadlineUptimeMS, HealthEvidence: result.HealthEvidence,
+		HealthEvidenceVersion: result.HealthEvidenceVersion,
 	}
 }
 
