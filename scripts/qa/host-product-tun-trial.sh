@@ -379,6 +379,12 @@ PYRESOLVED
   systemctl unmask --runtime server-connect-activation-recover.service
   test ! -e /run/systemd/system/server-connect-activation-recover.service
   test ! -L /run/systemd/system/server-connect-activation-recover.service
+  # The timer may have recorded a failed oneshot while its runtime name
+  # was conflicted. Restore and actually exercise the original installed
+  # executor before permitting the next unrelated guest-only operation.
+  systemctl reset-failed server-connect-activation-recover.service
+  systemctl start server-connect-activation-recover.service
+  test "$(systemctl show server-connect-activation-recover.service -p Result --value)" = success
   systemctl is-active --quiet server-connect-activation-recover.timer
   clear_recovered "$op"
   rm -f /run/sc-qa-product-tun-recover.json
