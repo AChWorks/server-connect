@@ -298,6 +298,10 @@ PYOWNEDCONFIG
   owned_tun_intent=yes
   ip tuntap add dev sctunqa0 mode tun vnet_hdr
   owned_tun_index=$(cat /sys/class/net/sctunqa0/ifindex)
+  # Core attachment raises carrier and can trigger kernel link-local IPv6
+  # generation later than the initial UP. Freeze address generation before
+  # UP so the complete manager-owned address/dependency receipt is stable.
+  ip link set dev sctunqa0 addrgenmode none
   ip link set dev sctunqa0 alias scqa-owned-boundary mtu 1400 up
   ip -4 addr add 172.31.99.1/30 dev sctunqa0
   ip -6 addr add fd73:99::1/64 dev sctunqa0 nodad
