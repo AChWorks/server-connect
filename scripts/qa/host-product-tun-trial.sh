@@ -240,7 +240,25 @@ PYSTATUS
   [ "$killed" = 137 ] || {
     echo "Product TUN controller did not die after journal: $killed" >&2;return 1
   }
-  op=$(pending_receipt)
+  # No credential and no systemd TUN start: the independent executor may
+  # already have reconciled the journal by the time this shell inspects it.
+  # A *fresh* trial_recovered revision 2 is a valid (safer) observation;
+  # requiring the intermediate pending state would turn prompt rollback
+  # into a false failure. The exact operation ID, verified kernel baseline
+  # and independent systemd completion are still checked below.
+  op=$("$sc" --json smart-tun-trial-status | python3 -c '
+import json,sys,re
+r=json.load(sys.stdin)
+assert r["ok"],r
+d=r["data"]
+assert d["experiment_only"] and not d["activation_ready"] and not d["vpn_verified"],d
+assert re.fullmatch("[0-9a-f]{32}",d["operation_id"]),d
+if d["phase"] == "trial_pending":
+    assert d["revision"]==1 and d["guard_scheduled"] and not d["recovery_verified"],d
+else:
+    assert d["phase"]=="trial_recovered" and d["revision"]==2,d
+    assert not d["guard_scheduled"] and d["recovery_verified"],d
+print(d["operation_id"])')
   [ ! -e /var/lib/server-connect/smart-tun-trial.json ]
   [ "$(systemctl show server-connect-smart-tun.service -p ActiveState --value)" = inactive ]
   require_recovered "$op"
