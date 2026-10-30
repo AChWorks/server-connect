@@ -617,6 +617,9 @@ func (m *Manager) beginGuardedTrial(operationID string, revision uint64, ttlSeco
 	if !journalHex32.MatchString(operationID) || revision != 1 || ttlSeconds < 4 || ttlSeconds > 600 {
 		return TrialReceipt{}, Fault("invalid_arguments", "exact staged revision and trial deadline (4-600s) required")
 	}
+	if err := nativeTrialApplyPlatform(); err != nil {
+		return TrialReceipt{}, err
+	}
 	if err := trialDisposableContext(); err != nil {
 		return TrialReceipt{}, err
 	}

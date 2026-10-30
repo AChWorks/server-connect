@@ -726,6 +726,9 @@ func (m *Manager) beginSmartTUNTrial(opts SmartTUNCandidateOptions, managementPe
 		deadlineSeconds < 4 || deadlineSeconds > 600 {
 		return SmartTUNTrialReceipt{}, Fault("trial_unsupported", "installed paths and deadline 4-600s required")
 	}
+	if err := nativeTrialApplyPlatform(); err != nil {
+		return SmartTUNTrialReceipt{}, err
+	}
 	if !smartTUNTrialFixturePolicySupported(opts) {
 		return SmartTUNTrialReceipt{}, Fault("trial_unsupported", "only the exact disposable IPv4 or dual-stack TUN fixtures are supported")
 	}

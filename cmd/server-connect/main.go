@@ -160,6 +160,15 @@ func run(j bool, m *sc.Manager, args []string) int {
 		args = rest
 	}
 	switch name {
+	case "installer-check-target":
+		opts := flag.NewFlagSet(name, flag.ContinueOnError)
+		opts.SetOutput(io.Discard)
+		manifest := opts.String("manifest", "", "verified local bundle manifest")
+		if err := opts.Parse(args); err != nil || len(opts.Args()) != 0 || *manifest == "" || os.Geteuid() != 0 {
+			return output(j, nil, sc.Fault("invalid_arguments", "installer-only target check requires --manifest FILE"))
+		}
+		report, err := sc.VerifyInstallerTarget(*manifest)
+		return output(j, report, err)
 	case "installer-check-guard-clear":
 		if len(args) != 0 || os.Geteuid() != 0 {
 			return output(j, nil, sc.Fault("invalid_arguments", "installer-only command"))
