@@ -269,6 +269,164 @@ class ExecutorBookkeepingTests(unittest.TestCase):
                     self.assertEqual(fake.resets, [])
 
 
+class FakeHealthProcess:
+    ARGV = b"/opt/server-connect/current/bin/server-connect\0--json\0smart-tun-trial-health\0"
+
+    def __init__(self, modes):
+        self.modes = modes
+        self.pid = 41
+        self.descriptor = None
+        self.opened, self.closed = [], []
+        self.dispatch_attempts, self.delivered = [], []
+        self.bound_pids = {}
+        self.elapsed, self.available_after = 0, None
+        self.delivery_times = []
+        self.output = io.StringIO()
+
+    def show(self, unit, prop):
+        assert (unit, prop) == (driver.HEALTH, "MainPID")
+        if (self.descriptor is None and self.available_after is not None and
+                self.elapsed != 5 and self.elapsed < self.available_after):
+            return "0"
+        if self.descriptor is not None:
+            self.unit_reads += 1
+            if self.mode == "pid_churn" or (self.mode == "pid_change_at_dispatch" and self.unit_reads == 2):
+                self.pid += 1
+        return str(self.pid)
+
+    def open(self, pid):
+        assert pid == self.pid and self.descriptor is None
+        self.mode = self.modes[min(len(self.opened), len(self.modes) - 1)]
+        self.descriptor = 100 + len(self.opened)
+        self.bound_pids[self.descriptor] = pid
+        self.opened.append(self.descriptor)
+        self.image_reads = self.argv_reads = self.unit_reads = 0
+        return self.descriptor
+
+    def stat(self, path):
+        if path == "/opt/server-connect/current/bin/server-connect":
+            return argparse.Namespace(st_dev=7, st_ino=41)
+        assert path == f"/proc/{self.bound_pids[self.descriptor]}/exe"
+        if self.mode == "disappears":
+            raise ProcessLookupError("early short invocation has already exited")
+        self.image_reads += 1
+        changed = ((self.mode == "exec_change" and self.image_reads >= 3) or
+                   (self.mode == "exec_change_during_argv" and self.image_reads >= 2))
+        inode = 9 if self.mode in ("starting", "foreign") or changed else 41
+        return argparse.Namespace(st_dev=7, st_ino=inode)
+
+    def path(self, path):
+        assert path == f"/proc/{self.bound_pids[self.descriptor]}/cmdline"
+        return argparse.Namespace(read_bytes=self.argv)
+
+    def argv(self):
+        self.argv_reads += 1
+        if self.mode == "wrong_argv" or (self.mode == "argv_change" and self.argv_reads >= 2):
+            return self.ARGV + b"unexpected-extra-argument\0"
+        return self.ARGV
+
+    def send(self, descriptor, requested_signal):
+        assert descriptor == self.descriptor
+        self.dispatch_attempts.append((descriptor, requested_signal))
+        if self.mode == "exit_at_dispatch":
+            # The unit acquires a replacement, but the opened fd still refers
+            # to the exited process. Never fall back to signalling a PID.
+            self.pid += 1
+            raise ProcessLookupError("pidfd target exited before dispatch")
+        self.delivered.append((descriptor, requested_signal))
+        self.delivery_times.append(self.elapsed)
+
+    def close(self, descriptor):
+        assert descriptor == self.descriptor
+        self.closed.append(descriptor)
+        self.descriptor = None
+
+
+class ExecutorSignalTests(unittest.TestCase):
+    def exercise(self, fake, requested_signal):
+        fixture = ForeignCleanupTests.new_fixture()
+        fake_os = argparse.Namespace(pidfd_open=fake.open, stat=fake.stat, close=fake.close)
+        fake_signal = argparse.Namespace(SIGKILL=driver.signal.SIGKILL, SIGSTOP=driver.signal.SIGSTOP,
+                                         pidfd_send_signal=fake.send)
+        ticks = itertools.count()
+
+        def monotonic():
+            fake.elapsed = next(ticks)
+            return fake.elapsed
+
+        with patch.object(driver, "os", fake_os), patch.object(driver, "signal", fake_signal), \
+                patch.object(driver, "Path", side_effect=fake.path), \
+                patch.object(fixture, "show", side_effect=fake.show), \
+                patch.object(driver.time, "monotonic", side_effect=monotonic), \
+                patch.object(driver.time, "sleep"), contextlib.redirect_stdout(fake.output):
+            try:
+                return fixture.wait_for_health_executor(requested_signal)
+            finally:
+                self.assertEqual(fake.closed, fake.opened, "a process descriptor leaked")
+
+    def test_transitional_image_waits_for_correct_exec_before_signal(self):
+        for requested_signal in (driver.signal.SIGKILL, driver.signal.SIGSTOP):
+            with self.subTest(signal=requested_signal):
+                fake = FakeHealthProcess(["starting", "correct"])
+                self.assertTrue(self.exercise(fake, requested_signal))
+                self.assertEqual(len(fake.opened), 2)
+                self.assertEqual(fake.delivered, [(fake.opened[1], requested_signal)])
+
+    def test_disappeared_early_tick_allows_authenticated_executor_after_eight_seconds(self):
+        fake = FakeHealthProcess(["disappears", "correct"])
+        fake.available_after = 10
+        self.assertTrue(self.exercise(fake, driver.signal.SIGSTOP))
+        self.assertEqual(len(fake.opened), 2)
+        self.assertEqual(fake.delivered, [(fake.opened[1], driver.signal.SIGSTOP)])
+        self.assertEqual(fake.delivery_times, [10])
+        self.assertGreater(fake.delivery_times[0], 8)
+        self.assertLess(fake.delivery_times[0], 15)
+        self.assertEqual(fake.output.getvalue(), "")
+
+    def test_persistent_foreign_image_or_extra_argv_times_out_without_signal(self):
+        for mode in ("foreign", "wrong_argv"):
+            with self.subTest(mode=mode):
+                fake = FakeHealthProcess([mode])
+                with self.assertRaisesRegex(AssertionError, "timed out.*authenticated health executor"):
+                    self.exercise(fake, driver.signal.SIGKILL)
+                self.assertEqual(fake.elapsed, 15)
+                self.assertGreater(len(fake.opened), 1)
+                self.assertEqual(fake.dispatch_attempts, [])
+                output = fake.output.getvalue()
+                prefix = "SUPERVISED_TUN_EXECUTOR_AUTH_TIMEOUT="
+                self.assertTrue(output.startswith(prefix))
+                observation = json.loads(output[len(prefix):])
+                self.assertEqual(set(observation), {"pid", "readiness"})
+                self.assertEqual(observation["pid"], 41)
+                self.assertEqual(observation["readiness"],
+                                 "executable_mismatch" if mode == "foreign" else "argv_mismatch")
+                self.assertNotIn("unexpected-extra-argument", output)
+                self.assertLess(len(output), 256)
+
+    def test_unit_pid_churn_never_signals_the_old_executor(self):
+        fake = FakeHealthProcess(["pid_churn"])
+        with self.assertRaisesRegex(AssertionError, "timed out.*authenticated health executor"):
+            self.exercise(fake, driver.signal.SIGSTOP)
+        self.assertGreater(len(set(fake.bound_pids.values())), 1)
+        self.assertEqual(fake.dispatch_attempts, [])
+
+    def test_dispatch_recheck_rejects_changed_image_argv_or_unit_pid(self):
+        for mode in ("exec_change", "exec_change_during_argv", "argv_change", "pid_change_at_dispatch"):
+            with self.subTest(mode=mode):
+                fake = FakeHealthProcess([mode])
+                with self.assertRaisesRegex(AssertionError, "timed out.*authenticated health executor"):
+                    self.exercise(fake, driver.signal.SIGKILL)
+                self.assertEqual(fake.dispatch_attempts, [])
+
+    def test_exit_at_dispatch_never_signals_the_replacement(self):
+        fake = FakeHealthProcess(["exit_at_dispatch"])
+        with self.assertRaisesRegex(AssertionError, "timed out.*authenticated health executor"):
+            self.exercise(fake, driver.signal.SIGKILL)
+        self.assertGreater(len(set(fake.bound_pids.values())), 1)
+        self.assertEqual(fake.dispatch_attempts, [(fd, driver.signal.SIGKILL) for fd in fake.opened])
+        self.assertEqual(fake.delivered, [])
+
+
 class FailureReportingTests(unittest.TestCase):
     def run_main(self, original):
         fixture = Mock(started=time.monotonic())
@@ -300,3 +458,4 @@ if __name__ == "__main__":
         raise SystemExit(1)
     print("SUPERVISED_FIXTURE_CREATION_CLEANUP_BOUNDARIES=PASS")
     print("SUPERVISED_FIXTURE_EXACT_FAILED_EXECUTOR_BOOKKEEPING=PASS")
+    print("SUPERVISED_FIXTURE_AUTHENTIC_EXECUTOR_SIGNAL=PASS")

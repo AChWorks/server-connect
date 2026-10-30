@@ -596,6 +596,71 @@ class Fixture:
             self.command(["systemctl", "reset-failed", unit])
         assert self.show(unit, "ActiveState") == "inactive" and self.show(unit, "Result") == "success"
 
+    def wait_for_health_executor(self, requested_signal):
+        label = "running authenticated health executor"
+        self.health_signal_observation = {"pid": None, "readiness": "not_observed"}
+        try:
+            # Confirmation can put NextProbe just beyond the next timer tick.
+            # Allow that short skipped invocation and one later five-second tick.
+            return self.wait(lambda: self.signal_health_executor(requested_signal), 15, label)
+        except AssertionError as error:
+            if str(error) == "timed out waiting for " + label:
+                print("SUPERVISED_TUN_EXECUTOR_AUTH_TIMEOUT=" +
+                      json.dumps(self.health_signal_observation, separators=(",", ":")), flush=True)
+            raise
+
+    def signal_health_executor(self, requested_signal):
+        assert requested_signal in (signal.SIGKILL, signal.SIGSTOP), "unsupported executor fault"
+        pid = int(self.show(HEALTH, "MainPID"))
+        self.health_signal_observation = {"pid": pid, "readiness": "awaiting_image"}
+        if pid <= 1:
+            self.health_signal_observation["readiness"] = "no_main_pid"
+            return False
+        try:
+            descriptor = os.pidfd_open(pid)
+        except ProcessLookupError:
+            self.health_signal_observation["readiness"] = "process_unavailable"
+            return False
+        try:
+            expected = os.stat("/opt/server-connect/current/bin/server-connect")
+            expected_argv = (b"/opt/server-connect/current/bin/server-connect\0"
+                             b"--json\0smart-tun-trial-health\0")
+
+            def authenticated_image():
+                actual = os.stat(f"/proc/{pid}/exe")
+                if (actual.st_dev, actual.st_ino) != (expected.st_dev, expected.st_ino):
+                    self.health_signal_observation["readiness"] = "executable_mismatch"
+                    return False
+                argv = Path(f"/proc/{pid}/cmdline").read_bytes()
+                after = os.stat(f"/proc/{pid}/exe")
+                if argv != expected_argv:
+                    self.health_signal_observation["readiness"] = "argv_mismatch"
+                    return False
+                if (after.st_dev, after.st_ino) != (expected.st_dev, expected.st_ino):
+                    self.health_signal_observation["readiness"] = "executable_changed"
+                    return False
+                self.health_signal_observation["readiness"] = "authenticated"
+                return True
+
+            # systemd may publish MainPID while its child is still preparing
+            # exec. An unmatched image/argv is not ready, never a signal target.
+            # Retain the same pidfd and repeat both process and unit checks
+            # immediately before dispatch. Exited/reused PIDs cannot retarget it.
+            for _observation in range(2):
+                if not authenticated_image():
+                    return False
+                if self.show(HEALTH, "MainPID") != str(pid):
+                    self.health_signal_observation["readiness"] = "unit_pid_changed"
+                    return False
+            signal.pidfd_send_signal(descriptor, requested_signal)
+            self.health_signal_observation["readiness"] = "signalled"
+            return True
+        except (ProcessLookupError, FileNotFoundError):
+            self.health_signal_observation["readiness"] = "process_unavailable"
+            return False
+        finally:
+            os.close(descriptor)
+
     def executor_failure(self, kind):
         print("SUPERVISED_TUN_CASE=supervisor-" + kind, flush=True)
         self.apply(30)
@@ -604,26 +669,8 @@ class Fixture:
             self.command(["systemctl", "stop", TIMER])
         elif kind in ("failed", "hung"):
             self.pause_upstream()
-            def signal_executor():
-                pid = int(self.show(HEALTH, "MainPID"))
-                if pid <= 1:
-                    return False
-                try:
-                    descriptor = os.pidfd_open(pid)
-                except ProcessLookupError:
-                    return False
-                try:
-                    exe = os.stat(f"/proc/{pid}/exe")
-                    expected = os.stat("/opt/server-connect/current/bin/server-connect")
-                    assert (exe.st_dev, exe.st_ino) == (expected.st_dev, expected.st_ino)
-                    assert b"smart-tun-trial-health\0" in Path(f"/proc/{pid}/cmdline").read_bytes()
-                    signal.pidfd_send_signal(descriptor, signal.SIGKILL if kind == "failed" else signal.SIGSTOP)
-                    return True
-                except (ProcessLookupError, FileNotFoundError):
-                    return False
-                finally:
-                    os.close(descriptor)
-            self.wait(signal_executor, 8, "running authenticated health executor")
+            requested_signal = signal.SIGKILL if kind == "failed" else signal.SIGSTOP
+            self.wait_for_health_executor(requested_signal)
             if kind == "failed":
                 self.wait(lambda: self.show(HEALTH, "ActiveState") == "failed" or not JOURNAL.exists(), 3, "failed executor")
         else:
