@@ -412,12 +412,13 @@ func (m *Manager) admitSmartTUNTrialLocked(store *activationJournalDir, opts Sma
 	if err != nil {
 		return smartTUNTrialAdmission{}, err
 	}
-	// The disposable guest can contain preexisting nftables owners. A
-	// strict empty-ruleset admission would incorrectly reject exactly the
-	// interoperability case we must test. Never adopt/delete any of their
-	// resources: retain the full normalized native firewall fingerprint and
-	// demand exact equality after stopping only our trusted TUN service.
-	// This is *not* authorization to run on physical/production hosts.
+	// Retain the full native firewall fingerprint for the controlled guest.
+	// Current foreign-object QA uses a separate table outside the core's
+	// automatic cleanup targets; this admission does not exclude every
+	// overlap. Core teardown may delete an overlapping foreign object before
+	// the baseline comparison, so equality is not ownership/preservation
+	// proof. Such collisions/replacements remain unsupported and unaccepted;
+	// this is not authorization for physical/production hosts.
 	if host.Firewall == nil || !host.Firewall.Observed {
 		return smartTUNTrialAdmission{}, Fault("trial_observation_uncertain", "complete native nftables observation required before guarded guest trial")
 	}

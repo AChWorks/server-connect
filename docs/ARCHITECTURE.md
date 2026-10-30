@@ -97,6 +97,9 @@ This deliberately cannot **commit** TUN, cannot authenticate foreign host
 owners or geographic data, and does not have fresh SSH/provider confirmation
 or Runtime Health Guard. Production activation still needs exactly owned
 multi-owner kernel transactions and a separate permission/review boundary.
+The current whole-host equality check also cannot guarantee preservation of
+foreign objects overlapping the core's automatic cleanup targets; see the
+[automatic-policy ownership limit](SAFETY-RECOVERY.md#automatic-policy-ownership-limit).
 
 ## Optional inbound website connectivity
 

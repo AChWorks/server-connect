@@ -47,10 +47,11 @@ and verified before starting the TUN. The default expiry
 is 600 seconds, configurable from 4 to 600 seconds in disconnected QA only.
 A failed/uncertain restoration retains the journal, never presents Direct
 as safely verified and blocks installer/update/profile/Proxy Only transitions.
-Preexisting guest nftables owners are fingerprinted and must remain
-unchanged; the product never adopts or deletes their objects. If a running
-pending TUN loses its independently verified recovery timer or executor, an
-explicit recovery invocation must stop **only the provenance-verified TUN
+The native fingerprint includes preexisting guest nftables objects. The current
+foreign-object QA demonstrates retention of a separate table outside the core's
+automatic cleanup targets; broader ownership is limited as described below.
+If a running pending TUN loses its independently verified recovery timer or
+executor, an explicit recovery invocation must stop **only the provenance-verified TUN
 service immediately**, even before the recorded deadline. Loss of the guard
 is never permission to keep an active pending interception running. Only full
 native IP/nftables equality after stopping the verified service permits
@@ -71,7 +72,7 @@ An already visible cleanup phase is not proof that an earlier directory fsync
 succeeded. Every cleanup retry must establish a successful durability barrier
 for the exact current operation before removing its credential; a failed barrier
 preserves the credential and recovery evidence for another attempt.
-Foreign-resource drift or changed credential/unit provenance retains evidence
+Observed foreign-resource drift or changed credential/unit provenance retains evidence
 and blocks a successful Direct claim. The independent executor resumes durable
 stop and cleanup intent while its timer is armed; status inspection alone must
 not advance either phase. After native restoration and credential removal,
@@ -86,6 +87,32 @@ repeats guard prearming, and creates a new operation instead of restoring old
 authority. Invalid or missing saved input is rejected before prearm. A saved
 policy change detected during prearm blocks TUN activation and reconciles only
 an uncommitted guard; it cannot disarm another journaled operation.
+
+#### Automatic-policy ownership limit
+
+The pinned core still creates and removes automatic Linux policy. Its
+[sing-box constructor](https://github.com/SagerNet/sing-box/blob/v1.14.3/protocol/tun/inbound.go#L375)
+uses the fixed nftables table name `sing-box`; the pinned dependency's
+[cleanup](https://github.com/SagerNet/sing-tun/blob/bca4bf029237/redirect_nftables.go#L392)
+deletes that entire `inet` table by name. Its
+[RPDB cleanup](https://github.com/SagerNet/sing-tun/blob/bca4bf029237/tun_linux.go#L1143)
+uses a priority interval and fallback priority, rather than an operation-owned
+object ledger. Other automatic route and compatibility-rule effects also need
+an explicit ownership boundary before general host support.
+
+The current link/profile/fixture admission does not exclude every overlapping
+foreign object. Collisions or replacements inside the core's automatic cleanup
+targets are **unsupported and unaccepted**, even in a guest that passes those
+admission checks. A trusted service identity does not authenticate every kernel
+object its upstream teardown can delete. The whole-host baseline is compared
+**after** stopping the core: an overlapping object added after the baseline can
+be deleted by that stop and leave baseline equality. Equality therefore cannot
+prove that all foreign objects survived or detect every such deletion.
+
+The accepted current evidence covers the controlled, nonoverlapping fixture
+case only. General preservation, including overlapping owners and replacement
+objects, remains an unfinished required product gate. These limits do not relax
+the safety invariants or authorize wider activation.
 
 This is one step toward the real activation state machine, **not** a
 substitute for privileged third-party ownership/conntrack proof, SSH
