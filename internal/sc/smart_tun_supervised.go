@@ -363,6 +363,9 @@ func (m *Manager) BeginSavedSupervisedSmartTUNTrial(deadline int, health SmartTU
 	if m.Dir != DefaultDir || m.Core != DefaultCore {
 		return SmartTUNTrialReceipt{}, Fault("trial_unsupported", "installed trial paths required")
 	}
+	if err := nativeTrialApplyPlatform(); err != nil {
+		return SmartTUNTrialReceipt{}, err
+	}
 	if err := validateSmartTUNHealthOptions(health); err != nil {
 		return SmartTUNTrialReceipt{}, err
 	}

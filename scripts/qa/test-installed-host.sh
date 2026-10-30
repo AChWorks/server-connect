@@ -401,6 +401,127 @@ assert_network_unchanged bundle-target-refusals "$offline_before"
 verify_host_services bundle-target-refusals
 docker exec "$container" /bin/rm -- /root/qa-bundle-target-refusal.sh
 
+if [[ $qa_version == 12 ]]; then
+  saved_refusal_nft=$(docker exec "$container" /usr/sbin/nft -j list ruleset)
+  # Real saved-Apply entry points, before installation, in the disconnected
+  # guest only. Failed assertions retain unexpected state for guest teardown.
+  docker exec -i "$container" python3 - <<'PYSAVEDREFUSAL'
+import hashlib
+import json
+import os
+from pathlib import Path
+import stat
+import subprocess
+
+state = Path('/var/lib/server-connect')
+policy = state / 'smart-tun-policy.json'
+manager = '/root/server-connect/bin/server-connect'
+expected = {
+    'code': 'trial_unsupported',
+    'message': 'native trials require Debian 13; Debian 12 installation supports Direct/Proxy Only only',
+}
+units = (
+    'server-connect.service',
+    'server-connect-activation-recover.service',
+    'server-connect-activation-recover.timer',
+    'server-connect-smart-tun.service',
+    'server-connect-smart-health.service',
+    'server-connect-smart-health.timer',
+)
+
+def absent_product():
+    for path in ('/opt/server-connect', '/usr/local/bin/server-connect'):
+        assert not os.path.lexists(path), 'unexpected installed product path'
+    for unit in units:
+        assert not os.path.lexists('/etc/systemd/system/' + unit), 'unexpected product unit'
+        result = subprocess.run(
+            ['systemctl', 'show', unit, '-p', 'LoadState', '--value'],
+            capture_output=True, text=True, timeout=10)
+        assert result.returncode in (0, 1) and result.stdout.strip() == 'not-found', \
+            'product unit no longer absent'
+
+def snapshot():
+    if not os.path.lexists(state):
+        return None
+    root = state.lstat()
+    assert stat.S_ISDIR(root.st_mode) and root.st_uid == 0
+    paths = [state] + sorted(state.iterdir())
+    records = []
+    for path in paths:
+        info = path.lstat()
+        record = [
+            str(path.relative_to(state)), info.st_dev, info.st_ino,
+            info.st_mode, info.st_uid, info.st_gid, info.st_nlink,
+            info.st_size, info.st_mtime_ns, info.st_ctime_ns,
+        ]
+        if path != state:
+            assert stat.S_ISREG(info.st_mode) and info.st_nlink == 1, \
+                'unexpected state object'
+            record.append(hashlib.sha256(path.read_bytes()).hexdigest())
+        records.append(record)
+    return records
+
+valid = {
+    'version': 1,
+    'management_peer_ip': '10.254.72.2',
+    'options': {
+        'tunnel_interface': 'sctunqa0',
+        'underlay_interface': 'scqaedge0',
+        'tunnel_ipv4': '172.31.99.1/30',
+        'tunnel_ipv6': '',
+        'protected_cidrs': ['10.254.72.0/30'],
+        'protected_ipv6_cidrs': [],
+        'domestic_cidrs': ['5.22.0.10/32'],
+        'domestic_ipv6_cidrs': [],
+        'exceptions': [],
+        'ipv6_exceptions': [],
+        'domain_exceptions': [],
+    },
+}
+cases = (
+    ('absent', None),
+    ('empty', None),
+    ('malformed', b'{"version":'),
+    ('valid', (json.dumps(valid, separators=(',', ':')) + '\n').encode()),
+)
+absent_product()
+for label, content in cases:
+    assert not os.path.lexists(state), 'prior state fixture remains'
+    if label != 'absent':
+        state.mkdir(mode=0o700)
+    if content is not None:
+        fd = os.open(policy, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, 'wb') as stream:
+            stream.write(content)
+    before = snapshot()
+    for supervised in (False, True):
+        args = [manager, '--json', 'smart-tun-trial-apply',
+                '--saved', '--deadline-seconds', '600']
+        if supervised:
+            args.append('--supervised')
+        result = subprocess.run(args, capture_output=True, text=True, timeout=15)
+        assert result.returncode == 1, 'saved Apply was not refused'
+        reply = json.loads(result.stdout)
+        assert reply['ok'] is False and reply['error'] == expected, \
+            'saved Apply did not report the platform refusal'
+        assert snapshot() == before, 'saved Apply mutated private state'
+        absent_product()
+        form = 'supervised' if supervised else 'pending'
+        print(f'DEBIAN12_SAVED_APPLY_REFUSAL({label},{form})=PASS', flush=True)
+    # Delete only exact unchanged fixtures; never erase unexpected state.
+    assert snapshot() == before
+    if content is not None:
+        policy.unlink()
+    if label != 'absent':
+        state.rmdir()
+assert not os.path.lexists(state)
+PYSAVEDREFUSAL
+  [[ $(docker exec "$container" /usr/sbin/nft -j list ruleset) == "$saved_refusal_nft" ]]
+  assert_network_unchanged debian12-saved-apply-refusals "$offline_before"
+  verify_host_services debian12-saved-apply-refusals
+  echo 'DEBIAN12_SAVED_APPLY_PLATFORM_REFUSAL=PASS (both forms, four state cases, inert product)'
+fi
+
 echo '=== Negative offline acceptance: missing pinned core must reject BEFORE mutation ==='
 # This test mutates ONLY the private disposable source bundle, restores the
 # original verified bytes before the next test, and never touches another host.
@@ -908,7 +1029,7 @@ docker exec -e SC_QA_TUN_PRODUCT_LAB=yes -e SC_QA_TUN_SUPERVISED=yes \
   "$container" /bin/sh /root/qa-host-tun-path.sh | tee "$supervised_log"
 for marker in \
   'DIRECT_CONTROLS' 'OFF_DIRECT_TCP_UDP_DNS' 'FRESH_SSH_SINGLE_USE_AND_NEGATIVES' \
-  'ACTIVE_UPDATE_UNINSTALL_REFUSED' 'DISJOINT_FOREIGN_OWNER_PRESERVED' \
+  'ACTIVE_UPDATE_UNINSTALL_REFUSED' 'DISJOINT_FOREIGN_OWNER_PRESERVED' 'SAVED_REAPPLY' \
   'CONFIRMED_BEYOND_ACTIVATION_DEADLINE' 'ONE_TARGET_FALSE_ALARM_REJECTED' \
   'DNS_FAILURE_AND_TRANSIENT_RECOVERY' 'LIVE_CORE_UPSTREAM_FAILURE_NO_DIRECT_LEAK' \
   'FINITE_EXHAUSTION_FLAPPING_AND_SAVED_STATE' 'EXPIRED_OFF_AND_REPLAY_REJECTED' \
@@ -1067,6 +1188,7 @@ else
   echo 'PHP_WORDPRESS_PHASES=NOT_RUN (Debian12 installation and Proxy Only lane; no PHP compatibility claim)'
 fi
 docker exec "$container" /bin/sh /root/qa-apt-only.sh positive initial
+docker exec "$container" /bin/sh /root/qa-apt-only.sh inherited-policy
 docker cp "$root/scripts/qa/apt-disabled-trace.py" "$container:/root/qa-apt-disabled-trace.py"
 docker exec "$container" /bin/sh /root/qa-apt-only.sh disabled-transports
 docker exec "$container" /bin/rm -- /root/qa-apt-disabled-trace.py

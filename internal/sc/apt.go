@@ -385,12 +385,28 @@ func verifyAptDumpPolicy(dump, expected string, compatibility aptCompatibility, 
 			(strings.Contains(key, "::acquire") || strings.Contains(key, "::proxy") ||
 				strings.Contains(key, "::dir") || strings.Contains(key, "::rootdir") ||
 				strings.Contains(key, "::apt::compressor") ||
-				strings.Contains(key, "::debug::acquire"))
+				strings.Contains(key, "::debug::acquire") ||
+				strings.Contains(key, "::debug::pkgacquire"))
 		// APT's HTTP wire debugging can print Proxy-Authorization (secrets).
 		debug := strings.HasPrefix(key, "debug::acquire") ||
 			strings.HasPrefix(key, "debug::pkgacquire")
 		if binary || auto || debug || (proxyPath && key != "acquire::http::proxy" && key != "acquire::https::proxy") {
 			return Fault("apt_policy_conflict", "APT per-host proxy, auto-detection or binary policy may bypass selected route")
+		}
+		// Native apt/apt-get can run an implicit update before a package
+		// action. Only an explicit update receives our final strict flag.
+		// Preserve empty namespace parents/hooks and canonical false values.
+		if key == "apt::update" || key == "binary::apt::apt::update" || key == "binary::apt-get::apt::update" {
+			disabled := false
+			if len(fields) == 2 {
+				switch strings.ToLower(fields[1]) {
+				case "\"\";", "\"0\";", "\"no\";", "\"false\";", "\"without\";", "\"off\";", "\"disable\";":
+					disabled = true
+				}
+			}
+			if !disabled {
+				return Fault("apt_policy_conflict", "inherited APT combined update policy is unsupported in Proxy Only")
+			}
 		}
 		// RootDir prepends even absolute APT paths. A new Dir root or usr
 		// prefix can also change where method executables are resolved.

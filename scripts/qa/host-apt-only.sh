@@ -257,6 +257,166 @@ if o.get("ok") is not True or (o.get("data") or {}).get("local_listener_ready") 
   fi
 }
 
+inherited_policy() {
+  [ "$(id -u)" = 0 ] && [ -f /.dockerenv ] &&
+    [ "$(cat /proc/1/comm)" = systemd ] && [ "$(ls -1 /sys/class/net)" = lo ] ||
+    { fail_apt 'inherited-policy QA requires the disconnected systemd guest'; return 1; }
+  inherited_before=$(config_digest) ||
+    { fail_apt 'inherited-policy baseline unavailable'; return 1; }
+  assert_digest "$inherited_before" ||
+    { fail_apt 'inherited-policy baseline invalid'; return 1; }
+
+  python3 - "$manager" "$apt_timeout" "$base" "$source_file" <<'PY' ||
+from pathlib import Path
+import hashlib
+import os
+import stat
+import subprocess
+import sys
+
+manager, timeout, base_arg, source = sys.argv[1:]
+base = Path(base_arg)
+work = base / "inherited-policy"
+policy = Path("/etc/apt/apt.conf.d/99server-connect-qa-inherited-policy")
+debug_error = (
+    b"Error: APT per-host proxy, auto-detection or binary policy may bypass selected route\n"
+)
+update_error = (
+    b"Error: inherited APT combined update policy is unsupported in Proxy Only\n"
+)
+
+# No credential-bearing configuration or child output is printed. The only
+# APT policy mutation is this exclusively owned disconnected-guest file.
+def require(condition, label):
+    if not condition:
+        raise RuntimeError(label)
+
+def identity(info):
+    return (
+        info.st_dev, info.st_ino, info.st_uid, info.st_gid,
+        stat.S_IMODE(info.st_mode), info.st_nlink,
+    )
+
+def with_policy(payload, callback):
+    data = payload.encode("ascii")
+    fd = os.open(policy, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    owned = identity(os.fstat(fd))
+    try:
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(data)
+            stream.flush()
+            os.fsync(stream.fileno())
+        require(identity(policy.lstat()) == owned, "owned policy identity changed")
+        require(policy.read_bytes() == data, "owned policy write incomplete")
+        callback()
+    finally:
+        # Preserve unexpected replacements/content for exact guest teardown.
+        info = policy.lstat()
+        require(
+            stat.S_ISREG(info.st_mode)
+            and identity(info) == owned
+            and hashlib.sha256(policy.read_bytes()).digest()
+                == hashlib.sha256(data).digest(),
+            "owned policy cleanup identity uncertain",
+        )
+        policy.unlink()
+
+def run_command(label, executable, expected):
+    folder = work / label
+    folder.mkdir(mode=0o700)
+    lists = folder / "lists"
+    archives = folder / "archives"
+    (lists / "partial").mkdir(parents=True, mode=0o755)
+    (archives / "partial").mkdir(parents=True, mode=0o755)
+    log = folder / "command.log"
+    argv = [
+        timeout, "--kill-after=5s", "35s",
+        manager, "apt", "--", executable, "install", "--simulate", "bash",
+        "-o", "Dir::Etc::sourcelist=" + source,
+        "-o", "Dir::Etc::sourceparts=-",
+        "-o", "Dir::State::lists=" + str(lists),
+        "-o", "Dir::Cache::archives=" + str(archives),
+        "-o", "Dir::Cache::pkgcache=/dev/null",
+        "-o", "Dir::Cache::srcpkgcache=/dev/null",
+        "-o", "APT::Get::List-Cleanup=0",
+        "-o", "Debug::NoLocking=1",
+    ]
+    with log.open("xb") as stream:
+        result = subprocess.run(
+            argv, stdin=subprocess.DEVNULL, stdout=stream, stderr=subprocess.STDOUT,
+            env={"HOME": "/root", "PATH": "/usr/sbin:/usr/bin:/sbin:/bin", "LC_ALL": "C"},
+            check=False,
+        )
+    require(log.stat().st_size <= 65536, "unexpected command output size")
+    output = log.read_bytes()
+    require(secret not in output, "private credential appeared in command output")
+    if expected is None:
+        require(result.returncode == 0, "canonical package simulation failed")
+    else:
+        require(
+            result.returncode == 1 and output == expected,
+            "precise inherited-policy preflight refusal missing",
+        )
+
+try:
+    require(not os.path.lexists(policy), "inherited-policy fixture already exists")
+    require(
+        os.access(manager, os.X_OK) and os.access(timeout, os.X_OK)
+        and os.access("/usr/bin/apt", os.X_OK) and os.access("/usr/bin/apt-get", os.X_OK),
+        "native command unavailable",
+    )
+    secret = Path("/var/lib/server-connect/proxy-auth").read_bytes()
+    require(
+        len(secret) == 48 and all(c in b"0123456789abcdef" for c in secret),
+        "installed proxy credential unavailable",
+    )
+    work.mkdir(mode=0o700)
+    cases = [
+        ("update-global", "apt-get", 'APT::Update "true";\n', update_error),
+        ("update-global-case", "apt", 'aPt::uPdAtE "On";\n', update_error),
+        ("update-apt", "apt", 'Binary::apt::APT::Update "yes";\n', update_error),
+        ("update-apt-get", "apt-get", 'Binary::apt-get::APT::Update "1";\n', update_error),
+        ("update-apt-case", "apt", 'bInArY::aPt::aPt::uPdAtE "ENABLE";\n', update_error),
+        ("update-apt-get-case", "apt-get", 'BiNaRy::ApT-GeT::ApT::UpDaTe "with";\n', update_error),
+        ("debug-apt", "apt", 'Binary::apt::Debug::pkgAcquire::Worker "true";\n', debug_error),
+        ("debug-apt-get", "apt-get", 'Binary::apt-get::Debug::pkgAcquire::Worker "true";\n', debug_error),
+        ("debug-apt-case", "apt", 'bInArY::aPt::dEbUg::PkGaCqUiRe::wOrKeR "1";\n', debug_error),
+        ("debug-apt-get-case", "apt-get", 'BiNaRy::ApT-GeT::DeBuG::pKgAcQuIrE::WoRkEr "yes";\n', debug_error),
+    ]
+    for label, executable, payload, expected in cases:
+        with_policy(
+            payload,
+            lambda label=label, executable=executable, expected=expected:
+                run_command(label, executable, expected),
+        )
+
+    # Empty parents/hooks, canonical disabled values and normal presentation
+    # settings remain usable by both real native package frontends.
+    safe_policy = (
+        'APT::Update "";\n'
+        'APT::Update::Post-Invoke {"true";};\n'
+        'Binary::apt::APT::Update "false";\n'
+        'Binary::apt-get::APT::Update "off";\n'
+        'Binary::apt::APT::Color "0";\n'
+    )
+    def positive_controls():
+        run_command("safe-apt-get", "apt-get", None)
+        run_command("safe-apt", "apt", None)
+    with_policy(safe_policy, positive_controls)
+    require(not os.path.lexists(policy), "owned inherited policy remains")
+except Exception:
+    raise SystemExit("INSTALLED_APT_INHERITED_POLICY=FAIL (private diagnostics withheld)")
+PY
+    { fail_apt 'inherited-policy regression failed'; return 1; }
+
+  inherited_after=$(config_digest) ||
+    { fail_apt 'inherited-policy final inventory unavailable'; return 1; }
+  assert_digest "$inherited_after" &&
+    [ "$inherited_before" = "$inherited_after" ] ||
+    { fail_apt 'inherited-policy cleanup did not restore native policy'; return 1; }
+  echo 'INSTALLED_APT_INHERITED_POLICY=PASS (10 precise refusals, both native package controls, full policy restored)'
+}
+
 disabled_transports() {
   [ "$(id -u)" = 0 ] && [ -f /.dockerenv ] &&
     [ "$(cat /proc/1/comm)" = systemd ] && [ "$(ls -1 /sys/class/net)" = lo ] ||
@@ -326,6 +486,10 @@ case "${1:-}" in
     test "$#" -eq 2
     run_selected "$2" failure
     ;;
+  inherited-policy)
+    test "$#" -eq 1
+    inherited_policy
+    ;;
   disabled-transports)
     test "$#" -eq 1
     disabled_transports
@@ -350,7 +514,7 @@ case "${1:-}" in
     echo 'INSTALLED_APT_NATIVE_HOST_POLICY_UNCHANGED=PASS'
     ;;
   *)
-    echo 'Usage: host-apt-only.sh setup|positive PHASE|negative PHASE|disabled-transports|verify-host-policy' >&2
+    echo 'Usage: host-apt-only.sh setup|positive PHASE|negative PHASE|inherited-policy|disabled-transports|verify-host-policy' >&2
     exit 2
     ;;
 esac

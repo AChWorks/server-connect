@@ -800,3 +800,151 @@ func TestAPTActionFirstKeepsOptionalOperandsAndSeparateFlags(t *testing.T) {
 		}
 	}
 }
+
+// apt-config leaves apt/apt-get Binary subtrees inactive. Both inspection
+// stages must refuse policy that becomes unsafe when the real binary uses it.
+func TestAPTInheritedUpdateAndWorkerDebugRefusal(t *testing.T) {
+	proxy := "http://sc:synthetic-never-expose@127.0.0.1:20807"
+	base := nativeAptDumpForTest() + "Acquire::http::Proxy \"" + proxy + "\";\n" +
+		"Acquire::https::Proxy \"" + proxy + "\";\n"
+	var entries []string
+	for _, key := range []string{
+		"Binary::apt::Debug::pkgAcquire::Worker",
+		"Binary::apt-get::Debug::pkgAcquire::Worker",
+		"bInArY::ApT::DeBuG::PkGaCqUiRe::WoRkEr",
+		"BiNaRy::ApT-GeT::dEbUg::pKgAcQuIrE::Worker",
+		"Binary::apt::Debug::pkgAcquire",
+	} {
+		entries = append(entries, key+" \"true\";\n")
+	}
+	for _, key := range []string{
+		"APT::Update", "Binary::apt::APT::Update", "Binary::apt-get::APT::Update",
+		"aPt::uPdAtE", "bInArY::ApT-GeT::aPt::UpDaTe",
+	} {
+		for _, value := range []string{
+			"1", "yes", "true", "with", "on", "enable", "TrUe",
+			"+1", "01", "0x1", "unsupported", "synthetic-never-expose",
+		} {
+			entries = append(entries, key+" \""+value+"\";\n")
+		}
+		entries = append(entries, key+"\n", key+" \"true\"; \"false\";\n")
+	}
+	for _, mode := range []struct {
+		name  string
+		value aptCompatibility
+	}{{"strict", aptStrictNative}, {"debian12", aptDebian12Native261}} {
+		t.Run(mode.name, func(t *testing.T) {
+			for _, owned := range []bool{false, true} {
+				dump := base
+				stage := "inherited"
+				if owned {
+					dump += ownedDisabledAptDumpForTest()
+					stage = "owned-denial"
+				}
+				t.Run(stage, func(t *testing.T) {
+					if err := verifyAptDumpPolicy(dump, proxy, mode.value, owned); err != nil {
+						t.Fatal("positive policy control failed:", err)
+					}
+					for _, entry := range entries {
+						t.Run(strings.TrimSpace(entry), func(t *testing.T) {
+							err := verifyAptDumpPolicy(dump+entry, proxy, mode.value, owned)
+							if ErrorCode(err) != "apt_policy_conflict" {
+								t.Fatal("inherited acquisition policy was not refused:", err)
+							}
+							if strings.Contains(err.Error(), "synthetic-never-expose") {
+								t.Fatal("refusal disclosed synthetic private data")
+							}
+						})
+					}
+				})
+			}
+		})
+	}
+}
+
+func TestAPTInheritedHarmlessUpdateAndPresentationPolicy(t *testing.T) {
+	proxy := "http://sc:synthetic-never-expose@127.0.0.1:20807"
+	base := nativeAptDumpForTest() + "Acquire::http::Proxy \"" + proxy + "\";\n" +
+		"Acquire::https::Proxy \"" + proxy + "\";\n" +
+		"APT::Update::Post-Invoke:: \"/bin/true\";\n" +
+		"Binary::apt::APT::Color \"true\";\n" +
+		"Binary::apt::DPkg::Progress-Fancy \"1\";\n" +
+		"Binary::apt-get::APT::Get::Show-Versions \"true\";\n"
+	for _, mode := range []aptCompatibility{aptStrictNative, aptDebian12Native261} {
+		for _, owned := range []bool{false, true} {
+			dump := base
+			if owned {
+				dump += ownedDisabledAptDumpForTest()
+			}
+			for _, key := range []string{"APT::Update", "Binary::apt::APT::Update", "Binary::apt-get::APT::Update", "bInArY::ApT::aPt::UpDaTe"} {
+				for _, value := range []string{"", "0", "no", "false", "without", "off", "disable", "FaLsE", "OFF"} {
+					if err := verifyAptDumpPolicy(dump+key+" \""+value+"\";\n", proxy, mode, owned); err != nil {
+						t.Fatalf("harmless inherited policy rejected: key=%s value=%q: %v", key, value, err)
+					}
+				}
+			}
+		}
+	}
+}
+
+// These options simulate inherited policy in the actual native apt-config
+// process. No host APT policy is changed and no acquisition process is run.
+func TestRealAPTInheritedUpdateAndWorkerDebugPolicy(t *testing.T) {
+	requireNativeAPT(t)
+	compatibility, err := observedAPTCompatibility(systemAPTGet)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxy, _ := url.Parse("http://sc:synthetic-never-expose@127.0.0.1:20807")
+	fd, err := privateAptConfig(t.TempDir(), proxy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer fd.Close()
+	for _, owned := range []bool{false, true} {
+		stage := "inherited"
+		if owned {
+			stage = "owned-denial"
+		}
+		t.Run(stage, func(t *testing.T) {
+			check := func(setting string) error {
+				var opts []string
+				if setting != "" {
+					opts = []string{"-o", setting}
+				}
+				if owned {
+					opts = aptOwnedDisabledOpts(opts)
+				}
+				return verifyEffectiveAptProxyPolicy(fd, proxy.String(), opts, compatibility, owned)
+			}
+			for _, setting := range []string{
+				"", "APT::Update=", "APT::Update=false", "Binary::apt::APT::Update=0",
+				"Binary::apt-get::APT::Update=off", "APT::Update::Post-Invoke::=/bin/true",
+				"Binary::apt::APT::Color=true", "Binary::apt::DPkg::Progress-Fancy=1",
+			} {
+				if err := check(setting); err != nil {
+					t.Fatal("native positive policy control failed:", err)
+				}
+			}
+			for _, setting := range []string{
+				"Binary::apt::Debug::pkgAcquire::Worker=true",
+				"Binary::apt-get::Debug::pkgAcquire::Worker=true",
+				"bInArY::ApT::DeBuG::PkGaCqUiRe::WoRkEr=true",
+				"BiNaRy::ApT-GeT::DeBuG::PkGaCqUiRe::WoRkEr=1",
+				"APT::Update=true", "APT::Update=with", "APT::Update=0x1",
+				"Binary::apt::APT::Update=yes", "Binary::apt-get::APT::Update=1",
+				"bInArY::ApT-GeT::aPt::UpDaTe=enable",
+			} {
+				t.Run(setting, func(t *testing.T) {
+					err := check(setting)
+					if ErrorCode(err) != "apt_policy_conflict" {
+						t.Fatal("native inherited policy crossed acquisition admission:", err)
+					}
+					if strings.Contains(err.Error(), "synthetic-never-expose") {
+						t.Fatal("native refusal disclosed synthetic private data")
+					}
+				})
+			}
+		})
+	}
+}
