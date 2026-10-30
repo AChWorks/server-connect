@@ -64,7 +64,7 @@ func smartTUNUptimeMillis() (int64, error) {
 func readManagementProc(path string, limit int64) ([]byte, error) {
 	f, err := os.Open(path)
 	if err != nil {
-		return nil, managementFault("management process evidence cannot be opened")
+		return nil, managementFault(fmt.Sprintf("management process evidence cannot be opened (%s): %v", path, err))
 	}
 	defer f.Close()
 	data, err := io.ReadAll(io.LimitReader(f, limit+1))
@@ -170,11 +170,11 @@ func parseManagementSocket(data []byte) (smartTUNManagementSocket, error) {
 func managementSockets() (map[uint32]smartTUNManagementSocket, error) {
 	fd, err := syscall.Socket(syscall.AF_NETLINK, syscall.SOCK_RAW|syscall.SOCK_CLOEXEC, syscall.NETLINK_INET_DIAG)
 	if err != nil {
-		return nil, managementFault("kernel TCP transport diagnostics unavailable")
+		return nil, managementFault(fmt.Sprintf("kernel TCP transport diagnostics unavailable: %v", err))
 	}
 	defer syscall.Close(fd)
 	if err := syscall.Bind(fd, &syscall.SockaddrNetlink{Family: syscall.AF_NETLINK}); err != nil {
-		return nil, managementFault("kernel TCP diagnostics bind failed")
+		return nil, managementFault(fmt.Sprintf("kernel TCP diagnostics bind failed: %v", err))
 	}
 	tv := syscall.NsecToTimeval(int64(500 * time.Millisecond))
 	if syscall.SetsockoptTimeval(fd, syscall.SOL_SOCKET, syscall.SO_RCVTIMEO, &tv) != nil {
@@ -198,7 +198,10 @@ func managementSockets() (map[uint32]smartTUNManagementSocket, error) {
 	for packets := 0; packets < 32 && time.Since(started) < 2*time.Second; packets++ {
 		count, _, flags, source, err := syscall.Recvmsg(fd, buffer, nil, 0)
 		from, ok := source.(*syscall.SockaddrNetlink)
-		if err != nil || !ok || from.Pid != 0 || flags&syscall.MSG_TRUNC != 0 {
+		if err != nil {
+			return nil, managementFault(fmt.Sprintf("kernel TCP diagnostics receive failed: %v", err))
+		}
+		if !ok || from.Pid != 0 || flags&syscall.MSG_TRUNC != 0 {
 			return nil, managementFault("kernel TCP diagnostics incomplete or untrusted")
 		}
 		messages, err := syscall.ParseNetlinkMessage(buffer[:count])

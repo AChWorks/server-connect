@@ -280,6 +280,34 @@ Default confirmation window: **600 seconds**, operator configurable. High-risk r
 
 If an existing resource was replaced or altered by another owner, classify `UNCERTAIN`, preserve it and require controlled operator recovery instead of deleting/overwriting it. Reobserve native kernel identity and all relevant foreign dependencies before cleanup: an `ip route`/RPDB protocol tag or a matching rule number alone is **not authenticated proof of Server Connect ownership**, and a Manager lock cannot exclude independent privileged writers.
 
+### Fresh management confirmation evidence
+
+For the disposable supervised native lifecycle, confirmation is deliberately
+limited to a new authenticated root OpenSSH connection over the admitted guest
+management path. An operation challenge is issued only after native capture is
+complete. Its monotonic boot-relative time, operation, configuration and control
+revision bind the confirmation. The original Apply shell and a new channel on an
+older SSH multiplexed connection cannot satisfy that requirement.
+
+The observer verifies the caller's actual process ancestry, trusted installed
+OpenSSH executable identity, root session ownership and network namespace. A
+bounded read-only Linux `SOCK_DIAG_BY_FAMILY` dump binds an established TCP tuple,
+inode and kernel socket cookie to a descriptor held by that ancestor. The oldest
+transport-owning session process must have started strictly after the challenge;
+process lifetime, ancestry, descriptor and socket generation are checked again
+before returning evidence. `SSH_CONNECTION`, `SSH_CLIENT`, process names and
+operator-supplied timestamps are not authentication. Ambiguous, missing or
+changed evidence refuses confirmation. Provider-console confirmation and
+non-root/sudo management sessions require their own future accepted proof; they
+are not silently treated as equivalent to this root-only fixture.
+
+The kernel's [process lifetime documentation](https://www.kernel.org/doc/html/latest/filesystems/proc.html)
+and [socket diagnostic UAPI](https://github.com/torvalds/linux/blob/v6.12/include/uapi/linux/inet_diag.h)
+explain the observation boundary. OpenSSH's [per-session executable split](https://www.openssh.com/releasenotes.html)
+is handled through the installed `sshd` / `sshd-session` executable identities.
+These are Linux/session observations, not an external management attestation or
+a general physical-host acceptance claim.
+
 ## Runtime Health Guard
 
 An **independent** active supervisor tests the exact selected data path, owned interfaces/rules and a set of meaningful TCP/TLS/HTTPS endpoints. Direct-path success, process existence or a lone ICMP Ping is insufficient. Monitor actual DNS and supported IPv4/IPv6/UDP behavior and invalid/aged routing data when these can undermine the selected routing contract. Avoid treating one unreachable website as a dead VPN.
