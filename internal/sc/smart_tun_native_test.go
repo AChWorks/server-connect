@@ -242,12 +242,15 @@ func TestSmartTUNNativeManifestSeparatesOwnershipAndContainment(t *testing.T) {
 		t.Fatal("guard loss permits routing cleanup and Direct leakage")
 	}
 	// Same semantic rule with a new handle is a replacement, not restoration.
-	objects[2]["rule"].(map[string]any)["handle"] = json.Number("9000")
+	firstRule := objects[3]["rule"].(map[string]any)
+	originalHandle := firstRule["handle"]
+	firstRule["handle"] = json.Number("9000")
 	replaced, err := nativeTUNNFTFromRows(objects, record, 46)
 	if err != nil || nativeTUNNFTReceiptCovers(record, replaced, false) {
 		t.Fatal("replacement nft handle adopted")
 	}
-	objects[2], objects[3] = objects[3], objects[2]
+	firstRule["handle"] = originalHandle
+	objects[3], objects[4] = objects[4], objects[3]
 	reordered, err := nativeTUNNFTFromRows(objects, record, 47)
 	if err == nil && nativeTUNNFTReceiptCovers(record, reordered, false) {
 		t.Fatal("rule order changed without conflict")

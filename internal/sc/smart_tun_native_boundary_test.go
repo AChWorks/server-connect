@@ -262,6 +262,28 @@ func nativeGuardOperand(value any, p nativeGuardPacket) any {
 		return "original"
 	}
 	if payload, ok := m["payload"].(map[string]any); ok {
+		// Protocol-typed payload expressions retain these dependencies even
+		// when nft's JSON listing omits the redundant explicit meta checks.
+		switch payload["protocol"] {
+		case "ip":
+			if p.family != 2 {
+				return nil
+			}
+		case "ip6":
+			if p.family != 10 {
+				return nil
+			}
+		case "udp":
+			if p.protocol != 17 {
+				return nil
+			}
+		case "icmpv6":
+			if p.family != 10 || p.protocol != 58 {
+				return nil
+			}
+		default:
+			return nil
+		}
 		switch payload["field"] {
 		case "daddr":
 			return p.destination
@@ -361,9 +383,11 @@ func TestSmartTUNNativeIndependentClassifierKeepsColdNeighborControl(t *testing.
 		{"core outer socket", nativeGuardPacket{family: 10, protocol: 17, oif: 3, mark: nativeTUNBypassMark, destination: "2001:db8:5::10"}, true},
 		{"cold IPv6 neighbor solicitation", nativeGuardPacket{family: 10, protocol: 58, oif: 3, icmpType: 135, destination: "ff02::1:ff00:2"}, true},
 		{"cold IPv6 neighbor advertisement", nativeGuardPacket{family: 10, protocol: 58, oif: 3, icmpType: 136, destination: "ff02::1"}, true},
+		{"ND payload type cannot exempt UDP", nativeGuardPacket{family: 10, protocol: 17, oif: 3, icmpType: 135, destination: "ff02::1"}, false},
 		{"ND cannot bypass public unicast", nativeGuardPacket{family: 10, protocol: 58, oif: 3, icmpType: 135, destination: "2001:db8:5::10"}, false},
 		{"arbitrary public ICMPv6 is unsupported", nativeGuardPacket{family: 10, protocol: 58, oif: 3, icmpType: 128, destination: "2001:db8:5::10"}, false},
 		{"link-local multicast DHCP4", nativeGuardPacket{family: 2, protocol: 17, oif: 3, sport: 68, dport: 67, destination: "255.255.255.255"}, true},
+		{"DHCP ports cannot exempt TCP", nativeGuardPacket{family: 2, protocol: 6, oif: 3, sport: 68, dport: 67, destination: "255.255.255.255"}, false},
 		{"broadcast arbitrary UDP denied", nativeGuardPacket{family: 2, protocol: 17, oif: 3, sport: 1234, dport: 1234, destination: "255.255.255.255"}, false},
 		{"local IPv4 link control", nativeGuardPacket{family: 2, protocol: 2, oif: 3, destination: "224.0.0.1"}, true},
 	} {

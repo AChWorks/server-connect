@@ -383,14 +383,20 @@ func nativeNFTObjects(record smartTUNTrialJournal) []map[string]any {
 	}
 	ret := map[string]any{"return": nil}
 	protected := func(family int) any {
-		prefixes := []string{"127.0.0.0/8", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "169.254.0.0/16"}
+		// Emit the pinned nft JSON representation directly: anonymous
+		// prefixes are address-sorted and full-length prefixes are literals.
+		prefixes := []string{"10.0.0.0/8", "127.0.0.0/8", "169.254.0.0/16", "172.16.0.0/12", "192.168.0.0/16"}
 		if family == 6 {
 			prefixes = []string{"::1/128", "fc00::/7", "fe80::/10"}
 		}
 		items := []any{}
 		for _, raw := range prefixes {
 			p := netip.MustParsePrefix(raw)
-			items = append(items, map[string]any{"prefix": map[string]any{"addr": p.Addr().String(), "len": p.Bits()}})
+			if p.Bits() == p.Addr().BitLen() {
+				items = append(items, p.Addr().String())
+			} else {
+				items = append(items, map[string]any{"prefix": map[string]any{"addr": p.Addr().String(), "len": p.Bits()}})
+			}
 		}
 		protocol := "ip"
 		if family == 6 {
@@ -398,28 +404,34 @@ func nativeNFTObjects(record smartTUNTrialJournal) []map[string]any {
 		}
 		return match(map[string]any{"payload": map[string]any{"protocol": protocol, "field": "daddr"}}, map[string]any{"set": items})
 	}
+	// nft lists all chain headers before each chain's ordered rules. Keep
+	// creation and expected receipt in that shape without sorting observations.
 	for _, chain := range []string{"capture", "guard"} {
 		kind, priority := "route", -150
 		if chain == "guard" {
 			kind, priority = "filter", 0
 		}
 		objects = append(objects, map[string]any{"chain": map[string]any{"family": "inet", "table": n.NFTName, "name": chain, "type": kind, "hook": "output", "prio": priority, "policy": "accept"}})
+	}
+	for _, chain := range []string{"capture", "guard"} {
 		add := func(expr ...any) {
 			objects = append(objects, map[string]any{"rule": map[string]any{"family": "inet", "table": n.NFTName, "chain": chain, "expr": expr, "comment": "server-connect:" + record.OperationID}})
 		}
 		add(match(map[string]any{"&": []any{meta("mark"), nativeTUNMarkMask}}, nativeTUNBypassMark), ret)
 		add(match(map[string]any{"ct": map[string]any{"key": "direction"}}, "reply"), ret)
 		add(match(meta("oif"), 1), ret)
-		add(match(meta("nfproto"), 2), protected(4), ret)
-		add(match(meta("nfproto"), 10), protected(6), ret)
+		// Payload protocol names carry their family/transport dependencies.
+		// nft removes redundant explicit meta checks when listing these rules.
+		add(protected(4), ret)
+		add(protected(6), ret)
 		// Neighbor discovery must continue with a cold cache. These are
 		// underlay-bound non-public controls, never a public ICMP exemption.
 		payload := func(protocol, field string) any {
 			return map[string]any{"payload": map[string]any{"protocol": protocol, "field": field}}
 		}
-		add(match(meta("oif"), n.UnderlayIndex), match(meta("nfproto"), 10), match(payload("ip6", "daddr"), map[string]any{"prefix": map[string]any{"addr": "ff02::", "len": 16}}), match(meta("l4proto"), 58), match(payload("icmpv6", "type"), map[string]any{"set": []any{133, 134, 135, 136}}), ret)
-		add(match(meta("oif"), n.UnderlayIndex), match(meta("nfproto"), 2), match(payload("ip", "daddr"), "255.255.255.255"), match(meta("l4proto"), 17), match(payload("udp", "sport"), 68), match(payload("udp", "dport"), 67), ret)
-		add(match(meta("oif"), n.UnderlayIndex), match(meta("nfproto"), 2), match(payload("ip", "daddr"), map[string]any{"prefix": map[string]any{"addr": "224.0.0.0", "len": 24}}), ret)
+		add(match(meta("oif"), n.UnderlayIndex), match(payload("ip6", "daddr"), map[string]any{"prefix": map[string]any{"addr": "ff02::", "len": 16}}), match(payload("icmpv6", "type"), map[string]any{"set": []any{133, 134, 135, 136}}), ret)
+		add(match(meta("oif"), n.UnderlayIndex), match(payload("ip", "daddr"), "255.255.255.255"), match(payload("udp", "sport"), 68), match(payload("udp", "dport"), 67), ret)
+		add(match(meta("oif"), n.UnderlayIndex), match(payload("ip", "daddr"), map[string]any{"prefix": map[string]any{"addr": "224.0.0.0", "len": 24}}), ret)
 		for _, family := range []int{4, 6} {
 			if nativeFamily(n, family).Address == "" {
 				continue
@@ -430,7 +442,10 @@ func nativeNFTObjects(record smartTUNTrialJournal) []map[string]any {
 			}
 			expr := []any{match(meta("nfproto"), nfproto), match(meta("l4proto"), map[string]any{"set": []any{6, 17}})}
 			if chain == "capture" {
-				expr = append(expr, map[string]any{"mangle": map[string]any{"key": meta("mark"), "value": map[string]any{"|": []any{map[string]any{"&": []any{meta("mark"), ^nativeTUNMarkMask}}, nativeTUNCaptureMark}}}})
+				// OR forces these capture bits regardless of the AND input.
+				// Include them in the AND mask to match nft's stable bitwise
+				// delinearization while preserving every unrelated mark bit.
+				expr = append(expr, map[string]any{"mangle": map[string]any{"key": meta("mark"), "value": map[string]any{"|": []any{map[string]any{"&": []any{meta("mark"), ^nativeTUNMarkMask | nativeTUNCaptureMark}}, nativeTUNCaptureMark}}}})
 			} else {
 				expr = append(expr, match(meta("oif"), n.LinkIndex), ret)
 			}

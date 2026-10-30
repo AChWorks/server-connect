@@ -1189,6 +1189,186 @@ func nativeTUNNftObjects(raw []byte) ([]map[string]any, error) {
 	return top.NFTables[1:], nil
 }
 
+// nft 1.1.3 JSON renders ifindex-typed operands as names even with -n, and
+// renders a missing index as a decimal string. Resolve only those typed
+// operands against a complete, independently observed current link map.
+func nativeNFTInterfaceMap(rows []map[string]json.RawMessage, record smartTUNTrialJournal) (map[string]int, error) {
+	indices := map[string]int{}
+	seen := map[int]bool{}
+	underlaySeen := false
+	for _, row := range rows {
+		index, ok := selectiveInt(row["ifindex"])
+		name := selectiveText(row["ifname"])
+		if !ok || index < 1 || !smartTUNDeviceName.MatchString(name) || seen[index] {
+			return nil, nativeTUNConflict("nft interface mapping is incomplete or ambiguous")
+		}
+		if _, duplicate := indices[name]; duplicate {
+			return nil, nativeTUNConflict("nft interface name is duplicated")
+		}
+		seen[index] = true
+		indices[name] = index
+		if name == record.UnderlayInterface || index == record.Native.UnderlayIndex {
+			if name != record.UnderlayInterface || index != record.Native.UnderlayIndex {
+				return nil, nativeTUNConflict("nft underlay interface identity changed")
+			}
+			underlaySeen = true
+		}
+		if name == record.TunnelInterface || (record.Native.LinkIndex > 0 && index == record.Native.LinkIndex) {
+			if record.Native.LinkIndex == 0 || name != record.TunnelInterface || index != record.Native.LinkIndex || record.Native.LinkStage == "removed" || selectiveText(row["ifalias"]) != "server-connect:"+record.OperationID {
+				return nil, nativeTUNConflict("nft TUN interface was renamed, replaced or reappeared")
+			}
+		}
+	}
+	if !underlaySeen {
+		return nil, nativeTUNConflict("nft underlay interface is absent")
+	}
+	return indices, nil
+}
+
+func nativeNFTObserveInterfaces(record smartTUNTrialJournal) (map[string]int, error) {
+	rows, err := nativeTUNRows("-d", "-j", "link", "show")
+	if err != nil {
+		return nil, err
+	}
+	indices, err := nativeNFTInterfaceMap(rows, record)
+	if err != nil {
+		return nil, err
+	}
+	for _, row := range rows {
+		if selectiveText(row["ifname"]) == record.TunnelInterface {
+			hash, persistent, err := nativeTUNLinkHash(row)
+			if err != nil {
+				return nil, err
+			}
+			if hash != record.Native.LinkSHA256 || (!persistent && record.Native.LinkStage != "bound" && record.Native.LinkStage != "persist_possible") {
+				return nil, nativeTUNConflict("nft TUN interface shape changed")
+			}
+		}
+	}
+	return indices, nil
+}
+
+func nativeNFTSameInterfaces(a, b map[string]int) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for name, index := range a {
+		other, present := b[name]
+		if !present || other != index {
+			return false
+		}
+	}
+	return true
+}
+
+func nativeNFTInterfaceValue(value any, indices map[string]int) (any, error) {
+	bad := func() (any, error) { return nil, nativeTUNConflict("nft interface operand is unresolved or ambiguous") }
+	switch v := value.(type) {
+	case json.Number:
+		index, err := strconv.ParseUint(v.String(), 10, 32)
+		if err != nil || strconv.FormatUint(index, 10) != v.String() {
+			return bad()
+		}
+		return json.Number(strconv.FormatUint(index, 10)), nil
+	case string:
+		if strings.TrimSpace(v) != v {
+			return bad()
+		}
+		digits := v != ""
+		for _, char := range v {
+			if char < '0' || char > '9' {
+				digits = false
+				break
+			}
+		}
+		if digits || strings.HasPrefix(v, "+") || strings.HasPrefix(v, "-") {
+			index, err := strconv.ParseUint(v, 10, 32)
+			if err != nil || strconv.FormatUint(index, 10) != v {
+				return bad()
+			}
+			// Numeric interface names and the missing-index fallback can
+			// produce identical JSON. Never guess between different indices.
+			if named, present := indices[v]; present && uint64(named) != index {
+				return bad()
+			}
+			return json.Number(v), nil
+		}
+		index, present := indices[v]
+		if !present {
+			return bad()
+		}
+		return json.Number(strconv.Itoa(index)), nil
+	case map[string]any:
+		if len(v) != 1 {
+			return bad()
+		}
+		items, ok := v["set"].([]any)
+		if !ok || len(items) == 0 {
+			return bad()
+		}
+		normalized := make([]any, len(items))
+		for i, item := range items {
+			switch item.(type) {
+			case string, json.Number:
+			default:
+				return bad()
+			}
+			var err error
+			normalized[i], err = nativeNFTInterfaceValue(item, indices)
+			if err != nil {
+				return nil, err
+			}
+		}
+		return map[string]any{"set": normalized}, nil
+	default:
+		return bad()
+	}
+}
+
+func nativeNFTPinInterfaceMatches(value any, indices map[string]int) error {
+	switch node := value.(type) {
+	case []any:
+		for _, child := range node {
+			if err := nativeNFTPinInterfaceMatches(child, indices); err != nil {
+				return err
+			}
+		}
+	case map[string]any:
+		if match, ok := node["match"].(map[string]any); ok {
+			for _, side := range []string{"left", "right"} {
+				kind := nativeNFTInterfaceExpr(match[side])
+				if kind != "oif" && kind != "iif" {
+					continue
+				}
+				other := "right"
+				if side == "right" {
+					other = "left"
+				}
+				resolved, err := nativeNFTInterfaceValue(match[other], indices)
+				if err != nil {
+					return err
+				}
+				match[other] = resolved
+			}
+		}
+		for _, child := range node {
+			if err := nativeNFTPinInterfaceMatches(child, indices); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func nativeNFTPinInterfaces(objects []map[string]any, indices map[string]int) error {
+	for _, object := range objects {
+		if err := nativeNFTPinInterfaceMatches(object, indices); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func nativeNFTObjectHash(objects []map[string]any, stripHandles bool) (string, error) {
 	raw, _ := json.Marshal(objects)
 	decoder := json.NewDecoder(bytes.NewReader(raw))
@@ -1217,9 +1397,10 @@ func nativeNFTObjectHash(objects []map[string]any, stripHandles bool) (string, e
 	return nativeTUNCanonical(copyObjects)
 }
 
-// Numeric output pins meta oif/iif values to kernel ifindices, even after
-// the link vanishes. Normalize only documented enum spelling differences;
-// retain every expression, field, ordering and numeric value.
+// Interface operands are pinned separately through a stable current link
+// map. Here normalize only documented enum spellings; retain all expressions,
+// fields, ordering and numeric values. In particular, -n alone is not enough
+// to make the pinned nft JSON renderer expose numeric interface indices.
 func nativeNFTNormalizeEnums(value any) {
 	switch node := value.(type) {
 	case []any:
@@ -1726,6 +1907,10 @@ func nativeTUNGuardIntact(record smartTUNTrialJournal, observed nativeTUNNFTObse
 
 func nativeTUNObserveNFT(record smartTUNTrialJournal) (nativeTUNNFTObservation, error) {
 	for attempt := 0; attempt < 3; attempt++ {
+		interfacesBefore, err := nativeNFTObserveInterfaces(record)
+		if err != nil {
+			return nativeTUNNFTObservation{}, err
+		}
 		before, err := nativeNFTGeneration()
 		if err != nil {
 			return nativeTUNNFTObservation{}, err
@@ -1738,14 +1923,23 @@ func nativeTUNObserveNFT(record smartTUNTrialJournal) (nativeTUNNFTObservation, 
 		if err != nil {
 			return nativeTUNNFTObservation{}, err
 		}
-		if before == 0 || before != after {
+		interfacesAfter, err := nativeNFTObserveInterfaces(record)
+		if err != nil {
+			return nativeTUNNFTObservation{}, err
+		}
+		// Link mappings have a separate lifetime from nft's generation.
+		// Disjoint mapping changes cause a bounded retry, never name adoption.
+		if before == 0 || before != after || !nativeNFTSameInterfaces(interfacesBefore, interfacesAfter) {
 			continue
 		}
 		objects, err := nativeTUNNftObjects(raw)
 		if err != nil {
 			return nativeTUNNFTObservation{}, err
 		}
+		if err := nativeNFTPinInterfaces(objects, interfacesAfter); err != nil {
+			return nativeTUNNFTObservation{}, err
+		}
 		return nativeTUNNFTFromRows(objects, record, after)
 	}
-	return nativeTUNNFTObservation{}, nativeTUNUncertain("nft generation changed during bounded ownership observation")
+	return nativeTUNNFTObservation{}, nativeTUNUncertain("nft generation or interface mapping changed during bounded ownership observation")
 }

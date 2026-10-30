@@ -1,0 +1,867 @@
+{
+  "nftables": [
+    {
+      "metainfo": {
+        "version": "1.1.3",
+        "release_name": "Commodore Bullmoose #4",
+        "json_schema_version": 1
+      }
+    },
+    {
+      "table": {
+        "family": "inet",
+        "name": "scnt_5f4c8ceaf238be74151d0ca235c6a7dc",
+        "handle": 16,
+        "comment": "server-connect:5f4c8ceaf238be74151d0ca235c6a7dc"
+      }
+    },
+    {
+      "chain": {
+        "family": "inet",
+        "table": "scnt_5f4c8ceaf238be74151d0ca235c6a7dc",
+        "name": "capture",
+        "handle": 1,
+        "type": "route",
+        "hook": "output",
+        "prio": -150,
+        "policy": "accept"
+      }
+    },
+    {
+      "chain": {
+        "family": "inet",
+        "table": "scnt_5f4c8ceaf238be74151d0ca235c6a7dc",
+        "name": "guard",
+        "handle": 15,
+        "type": "filter",
+        "hook": "output",
+        "prio": 0,
+        "policy": "accept"
+      }
+    },
+    {
+      "rule": {
+        "family": "inet",
+        "table": "scnt_5f4c8ceaf238be74151d0ca235c6a7dc",
+        "chain": "capture",
+        "handle": 2,
+        "comment": "server-connect:5f4c8ceaf238be74151d0ca235c6a7dc",
+        "expr": [
+          {
+            "match": {
+              "op": "==",
+              "left": {
+                "&": [
+                  {
+                    "meta": {
+                      "key": "mark"
+                    }
+                  },
+                  16711680
+                ]
+              },
+              "right": 5505024
+            }
+          },
+          {
+            "return": null
+          }
+        ]
+      }
+    },
+    {
+      "rule": {
+        "family": "inet",
+        "table": "scnt_5f4c8ceaf238be74151d0ca235c6a7dc",
+        "chain": "capture",
+        "handle": 3,
+        "comment": "server-connect:5f4c8ceaf238be74151d0ca235c6a7dc",
+        "expr": [
+          {
+            "match": {
+              "op": "==",
+              "left": {
+                "ct": {
+                  "key": "direction"
+                }
+              },
+              "right": 1
+            }
+          },
+          {
+            "return": null
+          }
+        ]
+      }
+    },
+    {
+      "rule": {
+        "family": "inet",
+        "table": "scnt_5f4c8ceaf238be74151d0ca235c6a7dc",
+        "chain": "capture",
+        "handle": 4,
+        "comment": "server-connect:5f4c8ceaf238be74151d0ca235c6a7dc",
+        "expr": [
+          {
+            "match": {
+              "op": "==",
+              "left": {
+                "meta": {
+                  "key": "oif"
+                }
+              },
+              "right": "lo"
+            }
+          },
+          {
+            "return": null
+          }
+        ]
+      }
+    },
+    {
+      "rule": {
+        "family": "inet",
+        "table": "scnt_5f4c8ceaf238be74151d0ca235c6a7dc",
+        "chain": "capture",
+        "handle": 6,
+        "comment": "server-connect:5f4c8ceaf238be74151d0ca235c6a7dc",
+        "expr": [
+          {
+            "match": {
+              "op": "==",
+              "left": {
+                "payload": {
+                  "protocol": "ip",
+                  "field": "daddr"
+                }
+              },
+              "right": {
+                "set": [
+                  {
+                    "prefix": {
+                      "addr": "10.0.0.0",
+                      "len": 8
+                    }
+                  },
+                  {
+                    "prefix": {
+                      "addr": "127.0.0.0",
+                      "len": 8
+                    }
+                  },
+                  {
+                    "prefix": {
+                      "addr": "169.254.0.0",
+                      "len": 16
+                    }
+                  },
+                  {
+                    "prefix": {
+                      "addr": "172.16.0.0",
+                      "len": 12
+                    }
+                  },
+                  {
+                    "prefix": {
+                      "addr": "192.168.0.0",
+                      "len": 16
+                    }
+                  }
+                ]
+              }
+            }
+          },
+          {
+            "return": null
+          }
+        ]
+      }
+    },
+    {
+      "rule": {
+        "family": "inet",
+        "table": "scnt_5f4c8ceaf238be74151d0ca235c6a7dc",
+        "chain": "capture",
+        "handle": 8,
+        "comment": "server-connect:5f4c8ceaf238be74151d0ca235c6a7dc",
+        "expr": [
+          {
+            "match": {
+              "op": "==",
+              "left": {
+                "payload": {
+                  "protocol": "ip6",
+                  "field": "daddr"
+                }
+              },
+              "right": {
+                "set": [
+                  "::1",
+                  {
+                    "prefix": {
+                      "addr": "fc00::",
+                      "len": 7
+                    }
+                  },
+                  {
+                    "prefix": {
+                      "addr": "fe80::",
+                      "len": 10
+                    }
+                  }
+                ]
+              }
+            }
+          },
+          {
+            "return": null
+          }
+        ]
+      }
+    },
+    {
+      "rule": {
+        "family": "inet",
+        "table": "scnt_5f4c8ceaf238be74151d0ca235c6a7dc",
+        "chain": "capture",
+        "handle": 10,
+        "comment": "server-connect:5f4c8ceaf238be74151d0ca235c6a7dc",
+        "expr": [
+          {
+            "match": {
+              "op": "==",
+              "left": {
+                "meta": {
+                  "key": "oif"
+                }
+              },
+              "right": "scqaedge0"
+            }
+          },
+          {
+            "match": {
+              "op": "==",
+              "left": {
+                "payload": {
+                  "protocol": "ip6",
+                  "field": "daddr"
+                }
+              },
+              "right": {
+                "prefix": {
+                  "addr": "ff02::",
+                  "len": 16
+                }
+              }
+            }
+          },
+          {
+            "match": {
+              "op": "==",
+              "left": {
+                "payload": {
+                  "protocol": "icmpv6",
+                  "field": "type"
+                }
+              },
+              "right": {
+                "set": [
+                  133,
+                  134,
+                  135,
+                  136
+                ]
+              }
+            }
+          },
+          {
+            "return": null
+          }
+        ]
+      }
+    },
+    {
+      "rule": {
+        "family": "inet",
+        "table": "scnt_5f4c8ceaf238be74151d0ca235c6a7dc",
+        "chain": "capture",
+        "handle": 11,
+        "comment": "server-connect:5f4c8ceaf238be74151d0ca235c6a7dc",
+        "expr": [
+          {
+            "match": {
+              "op": "==",
+              "left": {
+                "meta": {
+                  "key": "oif"
+                }
+              },
+              "right": "scqaedge0"
+            }
+          },
+          {
+            "match": {
+              "op": "==",
+              "left": {
+                "payload": {
+                  "protocol": "ip",
+                  "field": "daddr"
+                }
+              },
+              "right": "255.255.255.255"
+            }
+          },
+          {
+            "match": {
+              "op": "==",
+              "left": {
+                "payload": {
+                  "protocol": "udp",
+                  "field": "sport"
+                }
+              },
+              "right": 68
+            }
+          },
+          {
+            "match": {
+              "op": "==",
+              "left": {
+                "payload": {
+                  "protocol": "udp",
+                  "field": "dport"
+                }
+              },
+              "right": 67
+            }
+          },
+          {
+            "return": null
+          }
+        ]
+      }
+    },
+    {
+      "rule": {
+        "family": "inet",
+        "table": "scnt_5f4c8ceaf238be74151d0ca235c6a7dc",
+        "chain": "capture",
+        "handle": 12,
+        "comment": "server-connect:5f4c8ceaf238be74151d0ca235c6a7dc",
+        "expr": [
+          {
+            "match": {
+              "op": "==",
+              "left": {
+                "meta": {
+                  "key": "oif"
+                }
+              },
+              "right": "scqaedge0"
+            }
+          },
+          {
+            "match": {
+              "op": "==",
+              "left": {
+                "payload": {
+                  "protocol": "ip",
+                  "field": "daddr"
+                }
+              },
+              "right": {
+                "prefix": {
+                  "addr": "224.0.0.0",
+                  "len": 24
+                }
+              }
+            }
+          },
+          {
+            "return": null
+          }
+        ]
+      }
+    },
+    {
+      "rule": {
+        "family": "inet",
+        "table": "scnt_5f4c8ceaf238be74151d0ca235c6a7dc",
+        "chain": "capture",
+        "handle": 14,
+        "comment": "server-connect:5f4c8ceaf238be74151d0ca235c6a7dc",
+        "expr": [
+          {
+            "match": {
+              "op": "==",
+              "left": {
+                "meta": {
+                  "key": "nfproto"
+                }
+              },
+              "right": 2
+            }
+          },
+          {
+            "match": {
+              "op": "==",
+              "left": {
+                "meta": {
+                  "key": "l4proto"
+                }
+              },
+              "right": {
+                "set": [
+                  6,
+                  17
+                ]
+              }
+            }
+          },
+          {
+            "mangle": {
+              "key": {
+                "meta": {
+                  "key": "mark"
+                }
+              },
+              "value": {
+                "|": [
+                  {
+                    "&": [
+                      {
+                        "meta": {
+                          "key": "mark"
+                        }
+                      },
+                      4283695103
+                    ]
+                  },
+                  5439488
+                ]
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "rule": {
+        "family": "inet",
+        "table": "scnt_5f4c8ceaf238be74151d0ca235c6a7dc",
+        "chain": "guard",
+        "handle": 16,
+        "comment": "server-connect:5f4c8ceaf238be74151d0ca235c6a7dc",
+        "expr": [
+          {
+            "match": {
+              "op": "==",
+              "left": {
+                "&": [
+                  {
+                    "meta": {
+                      "key": "mark"
+                    }
+                  },
+                  16711680
+                ]
+              },
+              "right": 5505024
+            }
+          },
+          {
+            "return": null
+          }
+        ]
+      }
+    },
+    {
+      "rule": {
+        "family": "inet",
+        "table": "scnt_5f4c8ceaf238be74151d0ca235c6a7dc",
+        "chain": "guard",
+        "handle": 17,
+        "comment": "server-connect:5f4c8ceaf238be74151d0ca235c6a7dc",
+        "expr": [
+          {
+            "match": {
+              "op": "==",
+              "left": {
+                "ct": {
+                  "key": "direction"
+                }
+              },
+              "right": 1
+            }
+          },
+          {
+            "return": null
+          }
+        ]
+      }
+    },
+    {
+      "rule": {
+        "family": "inet",
+        "table": "scnt_5f4c8ceaf238be74151d0ca235c6a7dc",
+        "chain": "guard",
+        "handle": 18,
+        "comment": "server-connect:5f4c8ceaf238be74151d0ca235c6a7dc",
+        "expr": [
+          {
+            "match": {
+              "op": "==",
+              "left": {
+                "meta": {
+                  "key": "oif"
+                }
+              },
+              "right": "lo"
+            }
+          },
+          {
+            "return": null
+          }
+        ]
+      }
+    },
+    {
+      "rule": {
+        "family": "inet",
+        "table": "scnt_5f4c8ceaf238be74151d0ca235c6a7dc",
+        "chain": "guard",
+        "handle": 20,
+        "comment": "server-connect:5f4c8ceaf238be74151d0ca235c6a7dc",
+        "expr": [
+          {
+            "match": {
+              "op": "==",
+              "left": {
+                "payload": {
+                  "protocol": "ip",
+                  "field": "daddr"
+                }
+              },
+              "right": {
+                "set": [
+                  {
+                    "prefix": {
+                      "addr": "10.0.0.0",
+                      "len": 8
+                    }
+                  },
+                  {
+                    "prefix": {
+                      "addr": "127.0.0.0",
+                      "len": 8
+                    }
+                  },
+                  {
+                    "prefix": {
+                      "addr": "169.254.0.0",
+                      "len": 16
+                    }
+                  },
+                  {
+                    "prefix": {
+                      "addr": "172.16.0.0",
+                      "len": 12
+                    }
+                  },
+                  {
+                    "prefix": {
+                      "addr": "192.168.0.0",
+                      "len": 16
+                    }
+                  }
+                ]
+              }
+            }
+          },
+          {
+            "return": null
+          }
+        ]
+      }
+    },
+    {
+      "rule": {
+        "family": "inet",
+        "table": "scnt_5f4c8ceaf238be74151d0ca235c6a7dc",
+        "chain": "guard",
+        "handle": 22,
+        "comment": "server-connect:5f4c8ceaf238be74151d0ca235c6a7dc",
+        "expr": [
+          {
+            "match": {
+              "op": "==",
+              "left": {
+                "payload": {
+                  "protocol": "ip6",
+                  "field": "daddr"
+                }
+              },
+              "right": {
+                "set": [
+                  "::1",
+                  {
+                    "prefix": {
+                      "addr": "fc00::",
+                      "len": 7
+                    }
+                  },
+                  {
+                    "prefix": {
+                      "addr": "fe80::",
+                      "len": 10
+                    }
+                  }
+                ]
+              }
+            }
+          },
+          {
+            "return": null
+          }
+        ]
+      }
+    },
+    {
+      "rule": {
+        "family": "inet",
+        "table": "scnt_5f4c8ceaf238be74151d0ca235c6a7dc",
+        "chain": "guard",
+        "handle": 24,
+        "comment": "server-connect:5f4c8ceaf238be74151d0ca235c6a7dc",
+        "expr": [
+          {
+            "match": {
+              "op": "==",
+              "left": {
+                "meta": {
+                  "key": "oif"
+                }
+              },
+              "right": "scqaedge0"
+            }
+          },
+          {
+            "match": {
+              "op": "==",
+              "left": {
+                "payload": {
+                  "protocol": "ip6",
+                  "field": "daddr"
+                }
+              },
+              "right": {
+                "prefix": {
+                  "addr": "ff02::",
+                  "len": 16
+                }
+              }
+            }
+          },
+          {
+            "match": {
+              "op": "==",
+              "left": {
+                "payload": {
+                  "protocol": "icmpv6",
+                  "field": "type"
+                }
+              },
+              "right": {
+                "set": [
+                  133,
+                  134,
+                  135,
+                  136
+                ]
+              }
+            }
+          },
+          {
+            "return": null
+          }
+        ]
+      }
+    },
+    {
+      "rule": {
+        "family": "inet",
+        "table": "scnt_5f4c8ceaf238be74151d0ca235c6a7dc",
+        "chain": "guard",
+        "handle": 25,
+        "comment": "server-connect:5f4c8ceaf238be74151d0ca235c6a7dc",
+        "expr": [
+          {
+            "match": {
+              "op": "==",
+              "left": {
+                "meta": {
+                  "key": "oif"
+                }
+              },
+              "right": "scqaedge0"
+            }
+          },
+          {
+            "match": {
+              "op": "==",
+              "left": {
+                "payload": {
+                  "protocol": "ip",
+                  "field": "daddr"
+                }
+              },
+              "right": "255.255.255.255"
+            }
+          },
+          {
+            "match": {
+              "op": "==",
+              "left": {
+                "payload": {
+                  "protocol": "udp",
+                  "field": "sport"
+                }
+              },
+              "right": 68
+            }
+          },
+          {
+            "match": {
+              "op": "==",
+              "left": {
+                "payload": {
+                  "protocol": "udp",
+                  "field": "dport"
+                }
+              },
+              "right": 67
+            }
+          },
+          {
+            "return": null
+          }
+        ]
+      }
+    },
+    {
+      "rule": {
+        "family": "inet",
+        "table": "scnt_5f4c8ceaf238be74151d0ca235c6a7dc",
+        "chain": "guard",
+        "handle": 26,
+        "comment": "server-connect:5f4c8ceaf238be74151d0ca235c6a7dc",
+        "expr": [
+          {
+            "match": {
+              "op": "==",
+              "left": {
+                "meta": {
+                  "key": "oif"
+                }
+              },
+              "right": "scqaedge0"
+            }
+          },
+          {
+            "match": {
+              "op": "==",
+              "left": {
+                "payload": {
+                  "protocol": "ip",
+                  "field": "daddr"
+                }
+              },
+              "right": {
+                "prefix": {
+                  "addr": "224.0.0.0",
+                  "len": 24
+                }
+              }
+            }
+          },
+          {
+            "return": null
+          }
+        ]
+      }
+    },
+    {
+      "rule": {
+        "family": "inet",
+        "table": "scnt_5f4c8ceaf238be74151d0ca235c6a7dc",
+        "chain": "guard",
+        "handle": 28,
+        "comment": "server-connect:5f4c8ceaf238be74151d0ca235c6a7dc",
+        "expr": [
+          {
+            "match": {
+              "op": "==",
+              "left": {
+                "meta": {
+                  "key": "nfproto"
+                }
+              },
+              "right": 2
+            }
+          },
+          {
+            "match": {
+              "op": "==",
+              "left": {
+                "meta": {
+                  "key": "l4proto"
+                }
+              },
+              "right": {
+                "set": [
+                  6,
+                  17
+                ]
+              }
+            }
+          },
+          {
+            "match": {
+              "op": "==",
+              "left": {
+                "meta": {
+                  "key": "oif"
+                }
+              },
+              "right": "sctunqa0"
+            }
+          },
+          {
+            "return": null
+          }
+        ]
+      }
+    },
+    {
+      "rule": {
+        "family": "inet",
+        "table": "scnt_5f4c8ceaf238be74151d0ca235c6a7dc",
+        "chain": "guard",
+        "handle": 29,
+        "comment": "server-connect:5f4c8ceaf238be74151d0ca235c6a7dc",
+        "expr": [
+          {
+            "counter": {
+              "packets": 0,
+              "bytes": 0
+            }
+          },
+          {
+            "drop": null
+          }
+        ]
+      }
+    }
+  ]
+}
