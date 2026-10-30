@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Creation/cleanup failure regressions with fake commands; no native activity."""
+"""Fixture ownership and bookkeeping regressions; no native activity."""
 
 import argparse
 import contextlib
 import importlib.util
 import io
+import itertools
 import json
 from pathlib import Path
 import subprocess
@@ -164,6 +165,110 @@ class ForeignCleanupTests(unittest.TestCase):
         self.assertEqual(self.fake.deletions, 0)
 
 
+class FakeExecutor:
+    def __init__(self, unit):
+        self.unit = unit
+        self.device, self.inode, self.content = 7, 41, b"original installed executor"
+        self.original_identity = (self.device, self.inode, self.content)
+        self.regular, self.symlink = True, False
+        self.resets = []
+        self.properties = {
+            "ActiveState": "failed", "Result": "signal", "LoadState": "loaded",
+            "MainPID": "0", "ControlPID": "0", "Job": "", "DropInPaths": "",
+            "FragmentPath": str(self),
+        }
+
+    def __str__(self):
+        return "/etc/systemd/system/" + self.unit
+
+    def __truediv__(self, unit):
+        assert unit == self.unit
+        return self
+
+    def is_file(self):
+        return self.regular
+
+    def is_symlink(self):
+        return self.symlink
+
+    def stat(self):
+        return argparse.Namespace(st_dev=self.device, st_ino=self.inode)
+
+    def read_bytes(self):
+        return self.content
+
+    def show(self, unit, prop):
+        assert unit == self.unit
+        return self.properties[prop]
+
+    def command(self, argv):
+        assert argv == ["systemctl", "reset-failed", self.unit]
+        self.resets.append(argv)
+        self.properties.update(ActiveState="inactive", Result="success")
+        return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+
+
+class ExecutorBookkeepingTests(unittest.TestCase):
+    def exercise(self, fake):
+        fixture = ForeignCleanupTests.new_fixture()
+        # Run the actual bounded wait with a synthetic clock; no sleeping,
+        # filesystem changes, service manager, or native commands are used.
+        with patch.object(driver, "UNITS", fake), \
+                patch.object(fixture, "show", side_effect=fake.show), \
+                patch.object(fixture, "command", side_effect=fake.command), \
+                patch.object(driver.time, "monotonic", side_effect=itertools.count()), \
+                patch.object(driver.time, "sleep"), contextlib.redirect_stdout(io.StringIO()):
+            fixture.reset_failed_executor(fake.unit, fake.original_identity, "failed")
+
+    def test_inactive_or_collected_executor_needs_no_reset(self):
+        for unit in (driver.HEALTH, driver.RECOVERY):
+            for collected in (False, True):
+                with self.subTest(unit=unit, collected=collected):
+                    fake = FakeExecutor(unit)
+                    fake.properties.update(ActiveState="inactive", Result="success")
+                    if collected:
+                        fake.properties.update(LoadState="not-found", FragmentPath="")
+                    self.exercise(fake)
+                    self.assertEqual(fake.resets, [])
+
+    def test_authentic_idle_failed_executor_resets_only_exact_role(self):
+        for unit in (driver.HEALTH, driver.RECOVERY):
+            with self.subTest(unit=unit):
+                fake = FakeExecutor(unit)
+                self.exercise(fake)
+                self.assertEqual(fake.resets, [["systemctl", "reset-failed", unit]])
+                self.assertEqual(fake.properties["ActiveState"], "inactive")
+                self.assertEqual(fake.properties["Result"], "success")
+
+    def test_foreign_or_replaced_failed_executor_is_rejected(self):
+        mutations = (("device", 8), ("inode", 42), ("content", b"replacement"),
+                     ("regular", False), ("symlink", True), ("LoadState", "masked"),
+                     ("FragmentPath", "/run/systemd/system/foreign.service"),
+                     ("DropInPaths", "/etc/systemd/system/foreign.conf"))
+        for unit in (driver.HEALTH, driver.RECOVERY):
+            for field, value in mutations:
+                with self.subTest(unit=unit, changed=field):
+                    fake = FakeExecutor(unit)
+                    if field in fake.properties:
+                        fake.properties[field] = value
+                    else:
+                        setattr(fake, field, value)
+                    with self.assertRaises(AssertionError):
+                        self.exercise(fake)
+                    self.assertEqual(fake.resets, [])
+
+    def test_busy_executor_is_rejected_without_reset(self):
+        for unit in (driver.HEALTH, driver.RECOVERY):
+            for field, value in (("ActiveState", "activating"), ("MainPID", "17"),
+                                 ("ControlPID", "18"), ("Job", "19")):
+                with self.subTest(unit=unit, busy=field):
+                    fake = FakeExecutor(unit)
+                    fake.properties[field] = value
+                    with self.assertRaisesRegex(AssertionError, "timed out.*idle executor"):
+                        self.exercise(fake)
+                    self.assertEqual(fake.resets, [])
+
+
 class FailureReportingTests(unittest.TestCase):
     def run_main(self, original):
         fixture = Mock(started=time.monotonic())
@@ -194,3 +299,4 @@ if __name__ == "__main__":
     if not result.wasSuccessful():
         raise SystemExit(1)
     print("SUPERVISED_FIXTURE_CREATION_CLEANUP_BOUNDARIES=PASS")
+    print("SUPERVISED_FIXTURE_EXACT_FAILED_EXECUTOR_BOOKKEEPING=PASS")

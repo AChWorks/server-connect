@@ -821,7 +821,7 @@ supervised_log="$scratch/real-tun-product-supervised.log"
 docker exec -e SC_QA_TUN_PRODUCT_LAB=yes -e SC_QA_TUN_SUPERVISED=yes \
   "$container" /bin/sh /root/qa-host-tun-path.sh | tee "$supervised_log"
 for marker in \
-  'DIRECT_CONTROLS' 'FRESH_SSH_SINGLE_USE_AND_NEGATIVES' \
+  'DIRECT_CONTROLS' 'OFF_DIRECT_TCP_UDP_DNS' 'FRESH_SSH_SINGLE_USE_AND_NEGATIVES' \
   'ACTIVE_UPDATE_UNINSTALL_REFUSED' 'DISJOINT_FOREIGN_OWNER_PRESERVED' \
   'CONFIRMED_BEYOND_ACTIVATION_DEADLINE' 'ONE_TARGET_FALSE_ALARM_REJECTED' \
   'DNS_FAILURE_AND_TRANSIENT_RECOVERY' 'LIVE_CORE_UPSTREAM_FAILURE_NO_DIRECT_LEAK' \
@@ -840,7 +840,7 @@ assert_tun_native_cleanup installed-product-confirmed-supervision
 supervised_v6_log="$scratch/real-tun-product-supervised-ipv6.log"
 docker exec -e SC_QA_TUN_PRODUCT_LAB=yes -e SC_QA_TUN_SUPERVISED=yes -e SC_QA_TUN_IPV6=yes \
   "$container" /bin/sh /root/qa-host-tun-path.sh | tee "$supervised_v6_log"
-for marker in 'DIRECT_CONTROLS' 'CONFIRMED_BEYOND_ACTIVATION_DEADLINE' \
+for marker in 'DIRECT_CONTROLS' 'OFF_DIRECT_TCP_UDP_DNS' 'CONFIRMED_BEYOND_ACTIVATION_DEADLINE' \
   'DUALSTACK_SELECTED_TCP_UDP_DNS' 'COMPLETE_EXPERIMENTAL_ONLY'; do
   grep -Fx "SUPERVISED_TUN_${marker}=PASS" "$supervised_v6_log" >/dev/null
 done

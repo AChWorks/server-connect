@@ -48,6 +48,7 @@ class Fixture:
         self.root_created = False
         self.foreign_snapshot = None
         self.upstream_fd = None
+        self.health_identity = None
         self.recovery_identity = None
 
     def command(self, argv, *, check=True, timeout=20, data=None):
@@ -181,6 +182,9 @@ class Fixture:
         recovery_path = UNITS / RECOVERY
         recovery_stat = recovery_path.stat()
         self.recovery_identity = (recovery_stat.st_dev, recovery_stat.st_ino, recovery_path.read_bytes())
+        health_path = UNITS / HEALTH
+        health_stat = health_path.stat()
+        self.health_identity = (health_stat.st_dev, health_stat.st_ino, health_path.read_bytes())
         self.upstream_fd = os.pidfd_open(self.args.upstream_pid)
         upstream_argv = Path(f"/proc/{self.args.upstream_pid}/cmdline").read_bytes().rstrip(b"\0").split(b"\0")
         assert upstream_argv == [b"/root/server-connect/bin/sing-box", b"run", b"-c", b"/run/sc-qa-tun-upstream.json"], upstream_argv
@@ -313,6 +317,13 @@ class Fixture:
         assert self.native() == self.baseline, "native baseline was not restored"
         value = self.cli("status")
         assert value["desired"] == "direct" and value["observed"] == "inactive", value
+        self.wires("direct")
+        counts = self.counters()
+        assert set(counts) == set(self.direct_counts), "Direct witness identity changed after Off"
+        assert all(counts[key] > self.direct_counts[key] for key in counts), \
+            "fresh Direct delivery did not advance every peer witness after Off"
+        self.direct_counts = counts
+        self.marker("OFF_DIRECT_TCP_UDP_DNS")
 
     def disconnect(self):
         value = self.cli("smart-tun-trial-disconnect", "--operation-id", self.op, "--revision", "1")
@@ -557,6 +568,34 @@ class Fixture:
         self.inactive()
         self.marker("FINITE_EXHAUSTION_FLAPPING_AND_SAVED_STATE")
 
+    def reset_failed_executor(self, unit, original_identity, kind):
+        assert unit in (HEALTH, RECOVERY), "unsupported QA bookkeeping role"
+
+        def idle_state():
+            state = self.show(unit, "ActiveState")
+            if (state in ("inactive", "failed") and self.show(unit, "MainPID") == "0" and
+                    self.show(unit, "ControlPID") == "0" and self.show(unit, "Job") in ("", "0")):
+                return state
+            return None
+
+        state = self.wait(idle_state, 5, "idle executor " + unit)
+        # Healthy inactive units may be collected between observations. They
+        # need no reset. Only an authentic idle failed role permits mutation.
+        if state == "failed":
+            path = UNITS / unit
+            assert path.is_file() and not path.is_symlink(), "executor unit is missing or replaced"
+            identity = path.stat()
+            assert (identity.st_dev, identity.st_ino, path.read_bytes()) == original_identity, \
+                "executor unit identity changed"
+            assert self.show(unit, "LoadState") == "loaded", "executor unit is not loaded"
+            assert self.show(unit, "FragmentPath") == str(path), "executor fragment changed"
+            assert self.show(unit, "DropInPaths") == "", "executor has foreign drop-ins"
+            assert idle_state() == "failed", "executor state changed before QA reset"
+            print("SUPERVISED_TUN_" + kind.upper() + "_QA_BOOKKEEPING=reset exact idle " +
+                  unit + " after verified Off and Direct delivery", flush=True)
+            self.command(["systemctl", "reset-failed", unit])
+        assert self.show(unit, "ActiveState") == "inactive" and self.show(unit, "Result") == "success"
+
     def executor_failure(self, kind):
         print("SUPERVISED_TUN_CASE=supervisor-" + kind, flush=True)
         self.apply(30)
@@ -628,25 +667,11 @@ class Fixture:
             self.inactive()
         self.resume_upstream()
         self.restore_units()
-        if self.show(HEALTH, "ActiveState") == "failed":
-            print("SUPERVISED_TUN_" + kind.upper() + "_QA_BOOKKEEPING=reset failed health unit after verified Off", flush=True)
-        self.command(["systemctl", "reset-failed", HEALTH])
-        assert self.show(HEALTH, "ActiveState") == "inactive"
+        self.reset_failed_executor(HEALTH, self.health_identity, kind)
         # An authentic independent recovery invocation may have failed while
         # the fixture intentionally hid/masked the health unit. Restoring the
         # inode and finalizing Off does not reset that systemd history.
-        self.wait(lambda: self.show(RECOVERY, "ActiveState") in ("inactive", "failed") and
-                  self.show(RECOVERY, "MainPID") == "0" and self.show(RECOVERY, "ControlPID") == "0" and
-                  self.show(RECOVERY, "Job") in ("", "0"), 5, "idle independent recovery executor")
-        if self.show(RECOVERY, "ActiveState") == "failed":
-            recovery_path = UNITS / RECOVERY
-            identity = recovery_path.stat()
-            assert (identity.st_dev, identity.st_ino, recovery_path.read_bytes()) == self.recovery_identity
-            assert self.show(RECOVERY, "FragmentPath") == str(recovery_path)
-            assert self.show(RECOVERY, "DropInPaths") == ""
-            print("SUPERVISED_TUN_" + kind.upper() + "_QA_BOOKKEEPING=reset exact idle recovery executor after verified Off", flush=True)
-            self.command(["systemctl", "reset-failed", RECOVERY])
-            assert self.show(RECOVERY, "ActiveState") == "inactive" and self.show(RECOVERY, "Result") == "success"
+        self.reset_failed_executor(RECOVERY, self.recovery_identity, kind)
         self.marker("SUPERVISOR_" + kind.upper())
 
     def restore_units(self):
