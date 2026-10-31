@@ -50,6 +50,17 @@ Journal version selection and recovery share one uninterrupted manager lock;
 an absent or legacy observation cannot be reused after a concurrent Apply.
 A failed executor cannot be reported as an available guard. New Apply does
 not clear or ignore its failed result.
+The explicitly requested `smart-tun-trial-reconcile-idle-guard` is restricted
+to the exact named non-Docker Debian 13 QA VM; it is **not** part of Apply,
+normal guard recovery, or general-host functionality. Under the manager's
+existing activation lock it demands an absent journal/credential, idle trusted
+Core/Health units, disabled independent timers, a native non-ownership/collision
+preflight, and exact installed recovery-service provenance. A failed executor
+is eligible for `systemctl reset-failed` only if it has an accepted failure
+result and **no queued job, live PID or residual systemd cgroup**. The caller
+rechecks the same unit/digest identity and idle systemd result afterward. A
+changed, masked, unknown or still active executor remains a blocking failure;
+no fault evidence is deleted from the journal. No TUN activation follows.
 A failed/uncertain restoration retains the journal, never presents Direct
 as safely verified and blocks installer/update/profile/Proxy Only transitions.
 The native fingerprint includes preexisting guest nftables objects. Native

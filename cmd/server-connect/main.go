@@ -431,6 +431,12 @@ func run(j bool, m *sc.Manager, args []string) int {
 		}
 		result, err := m.DisconnectSmartTUNTrial(*id, *revision, *qaKill)
 		return output(j, result, err)
+	case "smart-tun-trial-reconcile-idle-guard":
+		if len(args) != 0 {
+			return output(j, nil, sc.Fault("invalid_arguments", "idle recovery guard reconciliation takes no options"))
+		}
+		result, err := m.ReconcileIdleSmartTUNRecoveryGuard()
+		return output(j, result, err)
 	case "smart-tun-trial-status":
 		if len(args) != 0 {
 			return output(j, nil, sc.Fault("invalid_arguments", "guarded TUN status accepts no options"))
@@ -732,6 +738,10 @@ Commands:
   smart-tun-trial-health      Bounded installed health executor; never general Apply
   smart-tun-trial-policy      Inspect saved non-secret trial policy; never activates routing
   smart-tun-trial-status      Experimental TUN operation/recovery receipt
+  smart-tun-trial-reconcile-idle-guard
+                             Explicitly reset only an exact failed, quiescent
+                             recovery service after proven QA VM Direct/off;
+                             never automatically bypass a failed guard
   smart-tun-trial-disconnect --operation-id HEX32 --revision N
                               Stop exactly this trial, verify native rollback and finalize
   smart-tun-trial-clear --operation-id HEX32 --revision N
@@ -830,7 +840,7 @@ func menu(m *sc.Manager) int {
 			run(false, m, []string{"mode-overview"})
 		case "20":
 			fmt.Println("Smart Routing is admitted ONLY on the exact isolated QEMU Debian 13 QA guest; never production.")
-			fmt.Print("1 Status  2 First guarded VM Connect  3 Reconnect saved  4 Safe Disconnect  5 Confirm from NEW SSH  6 Saved policy: ")
+			fmt.Print("1 Status  2 First guarded VM Connect  3 Reconnect saved  4 Safe Disconnect  5 Confirm from NEW SSH  6 Saved policy  7 Reconcile idle Guard: ")
 			sub, err := in.ReadString('\n')
 			if err != nil {
 				return 0
@@ -893,6 +903,14 @@ func menu(m *sc.Manager) int {
 				run(false, m, []string{"smart-tun-trial-confirm", "--operation-id", strings.TrimSpace(op), "--revision", strings.TrimSpace(revision), "--challenge", strings.TrimSpace(challenge)})
 			case "6":
 				run(false, m, []string{"smart-tun-trial-policy"})
+			case "7":
+				fmt.Print("Only on the exact isolated QA VM, after confirmed Direct/off and no owned resources. This resets only stale FAILED systemd recovery bookkeeping. Type VM-RECONCILE-GUARD: ")
+				ack, err := in.ReadString('\n')
+				if err != nil || strings.TrimSpace(ack) != "VM-RECONCILE-GUARD" {
+					fmt.Println("Canceled; no host change")
+					continue
+				}
+				run(false, m, []string{"smart-tun-trial-reconcile-idle-guard"})
 			default:
 				fmt.Println("Unknown Smart TUN choice; no change")
 			}
