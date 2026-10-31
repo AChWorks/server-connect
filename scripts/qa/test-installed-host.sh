@@ -713,6 +713,65 @@ assert r["ok"] is True and r["data"]["revision"]==3
 assert r["data"]["activation_ready"] is False
 assert len(r["data"]["rules"])==3
 '
+# Independent R1/R2 remediation: negative INPUTS must not persist, advance
+# the revision, reclassify a public suffix as registrable, or affect any
+# network/SSH/HTTP state. Re-run on the actual installed binary in D12/D13.
+rule_file="$rules_dir/smart-routing-rules.json"
+rules_before_sha=$(docker exec "$container" sha256sum "$rule_file" | cut -d ' ' -f1)
+for invalid_cidr in 100::/64 2001::/64 2001:2::/64 3fff::/64; do
+  if docker exec "$container" /usr/local/bin/server-connect --state-dir "$rules_dir" --json \
+      smart-routing-rules add --cidr "$invalid_cidr" --via direct >"$scratch/operator-v6-registry-refusal.json"; then
+    echo "INSTALLED_OPERATOR_REGISTRY_R1_R2=FAIL (IANA IPv6 special-purpose accepted)" >&2
+    exit 1
+  fi
+  python3 - "$scratch/operator-v6-registry-refusal.json" <<'PYR1'
+import json,sys
+r=json.load(open(sys.argv[1]))
+assert r["ok"] is False and r["error"]["code"]=="routing_rules_invalid"
+PYR1
+  blob="cidr vpn $invalid_cidr"
+  invalid_sha=$(printf '%s\n' "$blob" | sha256sum | cut -d ' ' -f1)
+  if printf '%s\n' "$blob" |
+      docker exec -i "$container" /usr/local/bin/server-connect --state-dir "$rules_dir" --json \
+        smart-routing-rules import --source badv6 --as-of 2026-10-01 \
+        --sha256 "$invalid_sha" --file - >"$scratch/operator-v6-registry-refusal.json"; then
+    echo "INSTALLED_OPERATOR_REGISTRY_R1_R2=FAIL (IANA IPv6 import accepted)" >&2
+    exit 1
+  fi
+done
+for invalid_suffix in co.uk com.au github.io; do
+  if docker exec "$container" /usr/local/bin/server-connect --state-dir "$rules_dir" --json \
+      smart-routing-rules add --domain "$invalid_suffix" --suffix --via vpn >"$scratch/operator-psl-refusal.json"; then
+    echo "INSTALLED_OPERATOR_REGISTRY_R1_R2=FAIL (whole public/private suffix accepted)" >&2
+    exit 1
+  fi
+  python3 - "$scratch/operator-psl-refusal.json" <<'PYR2'
+import json,sys
+r=json.load(open(sys.argv[1]))
+assert r["ok"] is False and r["error"]["code"]=="routing_rules_invalid"
+PYR2
+  blob="suffix vpn $invalid_suffix"
+  invalid_sha=$(printf '%s\n' "$blob" | sha256sum | cut -d ' ' -f1)
+  if printf '%s\n' "$blob" |
+      docker exec -i "$container" /usr/local/bin/server-connect --state-dir "$rules_dir" --json \
+        smart-routing-rules import --source badsuffix --as-of 2026-10-01 \
+        --sha256 "$invalid_sha" --file - >"$scratch/operator-psl-refusal.json"; then
+    echo "INSTALLED_OPERATOR_REGISTRY_R1_R2=FAIL (whole PSL import accepted)" >&2
+    exit 1
+  fi
+done
+test "$(docker exec "$container" sha256sum "$rule_file" | cut -d ' ' -f1)" = "$rules_before_sha"
+docker exec "$container" /usr/local/bin/server-connect --state-dir "$rules_dir" --json smart-routing-rules list |
+  python3 -c '
+import json,sys
+r=json.load(sys.stdin)
+assert r["ok"] is True and r["data"]["revision"]==3
+assert len(r["data"]["rules"])==3 and len(r["data"]["imports"])==1
+assert r["data"]["activation_ready"] is False
+'
+assert_network_unchanged installed-registry-r1-r2 "$offline_before"
+verify_host_services installed-registry-r1-r2
+echo 'INSTALLED_OPERATOR_REGISTRY_R1_R2=PASS (IANA IPv6 and ICANN/PRIVATE PSL manual/import refusal, byte/revision CAS unchanged, network and SSH/HTTP preserved)'
 assert_network_unchanged installed-routing-rules "$offline_before"
 verify_host_services installed-routing-rules
 # Remove only our verified, unique QA private state path after verification.

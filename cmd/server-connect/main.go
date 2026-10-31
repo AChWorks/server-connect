@@ -705,8 +705,8 @@ Commands:
   smart-tun-trial-apply --tunnel-if sctunqa0 --underlay-if scqaedge0
                         --tunnel-ipv4 172.31.99.1/30 --management-peer 10.254.72.2
                         --domestic-cidr 5.22.0.10/32 --protected-cidr 10.254.72.0/30
-                        [--tunnel-ipv6 fd73:99::1/64 --domestic-ipv6-cidr 2001:db8:5::/64
-                         --ipv6-vpn-cidr 2001:db8:5::10/128 --ipv6-direct-cidr 2001:db8:8::9/128]
+                        [--tunnel-ipv6 fd73:99::1/64 --domestic-ipv6-cidr 2606:4700:5::/64
+                         --ipv6-vpn-cidr 2606:4700:5::10/128 --ipv6-direct-cidr 2606:4700:8::9/128]
                         [--deadline-seconds 600]
                               DISPOSABLE DOCKER GUEST ONLY: pending genuine sing-box
                               TUN with mandatory independent timeout recovery.

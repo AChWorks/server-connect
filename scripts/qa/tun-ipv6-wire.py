@@ -22,8 +22,8 @@ UDP_PORT = 19193
 # Explicitly bind one independent UDP socket per loopback destination.
 # Linux wildcard UDP replies may otherwise select the primary interface
 # address, giving a false source identity on a genuine IPv6 Direct request.
-UDP_BIND_ADDRESSES = ("2001:db8:5::10", "2001:db8:5::11",
-                      "2001:db8:8::8", "2001:db8:8::9")
+UDP_BIND_ADDRESSES = ("2606:4700:5::10", "2606:4700:5::11",
+                      "2606:4700:8::8", "2606:4700:8::9")
 ALLOWED = {
     errno.ENETUNREACH, errno.EHOSTUNREACH, errno.ECONNREFUSED,
     errno.ECONNRESET, errno.EPIPE, errno.ETIMEDOUT,

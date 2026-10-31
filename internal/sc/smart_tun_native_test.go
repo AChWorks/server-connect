@@ -536,7 +536,7 @@ func TestSmartTUNNativeIPv6FallbackUsesKernelLoopbackDevice(t *testing.T) {
 	}
 	for _, bad := range []string{
 		strings.Replace(base, `"type":"7"`, `"type":"1"`, 1),
-		strings.Replace(base, `"dst":"default"`, `"dst":"2001:db8::/32"`, 1),
+		strings.Replace(base, `"dst":"default"`, `"dst":"2606:4700::/32"`, 1),
 		strings.Replace(base, `"table":"42426"`, `"table":"42424"`, 1),
 		strings.Replace(base, `"protocol":"247"`, `"protocol":"246"`, 1),
 		strings.Replace(base, `"metric":42760`, `"metric":42761`, 1),

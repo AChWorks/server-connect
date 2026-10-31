@@ -58,10 +58,10 @@ func main() {
 	case "":
 	case "yes":
 		opts.TunnelIPv6 = "fd73:99::1/64"
-		opts.DomesticIPv6CIDRs = []string{"2001:db8:5::/64"}
+		opts.DomesticIPv6CIDRs = []string{"2606:4700:5::/64"}
 		opts.IPv6Exceptions = []sc.SmartTUNCIDRException{
-			{CIDR: "2001:db8:5::10/128", Via: "vpn"},
-			{CIDR: "2001:db8:8::9/128", Via: "direct"},
+			{CIDR: "2606:4700:5::10/128", Via: "vpn"},
+			{CIDR: "2606:4700:8::9/128", Via: "direct"},
 		}
 	default:
 		fmt.Fprintln(os.Stderr, "Unsupported isolated IPv6 QA mode")

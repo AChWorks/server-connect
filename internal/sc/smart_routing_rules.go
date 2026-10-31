@@ -88,7 +88,8 @@ func normalizeSmartRoutingRule(x SmartRoutingRule) (SmartRoutingRule, error) {
 			!prefix.Addr().IsGlobalUnicast() || prefix.Addr().IsPrivate() ||
 			prefix.Addr().IsLoopback() || prefix.Addr().IsLinkLocalUnicast() ||
 			prefix.Addr().IsMulticast() || prefix.Addr().IsUnspecified() ||
-			overlapsSpecialPurpose(prefix) {
+			overlapsSpecialPurpose(prefix) ||
+			(prefix.Addr().Is6() && !conservativelyPublicIPv6Prefix(prefix)) {
 			return SmartRoutingRule{}, routingRuleInvalid()
 		}
 		if prefix.Addr().Is4() {
@@ -102,10 +103,8 @@ func normalizeSmartRoutingRule(x SmartRoutingRule) (SmartRoutingRule, error) {
 		if x.Via != "vpn" {
 			return SmartRoutingRule{}, Fault("routing_rules_invalid", "Direct domain exceptions require trusted DNS/IP correlation and are not supported")
 		}
-		// A whole public suffix cannot be a narrow operator exception.
-		if x.Type == "suffix" && !strings.Contains(x.Value, ".") {
-			return SmartRoutingRule{}, routingRuleInvalid()
-		}
+		// Shared domain parser enforces PSL (including PRIVATE entries) for
+		// suffix routing, not just string label counts.
 		normalized, err := canonicalSmartTUNDomain(x.Value, x.Type == "suffix")
 		if err != nil || normalized != x.Value {
 			return SmartRoutingRule{}, routingRuleInvalid()

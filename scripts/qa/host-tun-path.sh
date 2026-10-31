@@ -450,7 +450,7 @@ token=os.urandom(16);request=struct.pack('!BBHHH',128,0,0,0x5ca1,1)+token
 found=False
 with socket.socket(socket.AF_INET6,socket.SOCK_RAW,socket.IPPROTO_ICMPV6) as sock:
     sock.bind(('fd73:1::1',0));sock.settimeout(2)
-    try:sock.sendto(request,('2001:db8:8::8',0))
+    try:sock.sendto(request,('2606:4700:8::8',0))
     except OSError as error:
         if mode!='no-reply' or error.errno not in (errno.EPERM,errno.EACCES,errno.ENETUNREACH,errno.EHOSTUNREACH):raise
         sys.exit(0)
@@ -459,7 +459,7 @@ with socket.socket(socket.AF_INET6,socket.SOCK_RAW,socket.IPPROTO_ICMPV6) as soc
         sock.settimeout(max(0.01,end-time.monotonic()))
         try:reply,source=sock.recvfrom(2048)
         except socket.timeout:break
-        if source[0]=='2001:db8:8::8' and len(reply)==len(request) and reply[0]==129 and reply[4:]==request[4:]:
+        if source[0]=='2606:4700:8::8' and len(reply)==len(request) and reply[0]==129 and reply[4:]==request[4:]:
             found=True;break
 assert found==(mode=='reply'), 'unexpected public ICMPv6 echo result'
 PYICMP6PATH
@@ -716,7 +716,7 @@ if [ "$ipv6_trial" = yes ]; then
   }
   ip -6 addr add fd73:1::1/64 dev "$edge"
   ip -n "$peer" -6 addr add fd73:1::2/64 dev scqapeer0
-  for addr in 2001:db8:5::10 2001:db8:5::11 2001:db8:8::8 2001:db8:8::9; do
+  for addr in 2606:4700:5::10 2606:4700:5::11 2606:4700:8::8 2606:4700:8::9; do
     ip -n "$peer" -6 addr add "$addr"/128 dev lo
   done
   ip -6 route add default via fd73:1::2 dev "$edge" metric 100
@@ -747,11 +747,11 @@ table inet scqawitness {
     iifname "scqapeer0" ip daddr 8.8.8.8 tcp dport 19180 counter name direct_packets
     iifname "scqapeer0" ip daddr 8.8.8.8 udp dport 19186 counter name direct_udp_packets
     iifname "scqapeer0" ip daddr 198.51.100.42 tcp dport 19180 counter name visitor_origin_packets
-    iifname "scqapeer0" ip6 daddr 2001:db8:8::8 icmpv6 type echo-request counter name public_icmp6_packets
-    iifname "scqapeer0" ip6 daddr 2001:db8:8::8 tcp dport 19192 counter name ipv6_foreign_tcp_packets
-    iifname "scqapeer0" ip6 daddr 2001:db8:8::8 udp dport 19193 counter name ipv6_foreign_udp_packets
-    iifname "scqapeer0" ip6 daddr 2001:db8:5::10 tcp dport 19192 counter name ipv6_override_packets
-    iifname "scqapeer0" ip6 daddr 2001:db8:5::10 udp dport 19193 counter name ipv6_override_udp_packets
+    iifname "scqapeer0" ip6 daddr 2606:4700:8::8 icmpv6 type echo-request counter name public_icmp6_packets
+    iifname "scqapeer0" ip6 daddr 2606:4700:8::8 tcp dport 19192 counter name ipv6_foreign_tcp_packets
+    iifname "scqapeer0" ip6 daddr 2606:4700:8::8 udp dport 19193 counter name ipv6_foreign_udp_packets
+    iifname "scqapeer0" ip6 daddr 2606:4700:5::10 tcp dport 19192 counter name ipv6_override_packets
+    iifname "scqapeer0" ip6 daddr 2606:4700:5::10 udp dport 19193 counter name ipv6_override_udp_packets
     iifname "scqapeer0" ip daddr 8.8.8.8 tcp dport 19188 counter name payload_tcp_direct_packets
     iifname "scqapeer0" ip daddr 8.8.8.8 udp dport 19189 counter name payload_udp_direct_packets
     iifname "scqapeer0" ip daddr 8.8.8.8 udp dport 53 counter name direct_dns_udp_packets
@@ -950,10 +950,10 @@ if [ "$ipv6_trial" = yes ]; then
   tries=0
   while [ "$tries" -lt 60 ]; do
     if ! ip -6 addr show dev "$edge" | grep -Eq 'tentative|dadfailed' &&
-      ipv6_path tcp 2001:db8:8::8 fd73:1::1 reply &&
-      ipv6_path udp 2001:db8:8::8 fd73:1::1 reply &&
-      ipv6_path tcp 2001:db8:5::10 fd73:1::1 reply &&
-      ipv6_path udp 2001:db8:5::10 fd73:1::1 reply; then
+      ipv6_path tcp 2606:4700:8::8 fd73:1::1 reply &&
+      ipv6_path udp 2606:4700:8::8 fd73:1::1 reply &&
+      ipv6_path tcp 2606:4700:5::10 fd73:1::1 reply &&
+      ipv6_path udp 2606:4700:5::10 fd73:1::1 reply; then
       ipv6_ready=yes
       break
     fi
@@ -1130,16 +1130,16 @@ if [ "$ipv6_trial" = yes ]; then
   ip -6 route show table all | grep -F 'dev sctunqa0' >/dev/null || {
     echo 'REAL_TUN_IPV6=FAIL (no active kernel IPv6 TUN route)' >&2; exit 1;
   }
-  ipv6_path tcp 2001:db8:5::11 fd73:1::1 reply
-  ipv6_path udp 2001:db8:5::11 fd73:1::1 reply
+  ipv6_path tcp 2606:4700:5::11 fd73:1::1 reply
+  ipv6_path udp 2606:4700:5::11 fd73:1::1 reply
   # The explicitly VPN-only domestic host must override the /64 Direct rule.
-  ipv6_path tcp 2001:db8:5::10 2001:db8:5::10 reply
-  ipv6_path udp 2001:db8:5::10 2001:db8:5::10 reply
+  ipv6_path tcp 2606:4700:5::10 2606:4700:5::10 reply
+  ipv6_path udp 2606:4700:5::10 2606:4700:5::10 reply
   # Foreign defaults to VLESS; explicit foreign host Direct stays deliberate.
-  ipv6_path tcp 2001:db8:8::8 2001:db8:8::8 reply
-  ipv6_path udp 2001:db8:8::8 2001:db8:8::8 reply
-  ipv6_path tcp 2001:db8:8::9 fd73:1::1 reply
-  ipv6_path udp 2001:db8:8::9 fd73:1::1 reply
+  ipv6_path tcp 2606:4700:8::8 2606:4700:8::8 reply
+  ipv6_path udp 2606:4700:8::8 2606:4700:8::8 reply
+  ipv6_path tcp 2606:4700:8::9 fd73:1::1 reply
+  ipv6_path udp 2606:4700:8::9 fd73:1::1 reply
   test "$(ipv6_foreign_tcp_direct_packets)" -eq "$ipv6_foreign_tcp_baseline" &&
     test "$(ipv6_foreign_udp_direct_packets)" -eq "$ipv6_foreign_udp_baseline" &&
     test "$(ipv6_override_direct_packets)" -eq "$ipv6_override_baseline" &&
@@ -1356,18 +1356,18 @@ assert_tun_policy_active || {
 }
 echo 'REAL_TUN_NATIVE_APPS_OUTAGE_WITNESS=PASS (APT/Git failed closed, independent Direct witness unchanged)'
 if [ "$ipv6_trial" = yes ]; then
-  ipv6_path tcp 2001:db8:8::8 none no-reply
-  ipv6_path udp 2001:db8:8::8 none no-reply
-  ipv6_path tcp 2001:db8:5::10 none no-reply
-  ipv6_path udp 2001:db8:5::10 none no-reply
+  ipv6_path tcp 2606:4700:8::8 none no-reply
+  ipv6_path udp 2606:4700:8::8 none no-reply
+  ipv6_path tcp 2606:4700:5::10 none no-reply
+  ipv6_path udp 2606:4700:5::10 none no-reply
   kill -0 "$ipv6_pid" 2>/dev/null || {
     echo 'REAL_TUN_IPV6=FAIL (independent peer dead during outage)' >&2; exit 1;
   }
   # Direct still works after upstream loss and the origin is independently alive.
-  ipv6_path tcp 2001:db8:5::11 fd73:1::1 reply
-  ipv6_path udp 2001:db8:5::11 fd73:1::1 reply
-  ipv6_path tcp 2001:db8:8::9 fd73:1::1 reply
-  ipv6_path udp 2001:db8:8::9 fd73:1::1 reply
+  ipv6_path tcp 2606:4700:5::11 fd73:1::1 reply
+  ipv6_path udp 2606:4700:5::11 fd73:1::1 reply
+  ipv6_path tcp 2606:4700:8::9 fd73:1::1 reply
+  ipv6_path udp 2606:4700:8::9 fd73:1::1 reply
   test "$(ipv6_foreign_tcp_direct_packets)" -eq "$ipv6_foreign_tcp_baseline" &&
     test "$(ipv6_foreign_udp_direct_packets)" -eq "$ipv6_foreign_udp_baseline" &&
     test "$(ipv6_override_direct_packets)" -eq "$ipv6_override_baseline" &&
