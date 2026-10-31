@@ -129,6 +129,24 @@ class IPv6WireTests(unittest.TestCase):
         })
         self.assertNotIn("::", m.UDP_BIND_ADDRESSES)
 
+    def test_owned_tun_qa_uses_only_controlled_ipv6_wire_destinations(self):
+        # Catch late installed-host failures when wire fixtures and the
+        # isolated owner-boundary path are updated in separate commits.
+        path = Path(__file__).with_name("host-owned-tun-boundary.sh")
+        destinations = []
+        for line in path.read_text().splitlines():
+            tokens = line.strip().split()
+            if not tokens or tokens[0] != "ipv6_path":
+                continue
+            self.assertEqual(len(tokens), 5, line)
+            _, transport, destination, source, mode = tokens
+            self.assertIn(transport, ("tcp", "udp"))
+            self.assertIn(destination, m.UDP_BIND_ADDRESSES, line)
+            self.assertEqual(mode, "reply")
+            self.assertIn(source, ("fd73:1::1", destination), line)
+            destinations.append(destination)
+        self.assertEqual(set(destinations), set(m.UDP_BIND_ADDRESSES))
+
     def test_address_is_binary_canonicalized(self):
         token = b"0123456789abcdef"
         answer = m.response(m.request(token, m.UDP_BYTES), "2606:4700:5:0:0:0:0:10", m.UDP_BYTES)
