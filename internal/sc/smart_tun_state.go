@@ -16,7 +16,7 @@ const smartTUNSavedPolicyFile = "smart-tun-policy.json"
 // FIFOs, foreign owners and oversized data before reading any bytes.
 func (store *activationJournalDir) openSmartTUNFile(name string) (*os.File, activationJournalFileIdentity, error) {
 	var identity activationJournalFileIdentity
-	if name != smartTUNSavedPolicyFile && name != smartTUNTrialConfigFile {
+	if name != smartTUNSavedPolicyFile && name != smartTUNTrialConfigFile && name != smartRoutingRulesFilename {
 		return nil, identity, journalFSUnavailable("unsupported TUN state filename")
 	}
 	if err := store.ensureLockIdentity(); err != nil {

@@ -625,6 +625,106 @@ PYMODEMENU
 assert_network_unchanged installed-mode-overview "$offline_before"
 verify_host_services installed-mode-overview
 echo 'INSTALLED_OPERATOR_MODE_OVERVIEW=PASS (inactive service, honest Direct unknown, non-admitted TUN, CLI/menu parity)'
+# A separately named, never-applied private rule store proves real installed
+# CLI/menu behavior without sharing experimental TUN journals or altering any
+# host policy. Both Debian 12 and 13 must keep SSH/HTTP and routes unchanged.
+rules_dir=/run/scqa-operator-rules
+docker exec "$container" /bin/sh -c 'test ! -e /run/scqa-operator-rules && test ! -L /run/scqa-operator-rules'
+docker exec "$container" /usr/local/bin/server-connect --state-dir "$rules_dir" --json smart-routing-rules list |
+  python3 -c '
+import json,sys
+r=json.load(sys.stdin)
+assert r["ok"] is True and r["data"]["revision"]==0 and not r["data"]["present"]
+assert r["data"]["activation_ready"] is False and r["data"]["general_host_admitted"] is False
+'
+docker exec "$container" /usr/local/bin/server-connect --state-dir "$rules_dir" --json \
+  smart-routing-rules add --cidr 1.1.1.0/24 --via direct |
+  python3 -c '
+import json,sys
+r=json.load(sys.stdin)
+assert r["ok"] is True and r["data"]["revision"]==1
+assert r["data"]["rules"][0]["source"]=="manual"
+assert r["data"]["rules"][0]["value"]=="1.1.1.0/24"
+assert r["data"]["activation_ready"] is False
+'
+docker exec "$container" /usr/local/bin/server-connect --state-dir "$rules_dir" --json \
+  smart-routing-rules add --domain example.org --via vpn |
+  python3 -c '
+import json,sys
+r=json.load(sys.stdin)
+assert r["ok"] is True and r["data"]["revision"]==2
+assert len(r["data"]["rules"])==2
+'
+if docker exec "$container" /usr/local/bin/server-connect --state-dir "$rules_dir" --json \
+  smart-routing-rules add --domain example.org --via direct >"$scratch/operator-direct-domain-refusal.json"; then
+  echo "INSTALLED_OPERATOR_ROUTING_RULES=FAIL (unauthenticated domain Direct accepted)" >&2
+  exit 1
+fi
+python3 - "$scratch/operator-direct-domain-refusal.json" <<'PYRULESNEG'
+import json,sys
+r=json.load(open(sys.argv[1]))
+assert r["ok"] is False and r["error"]["code"]=="routing_rules_invalid"
+PYRULESNEG
+rules_blob='cidr vpn 9.9.9.9/32'
+rules_sha=$(printf '%s\n' "$rules_blob" | sha256sum | cut -d ' ' -f1)
+printf '%s\n' "$rules_blob" |
+  docker exec -i "$container" /usr/local/bin/server-connect --state-dir "$rules_dir" --json \
+    smart-routing-rules import --source fixture --as-of 2026-10-01 --sha256 "$rules_sha" --file - |
+  python3 -c '
+import json,sys
+r=json.load(sys.stdin)
+assert r["ok"] is True and r["data"]["revision"]==3
+assert len(r["data"]["rules"])==3 and len(r["data"]["imports"])==1
+assert r["data"]["imports"][0]["source"]=="fixture"
+assert r["data"]["imports"][0]["publisher_signature_verified"] is False
+assert r["data"]["state"]=="saved_not_applied"
+assert r["data"]["activation_ready"] is False
+'
+if printf '%s\n' "$rules_blob" |
+  docker exec -i "$container" /usr/local/bin/server-connect --state-dir "$rules_dir" --json \
+    smart-routing-rules import --source other --as-of 2026-10-01 \
+      --sha256 0000000000000000000000000000000000000000000000000000000000000000 --file - \
+    >"$scratch/operator-wrong-hash-refusal.json"; then
+  echo "INSTALLED_OPERATOR_ROUTING_RULES=FAIL (wrong import digest accepted)" >&2
+  exit 1
+fi
+python3 - "$scratch/operator-wrong-hash-refusal.json" <<'PYRULESHASH'
+import json,sys
+r=json.load(open(sys.argv[1]))
+assert r["ok"] is False and r["error"]["code"]=="routing_rules_hash_mismatch"
+PYRULESHASH
+printf '19\n1\n0\n' |
+  docker exec -i "$container" /usr/local/bin/server-connect --state-dir "$rules_dir" menu \
+  >"$scratch/operator-rules-menu.log"
+python3 - "$scratch/operator-rules-menu.log" <<'PYRULESMENU'
+from pathlib import Path
+import sys
+text=Path(sys.argv[1]).read_text()
+assert "19 Routing Rules" in text
+assert "saved_not_applied" in text
+assert "9.9.9.9/32" in text
+assert '"activation_ready": false' in text
+PYRULESMENU
+docker exec "$container" /usr/local/bin/server-connect --state-dir "$rules_dir" --json smart-routing-rules list |
+  python3 -c '
+import json,sys
+r=json.load(sys.stdin)
+assert r["ok"] is True and r["data"]["revision"]==3
+assert r["data"]["activation_ready"] is False
+assert len(r["data"]["rules"])==3
+'
+assert_network_unchanged installed-routing-rules "$offline_before"
+verify_host_services installed-routing-rules
+# Remove only our verified, unique QA private state path after verification.
+docker exec "$container" /bin/sh -c '
+set -eu
+d=/run/scqa-operator-rules
+test -d "$d" && test ! -L "$d" && test "$(stat -c %u "$d")" = 0
+test "$(stat -c %a "$d")" = 700
+rm -r -- "$d"
+test ! -e "$d"
+'
+echo 'INSTALLED_OPERATOR_ROUTING_RULES=PASS (real CLI/menu, SHA-pinned import, no network effects, SSH/HTTP preserved)'
 if [[ $qa_version == 12 ]]; then
   native_refusal_nft=$(docker exec "$container" /usr/sbin/nft -j list ruleset)
   private_state_digest() {

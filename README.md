@@ -26,6 +26,39 @@ The existing source includes a Go CLI, secure profile storage, real pinned sing-
 
 For operator inspection, `server-connect --json mode-overview` (or menu option **18 Mode Overview**) reports the **desired** mode, the observed Proxy Only service state and whether the experimental Smart Routing trial blocks an ordinary Direct claim. It exposes three mode choices but explicitly marks general-host Smart Routing as **unavailable**: neither an inactive Proxy Only service nor an experimental journal proves baseline Direct routes, selected VPN egress or safe production TUN. `not_run` is retained for real path evidence until measured separately; a guard/service error remains a nonzero, structured failure. This diagnostic may initialize private manager state/locks, as the existing `status` command does, but never changes host routing.
 
+### Saved Smart Routing rules (not activated)
+
+Use the same CLI and **19 Routing Rules** interactive menu to store explicit routing exceptions without changing Linux routes, DNS, nftables, or TUN. This private, versioned operator configuration does **not** prove selected VPN reachability or general-host Smart Routing admission. `smart-routing-rules list` returns `saved_not_applied`, `activation_ready=false` and `general_host_admitted=false` even when rules have been saved.
+
+```console
+server-connect --json smart-routing-rules list
+server-connect --json smart-routing-rules add --cidr 1.1.1.0/24 --via direct
+server-connect --json smart-routing-rules add --domain example.org --via vpn
+server-connect --json smart-routing-rules add --domain test.example.org --suffix --via vpn
+server-connect --json smart-routing-rules remove --cidr 1.1.1.0/24
+```
+
+An offline ASCII/LF-only import file (up to 64 KiB) uses `kind action value` per line:
+
+```text
+# local operator exceptions, not authenticated Iran geography
+cidr direct 1.1.1.0/24
+cidr vpn 9.9.9.9/32
+domain vpn example.org
+suffix vpn test.example.org
+```
+
+Pin the SHA-256 of the **exact raw file bytes** independently, then import:
+
+```console
+sha256sum /private/operator-rules.txt
+server-connect --json smart-routing-rules import --file /private/operator-rules.txt --source operator-list --as-of 2026-10-31 --sha256 EXACT_64_CHAR_SHA256
+```
+
+Use `--file -` for stdin with the CLI, not the menu. Source replacement requires `--replaces-sha256 CURRENT_SOURCE_HASH`, while `smart-routing-rules remove-source --source operator-list --sha256 CURRENT_SOURCE_HASH` removes one exact imported source. Invalid/special-purpose/overlapping CIDRs, dangerous broad Direct rules and unauthenticated Direct-domain exceptions are rejected. Suffix rules must include at least two labels. List metadata exposes source age, SHA and staleness over 30 days: **a matching hash is not a publisher signature or proof of trusted geography**.
+
+The read-only `smart-routing-rules preview --tunnel-if TUN --underlay-if IFACE --tunnel-ipv4 PRIVATE_CIDR --domestic-cidr EXPLICIT_CIDR` compiles the saved exceptions and selected compatible profile using the existing native TUN candidate compiler. It returns a configuration hash with `native_policy_compile_only`; it does not run sing-box, inspect the real host, apply rules or verify a VPN. Actual general-host routing and independent guards remain open under Issues #2 and #3.
+
 For source checks, run `go test ./...`. Actual CLI flags and development diagnostics are maintained in [the CLI help/source](cmd/server-connect/main.go); the reproducible isolated test procedures live in [the QA scripts](scripts/qa/) and CI. Older unarmed selective-intent and loopback-rule trial commands are **developer diagnostics, not production routing**. A separate installed, **Docker-only Smart TUN trial** exercises real sing-box through a prearmed independent expiry guard. Its default pending mode expires without confirmation. The explicit `--supervised` mode requires a new authenticated root SSH connection and a single-use operation challenge before experimental confirmation, then runs bounded selected-path health rounds under independently monitored liveness. Neither mode grants general-host `ACTIVE_VERIFIED`. Its strictly synthetic fixture supports IPv4 and explicitly requested IPv4+IPv6 policy with exact Direct/VPN exceptions and native rollback checks. The manager owns the persistent TUN and native interception/containment policy; the core attaches with automatic host policy disabled. Operation-bound Disconnect removes only resources covered by the durable ownership record, preserving supported disjoint changes by other owners. Ambiguous ownership retains recovery evidence and reports uncertainty instead of guessing at cleanup. The validated trial policy and selected profile remain saved for a fresh guarded reapply; interrupted stop/cleanup retains durable recovery evidence. It is not available for customer/physical-host operation, nor proof that Smart Routing is production-ready. Never run privileged disposable-only QA experiments on a customer server.
 
 The read-only `server-connect smart-routing-data` command works entirely offline and reports a pinned **DB-IP Country Lite geolocation estimate** for Iran (IPv4/IPv6 counts, source, month, age, hashes and license). **Data credit: [IP Geolocation by DB-IP](https://db-ip.com), [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/).** The project extracts IR rows from DB-IP Country Lite (October 2026) and converts the original IP ranges into sorted CIDR prefixes. DB-IP Lite has reduced coverage/accuracy; its country estimates are **not** independent packet-path proof. These entries are deliberately **not automatically used as Direct exemptions** and the report explicitly declares geographic-route safety and activation readiness false. This is not a publisher-signed update, operator rule import or production Apply. Regeneration from a separately downloaded, pinned source archive is supported by `scripts/qa/generate-iran-dbip-lite-snapshot.py`; installation and inspection do not contact DB-IP, GitHub or any outside network. Independent field testing, update/rollback policy and guards remain mandatory.
