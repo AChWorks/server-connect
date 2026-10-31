@@ -19,11 +19,12 @@ import os
 from pathlib import Path
 scratch = Path(os.environ["SC_QA_APT_TEST_ROOT"])
 source = Path(os.environ["SC_QA_APT_SOURCE"]).read_text()
-# Keep the exact exclusion AFTER the inclusive syscall selector: strace
-# accepts sequential filters, and reversing them silently re-adds tgkill.
-selector = "-e trace=%network,%process -e trace=!tgkill"
-if source.count(selector) != 2:
-    raise SystemExit("Native APT trace selection no longer excludes Go scheduler-only tgkill")
+# One inclusive set retains all network syscalls and process creation,
+# execution, wait and termination. Do NOT use two -e trace selectors:
+# on strace the second can select ALL syscalls except tgkill.
+selector = "-e trace=%network,clone,clone3,fork,vfork,execve,execveat,wait4,waitid,exit,exit_group"
+if source.count(selector) != 2 or "-e trace=!tgkill" in source:
+    raise SystemExit("Native APT trace must use the exact bounded syscall selector")
 edits = [
     ("manager=/usr/local/bin/server-connect", f"manager={scratch}/bin/manager"),
     ("apt_cache=/usr/bin/apt-cache", f"apt_cache={scratch}/bin/apt-cache"),
