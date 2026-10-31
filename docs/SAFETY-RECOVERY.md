@@ -280,6 +280,17 @@ uncertain outcomes. A present object with no durable receipt is never adopted
 from matching fields. An absent object can be reconciled only after outstanding
 mutators are excluded and the complete current ownership graph is observed.
 
+A completely verified Off can precede systemd garbage collection of a
+failed Health Guard oneshot, especially in the slow non-Docker QA VM. A stale
+`failed` service result must not permanently block verified offline updates
+or fresh **separately admitted** QA trials. Normalize only that exact owned
+service's failure bookkeeping after proving the journal absent under the
+manager/installer lock, the independent recovery guard disabled, the trusted
+TUN core inactive, and the health timer disabled. Never normalize an active
+executor, treat a failed unit as continuing runtime-health authority, or
+clear a pending/uncertain journal to enable an update. Preserve the journal
+logs that explain the prior timeout.
+
 The independent nftables guard reclassifies public traffic rather than trusting
 only the capture mark. It checks the resulting output interface in POSTROUTING:
 a later OUTPUT filter still sees the initial interface after an OUTPUT route

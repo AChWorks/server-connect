@@ -361,6 +361,50 @@ func smartTUNHealthUnits(armed bool, expected *[2]smartTUNHealthUnitIdentity) ([
 	return roles, nil
 }
 
+// A timed-out oneshot remains FAILED after the independent guard has safely
+// removed every owned TUN resource. The systemd failure receipt must never be
+// treated as a live guard; equally, a stale result must not strand a NEW,
+// separately admitted QA VM operation. Only after a held journal lock proves
+// absence, the trusted recovery timer is disarmed, the core is completely
+// quiescent and the exact health timer is inactive may we reset this ONE owned
+// failed oneshot. This does not start, stop or modify any data-plane service.
+func normalizeQuiescentSmartTUNHealthUnit(store *activationJournalDir) error {
+	if _, _, err := store.readJournal(); !errors.Is(err, os.ErrNotExist) {
+		return Fault("guard_unavailable", "health result cannot be normalized while an activation journal exists")
+	}
+	if err := trialGuardUnits(false); err != nil {
+		return err
+	}
+	core, err := observeSmartTUNTrialUnit(context.Background())
+	if err != nil || !core.stopped() {
+		return Fault("guard_unavailable", "TUN core must be verified inactive before health normalization")
+	}
+	serviceID, service, err := observeSmartTUNHealthUnit(smartTUNHealthUnit)
+	if err != nil {
+		return err
+	}
+	if service["ActiveState"] == "inactive" && service["Result"] == "success" {
+		return nil
+	}
+	if service["ActiveState"] != "failed" || service["UnitFileState"] != "static" {
+		return Fault("guard_unavailable", "only an idle failed owned health executor may be normalized")
+	}
+	_, timer, err := observeSmartTUNHealthUnit(smartTUNHealthTimer)
+	if err != nil || timer["ActiveState"] != "inactive" ||
+		timer["UnitFileState"] != "disabled" || timer["Result"] != "success" {
+		return Fault("guard_unavailable", "health timer must be disabled and inactive before normalization")
+	}
+	if err := smartTUNTrialSystemctl("reset-failed", smartTUNHealthUnit); err != nil {
+		return err
+	}
+	sameID, next, err := observeSmartTUNHealthUnit(smartTUNHealthUnit)
+	if err != nil || sameID != serviceID ||
+		next["Result"] != "success" || next["ActiveState"] != "inactive" {
+		return Fault("guard_unavailable", "owned health executor failed-state normalization was not verified")
+	}
+	return nil
+}
+
 // Stop only the timer. The health oneshot might be this very caller, or a
 // contender waiting for this lock: synchronous service stop would deadlock.
 // Disabling the timer prevents future starts; the bounded current executor

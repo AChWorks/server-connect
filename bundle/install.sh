@@ -144,6 +144,39 @@ check_guard_units() {
   fi
  done
 }
+# systemd can retain a FAILED health oneshot long after the independent guard
+# has removed all owned routing. Do not strand verified offline updates solely
+# because systemd garbage collection has not yet normalized that stale result.
+# The installer holds the product .lock and previously checked the journal,
+# all exact unit files and their owner hashes before calling this helper.
+normalize_idle_health_failure() {
+ name=server-connect-smart-health.service
+ state=$(systemctl show "$name" -p ActiveState --value) ||
+   die 'health executor state cannot be inspected'
+ [ "$state" = failed ] || return 0
+ # A failed oneshot is not sufficient evidence of a cleared operation.
+ # Before resetting bookkeeping prove every guard, core and timer inactive,
+ # no live health process, and recheck the exact owned role provenance.
+ for role in server-connect-activation-recover.timer server-connect-activation-recover.service server-connect-smart-tun.service server-connect-smart-health.timer; do
+  [ "$(systemctl show "$role" -p ActiveState --value)" = inactive ] ||
+    die 'cannot normalize health failure while another TUN/guard role is active'
+ done
+ [ "$(systemctl show "$name" -p MainPID --value)" = 0 ] &&
+ [ "$(systemctl show "$name" -p ControlPID --value)" = 0 ] ||
+   die 'cannot normalize health failure with a live executor'
+ check_guard_units
+ if ! systemctl reset-failed "$name"; then
+  # A collected failed oneshot may become inactive concurrently. Do not
+  # retry an uncertain reset or accept any still-failed/transient state.
+  [ "$(systemctl show "$name" -p ActiveState --value)" = inactive ] ||
+    die 'owned health executor failure could not be normalized'
+ fi
+ [ "$(systemctl show "$name" -p ActiveState --value)" = inactive ] &&
+ [ "$(systemctl show "$name" -p Result --value)" = success ] ||
+   die 'owned health executor did not return to an inactive healthy state'
+ check_guard_units
+}
+
 # An active timer or oneshot may own pending kernel state. Updating or
 # uninstalling its recovery executable would sever the only independent guard.
 require_guard_inactive() {
@@ -215,6 +248,7 @@ if [ "$unit_identity" = owned ]; then
 fi
 
 if [ "$ACTION" = --uninstall ]; then
+ normalize_idle_health_failure
  require_guard_inactive
  [ -f "$PREFIX/.owner" ] || die 'Server Connect not installed'
  # Validate all release ownership before destructive changes to the service/unit.
@@ -269,6 +303,9 @@ if [ "$ACTION" = --uninstall ]; then
 fi
 
 # Installation and offline update share this path. No networking is performed.
+# Never normalize a failed oneshot until the exact activation journal has
+# already been checked clear under the product lock.
+normalize_idle_health_failure
 require_guard_inactive
 # The shared .lock is held across observation, activation and rollback.
 # Bind the installed release identity to the verified exact binary bytes in

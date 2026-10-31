@@ -170,5 +170,123 @@ check_root_dir() { [ -d "$1" ] && [ ! -L "$1" ] || die 'fixture directory missin
         self.assertEqual(calls, ["installer-check-target", "version", "core-version"])
 
 
+class InstallerIdleHealthNormalizationTests(unittest.TestCase):
+    """Execute only the real installer functions against an inert systemctl seam.
+
+    No installed service, root filesystem, networking or activation journal is
+    accessed. This proves fail-closed shell decisions, not native systemd QA.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        body = INSTALLER.read_text()
+        def extract(name):
+            start = body.index(name + "() {\n")
+            return body[start:body.index("\n}\n", start) + len("\n}\n")]
+        cls.normalize = extract("normalize_idle_health_failure")
+        cls.require_inactive = extract("require_guard_inactive")
+        cls.body = body
+
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory(prefix="sc-health-gate-")
+        self.addCleanup(self.temporary.cleanup)
+        self.log = Path(self.temporary.name) / "reset-attempts"
+
+    def invoke(self, **changes):
+        env = os.environ.copy()
+        env.update({
+            "SC_QA_RESET_LOG": str(self.log),
+            "SC_HEALTH_STATE": "failed",
+            "SC_OTHER_ROLE_STATE": "inactive",
+            "SC_HEALTH_TIMER_STATE": "inactive",
+            "SC_MAIN_PID": "0",
+            "SC_CONTROL_PID": "0",
+            "SC_ROLE_TRUSTED": "yes",
+            "SC_QA_RESET_BEHAVIOR": "success",
+        })
+        env.update(changes)
+        fake = r"""set -eu
+systemctl() {
+ case "$1" in
+ show)
+  [ "$3" = -p ] && [ "$5" = --value ] || exit 89
+  case "$4" in
+   ActiveState)
+    case "$2" in
+     server-connect-smart-health.service) printf '%s\n' "$SC_HEALTH_STATE" ;;
+     server-connect-smart-health.timer) printf '%s\n' "$SC_HEALTH_TIMER_STATE" ;;
+     *) printf '%s\n' "$SC_OTHER_ROLE_STATE" ;;
+    esac ;;
+   Result) printf '%s\n' success ;;
+   MainPID) printf '%s\n' "$SC_MAIN_PID" ;;
+   ControlPID) printf '%s\n' "$SC_CONTROL_PID" ;;
+   *) exit 90 ;;
+  esac ;;
+ reset-failed)
+  [ "$2" = server-connect-smart-health.service ] || exit 91
+  printf 'reset\n' >> "$SC_QA_RESET_LOG"
+  case "$SC_QA_RESET_BEHAVIOR" in
+   success) SC_HEALTH_STATE=inactive;export SC_HEALTH_STATE; return 0 ;;
+   gc) SC_HEALTH_STATE=inactive;export SC_HEALTH_STATE; return 1 ;;
+   fail) return 1 ;;
+   *) return 2 ;;
+  esac ;;
+ *) exit 92 ;;
+ esac
+}
+die() { printf 'REFUSED: %s\n' "$*" >&2; exit 1; }
+check_guard_units() { [ "$SC_ROLE_TRUSTED" = yes ] || die 'foreign health role provenance'; }
+"""
+        response = subprocess.run(["/bin/sh", "-s"],
+            input=fake + self.normalize + "\n" + self.require_inactive
+            + "\nnormalize_idle_health_failure\nrequire_guard_inactive\n",
+            capture_output=True, text=True, timeout=6, env=env)
+        calls = self.log.read_text().splitlines() if self.log.exists() else []
+        return response, calls
+
+    def test_clean_idle_health_is_not_mutated(self):
+        run, calls = self.invoke(SC_HEALTH_STATE="inactive")
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertEqual(calls, [])
+
+    def test_stale_failed_owned_executor_is_reconciled_only_when_quiescent(self):
+        run, calls = self.invoke()
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertEqual(calls, ["reset"])
+
+    def test_garbage_collected_failure_is_not_retried(self):
+        run, calls = self.invoke(SC_QA_RESET_BEHAVIOR="gc")
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertEqual(calls, ["reset"])
+
+    def test_failed_reset_does_not_weaken_refusal(self):
+        run, calls = self.invoke(SC_QA_RESET_BEHAVIOR="fail")
+        self.assertNotEqual(run.returncode, 0)
+        self.assertEqual(calls, ["reset"])
+        self.assertIn("could not be normalized", run.stderr)
+
+    def test_active_or_unowned_roles_and_live_executors_are_refused(self):
+        for field, value in (
+            ("SC_OTHER_ROLE_STATE", "active"),
+            ("SC_HEALTH_TIMER_STATE", "active"),
+            ("SC_MAIN_PID", "2121"),
+            ("SC_CONTROL_PID", "2121"),
+            ("SC_ROLE_TRUSTED", "no"),
+            ("SC_HEALTH_STATE", "activating"),
+        ):
+            with self.subTest(field=field, value=value):
+                run, calls = self.invoke(**{field: value})
+                self.assertNotEqual(run.returncode, 0)
+                self.assertEqual(calls, [])
+
+    def test_normalization_only_follows_installer_journal_lock_and_clear_check(self):
+        text = self.body
+        claim = 'exec 9>"$STATE/.lock"'
+        check = '"$SOURCE_DIR/bin/server-connect" installer-check-guard-clear >/dev/null'
+        apply = "\nnormalize_idle_health_failure\nrequire_guard_inactive"
+        self.assertLess(text.index(claim), text.index(check))
+        self.assertLess(text.index(check), text.index(apply))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

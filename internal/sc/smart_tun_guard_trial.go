@@ -760,6 +760,14 @@ func (m *Manager) beginSmartTUNTrial(opts SmartTUNCandidateOptions, managementPe
 		if err := checkSavedSmartTUNPolicyLocked(store, saved); err != nil {
 			return err
 		}
+		// The isolated VM's slow systemd health oneshot can retain FAILED
+		// after the previous independent guard completed an exact safe Off.
+		// Repair only stale bookkeeping under the existing lifecycle lock.
+		if health != nil && opts.TunnelInterface == smartTUNVMInterface {
+			if err := normalizeQuiescentSmartTUNHealthUnit(store); err != nil {
+				return err
+			}
+		}
 		if opts.TunnelInterface == smartTUNVMInterface {
 			if saved == nil && len(opts.Exceptions) != 0 {
 				return Fault("routing_rules_invalid", "VM Smart Routing exceptions must come from the saved operator rule registry")
