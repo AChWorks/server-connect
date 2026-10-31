@@ -197,6 +197,11 @@ func run(j bool, m *sc.Manager, args []string) int {
 		return output(j, report, err)
 	case "status":
 		return runStatus(j, m.Status)
+	case "mode-overview":
+		if len(args) != 0 {
+			return output(j, nil, sc.Fault("invalid_arguments", "mode-overview accepts no command options"))
+		}
+		return runModeOverview(j, m.Status)
 	case "activation-journal-status":
 		if len(args) != 0 {
 			return output(j, nil, sc.Fault("invalid_arguments", "activation-journal-status accepts no command options"))
@@ -646,6 +651,9 @@ Usage:
 
 Commands:
   menu                       Interactive menu (no machine-output contract)
+  mode-overview              Read-only Direct / Proxy Only / Smart Routing availability
+                              Local service state is not foreign VPN path proof;
+                              Smart Routing remains disposable-guest-only
   import [--file FILE|-]      Import VLESS URI or sing-box outbound/config
   validate [--file FILE|-]    Validate against pinned sing-box without saving
   profiles                   List saved profiles (no credentials)
@@ -778,7 +786,12 @@ routing changes, authenticate DNS, or authorize tunnel activation.
 func menu(m *sc.Manager) int {
 	in := bufio.NewReader(os.Stdin)
 	for {
-		fmt.Println("\nServer Connect | 1 Status  2 Profiles  3 Import  4 Select  5 Connect  6 Test  7 Disconnect  8 Remove  9 APT Update  10 Host Preflight  11 Path Diagnostics  12 Selective Plan  13 Underlay TCP  14 Underlay DNS  15 Host Drift  16 Activation Journal  17 Firewall Preflight  0 Exit")
+		fmt.Println("\nServer Connect | Direct / Proxy Only / Smart Routing (experimental only)")
+		fmt.Println("  Modes      18 Mode Overview  1 Status  5 Connect (Proxy Only)  7 Disconnect")
+		fmt.Println("  Profiles   2 Profiles  3 Import  4 Select  8 Remove")
+		fmt.Println("  Network    6 Test  11 Path Diagnostics  12 Selective Plan  13 Underlay TCP  14 Underlay DNS")
+		fmt.Println("  Safety     10 Host Preflight  15 Host Drift  16 Activation Journal  17 Firewall Preflight")
+		fmt.Println("  System     9 APT Update  0 Exit")
 		fmt.Print("Choice: ")
 		raw, e := in.ReadString('\n')
 		if e != nil {
@@ -790,6 +803,8 @@ func menu(m *sc.Manager) int {
 			return 0
 		case "1":
 			run(false, m, []string{"status"})
+		case "18":
+			run(false, m, []string{"mode-overview"})
 		case "2":
 			run(false, m, []string{"profiles"})
 		case "3":
