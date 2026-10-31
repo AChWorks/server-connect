@@ -324,11 +324,21 @@ func selectFreshManagementOwner(owners []smartTUNManagementOwner, afterMS int64,
 }
 
 func observeFreshSmartTUNManagement(peer, underlay string, afterUptimeMS int64) (smartTUNManagementProof, error) {
-	if os.Geteuid() != 0 || peer != "10.254.72.2" || underlay != "scqaedge0" {
-		return smartTUNManagementProof{}, managementFault("confirmation is restricted to the exact disposable root management path")
+	if os.Geteuid() != 0 {
+		return smartTUNManagementProof{}, managementFault("confirmation requires privileged authenticated management")
 	}
-	if err := trialDisposableContext(); err != nil {
-		return smartTUNManagementProof{}, err
+	localIP := "10.254.72.1"
+	if peer == smartTUNVMEndpoint && underlay == smartTUNVMUnderlay {
+		localIP = smartTUNVMGuestIP
+		if err := smartTUNQAVMContext(); err != nil {
+			return smartTUNManagementProof{}, err
+		}
+	} else if peer == "10.254.72.2" && underlay == "scqaedge0" {
+		if err := trialDisposableContext(); err != nil {
+			return smartTUNManagementProof{}, err
+		}
+	} else {
+		return smartTUNManagementProof{}, managementFault("management topology is not an admitted trial")
 	}
 	before, err := managementSockets()
 	if err != nil {
@@ -363,7 +373,7 @@ func observeFreshSmartTUNManagement(peer, underlay string, afterUptimeMS int64) 
 			}
 			for inode := range inodes {
 				socket, present := before[inode]
-				if present && socket.Peer.String() == peer && socket.Local.String() == "10.254.72.1" {
+				if present && socket.Peer.String() == peer && socket.Local.String() == localIP {
 					owners = append(owners, smartTUNManagementOwner{process, socket})
 				}
 			}

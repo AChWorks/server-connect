@@ -594,7 +594,7 @@ func nativeTUNVerifyRestored(record smartTUNTrialJournal) error {
 }
 
 func recoverSmartTUNNativeLocked(store *activationJournalDir, record *smartTUNTrialJournal, qaPoint string) (SmartTUNTrialReceipt, error) {
-	if err := trialDisposableContext(); err != nil {
+	if err := smartTUNNativeHostContext(); err != nil {
 		return SmartTUNTrialReceipt{}, err
 	}
 	unit, err := observeSmartTUNTrialUnit(context.Background())

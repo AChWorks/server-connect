@@ -106,8 +106,7 @@ func validateSmartTUNNative(record smartTUNTrialJournal) error {
 	n := record.Native
 	bad := func() error { return activationJournalError("native TUN identity or resource ledger is invalid") }
 	if n == nil || n.Version != 1 || n.NamespaceDev == 0 || n.NamespaceIno == 0 || n.UnderlayIndex <= 1 ||
-		record.EndpointIP != "10.254.72.2" || record.ManagementPeerIP != "10.254.72.2" ||
-		record.TunnelInterface != "sctunqa0" || record.UnderlayInterface != "scqaedge0" ||
+		!smartTUNNativeJournalIdentity(record) ||
 		n.NFTName != "scnt_"+record.OperationID || n.IPv4.Address != "172.31.99.1/30" || n.IPv4.Table != nativeTUNTable4 ||
 		(n.IPv6.Address != "" && n.IPv6.Address != "fd73:99::1/64") || n.IPv6.Table != nativeTUNTable6 || !nativeObjectValid(n.NFT) {
 		return bad()

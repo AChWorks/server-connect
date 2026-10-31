@@ -298,7 +298,7 @@ func inspectSmartTUNBaseline(endpoint, peer string) (string, error) {
 // guest and a native endpoint route via the *declared* underlay. The Docker
 // marker alone would not distinguish a customer system from a QA fixture.
 func smartTUNTrialGuest(underlay, tunnel, endpoint string) error {
-	if err := trialDisposableContext(); err != nil {
+	if err := smartTUNNativeHostContext(); err != nil {
 		return err
 	}
 	raw, err := nativeIPJSON("-j", "link", "show")
@@ -657,8 +657,11 @@ func (m *Manager) admitSmartTUNTrialLocked(store *activationJournalDir, opts Sma
 		endpoint.IsLoopback() || endpoint.IsLinkLocalUnicast() {
 		return smartTUNTrialAdmission{}, Fault("trial_unsupported", "selected profile requires a literal public IPv4 endpoint")
 	}
-	if endpoint.String() != "10.254.72.2" || managementPeer != "10.254.72.2" {
-		return smartTUNTrialAdmission{}, Fault("trial_unsupported", "disconnected disposable peer identity required")
+	if (endpoint.String() == "10.254.72.2" && managementPeer == "10.254.72.2") ||
+		(endpoint.String() == smartTUNVMEndpoint && managementPeer == smartTUNVMEndpoint && smartTUNVMPolicySupported(opts)) {
+		// Continue with the independently observed underlay and guarded native admission.
+	} else {
+		return smartTUNTrialAdmission{}, Fault("trial_unsupported", "unrecognized disconnected peer identity")
 	}
 	if err := smartTUNTrialGuest(opts.UnderlayInterface, opts.TunnelInterface, endpoint.String()); err != nil {
 		return smartTUNTrialAdmission{}, err
@@ -741,13 +744,13 @@ func (m *Manager) beginSmartTUNTrial(opts SmartTUNCandidateOptions, managementPe
 	if err := nativeTrialApplyPlatform(); err != nil {
 		return SmartTUNTrialReceipt{}, err
 	}
-	if !smartTUNTrialFixturePolicySupported(opts) {
-		return SmartTUNTrialReceipt{}, Fault("trial_unsupported", "only the exact disposable IPv4 or dual-stack TUN fixtures are supported")
+	if !smartTUNTrialFixturePolicySupported(opts) && !smartTUNVMPolicySupported(opts) {
+		return SmartTUNTrialReceipt{}, Fault("trial_unsupported", "unsupported disposable native TUN policy")
 	}
 	if err := EnsureCore(m.Core); err != nil {
 		return SmartTUNTrialReceipt{}, err
 	}
-	if err := trialDisposableContext(); err != nil {
+	if err := smartTUNNativeCandidateContext(opts, managementPeer); err != nil {
 		return SmartTUNTrialReceipt{}, err
 	}
 	var planned smartTUNTrialAdmission
