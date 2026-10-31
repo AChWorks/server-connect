@@ -284,10 +284,29 @@ func smartTUNConfirmMatches(r smartTUNTrialJournal, op string, revision uint64, 
 		journalHex64.MatchString(challenge) && subtle.ConstantTimeCompare([]byte(s.ChallengeSHA256), []byte(smartTUNChallengeDigest(r, challenge))) == 1
 }
 
+// Each caller has its own exact role allowlist. A recovery service is not a
+// Health service, even though both share the same authenticated observation.
 func observeSmartTUNHealthUnit(name string) (smartTUNHealthUnitIdentity, map[string]string, error) {
-	var empty smartTUNHealthUnitIdentity
 	if name != smartTUNHealthUnit && name != smartTUNHealthTimer {
-		return empty, nil, Fault("guard_unavailable", "unknown health role")
+		return smartTUNHealthUnitIdentity{}, nil, Fault("guard_unavailable", "unknown health role")
+	}
+	return observeSmartTUNManagedUnit(name)
+}
+
+func observeSmartTUNRecoveryUnit(name string) (smartTUNHealthUnitIdentity, map[string]string, error) {
+	if name != trialRecoveryUnit && name != trialRecoveryTimer {
+		return smartTUNHealthUnitIdentity{}, nil, Fault("guard_unavailable", "unknown recovery role")
+	}
+	return observeSmartTUNManagedUnit(name)
+}
+
+// The same trusted systemctl/manifest/identity checks apply to the four
+// fixed roles, without granting a caller authority over arbitrary units.
+func observeSmartTUNManagedUnit(name string) (smartTUNHealthUnitIdentity, map[string]string, error) {
+	var empty smartTUNHealthUnitIdentity
+	if name != smartTUNHealthUnit && name != smartTUNHealthTimer &&
+		name != trialRecoveryUnit && name != trialRecoveryTimer {
+		return empty, nil, Fault("guard_unavailable", "unknown managed role")
 	}
 	path := filepath.Join(trialGuardUnitDir, name)
 	body, unitID, err := readSmartTUNTrialUnitFile(path)

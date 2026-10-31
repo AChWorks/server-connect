@@ -70,7 +70,7 @@ func parseSmartTUNIdleRecoveryService(raw []byte) (failed bool, err error) {
 // Reobserve provenance before and after the detailed systemd process/job
 // query. The first-party unit and manifest must match across observations.
 func observeSmartTUNIdleRecoveryService() (smartTUNHealthUnitIdentity, bool, error) {
-	id, first, err := observeSmartTUNHealthUnit(trialRecoveryUnit)
+	id, first, err := observeSmartTUNRecoveryUnit(trialRecoveryUnit)
 	if err != nil {
 		return smartTUNHealthUnitIdentity{}, false, err
 	}
@@ -92,7 +92,7 @@ func observeSmartTUNIdleRecoveryService() (smartTUNHealthUnitIdentity, bool, err
 	if err != nil {
 		return smartTUNHealthUnitIdentity{}, false, err
 	}
-	nextID, next, err := observeSmartTUNHealthUnit(trialRecoveryUnit)
+	nextID, next, err := observeSmartTUNRecoveryUnit(trialRecoveryUnit)
 	if err != nil || nextID != id ||
 		next["ActiveState"] != first["ActiveState"] ||
 		next["Result"] != first["Result"] ||
@@ -208,7 +208,7 @@ func (m *Manager) ReconcileIdleSmartTUNRecoveryGuard() (SmartTUNIdleGuardReconci
 		if _, err := smartTUNHealthUnits(false, nil); err != nil {
 			return err
 		}
-		_, recoveryTimer, err := observeSmartTUNHealthUnit(trialRecoveryTimer)
+		_, recoveryTimer, err := observeSmartTUNRecoveryUnit(trialRecoveryTimer)
 		if err != nil || recoveryTimer["ActiveState"] != "inactive" ||
 			recoveryTimer["UnitFileState"] != "disabled" ||
 			recoveryTimer["Result"] != "success" || recoveryTimer["Unit"] != trialRecoveryUnit {

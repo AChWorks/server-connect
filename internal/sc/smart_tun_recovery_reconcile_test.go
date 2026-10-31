@@ -104,3 +104,19 @@ func TestRejectSmartTUNOrphanedTables(t *testing.T) {
 		})
 	}
 }
+
+func TestManagedRecoveryObserverDoesNotWidenHealthOrArbitraryUnitScope(t *testing.T) {
+	for _, role := range []string{trialRecoveryUnit, trialRecoveryTimer} {
+		if _, _, err := observeSmartTUNHealthUnit(role); ErrorCode(err) != "guard_unavailable" {
+			t.Fatalf("health observer accepted recovery role %s: %v", role, err)
+		}
+	}
+	for _, role := range []string{smartTUNHealthUnit, smartTUNHealthTimer, "untrusted.service", ""} {
+		if _, _, err := observeSmartTUNRecoveryUnit(role); ErrorCode(err) != "guard_unavailable" {
+			t.Fatalf("recovery observer accepted other role %s: %v", role, err)
+		}
+	}
+	if _, _, err := observeSmartTUNManagedUnit("untrusted.service"); ErrorCode(err) != "guard_unavailable" {
+		t.Fatalf("managed observer accepted untrusted unit: %v", err)
+	}
+}
