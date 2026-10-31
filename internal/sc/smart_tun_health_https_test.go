@@ -397,10 +397,10 @@ func TestSmartTUNHTTPSCanceledRoundRetainsCriticalSourceEvidence(t *testing.T) {
 	}
 }
 
-// The peer performs an actual TLS handshake, reads the fresh HTTP request and
-// writes complete TLS application records. Closing the raw stream at a record
-// boundary lets the client wrapper cancel on the real EOF returned to TLS,
-// before HTTP completion is classified. No classified result is injected.
+// The peer performs a real TLS handshake and sends complete HTTP records.
+// EOF-boundary cases cancel at the actual transport read. Length-delimited
+// cases instead finish on exact bytes (without relying on connection EOF).
+// No preclassified path result is injected.
 func healthTLSReadCompletion(t *testing.T, parent context.Context, respond func(string) []byte,
 	holdOpen bool, readError error) (SmartTUNHTTPSResult, bool) {
 	t.Helper()
@@ -445,8 +445,9 @@ func healthTLSReadCompletion(t *testing.T, parent context.Context, respond func(
 			return
 		}
 		if holdOpen {
-			// Complete-looking HTTP bytes without peer EOF cannot establish
-			// critical evidence. Only the caller's cancellation closes it.
+			// Even without transport EOF, a complete declared Content-Length
+			// is a complete HTTP message. Cancel after the TLS record was
+			// delivered; the child context, not the aggregate, is canceled.
 			cancel()
 			<-exchanged
 		}
@@ -480,11 +481,12 @@ func TestSmartTUNHTTPSReadCompletionCancellation(t *testing.T) {
 		readError error
 	}{
 		{name: "mismatch-content-length", respond: func(body string) []byte { return healthHTTPResponse(200, body) },
-			want: SmartTUNHTTPSResult{"path_mismatch", 200}, complete: true},
+			want: SmartTUNHTTPSResult{"path_mismatch", 200}},
 		{name: "mismatch-close-delimited", respond: func(body string) []byte { return []byte("HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n" + body) },
 			want: SmartTUNHTTPSResult{"path_mismatch", 200}, complete: true},
-		{name: "positive", respond: func(body string) []byte {
-			return healthHTTPResponse(200, strings.Replace(body, "10.254.72.1", "8.8.8.8", 1))
+		{name: "positive-close-delimited-canceled", respond: func(body string) []byte {
+			return []byte("HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n" +
+				strings.Replace(body, "10.254.72.1", "8.8.8.8", 1))
 		},
 			want: SmartTUNHTTPSResult{"canceled", 200}, complete: true},
 		{name: "truncated-length", respond: func(body string) []byte {
@@ -492,18 +494,24 @@ func TestSmartTUNHTTPSReadCompletionCancellation(t *testing.T) {
 		},
 			want: SmartTUNHTTPSResult{"canceled", 200}, complete: true},
 		{name: "trailing-frame", respond: func(body string) []byte { return append(healthHTTPResponse(200, strings.TrimSuffix(body, "\n")), '\n') },
-			want: SmartTUNHTTPSResult{"canceled", 200}, complete: true},
+			want: SmartTUNHTTPSResult{"http_invalid_response", 200}},
 		{name: "malformed-body", respond: func(body string) []byte { return healthHTTPResponse(200, strings.TrimSuffix(body, "\n")) },
-			want: SmartTUNHTTPSResult{"canceled", 200}, complete: true},
+			want: SmartTUNHTTPSResult{"invalid_response", 200}},
 		{name: "stale-nonce", respond: func(body string) []byte {
 			reply := []byte(body)
 			reply[10] ^= 1
 			return healthHTTPResponse(200, string(reply))
-		}, want: SmartTUNHTTPSResult{"canceled", 200}, complete: true},
-		{name: "read-error", respond: func(body string) []byte { return healthHTTPResponse(200, body) },
+		}, want: SmartTUNHTTPSResult{"invalid_response", 200}},
+		{name: "read-error", respond: func(body string) []byte {
+			return []byte("HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n" + body)
+		},
 			want: SmartTUNHTTPSResult{"canceled", 200}, complete: true, readError: io.ErrNoProgress},
 		{name: "body-without-eof", respond: func(body string) []byte { return healthHTTPResponse(200, body) },
-			want: SmartTUNHTTPSResult{"canceled", 200}, holdOpen: true},
+			want: SmartTUNHTTPSResult{"path_mismatch", 200}, holdOpen: true},
+		{name: "partial-length-held-open", respond: func(body string) []byte {
+			full := healthHTTPResponse(200, body+"x")
+			return full[:len(full)-1]
+		}, want: SmartTUNHTTPSResult{"canceled", 200}, holdOpen: true},
 		{name: "oversized-length", respond: func(body string) []byte {
 			return []byte("HTTP/1.1 200 OK\r\nContent-Length: 257\r\nConnection: close\r\n\r\n" + body)
 		},

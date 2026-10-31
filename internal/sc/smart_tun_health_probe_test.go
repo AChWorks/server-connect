@@ -514,23 +514,27 @@ func TestSmartTUNHealthReadCompletionCancellation(t *testing.T) {
 }
 
 func TestSmartTUNHealthReadCompletionMismatchStopsSupervision(t *testing.T) {
-	for _, protocol := range []string{"https", "tcp", "udp", "dns"} {
+	for _, protocol := range []string{"https", "https-length-held-open", "tcp", "udp", "dns"} {
 		t.Run(protocol, func(t *testing.T) {
 			parent, cancel := context.WithTimeout(context.Background(), smartTUNHealthRoundTimeout)
 			defer cancel()
 			var observed SmartTUNHTTPSResult
-			if protocol == "https" {
+			if protocol == "https" || protocol == "https-length-held-open" {
 				observed, _ = healthTLSReadCompletion(t, parent, func(body string) []byte {
 					return healthHTTPResponse(200, body)
-				}, false, nil)
+				}, protocol == "https-length-held-open", nil)
 			} else {
 				observed = healthOrdinaryReadCompletion(t, parent, protocol,
 					func(request, nonce []byte) []byte {
 						return healthOrdinaryBoundaryReply(protocol, "mismatch", request, nonce)
 					}, nil)
 			}
+			targetProtocol := protocol
+			if targetProtocol == "https-length-held-open" {
+				targetProtocol = "https"
+			}
 			evidence := runSmartTUNHealthProbes(parent, true, func(_ context.Context, probe smartTUNHealthProbe) SmartTUNHTTPSResult {
-				if probe.target == 0 && probe.protocol == protocol {
+				if probe.target == 0 && probe.protocol == targetProtocol {
 					return observed
 				}
 				if probe.protocol == "https" {

@@ -111,14 +111,25 @@ func exchangeSmartTUNHTTPSHealth(ctx context.Context, connection net.Conn, probe
 	if response.ContentLength > smartTUNHealthHTTPBodyLimit {
 		return SmartTUNHTTPSResult{Result: "http_oversized_response", StatusCode: status}
 	}
-	reply, err := io.ReadAll(io.LimitReader(reader, smartTUNHealthHTTPBodyLimit+1))
-	// Completed critical evidence survives cancellation after the final read.
-	// Only an error-free, bounded and fully framed reply may establish it;
-	// canceled positive replies still cannot authorize healthy supervision.
+	var reply []byte
+	var readErr error
+	if response.ContentLength >= 0 {
+		// An HTTP/1.1 length-delimited message ends at exactly these bytes;
+		// waiting for TLS EOF can erase already complete source evidence.
+		reply = make([]byte, int(response.ContentLength))
+		_, readErr = io.ReadFull(reader, reply)
+	} else {
+		// Close-delimited replies still require a successful EOF.
+		reply, readErr = io.ReadAll(io.LimitReader(reader, smartTUNHealthHTTPBodyLimit+1))
+	}
+	// Reject any immediately buffered surplus after a declared-length body.
+	// Never wait for an extra byte/EOF: it is not part of this HTTP message.
+	extraBuffered := response.ContentLength >= 0 && reader.Buffered() > 0
 	classification := "invalid_response"
-	if err == nil && len(reply) <= smartTUNHealthHTTPBodyLimit &&
-		(response.ContentLength < 0 || int64(len(reply)) == response.ContentLength) {
+	if readErr == nil && len(reply) <= smartTUNHealthHTTPBodyLimit && !extraBuffered {
 		classification = smartTUNHealthReply(reply, probe, nonce)
+		// Completed critical evidence survives subsequent child cancellation;
+		// canceled positive replies still cannot authorize healthy supervision.
 		if classification == "path_mismatch" {
 			return SmartTUNHTTPSResult{Result: classification, StatusCode: status}
 		}
@@ -129,16 +140,11 @@ func exchangeSmartTUNHTTPSHealth(ctx context.Context, connection net.Conn, probe
 	if len(reply) > smartTUNHealthHTTPBodyLimit {
 		return SmartTUNHTTPSResult{Result: "http_oversized_response", StatusCode: status}
 	}
-	if err != nil {
-		return smartTUNHealthHTTPReadFailure(ctx, err, status)
+	if readErr != nil {
+		return smartTUNHealthHTTPReadFailure(ctx, readErr, status)
 	}
-	if response.ContentLength >= 0 {
-		if int64(len(reply)) < response.ContentLength {
-			return SmartTUNHTTPSResult{Result: "http_truncated_response", StatusCode: status}
-		}
-		if int64(len(reply)) != response.ContentLength {
-			return SmartTUNHTTPSResult{Result: "http_invalid_response", StatusCode: status}
-		}
+	if extraBuffered {
+		return SmartTUNHTTPSResult{Result: "http_invalid_response", StatusCode: status}
 	}
 	return SmartTUNHTTPSResult{Result: classification, StatusCode: status}
 }
