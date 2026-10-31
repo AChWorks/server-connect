@@ -192,7 +192,8 @@ func decodeSavedSmartTUNPolicy(data []byte) (smartTUNSavedPolicy, error) {
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.DisallowUnknownFields()
 	if decoder.Decode(&policy) != nil || policy.Version != 1 ||
-		policy.ManagementPeerIP != "10.254.72.2" || !smartTUNTrialFixturePolicySupported(policy.Options) {
+		!((policy.ManagementPeerIP == "10.254.72.2" && smartTUNTrialFixturePolicySupported(policy.Options)) ||
+			(policy.ManagementPeerIP == smartTUNVMEndpoint && smartTUNVMPolicySupported(policy.Options))) {
 		return invalid()
 	}
 	// Nested exception names must also be exact, not encoding/json's

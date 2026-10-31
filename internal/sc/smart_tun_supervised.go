@@ -153,7 +153,7 @@ func validateSmartTUNSupervision(r smartTUNTrialJournal) error {
 	if s.Rounds > 0 && (s.LastProbeMS <= 0 || s.LastProbeMS > s.HeartbeatMS || s.NextProbeMS > s.HeartbeatMS+30000) {
 		return bad()
 	}
-	if s.Evidence.VPNHealthy && (!s.Evidence.IPv4TCP || !s.Evidence.IPv4UDP || !s.Evidence.IPv4DNS || (r.Native.IPv6.Address != "" && (!s.Evidence.IPv6TCP || !s.Evidence.IPv6UDP || !s.Evidence.IPv6DNS))) {
+	if s.Evidence.VPNHealthy && (!s.Evidence.IPv4TCP || (r.EndpointIP != smartTUNVMEndpoint && (!s.Evidence.IPv4UDP || !s.Evidence.IPv4DNS || (r.Native.IPv6.Address != "" && (!s.Evidence.IPv6TCP || !s.Evidence.IPv6UDP || !s.Evidence.IPv6DNS))))) {
 		return bad()
 	}
 	if r.Native.IPv6.Address == "" && (s.Evidence.IPv6TCP || s.Evidence.IPv6UDP || s.Evidence.IPv6DNS) {
@@ -165,10 +165,12 @@ func validateSmartTUNSupervision(r smartTUNTrialJournal) error {
 	}
 	if s.Rounds > 0 {
 		count, targets := 7, 2
-		if r.Native.IPv6.Address != "" {
+		if r.EndpointIP == smartTUNVMEndpoint {
+			count, targets = 2, 1
+		} else if r.Native.IPv6.Address != "" {
 			count, targets = 13, 4
 		}
-		if s.Version == smartTUNSupervisionVersion {
+		if s.Version == smartTUNSupervisionVersion && r.EndpointIP != smartTUNVMEndpoint {
 			count += targets
 		}
 		if s.Evidence.ProbeCount != count && !(s.Evidence.ProbeCount == 0 && s.Evidence.Reason == "round_canceled") {
@@ -178,6 +180,10 @@ func validateSmartTUNSupervision(r smartTUNTrialJournal) error {
 			return bad()
 		}
 		switch s.Evidence.Reason {
+		case "vm_https_only_udp_dns_not_run", "vm_protected_underlay_failed", "vm_selected_https_failed", "vm_round_canceled":
+			if r.EndpointIP != smartTUNVMEndpoint {
+				return bad()
+			}
 		case "healthy", "healthy_partial_targets", "protected_underlay_failed", "vpn_path_mismatch", "vpn_ipv4_tcp_failed", "vpn_ipv4_udp_failed", "vpn_ipv4_dns_failed", "vpn_ipv6_tcp_failed", "vpn_ipv6_udp_failed", "vpn_ipv6_dns_failed", "round_canceled":
 		case "vpn_ipv4_https_failed", "vpn_ipv6_https_failed":
 			if s.Version == 1 {
@@ -191,8 +197,14 @@ func validateSmartTUNSupervision(r smartTUNTrialJournal) error {
 		if s.Evidence.IPv4HTTPS || s.Evidence.IPv6HTTPS || s.Evidence.HTTPSResults != ([4]SmartTUNHTTPSResult{}) {
 			return bad()
 		}
-	} else if s.Rounds > 0 && !validSmartTUNHTTPSEvidence(s.Evidence, r.Native.IPv6.Address != "") {
-		return bad()
+	} else if s.Rounds > 0 {
+		if r.EndpointIP == smartTUNVMEndpoint {
+			if !validSmartTUNQAVMHealthEvidence(s.Evidence) {
+				return bad()
+			}
+		} else if !validSmartTUNHTTPSEvidence(s.Evidence, r.Native.IPv6.Address != "") {
+			return bad()
+		}
 	}
 	return nil
 }
@@ -347,6 +359,50 @@ func smartTUNHealthUnits(armed bool, expected *[2]smartTUNHealthUnitIdentity) ([
 		}
 	}
 	return roles, nil
+}
+
+// A timed-out oneshot remains FAILED after the independent guard has safely
+// removed every owned TUN resource. The systemd failure receipt must never be
+// treated as a live guard; equally, a stale result must not strand a NEW,
+// separately admitted QA VM operation. Only after a held journal lock proves
+// absence, the trusted recovery timer is disarmed, the core is completely
+// quiescent and the exact health timer is inactive may we reset this ONE owned
+// failed oneshot. This does not start, stop or modify any data-plane service.
+func normalizeQuiescentSmartTUNHealthUnit(store *activationJournalDir) error {
+	if _, _, err := store.readJournal(); !errors.Is(err, os.ErrNotExist) {
+		return Fault("guard_unavailable", "health result cannot be normalized while an activation journal exists")
+	}
+	if err := trialGuardUnits(false); err != nil {
+		return err
+	}
+	core, err := observeSmartTUNTrialUnit(context.Background())
+	if err != nil || !core.stopped() {
+		return Fault("guard_unavailable", "TUN core must be verified inactive before health normalization")
+	}
+	serviceID, service, err := observeSmartTUNHealthUnit(smartTUNHealthUnit)
+	if err != nil {
+		return err
+	}
+	if service["ActiveState"] == "inactive" && service["Result"] == "success" {
+		return nil
+	}
+	if service["ActiveState"] != "failed" || service["UnitFileState"] != "static" {
+		return Fault("guard_unavailable", "only an idle failed owned health executor may be normalized")
+	}
+	_, timer, err := observeSmartTUNHealthUnit(smartTUNHealthTimer)
+	if err != nil || timer["ActiveState"] != "inactive" ||
+		timer["UnitFileState"] != "disabled" || timer["Result"] != "success" {
+		return Fault("guard_unavailable", "health timer must be disabled and inactive before normalization")
+	}
+	if err := smartTUNTrialSystemctl("reset-failed", smartTUNHealthUnit); err != nil {
+		return err
+	}
+	sameID, next, err := observeSmartTUNHealthUnit(smartTUNHealthUnit)
+	if err != nil || sameID != serviceID ||
+		next["Result"] != "success" || next["ActiveState"] != "inactive" {
+		return Fault("guard_unavailable", "owned health executor failed-state normalization was not verified")
+	}
+	return nil
 }
 
 // Stop only the timer. The health oneshot might be this very caller, or a
@@ -522,7 +578,7 @@ func (m *Manager) ConfirmSmartTUNTrial(op string, revision uint64, challenge str
 	if m.Dir != DefaultDir || m.Core != DefaultCore || !supervisedKillValid(qaKill, true) {
 		return SmartTUNTrialReceipt{}, Fault("invalid_arguments", "installed supervised confirmation and supported kill boundary required")
 	}
-	if err := trialDisposableContext(); err != nil {
+	if err := smartTUNNativeHostContext(); err != nil {
 		return SmartTUNTrialReceipt{}, err
 	}
 	var receipt SmartTUNTrialReceipt
@@ -568,7 +624,12 @@ func (m *Manager) ConfirmSmartTUNTrial(op string, revision uint64, challenge str
 		return receipt, err
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
-	evidence := probeSmartTUNHealth(ctx, snapshot.Native.IPv6.Address != "")
+	var evidence SmartTUNHealthEvidence
+	if snapshot.EndpointIP == smartTUNVMEndpoint {
+		evidence = probeSmartTUNQAVMHealth(ctx)
+	} else {
+		evidence = probeSmartTUNHealth(ctx, snapshot.Native.IPv6.Address != "")
+	}
 	cancel()
 	measuredMS, err := smartTUNUptimeMillis()
 	if err != nil {
@@ -927,7 +988,7 @@ func (m *Manager) RunSmartTUNHealthRound(qaKill string) (SmartTUNTrialReceipt, e
 	if m.Dir != DefaultDir || m.Core != DefaultCore || !supervisedKillValid(qaKill, false) {
 		return SmartTUNTrialReceipt{}, Fault("invalid_arguments", "installed supervised health executor required")
 	}
-	if err := trialDisposableContext(); err != nil {
+	if err := smartTUNNativeHostContext(); err != nil {
 		return SmartTUNTrialReceipt{}, err
 	}
 	var snapshot smartTUNTrialJournal
@@ -977,7 +1038,12 @@ func (m *Manager) RunSmartTUNHealthRound(qaKill string) (SmartTUNTrialReceipt, e
 		return receipt, err
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
-	evidence := probeSmartTUNHealth(ctx, snapshot.Native.IPv6.Address != "")
+	var evidence SmartTUNHealthEvidence
+	if snapshot.EndpointIP == smartTUNVMEndpoint {
+		evidence = probeSmartTUNQAVMHealth(ctx)
+	} else {
+		evidence = probeSmartTUNHealth(ctx, snapshot.Native.IPv6.Address != "")
+	}
 	cancel()
 	measuredMS, err := smartTUNUptimeMillis()
 	if err != nil {
