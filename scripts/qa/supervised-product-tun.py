@@ -840,6 +840,18 @@ class Fixture:
     def marker(self, name):
         print("SUPERVISED_TUN_" + name + "=PASS", flush=True)
 
+    def wait_one_target_measurement(self, previous):
+        # Sample the durable journal once per attempt: comparing two separate
+        # reads can splice an old failure onto a newer round. Allow enough
+        # time for a full independent timer interval and bounded probe work.
+        def measured():
+            current = self.health()
+            if current["rounds"] > previous and current["evidence"]["failed_targets"] == 1:
+                return current
+            return None
+
+        return self.wait(measured, 24, "one-target measurement")
+
     def confirmations_and_health(self):
         if not self.args.ipv6:
             # An authenticated old transport must stay stale even if a new
@@ -892,11 +904,10 @@ class Fixture:
 
         previous = self.health()["rounds"]
         self.controls({protocol + "@8.8.8.8": "drop" for protocol in PROTOCOLS})
-        self.wait(lambda: self.health()["rounds"] > previous and
-                  self.health()["evidence"]["failed_targets"] == 1, 15, "one-target measurement")
-        assert self.health()["state"] == "healthy" and self.health()["attempts"] == 0
-        assert self.health()["evidence"]["reason"] == "healthy_partial_targets"
-        assert self.health()["evidence"]["failed_targets"] == 1
+        observed = self.wait_one_target_measurement(previous)
+        assert observed["state"] == "healthy" and observed["attempts"] == 0
+        assert observed["evidence"]["reason"] == "healthy_partial_targets"
+        assert observed["evidence"]["failed_targets"] == 1
         self.controls()
         self.marker("ONE_TARGET_FALSE_ALARM_REJECTED")
 

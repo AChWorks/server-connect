@@ -1672,6 +1672,34 @@ class SustainedFaultTests(unittest.TestCase):
         self.assertNotIn("SUPERVISED_TUN_FINAL_RECEIPT=", final.output.getvalue())
 
 
+class OneTargetMeasurementTests(unittest.TestCase):
+    def test_new_round_and_failure_must_be_in_one_atomic_observation(self):
+        fixture = ForeignCleanupTests.new_fixture()
+        old_fault = {"rounds": 4, "evidence": {"failed_targets": 1}}
+        new_healthy = {"rounds": 5, "evidence": {"failed_targets": 0}}
+        new_fault = {"rounds": 6, "evidence": {"failed_targets": 1}}
+        reads = []
+
+        def await_samples(predicate, timeout, label):
+            self.assertGreaterEqual(timeout, 20)
+            self.assertEqual(label, "one-target measurement")
+            for sample in range(3):
+                value = predicate()
+                reads.append(value)
+                if value:
+                    return value
+            raise AssertionError("no current one-target round observed")
+
+        # An old two-read predicate could incorrectly combine rounds=5 with
+        # failed_targets=1 from rounds=4. The new fixture must not do so.
+        with patch.object(fixture, "health", side_effect=[new_healthy, old_fault, new_fault]) as reader, \
+                patch.object(fixture, "wait", side_effect=await_samples):
+            result = fixture.wait_one_target_measurement(4)
+        self.assertIs(result, new_fault)
+        self.assertEqual(reads, [None, None, new_fault])
+        self.assertEqual(reader.call_count, 3)
+
+
 class HTTPSFixtureEvidenceTests(unittest.TestCase):
     def test_independent_controls_cannot_cross_the_reconnect_boundary(self):
         for attempts, accepted in ((0, True), (1, False)):
