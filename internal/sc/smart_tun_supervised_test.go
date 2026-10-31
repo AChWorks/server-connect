@@ -16,7 +16,7 @@ func supervisedExample(t *testing.T, confirmed bool) smartTUNTrialJournal {
 	r.IntentType = smartTUNSupervisedIntent
 	r.DeadlineUptimeSec = 200
 	id := smartTUNHealthUnitIdentity{UnitDev: 1, UnitIno: 2, DigestDev: 1, DigestIno: 3, SHA256: strings.Repeat("a", 64)}
-	r.Supervised = &smartTUNSupervision{Version: 1, Generation: 1, State: "awaiting_confirmation", Options: SmartTUNHealthOptions{5, 0, 1, 2, 10}, Roles: [2]smartTUNHealthUnitIdentity{id, id}, ReadyAfterMS: 100000, HeartbeatMS: 100000, LeaseDeadlineMS: 135000, CorePID: 100, CoreStartTicks: 20, ReconnectStage: "none"}
+	r.Supervised = &smartTUNSupervision{Version: smartTUNSupervisionVersion, Generation: 1, State: "awaiting_confirmation", Options: SmartTUNHealthOptions{5, 0, 1, 2, 10}, Roles: [2]smartTUNHealthUnitIdentity{id, id}, ReadyAfterMS: 100000, HeartbeatMS: 100000, LeaseDeadlineMS: 135000, CorePID: 100, CoreStartTicks: 20, ReconnectStage: "none"}
 	r.Supervised.ChallengeSHA256 = smartTUNChallengeDigest(r, strings.Repeat("b", 64))
 	if confirmed {
 		s := r.Supervised
@@ -39,7 +39,7 @@ func supervisedExample(t *testing.T, confirmed bool) smartTUNTrialJournal {
 }
 
 func healthySupervisedEvidence() SmartTUNHealthEvidence {
-	return SmartTUNHealthEvidence{UnderlayHealthy: true, VPNHealthy: true, IPv4TCP: true, IPv4UDP: true, IPv4DNS: true, IPv6TCP: true, IPv6UDP: true, IPv6DNS: true, ProbeCount: 13, ElapsedMS: 20, Reason: "healthy"}
+	return SmartTUNHealthEvidence{UnderlayHealthy: true, VPNHealthy: true, IPv4TCP: true, IPv4UDP: true, IPv4DNS: true, IPv6TCP: true, IPv6UDP: true, IPv6DNS: true, IPv4HTTPS: true, IPv6HTTPS: true, HTTPSResults: [4]SmartTUNHTTPSResult{{Result: "pass", StatusCode: 200}, {Result: "pass", StatusCode: 200}, {Result: "pass", StatusCode: 200}, {Result: "pass", StatusCode: 200}}, ProbeCount: 17, ElapsedMS: 20, Reason: "healthy"}
 }
 
 func TestSupervisedJournalStrictSubtypeAndFullValueComparison(t *testing.T) {

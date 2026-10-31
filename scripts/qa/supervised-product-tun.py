@@ -7,6 +7,7 @@ synthetic management/VPN proof as general-host production acceptance.
 
 import argparse
 import contextlib
+import fcntl
 import hashlib
 import json
 import os
@@ -26,12 +27,27 @@ JOURNAL = Path("/var/lib/server-connect/route-activation-journal.json")
 HEALTH = "server-connect-smart-health.service"
 TIMER = "server-connect-smart-health.timer"
 RECOVERY = "server-connect-activation-recover.service"
+RECOVERY_TIMER = "server-connect-activation-recover.timer"
 CORE = "server-connect-smart-tun.service"
 UNITS = Path("/etc/systemd/system")
 ROOT = Path("/run/sc-qa-supervised")
 PUBLIC4 = ("8.8.8.8", "198.51.100.42")
 PUBLIC6 = ("2001:db8:8::8", "2001:db8:5::10")
-PROTOCOLS = ("tcp", "udp", "dns")
+PROTOCOLS = ("tcp", "udp", "dns", "https")
+TLS_BUNDLE = Path("/root/qa-smart-health-tls")
+TLS_FILES = ("qa-root.pem", "qa-server.pem", "qa-server-key.pem", "qa-wrong-name.pem",
+             "qa-wrong-trust.pem", "qa-wrong-root.pem", "qa-expired.pem", "qa-client-auth-only.pem")
+LEGACY_EVIDENCE_KEYS = frozenset(("underlay_healthy", "vpn_healthy", "ipv4_tcp", "ipv4_udp", "ipv4_dns",
+                                "ipv6_tcp", "ipv6_udp", "ipv6_dns", "failed_targets", "probe_count",
+                                "elapsed_ms", "reason"))
+HTTPS_EVIDENCE_KEYS = LEGACY_EVIDENCE_KEYS | {"ipv4_https", "ipv6_https", "https_results"}
+
+
+def exact_json(value):
+    """Keep JSON number/boolean types distinct in complete fixture CAS proofs."""
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False)
+
+
 CONFIRM_DEATH_WRAPPER = r'''
 import json, re, signal, subprocess, sys
 
@@ -97,6 +113,11 @@ class Fixture:
         self.health_role_originals = {}
         self.fixture_boot_id = None
         self.health_fault_series = None
+        self.tls_bundle = getattr(args, "tls_bundle", TLS_BUNDLE)
+        self.tls_identity = None
+        self.legacy_pause = None
+        self.legacy_roles = {}
+        self.applied_record = None
 
     def command(self, argv, *, check=True, timeout=20, data=None):
         elapsed = time.monotonic() - self.started
@@ -249,6 +270,9 @@ class Fixture:
         assert Path("/.dockerenv").is_file()
         assert Path("/proc/1/comm").read_text().strip() == "systemd"
         assert not JOURNAL.exists() and not ROOT.exists()
+        assert self.tls_bundle.is_dir() and not self.tls_bundle.is_symlink()
+        assert {path.name for path in self.tls_bundle.iterdir()} == set(TLS_FILES), "unexpected TLS fixture contents"
+        self.tls_identity = {name: self.read_health_role_file(self.tls_bundle / name) for name in TLS_FILES}
         assert self.show(CORE, "ActiveState") == "inactive"
         assert self.show(HEALTH, "ActiveState") == "inactive"
         assert self.show(TIMER, "ActiveState") == "inactive"
@@ -256,6 +280,7 @@ class Fixture:
         recovery_stat = recovery_path.stat()
         self.recovery_identity = (recovery_stat.st_dev, recovery_stat.st_ino, recovery_path.read_bytes())
         self.health_role_originals = {name: self.health_role_files(name) for name in (HEALTH, TIMER)}
+        self.legacy_roles = {name: self.health_role_files(name) for name in (TIMER, RECOVERY_TIMER, HEALTH, RECOVERY)}
         self.health_identity = self.health_role_originals[HEALTH][0]
         self.fixture_boot_id = self.current_boot_id()
         self.upstream_fd = os.pidfd_open(self.args.upstream_pid)
@@ -279,7 +304,8 @@ class Fixture:
         self.background(["/usr/sbin/sshd", "-D", "-e", "-f", str(ROOT / "sshd_config")], "sshd")
         responder = ["ip", "netns", "exec", PEER, "/usr/bin/python3", "-I", "-B", "-u",
                      "/root/qa-smart-health-responder.py", "--control", str(ROOT / "control.json"),
-                     "--events", str(ROOT / "events.jsonl"), "--ready", str(ROOT / "ready")]
+                     "--events", str(ROOT / "events.jsonl"), "--ready", str(ROOT / "ready"),
+                     "--tls-bundle", str(self.tls_bundle)]
         if self.args.ipv6:
             responder.append("--ipv6")
         self.background(responder, "responder")
@@ -289,8 +315,8 @@ class Fixture:
         for number, address in enumerate(self.targets):
             family = "ip6" if ":" in address else "ip"
             for protocol in PROTOCOLS:
-                transport = "tcp" if protocol == "tcp" else "udp"
-                port = {"tcp": 19220, "udp": 19221, "dns": 19222}[protocol]
+                transport = "tcp" if protocol in ("tcp", "https") else "udp"
+                port = {"tcp": 19220, "udp": 19221, "dns": 19222, "https": 19224}[protocol]
                 rules.append(f'iifname "scqapeer0" {family} daddr {address} {transport} dport {port} counter comment "health-{number}-{protocol}"')
         rules.extend(("}", "}"))
         self.command(["ip", "netns", "exec", PEER, "nft", "-f", "-"], data="\n".join(rules) + "\n")
@@ -299,6 +325,170 @@ class Fixture:
         self.direct_counts = self.counters()
         assert all(value > 0 for value in self.direct_counts.values()), self.direct_counts
         self.marker("DIRECT_CONTROLS")
+        self.marker("HTTPS_AUTHENTICATED_DIRECT_CONTROLS")
+
+    def tls_unchanged(self):
+        assert self.tls_identity is not None, "no original TLS fixture identity"
+        assert self.tls_bundle.is_dir() and not self.tls_bundle.is_symlink()
+        assert {path.name for path in self.tls_bundle.iterdir()} == set(TLS_FILES), "TLS fixture set changed"
+        assert {name: self.read_health_role_file(self.tls_bundle / name) for name in TLS_FILES} == self.tls_identity, \
+            "TLS fixture files were replaced or modified"
+
+    def event_position(self):
+        path = ROOT / "events.jsonl"
+        return path.stat().st_size if path.exists() else 0
+
+    def https_peer_evidence(self, position, modes=None):
+        """Independent actual peer source; injected reply text is not path traffic."""
+        modes = modes or {target: "normal" for target in self.targets}
+        path = ROOT / "events.jsonl"
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        try:
+            current = os.fstat(descriptor)
+            assert stat.S_ISREG(current.st_mode) and current.st_size >= position, "peer event log replaced or truncated"
+            os.lseek(descriptor, position, os.SEEK_SET)
+            data = os.read(descriptor, 262145)
+        finally:
+            os.close(descriptor)
+        assert len(data) <= 262144 and data.endswith(b"\n"), "incomplete or oversized peer evidence"
+        rows = [json.loads(line) for line in data.splitlines()]
+        witnessed, nonces = set(), set()
+        for row in rows:
+            if row.get("protocol") != "https":
+                continue
+            target = row.get("destination")
+            assert target in self.targets and row.get("peer") == target, "HTTPS traffic used an unexpected actual source"
+            if row.get("mode") != modes.get(target):
+                continue
+            if row["mode"] in ("wrong-name", "wrong-trust", "expired", "client-auth-only"):
+                assert row.get("result") == "tls-handshake-failed" and "nonce" not in row, row
+            else:
+                assert row.get("result") == "replied" and re.fullmatch("[0-9a-f]{32}", row.get("nonce", "")), row
+                assert row["nonce"] not in nonces, "HTTPS request nonce was reused"
+                nonces.add(row["nonce"])
+            witnessed.add(target)
+        assert witnessed == set(modes), "missing per-target authenticated HTTPS peer observations"
+        assert self.counters() == self.direct_counts, "HTTPS path silently escaped through Direct"
+
+    def require_https_evidence(self, evidence, *, expected=None, healthy=None):
+        assert isinstance(evidence, dict) and set(evidence) == HTTPS_EVIDENCE_KEYS, evidence
+        assert type(evidence["probe_count"]) is int and evidence["probe_count"] == (17 if self.args.ipv6 else 9), evidence
+        assert type(evidence["elapsed_ms"]) is int and 0 <= evidence["elapsed_ms"] <= 4500, evidence
+        assert all(type(evidence[key]) is bool for key in ("vpn_healthy", "ipv4_https", "ipv6_https"))
+        assert self.args.ipv6 or evidence["ipv6_https"] is False
+        results = evidence["https_results"]
+        assert isinstance(results, list) and len(results) == 4
+        for index, result in enumerate(results):
+            assert isinstance(result, dict) and set(result) == {"result", "status_code"}
+            assert isinstance(result["result"], str) and type(result["status_code"]) is int
+            if result["result"] in ("pass", "invalid_response", "path_mismatch"):
+                assert result["status_code"] == 200, result
+            elif result["result"] == "http_status":
+                assert 100 <= result["status_code"] <= 599 and result["status_code"] != 200, result
+            elif result["result"] in ("http_invalid_response", "http_oversized_response", "http_truncated_response", "canceled", "timeout"):
+                assert result["status_code"] in (0, 200), result
+            else:
+                assert result["result"] in ("not_run", "transport_failed", "deadline_unavailable",
+                    "nonce_unavailable", "tls_identity_failed", "tls_handshake_failed") and result["status_code"] == 0, result
+            if index >= len(self.targets):
+                assert result == {"result": "not_run", "status_code": 0}, result
+        if expected is not None:
+            for index, (result, code) in expected.items():
+                assert results[index] == {"result": result, "status_code": code}, evidence
+        if healthy is not None:
+            assert evidence["vpn_healthy"] is healthy
+            if healthy:
+                assert evidence["ipv4_https"] and (not self.args.ipv6 or evidence["ipv6_https"]), evidence
+        return evidence
+
+    def ordinary_selected_evidence(self, evidence):
+        assert evidence["underlay_healthy"], evidence
+        for family in (4, 6) if self.args.ipv6 else (4,):
+            assert all(evidence[f"ipv{family}_{protocol}"] for protocol in ("tcp", "udp", "dns")), evidence
+
+    def https_fault_round(self, modes, expected, *, healthy, before_reconnect=False):
+        previous = self.health()["rounds"]
+        position = self.event_position()
+        self.controls({"https@" + target: mode for target, mode in modes.items()})
+
+        def measured():
+            value = self.health()
+            if value["rounds"] <= previous:
+                return None
+            results = value["evidence"]["https_results"]
+            if all(results[index] == {"result": result, "status_code": code}
+                   for index, (result, code) in expected.items()):
+                return value
+            return None
+
+        value = self.wait(measured, 14, "installed cause-discriminating HTTPS round")
+        self.require_https_evidence(value["evidence"], expected=expected, healthy=healthy)
+        self.ordinary_selected_evidence(value["evidence"])
+        if before_reconnect:
+            assert value["state"] == "degraded" and value["failures"] == 1 and value["attempts"] == 0, value
+        self.wires("vpn", ("tcp", "udp", "dns"))
+        if before_reconnect:
+            current = self.journal()
+            assert current is not None and current["phase"] == "trial_pending" and current["supervised"]["attempts"] == 0, \
+                "independent ordinary controls crossed an actual reconnect boundary"
+        else:
+            self.command(self.ssh_arguments() + ["true"], timeout=3)
+        self.https_peer_evidence(position, {target: modes.get(target, "normal") for target in self.targets})
+        print("SUPERVISED_TUN_HTTPS_DIAGNOSTIC=" + json.dumps({"operation_id": self.op,
+              "modes": modes, "results": value["evidence"]["https_results"]}, separators=(",", ":")), flush=True)
+        return value
+
+    def https_diagnostics(self):
+        # Four pairs reuse the initial real operation and its 5-second cadence.
+        # A raised failure threshold permits observation; it grants no success.
+        cases = (("wrong-name", "wrong-trust", "tls_identity_failed", 0, "tls_identity_failed", 0),
+                 ("status503", "redirect", "http_status", 503, "http_status", 302),
+                 ("malformed", "truncated", "http_invalid_response", 0, "http_truncated_response", 200),
+                 ("oversized", "bad-nonce", "http_oversized_response", 200, "invalid_response", 200))
+        for first, second, result0, status0, result1, status1 in cases:
+            value = self.https_fault_round({PUBLIC4[0]: first, PUBLIC4[1]: second},
+                {0: (result0, status0), 1: (result1, status1)}, healthy=False)
+            assert value["state"] == "degraded" and value["attempts"] == 0, value
+            assert not value["evidence"]["ipv4_https"]
+        self.marker("HTTPS_TLS_HTTP_FAILURE_CLASSES")
+        value = self.https_fault_round({PUBLIC4[0]: "wrong-name"},
+            {0: ("tls_identity_failed", 0), 1: ("pass", 200)}, healthy=True)
+        assert value["state"] == "healthy" and value["attempts"] == 0
+        assert value["evidence"]["failed_targets"] == 1 and value["evidence"]["reason"] == "healthy_partial_targets"
+        self.marker("HTTPS_ONE_DESTINATION_PARTIAL_TOLERANCE")
+
+        # The peer really receives VPN traffic, but intentionally lies in its
+        # reply. This tests critical response validation, not an observed leak.
+        self.wires("vpn", ("tcp", "udp", "dns"))
+        position = self.event_position()
+        self.controls({"https@" + PUBLIC4[0]: "direct"})
+        self.wait(lambda: not JOURNAL.exists(), 18, "wrong-source HTTPS critical owned Off")
+        self.wait(lambda: self.show(HEALTH, "MainPID") == "0", 5, "wrong-source health completion")
+        self.https_peer_evidence(position, {PUBLIC4[0]: "direct", PUBLIC4[1]: "normal"})
+        self.controls()
+        self.inactive()
+        receipt = self.final_receipt("vpn_path_mismatch", 0)
+        self.require_https_evidence(receipt["health_evidence"], expected={0: ("path_mismatch", 200)}, healthy=False)
+        self.ordinary_selected_evidence(receipt["health_evidence"])
+        print("SUPERVISED_TUN_HTTPS_WRONG_SOURCE_INJECTION=reply text only; actual peer source remained selected", flush=True)
+        self.marker("HTTPS_WRONG_SOURCE_CRITICAL_OFF")
+
+    def https_exhaustion(self):
+        print("SUPERVISED_TUN_CASE=https-only-reconnect-exhaustion", flush=True)
+        self.apply(30, saved=True, health_failures=3, health_attempts=1)
+        self.confirmed()
+        self.command(self.ssh_arguments() + ["true"], timeout=3)
+        value = self.https_fault_round({target: "status503" for target in self.targets},
+            {index: ("http_status", 503) for index in range(len(self.targets))}, healthy=False, before_reconnect=True)
+        self.wait(lambda: self.health()["attempts"] == 1, 18, "HTTPS-only bounded reconnect")
+        assert value["evidence"]["reason"] == "vpn_ipv4_https_failed", value
+        self.independent_off(25, restore_controls=True)
+        receipt = self.final_receipt("reconnect_exhausted", 1)
+        self.require_https_evidence(receipt["health_evidence"],
+            expected={index: ("http_status", 503) for index in range(len(self.targets))}, healthy=False)
+        self.ordinary_selected_evidence(receipt["health_evidence"])
+        assert not receipt["health_evidence"]["ipv4_https"]
+        self.marker("HTTPS_ONLY_RECONNECT_EXHAUSTION_AND_SAVED_STATE")
 
     def counters(self):
         raw = self.command(["ip", "netns", "exec", PEER, "nft", "-j", "-a", "list", "table", "inet", "scqahealth"]).stdout
@@ -314,15 +504,23 @@ class Fixture:
         return result
 
     def wire(self, protocol, target, mode):
-        return self.command(["/usr/bin/python3", "-I", "-B", "/root/qa-smart-health-client.py",
-                             protocol, target, mode, "--timeout", "0.8"], timeout=2).stdout
+        argv = ["/usr/bin/python3", "-I", "-B", "/root/qa-smart-health-client.py",
+                protocol, target, mode, "--timeout", "0.8"]
+        if protocol == "https":
+            argv += ["--tls-bundle", str(self.tls_bundle)]
+        output = self.command(argv, timeout=2).stdout
+        if protocol == "https" and mode != "blocked":
+            result = json.loads(output)
+            assert result["tls_authenticated"] is True and result["server_name"] == "scqa-health.example.test"
+        return output
 
-    def wires(self, mode):
+    def wires(self, mode, protocols=PROTOCOLS):
         # Concurrent fixed-size rounds keep negative protocol cases bounded.
         from concurrent.futures import ThreadPoolExecutor
-        with ThreadPoolExecutor(max_workers=12) as pool:
+        self.tls_unchanged()
+        with ThreadPoolExecutor(max_workers=16) as pool:
             futures = [pool.submit(self.wire, protocol, target, mode)
-                       for target in self.targets for protocol in PROTOCOLS]
+                       for target in self.targets for protocol in protocols]
             for future in futures:
                 future.result()
         self.wire("tcp", "10.254.72.2", "direct")
@@ -357,6 +555,7 @@ class Fixture:
         assert re.fullmatch("[0-9a-f]{32,128}", self.challenge)
         assert not value["management_confirmed"] and value["experiment_only"] and not value["activation_ready"], value
         self.saved_before = self.saved()
+        self.applied_record = self.journal()
         if saved:
             assert self.saved_before == saved_before, "saved reapply changed saved input"
             assert previous_op is None or self.op != previous_op, "saved reapply reused an operation"
@@ -409,10 +608,16 @@ class Fixture:
         assert not current["management_confirmed"], current
 
     def confirmed(self):
+        position = self.event_position()
         value = self.confirm()
         assert value["management_confirmed"] and value["supervision_state"] == "healthy", value
         assert value["experiment_only"] and not value["activation_ready"] and not value["vpn_verified"], value
         self.wait(lambda: self.health()["state"] == "healthy", 8, "confirmed healthy state")
+        assert value["health_evidence_version"] == 2, value
+        self.require_https_evidence(value["health_evidence"], healthy=True,
+            expected={index: ("pass", 200) for index in range(len(self.targets))})
+        self.https_peer_evidence(position)
+        self.marker("HTTPS_AUTHENTICATED_SELECTED_PATH")
 
     def inactive(self):
         assert not JOURNAL.exists() and not Path("/var/lib/server-connect/smart-tun-trial.json").exists()
@@ -430,6 +635,7 @@ class Fixture:
         assert value["desired"] == "direct" and value["observed"] == "inactive", value
         self.verify_direct_delivery()
         self.marker("OFF_DIRECT_TCP_UDP_DNS")
+        self.marker("OFF_DIRECT_AUTHENTICATED_HTTPS")
 
     def verify_direct_delivery(self):
         self.wires("direct")
@@ -445,16 +651,19 @@ class Fixture:
         self.wait(lambda: self.show(HEALTH, "MainPID") == "0", 5, "health stop")
         self.inactive()
 
-    def independent_off(self, seconds=35):
+    def independent_off(self, seconds=35, *, restore_controls=False):
         # Deliberately never invoke status/recover while waiting: only the
         # installed independent roles can complete this transition.
         self.wait(lambda: not JOURNAL.exists(), seconds, "independent verified Off")
         off_uptime_ms = int(float(Path("/proc/uptime").read_text().split()[0]) * 1000)
         self.wait(lambda: self.show(HEALTH, "MainPID") == "0", 22, "bounded health executor termination")
+        if restore_controls:
+            self.controls()
         self.inactive()
         return off_uptime_ms
 
-    def final_receipt(self, reason, attempts, *, supervisor_snapshot=None, off_uptime_ms=None):
+    def final_receipt(self, reason, attempts, *, supervisor_snapshot=None, off_uptime_ms=None,
+                      evidence_version=2, retained_legacy=None):
         """Select exact operation receipts from authenticated unit streams."""
         supervisor_reasons = {"supervisor_unavailable", "supervisor_lease_expired"}
         if isinstance(reason, str):
@@ -511,7 +720,18 @@ class Fixture:
                 assert actual_reason in reasons and value.get("reconnect_attempts", 0) == attempts, value
                 assert value.get("management_confirmed") and value.get("health_round", 0) > 0, value
                 evidence = value["health_evidence"]
-                assert evidence["probe_count"] == (13 if self.args.ipv6 else 7)
+                assert type(value.get("health_evidence_version")) is int and value["health_evidence_version"] == evidence_version
+                if evidence_version == 1:
+                    assert retained_legacy is not None and set(evidence) == HTTPS_EVIDENCE_KEYS
+                    assert exact_json({key: evidence[key] for key in LEGACY_EVIDENCE_KEYS}) == exact_json(retained_legacy["evidence"])
+                    assert evidence["probe_count"] == (13 if self.args.ipv6 else 7)
+                    assert evidence["ipv4_https"] is False and evidence["ipv6_https"] is False
+                    assert exact_json(evidence["https_results"]) == exact_json([{"result": "not_run", "status_code": 0} for _ in range(4)])
+                    assert type(value["health_round"]) is int and value["health_round"] == retained_legacy["rounds"]
+                    assert type(value.get("health_last_uptime_ms")) is int and value["health_last_uptime_ms"] == retained_legacy["last_probe_uptime_ms"]
+                else:
+                    assert evidence_version == 2
+                    self.require_https_evidence(evidence)
                 assert 0 <= evidence["elapsed_ms"] <= 4500, evidence
                 if actual_reason in supervisor_reasons:
                     assert attempts == 0 and all(type(value.get(key, 0)) is int and value.get(key, 0) == 0
@@ -527,20 +747,20 @@ class Fixture:
                             assert (type(deadline) is int and deadline > 0 and type(off_uptime_ms) is int and
                                     off_uptime_ms >= deadline), \
                                 "lease-expiry Off predates the captured boot-time lease deadline"
-                matches.append((identity, actual_reason))
+                matches.append((identity, actual_reason, value))
             assert len(matches) <= 1, "ambiguous final operation provenance"
             if matches:
-                identity, actual_reason = matches[0]
+                identity, actual_reason, value = matches[0]
                 unit, invocation, _stream, _pid = identity
                 timing = ""
                 if supervisor_snapshot is not None:
                     timing = (f" round:{supervisor_snapshot['rounds']} last_probe_ms:{supervisor_snapshot['last_probe_uptime_ms']}"
                               f" lease_deadline_ms:{supervisor_snapshot['lease_deadline_uptime_ms']} off_observed_ms:{off_uptime_ms}")
                 print(f"SUPERVISED_TUN_FINAL_RECEIPT=operation:{self.op} unit:{unit} invocation:{invocation} reason:{actual_reason} attempts:{attempts}" + timing, flush=True)
-                return True
+                return value
             return False
 
-        self.wait(observed, 5, "attributable final supervision receipt")
+        return self.wait(observed, 5, "attributable final supervision receipt")
 
     def foreign_bytes(self):
         return self.command(["nft", "-j", "-a", "list", "table", "inet", "scqasupforeign"]).stdout
@@ -629,7 +849,7 @@ class Fixture:
             master[-1:-1] = ["-f", "-N"]
             self.command(master)
             self.master = True
-            self.apply(60)
+            self.apply(60, health_failures=10)
             self.reject_confirmation(operation="0" * 32)
             self.reject_confirmation(revision=2)
             self.reject_confirmation(challenge="0" * len(self.challenge))
@@ -647,7 +867,7 @@ class Fixture:
             self.marker("FRESH_SSH_SINGLE_USE_AND_NEGATIVES")
             self.reject_installer_mutation()
             self.add_foreign()
-            self.disconnect()
+            self.https_diagnostics()
 
         # Separate short-deadline operation proves confirmed continuation,
         # and keeps the large negative-confirmation budget out of this case.
@@ -667,6 +887,7 @@ class Fixture:
         if self.args.ipv6:
             self.disconnect()
             self.marker("DUALSTACK_SELECTED_TCP_UDP_DNS")
+            self.marker("DUALSTACK_AUTHENTICATED_HTTPS")
             return
 
         previous = self.health()["rounds"]
@@ -1212,8 +1433,292 @@ class Fixture:
             previous = self.health()["rounds"]
             self.wait(lambda: self.health()["rounds"] > previous, 12, "independent post-controller health")
             assert self.health()["confirmed"] and self.health()["state"] == "healthy"
-        self.disconnect()
+        self.legacy_recovery(False)
         self.marker("HEALTH_PUBLICATION_CONTROLLER_DEATH")
+
+    @contextlib.contextmanager
+    def legacy_operation_lock(self):
+        """Pin the existing product lock for this one QA record injection."""
+        parent = os.open(JOURNAL.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        descriptor = None
+        try:
+            directory = os.fstat(parent)
+            assert directory.st_uid == 0 and stat.S_IMODE(directory.st_mode) == 0o700
+            descriptor = os.open(".lock", os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=parent)
+            identity = os.fstat(descriptor)
+            assert stat.S_ISREG(identity.st_mode) and identity.st_uid == 0 and identity.st_nlink == 1
+            assert stat.S_IMODE(identity.st_mode) == 0o600
+            deadline = time.monotonic() + 2
+            while True:
+                try:
+                    fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    assert time.monotonic() < deadline, "legacy fixture product lock unavailable"
+                    time.sleep(0.02)
+
+            def unchanged():
+                named = os.stat(JOURNAL.parent, follow_symlinks=False)
+                current = os.stat(".lock", dir_fd=parent, follow_symlinks=False)
+                assert (named.st_dev, named.st_ino, named.st_mode, named.st_uid) == \
+                    (directory.st_dev, directory.st_ino, directory.st_mode, directory.st_uid), "state directory replaced"
+                assert (current.st_dev, current.st_ino, current.st_mode, current.st_uid, current.st_nlink) == \
+                    (identity.st_dev, identity.st_ino, identity.st_mode, identity.st_uid, identity.st_nlink), "product lock replaced"
+                if self.legacy_pause is not None:
+                    assert (identity.st_dev, identity.st_ino) == self.legacy_pause["lock"], "pause belongs to a different lock"
+
+            unchanged()
+            yield parent, (identity.st_dev, identity.st_ino)
+            unchanged()
+        finally:
+            if descriptor is not None:
+                os.close(descriptor)
+            os.close(parent)
+
+    def legacy_private_read(self, path, limit=262144):
+        descriptor = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW | os.O_CLOEXEC)
+        try:
+            before = os.fstat(descriptor)
+            assert stat.S_ISREG(before.st_mode) and before.st_uid == 0 and before.st_nlink == 1
+            assert stat.S_IMODE(before.st_mode) == 0o600 and 0 < before.st_size <= limit
+            data = os.read(descriptor, limit + 1)
+            after, named = os.fstat(descriptor), os.lstat(path)
+            fields = ("st_dev", "st_ino", "st_mode", "st_uid", "st_nlink", "st_size", "st_mtime_ns", "st_ctime_ns")
+            assert len(data) == before.st_size and all(getattr(before, key) == getattr(after, key) == getattr(named, key)
+                                                      for key in fields), "private legacy fixture state replaced"
+            return data, (before.st_dev, before.st_ino)
+        finally:
+            os.close(descriptor)
+
+    def legacy_read_journal(self):
+        data, identity = self.legacy_private_read(JOURNAL, 131072)
+
+        def unique(pairs):
+            result = {}
+            for key, value in pairs:
+                assert key not in result, "duplicate legacy journal key"
+                result[key] = value
+            return result
+
+        value = json.loads(data, object_pairs_hook=unique)
+        assert isinstance(value, dict) and value.get("operation_id") == self.op
+        return value, data, identity
+
+    def legacy_unit_proof(self, state):
+        assert state in ("owned", "idle", "rearmed", "finalized")
+        properties = ("Id", "LoadState", "FragmentPath", "DropInPaths", "Transient", "UnitFileState",
+                      "ActiveState", "SubState", "Job")
+        for name in (TIMER, RECOVERY_TIMER, HEALTH, RECOVERY):
+            original = self.legacy_roles[name]
+            assert self.health_role_files(name) == original, "legacy fixture role file or installer digest changed"
+            assert hashlib.sha256(original[0][2]).hexdigest() == original[1][2].decode("ascii").strip()
+            for directory in (Path("/run/systemd/system"),):
+                assert not (directory / name).exists() and not (directory / name).is_symlink(), "runtime role replacement"
+            timer = name.endswith(".timer")
+            fields = self.unit_properties(name, properties + (("Unit",) if timer else
+                ("MainPID", "ControlPID", "ControlGroup", "Result")))
+            assert fields["Id"] == name and fields["LoadState"] == "loaded"
+            assert fields["FragmentPath"] == str(UNITS / name) and fields["DropInPaths"] == "" and fields["Transient"] == "no"
+            assert fields["UnitFileState"] == (("disabled" if state == "finalized" else "enabled") if timer else "static")
+            if timer:
+                assert fields["Unit"] == (HEALTH if name == TIMER else RECOVERY)
+            if state in ("idle", "finalized"):
+                assert fields["ActiveState"] == "inactive" and fields["SubState"] == "dead" and fields["Job"] in ("", "0")
+                if not timer:
+                    assert fields["MainPID"] == fields["ControlPID"] == "0" and fields["ControlGroup"] == ""
+                    assert fields["Result"] == "success"
+            elif state == "rearmed" and timer:
+                assert fields["ActiveState"] == "active" and fields["SubState"] in ("waiting", "elapsed", "running")
+                assert fields["Job"] in ("", "0")
+            assert self.health_role_files(name) == original, "legacy role changed during native observation"
+
+    def legacy_projection(self, record):
+        assert self.applied_record is not None
+        # Compare the complete genuine Apply-owned outer/native value. No
+        # receipt, handle, ownership stage or operation identity is synthesized.
+        assert exact_json({key: value for key, value in record.items() if key != "supervised"}) == \
+            exact_json({key: value for key, value in self.applied_record.items() if key != "supervised"})
+        assert record["version"] == 4 and record["intent_type"] == "smart_tun_native_supervised_trial_v1"
+        assert record["operation_id"] == self.op and record["phase"] == "trial_pending" and record["revision"] == 1
+        current = record["supervised"]
+        assert current["version"] == 2 and current["confirmed"] is True and current["state"] == "healthy"
+        assert current["attempts"] == current["failures"] == 0 and current["rounds"] > 0
+        self.require_https_evidence(current["evidence"], healthy=True,
+            expected={index: ("pass", 200) for index in range(len(self.targets))})
+        self.ordinary_selected_evidence(current["evidence"])
+        assert current["evidence"]["reason"] == "healthy" and current["evidence"]["failed_targets"] == 0
+        projected = json.loads(json.dumps(record))
+        old = projected["supervised"]
+        old["version"] = 1
+        for key in ("ipv4_https", "ipv6_https", "https_results"):
+            del old["evidence"][key]
+        old["evidence"]["probe_count"] = 13 if self.args.ipv6 else 7
+        assert set(old["evidence"]) == LEGACY_EVIDENCE_KEYS and projected["native"] == record["native"]
+        return projected
+
+    def legacy_write_projection(self, parent, original, raw, identity, projected):
+        staging = JOURNAL.name + ".scqa-legacy-" + self.op
+        descriptor = os.open(staging, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
+                             0o600, dir_fd=parent)
+        created = os.fstat(descriptor)
+        try:
+            data = memoryview((json.dumps(projected, sort_keys=True, separators=(",", ":")) + "\n").encode())
+            while data:
+                written = os.write(descriptor, data)
+                assert written > 0
+                data = data[written:]
+            os.fsync(descriptor)
+            again, current_raw, current_identity = self.legacy_read_journal()
+            assert (again, current_raw, current_identity) == (original, raw, identity), "legacy journal compare-and-swap failed"
+            os.replace(staging, JOURNAL.name, src_dir_fd=parent, dst_dir_fd=parent)
+            os.fsync(parent)
+            after, _data, _identity = self.legacy_read_journal()
+            assert exact_json(after) == exact_json(projected) and set(after["supervised"]["evidence"]) == LEGACY_EVIDENCE_KEYS
+        finally:
+            os.close(descriptor)
+            try:
+                current = os.stat(staging, dir_fd=parent, follow_symlinks=False)
+            except FileNotFoundError:
+                pass
+            else:
+                assert (current.st_dev, current.st_ino) == (created.st_dev, created.st_ino), "legacy staging file replaced"
+                os.unlink(staging, dir_fd=parent)
+                os.fsync(parent)
+
+    def pause_and_project_legacy(self):
+        assert self.legacy_pause is None
+        with self.legacy_operation_lock() as (parent, lock_identity):
+            original, raw, identity = self.legacy_read_journal()
+            projected = self.legacy_projection(original)
+            self.legacy_unit_proof("rearmed")
+            path = ROOT / "legacy-pause.json"
+            receipt = {"operation_id": self.op, "lock": lock_identity, "original": original, "projected": projected,
+                       "roles": {name: {"device": identity[0][0], "inode": identity[0][1],
+                                        "sha256": hashlib.sha256(identity[0][2]).hexdigest()}
+                                 for name, identity in self.legacy_roles.items()}}
+            body = (json.dumps(receipt, sort_keys=True, separators=(",", ":")) + "\n").encode()
+            descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+            try:
+                with os.fdopen(descriptor, "wb", closefd=False) as output:
+                    output.write(body)
+                    output.flush()
+                    os.fsync(descriptor)
+                directory = os.open(ROOT, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+                try:
+                    os.fsync(directory)
+                finally:
+                    os.close(directory)
+            finally:
+                os.close(descriptor)
+            actual, receipt_identity = self.legacy_private_read(path)
+            assert actual == body
+            # Durable pause ownership is recorded before the first stop, even
+            # if a later stop, projection CAS or timer start fails.
+            self.legacy_pause = {"lock": lock_identity, "original": original, "projected": projected,
+                                 "stop": None, "receipt": body, "receipt_identity": receipt_identity, "rearmed": False}
+            for name in (TIMER, RECOVERY_TIMER, HEALTH, RECOVERY):
+                self.command(["systemctl", "stop", name], timeout=2)
+            self.legacy_unit_proof("idle")
+            assert self.legacy_read_journal() == (original, raw, identity), "journal changed while pausing exact roles"
+            self.legacy_write_projection(parent, original, raw, identity, projected)
+        status, envelope = self.cli("smart-tun-trial-status", check=False)
+        assert status.returncode != 0 and envelope and envelope.get("ok") is False
+        assert envelope.get("error", {}).get("code") == "trial_observation_uncertain", envelope
+        inspected = envelope["data"]
+        assert inspected["operation_id"] == self.op and inspected["health_reason"] == "legacy_reapply_required"
+        assert inspected["supervision_state"] == "uncertain" and inspected["experiment_only"]
+        assert type(inspected["health_evidence_version"]) is int and inspected["health_evidence_version"] == 1
+        assert set(inspected["health_evidence"]) == HTTPS_EVIDENCE_KEYS
+        assert exact_json({key: inspected["health_evidence"][key] for key in LEGACY_EVIDENCE_KEYS}) == exact_json(projected["supervised"]["evidence"])
+        assert inspected["health_evidence"]["ipv4_https"] is False and inspected["health_evidence"]["ipv6_https"] is False
+        assert exact_json(inspected["health_evidence"]["https_results"]) == exact_json([{"result": "not_run", "status_code": 0} for _ in range(4)])
+        print("SUPERVISED_TUN_LEGACY_RECORD_INJECTION=exact Version1 schema projection; genuine original native ownership retained", flush=True)
+        return json.loads(json.dumps(projected))
+
+    def resume_legacy(self):
+        pause = self.legacy_pause
+        assert pause is not None
+        with self.legacy_operation_lock():
+            assert self.legacy_private_read(ROOT / "legacy-pause.json") == (pause["receipt"], pause["receipt_identity"])
+            current, _raw, _identity = self.legacy_read_journal()
+            assert exact_json(current) in tuple(exact_json(value) for value in (pause["original"], pause["projected"], pause["stop"])), \
+                "legacy pause refuses a changed operation or ownership ledger"
+            self.legacy_unit_proof("owned")
+            # A failed stop may have left a queued job. Finish the exact
+            # bounded drain under the lock before any rearm, without resetting
+            # a failed role or treating an unacknowledged stop as quiescence.
+            for name in (TIMER, RECOVERY_TIMER, HEALTH, RECOVERY):
+                self.command(["systemctl", "stop", name], timeout=2)
+            self.legacy_unit_proof("idle")
+            assert exact_json(self.legacy_read_journal()[0]) == exact_json(current), "legacy journal changed while completing pause"
+            # Both starts are bounded and idempotent only for the exact roles.
+            # Keep the durable receipt through partial start and final recovery.
+            pause["resumed_record"] = current
+            for name in (RECOVERY_TIMER, TIMER):
+                self.command(["systemctl", "start", name], timeout=2)
+            self.legacy_unit_proof("rearmed")
+            pause["rearmed"] = True
+
+    def retire_legacy_pause(self, receipt):
+        pause = self.legacy_pause
+        assert pause is not None and isinstance(receipt, dict)
+        assert receipt.get("operation_id") == self.op and receipt.get("phase") == "trial_cleared"
+        assert receipt.get("recovery_verified") is True and receipt.get("experiment_only") is True
+        # Final JSON can reach journald just before its emitting oneshot exits.
+        # Drain outside the product lock; no executor waits on our held lock.
+        self.wait(lambda: all(self.show(name, "ActiveState") == "inactive" and self.show(name, "MainPID") == "0"
+                              for name in (HEALTH, RECOVERY)), 5, "legacy final executor drain")
+        with self.legacy_operation_lock():
+            assert not JOURNAL.exists() and not Path("/var/lib/server-connect/smart-tun-trial.json").exists()
+            assert not Path("/sys/class/net/sctunqa0").exists() and self.native() == self.baseline
+            self.legacy_unit_proof("finalized")
+            path = ROOT / "legacy-pause.json"
+            assert self.legacy_private_read(path) == (pause["receipt"], pause["receipt_identity"])
+            path.unlink()
+            directory = os.open(ROOT, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+            try:
+                os.fsync(directory)
+            finally:
+                os.close(directory)
+            self.legacy_pause = None
+
+    def legacy_recovery(self, interrupted):
+        if interrupted:
+            self.apply(30, saved=True)
+            self.confirmed()
+        projected = self.pause_and_project_legacy()
+        retained = projected["supervised"]
+        reason = "legacy_reapply_required"
+        # A killed old probe may still be closing its peer worker. With both
+        # roles paused, allow that existing one-second connection deadline to
+        # finish before attributing any later request to the new executor.
+        time.sleep(1.1)
+        position = self.event_position()
+        if interrupted:
+            stopped = json.loads(json.dumps(projected))
+            stopped.update(phase="trial_stop_requested", revision=2)
+            stopped["native"]["stop_reason"] = "off"
+            stopped["supervised"].update(state="stopped", reason="operator_off",
+                                         generation=retained["generation"] + 1)
+            # Record the only authorized expected successor before the child
+            # can die after its real durable stop write.
+            self.legacy_pause["stop"] = stopped
+            result, _receipt = self.cli("smart-tun-trial-disconnect", "--operation-id", self.op, "--revision", "1",
+                                        "--qa-kill-at", "after-stop-request", check=False)
+            assert result.returncode == -signal.SIGKILL, "legacy stop did not reach the exact durable boundary"
+            with self.legacy_operation_lock():
+                reread, _raw, _identity = self.legacy_read_journal()
+                assert exact_json(reread) == exact_json(stopped) and reread["supervised"]["version"] == 1
+                assert set(reread["supervised"]["evidence"]) == LEGACY_EVIDENCE_KEYS
+            reason = "operator_off"
+        self.resume_legacy()
+        self.wait(lambda: not JOURNAL.exists(), 15, "independent Version1 owned recovery")
+        self.wait(lambda: self.show(HEALTH, "MainPID") == "0", 5, "legacy executor completion")
+        assert self.event_position() == position, "legacy evidence incorrectly authorized a new probe round"
+        receipt = self.final_receipt(reason, 0, evidence_version=1, retained_legacy=retained)
+        self.inactive()
+        self.retire_legacy_pause(receipt)
+        self.marker("LEGACY_V1_INTERRUPTED_DURABLE_STOP" if interrupted else "LEGACY_V1_REAPPLY_REQUIRED_OWNED_OFF")
 
     def expired_confirmation(self):
         print("SUPERVISED_TUN_CASE=expired-confirmation", flush=True)
@@ -1259,6 +1764,9 @@ class Fixture:
                 self.controls()
             if self.saved_units:
                 self.restore_units()
+            cleanup_receipt = None
+            if self.legacy_pause is not None and not self.legacy_pause["rearmed"] and JOURNAL.exists():
+                self.resume_legacy()
             if JOURNAL.exists():
                 print("SUPERVISED_TUN_FAILURE_CLEANUP=explicit QA-operator exact-operation remediation", flush=True)
                 value = json.loads(JOURNAL.read_text())
@@ -1266,11 +1774,22 @@ class Fixture:
                     "cleanup refuses to adopt an operation not bound by this fixture's Apply receipt"
                 self.command(["systemctl", "stop", HEALTH], check=False, timeout=5)
                 if value["phase"] == "trial_pending":
-                    self.cli("smart-tun-trial-disconnect", "--operation-id", self.op,
-                             "--revision", str(value["revision"]))
+                    cleanup_receipt = self.cli("smart-tun-trial-disconnect", "--operation-id", self.op,
+                                               "--revision", str(value["revision"]))
                 else:
-                    self.cli("activation-trial-recover")
+                    cleanup_receipt = self.cli("activation-trial-recover")
                 self.wait(lambda: not JOURNAL.exists(), 15, "explicit failure cleanup")
+            if self.legacy_pause is not None:
+                if not cleanup_receipt or cleanup_receipt.get("phase") != "trial_cleared":
+                    resumed = self.legacy_pause.get("resumed_record")
+                    assert resumed is not None, "legacy cleanup has no exact resumed operation"
+                    old = resumed["supervised"]
+                    reason = "operator_off" if resumed["phase"] == "trial_stop_requested" else \
+                        "legacy_reapply_required" if old["version"] == 1 else "supervisor_unavailable"
+                    cleanup_receipt = self.final_receipt(reason, 0, evidence_version=old["version"],
+                                                        retained_legacy=old if old["version"] == 1 else None)
+                self.inactive()
+                self.retire_legacy_pause(cleanup_receipt)
             if self.foreign:
                 self.remove_foreign()
         finally:
@@ -1289,12 +1808,14 @@ class Fixture:
                         process.wait(3)
             for stream in self.streams:
                 stream.close()
-            if self.root_created:
+            if self.root_created and self.legacy_pause is None:
                 for name in ("hostkey", "clientkey", "authorized_keys"):
                     with contextlib.suppress(FileNotFoundError):
                         (ROOT / name).unlink()
                 assert ROOT.is_dir() and not ROOT.is_symlink()
                 shutil.rmtree(ROOT)
+            elif self.root_created:
+                print("SUPERVISED_TUN_LEGACY_PAUSE_RETAINED=unresolved exact-operation pause receipt and diagnostics", flush=True)
             if self.upstream_fd is not None:
                 os.close(self.upstream_fd)
 
@@ -1327,6 +1848,7 @@ def main():
     parser.add_argument("--profile", required=True)
     parser.add_argument("--upstream-pid", required=True, type=int)
     parser.add_argument("--ipv6", action="store_true")
+    parser.add_argument("--tls-bundle", type=Path, default=TLS_BUNDLE)
     args = parser.parse_args()
     assert re.fullmatch("[0-9a-f]{16}", args.profile) and args.upstream_pid > 1
     fixture = Fixture(args)
@@ -1335,11 +1857,13 @@ def main():
         fixture.start()
         fixture.confirmations_and_health()
         if not args.ipv6:
+            fixture.https_exhaustion()
             fixture.expired_confirmation()
             fixture.protected_underlay_failure()
             for kind in ("dead", "failed", "hung", "masked", "missing"):
                 fixture.executor_failure(kind)
             fixture.publication_failures()
+            fixture.legacy_recovery(True)
         fixture.inactive()
         print("SUPERVISED_TUN_RESOURCE_BOUND_SECONDS=" + str(round(time.monotonic() - fixture.started, 2)), flush=True)
         fixture.marker("COMPLETE_EXPERIMENTAL_ONLY")

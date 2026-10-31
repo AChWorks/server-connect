@@ -80,6 +80,7 @@ type TrialReceipt struct {
 	HealthFailures           int                     `json:"health_failures,omitempty"`
 	ReconnectAttempts        int                     `json:"reconnect_attempts,omitempty"`
 	RecoveryDeadlineUptimeMS int64                   `json:"recovery_deadline_uptime_ms,omitempty"`
+	HealthEvidenceVersion    int                     `json:"health_evidence_version,omitempty"`
 	HealthEvidence           *SmartTUNHealthEvidence `json:"health_evidence,omitempty"`
 }
 

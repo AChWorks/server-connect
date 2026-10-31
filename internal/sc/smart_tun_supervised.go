@@ -19,9 +19,10 @@ import (
 )
 
 const (
-	smartTUNSupervisedIntent = "smart_tun_native_supervised_trial_v1"
-	smartTUNHealthUnit       = "server-connect-smart-health.service"
-	smartTUNHealthTimer      = "server-connect-smart-health.timer"
+	smartTUNSupervisionVersion = 2
+	smartTUNSupervisedIntent   = "smart_tun_native_supervised_trial_v1"
+	smartTUNHealthUnit         = "server-connect-smart-health.service"
+	smartTUNHealthTimer        = "server-connect-smart-health.timer"
 	// The timer starts five seconds after the bounded (20s) executor exits.
 	// This lease includes that entire bound and scheduling margin, not merely
 	// the four-second aggregate measurement deadline.
@@ -84,7 +85,7 @@ func validateSmartTUNHealthOptions(o SmartTUNHealthOptions) error {
 func validateSmartTUNSupervision(r smartTUNTrialJournal) error {
 	s := r.Supervised
 	bad := func() error { return activationJournalError("supervised TUN identity, state or evidence invalid") }
-	if s == nil || s.Version != 1 || s.Generation == 0 || s.Generation > 1<<62 || validateSmartTUNHealthOptions(s.Options) != nil ||
+	if s == nil || (s.Version != 1 && s.Version != smartTUNSupervisionVersion) || s.Generation == 0 || s.Generation > 1<<62 || validateSmartTUNHealthOptions(s.Options) != nil ||
 		s.HeartbeatMS <= 0 || s.LeaseDeadlineMS != s.HeartbeatMS+smartTUNHealthLeaseMS || s.ReadyAfterMS < 0 ||
 		s.LastProbeMS < 0 || s.NextProbeMS < 0 || s.Rounds > 1<<62 || s.Failures < 0 || s.Failures > s.Options.FailureThreshold ||
 		s.Attempts < 0 || s.Attempts > s.Options.MaxAttempts || s.RecoveryDeadlineMS < 0 || len(s.Reason) > 96 {
@@ -167,6 +168,9 @@ func validateSmartTUNSupervision(r smartTUNTrialJournal) error {
 		if r.Native.IPv6.Address != "" {
 			count, targets = 13, 4
 		}
+		if s.Version == smartTUNSupervisionVersion {
+			count += targets
+		}
 		if s.Evidence.ProbeCount != count && !(s.Evidence.ProbeCount == 0 && s.Evidence.Reason == "round_canceled") {
 			return bad()
 		}
@@ -175,9 +179,20 @@ func validateSmartTUNSupervision(r smartTUNTrialJournal) error {
 		}
 		switch s.Evidence.Reason {
 		case "healthy", "healthy_partial_targets", "protected_underlay_failed", "vpn_path_mismatch", "vpn_ipv4_tcp_failed", "vpn_ipv4_udp_failed", "vpn_ipv4_dns_failed", "vpn_ipv6_tcp_failed", "vpn_ipv6_udp_failed", "vpn_ipv6_dns_failed", "round_canceled":
+		case "vpn_ipv4_https_failed", "vpn_ipv6_https_failed":
+			if s.Version == 1 {
+				return bad()
+			}
 		default:
 			return bad()
 		}
+	}
+	if s.Version == 1 {
+		if s.Evidence.IPv4HTTPS || s.Evidence.IPv6HTTPS || s.Evidence.HTTPSResults != ([4]SmartTUNHTTPSResult{}) {
+			return bad()
+		}
+	} else if s.Rounds > 0 && !validSmartTUNHTTPSEvidence(s.Evidence, r.Native.IPv6.Address != "") {
+		return bad()
 	}
 	return nil
 }
@@ -221,8 +236,28 @@ func strictSmartTUNSupervisionJSON(raw json.RawMessage) error {
 			return err
 		}
 	}
-	_, err = strictSupervisedObject(f["evidence"], "underlay_healthy vpn_healthy ipv4_tcp ipv4_udp ipv4_dns ipv6_tcp ipv6_udp ipv6_dns failed_targets probe_count elapsed_ms reason")
-	return err
+	var version int
+	if json.Unmarshal(f["version"], &version) != nil || (version != 1 && version != smartTUNSupervisionVersion) {
+		return activationJournalError("unsupported supervision evidence version")
+	}
+	keys := "underlay_healthy vpn_healthy ipv4_tcp ipv4_udp ipv4_dns ipv6_tcp ipv6_udp ipv6_dns failed_targets probe_count elapsed_ms reason"
+	if version == smartTUNSupervisionVersion {
+		keys += " ipv4_https ipv6_https https_results"
+	}
+	evidence, err := strictSupervisedObject(f["evidence"], keys)
+	if err != nil || version == 1 {
+		return err
+	}
+	var results []json.RawMessage
+	if json.Unmarshal(evidence["https_results"], &results) != nil || len(results) != 4 {
+		return activationJournalError("HTTPS evidence must have exactly four target slots")
+	}
+	for _, result := range results {
+		if _, err := strictSupervisedObject(result, "result status_code"); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func smartTUNChallengeDigest(r smartTUNTrialJournal, challenge string) string {
@@ -231,7 +266,7 @@ func smartTUNChallengeDigest(r smartTUNTrialJournal, challenge string) string {
 
 func smartTUNConfirmMatches(r smartTUNTrialJournal, op string, revision uint64, challenge string, boot string, now int64) bool {
 	s := r.Supervised
-	return s != nil && r.Phase == "trial_pending" && !s.Confirmed && s.ReadyAfterMS > 0 &&
+	return s != nil && s.Version == smartTUNSupervisionVersion && r.Phase == "trial_pending" && !s.Confirmed && s.ReadyAfterMS > 0 &&
 		matchingSmartTUNOperation(r, op, revision) && boot == r.BootID && now > s.ReadyAfterMS && now < r.DeadlineUptimeSec*1000 &&
 		now >= s.HeartbeatMS && now < s.LeaseDeadlineMS &&
 		journalHex64.MatchString(challenge) && subtle.ConstantTimeCompare([]byte(s.ChallengeSHA256), []byte(smartTUNChallengeDigest(r, challenge))) == 1
@@ -391,6 +426,9 @@ func supervisedRuntimeReason(r smartTUNTrialJournal, unit smartTUNTrialUnitObser
 	if s == nil {
 		return "supervision_missing"
 	}
+	if s.Version == 1 {
+		return "legacy_reapply_required"
+	}
 	if boot != r.BootID {
 		return "boot_changed"
 	}
@@ -427,6 +465,11 @@ func terminalSupervisedReason(reason string) bool {
 }
 
 func inspectSupervisedRuntime(store *activationJournalDir, r smartTUNTrialJournal, checkHealth bool) string {
+	// Legacy TCP-only authority is never probed, confirmed or renewed by the
+	// HTTPS executor. The existing exact owned stop path handles its ledger.
+	if r.Supervised != nil && r.Supervised.Version == 1 {
+		return "legacy_reapply_required"
+	}
 	boot, err := trialBootIdentity()
 	if err != nil {
 		return "boot_unavailable"
@@ -482,12 +525,23 @@ func (m *Manager) ConfirmSmartTUNTrial(op string, revision uint64, challenge str
 	if err := trialDisposableContext(); err != nil {
 		return SmartTUNTrialReceipt{}, err
 	}
+	var receipt SmartTUNTrialReceipt
 	var snapshot smartTUNTrialJournal
 	var proof smartTUNManagementProof
 	err := m.withActivationJournalLock(syscall.Fsync, func(store *activationJournalDir) error {
 		r, _, err := loadSmartTUNTrialLocked(store)
 		if err != nil {
 			return err
+		}
+		if r.Supervised != nil && r.Supervised.Version == 1 {
+			if r.Phase != "trial_pending" || !matchingSmartTUNOperation(r, op, revision) {
+				return Fault("confirmation_rejected", "confirmation does not match a live legacy operation")
+			}
+			receipt, err = supervisedFinishStop(store, &r, "legacy_reapply_required")
+			if err != nil {
+				return err
+			}
+			return Fault("legacy_reapply_required", "legacy TCP-only supervision requires a fresh guarded Apply")
 		}
 		boot, err := trialBootIdentity()
 		if err != nil {
@@ -511,7 +565,7 @@ func (m *Manager) ConfirmSmartTUNTrial(op string, revision uint64, challenge str
 		return nil
 	})
 	if err != nil {
-		return SmartTUNTrialReceipt{}, err
+		return receipt, err
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
 	evidence := probeSmartTUNHealth(ctx, snapshot.Native.IPv6.Address != "")
@@ -523,7 +577,6 @@ func (m *Manager) ConfirmSmartTUNTrial(op string, revision uint64, challenge str
 	if !evidence.UnderlayHealthy || !evidence.VPNHealthy {
 		return SmartTUNTrialReceipt{}, Fault("confirmation_unavailable", "fresh selected VPN and protected underlay health are required")
 	}
-	var receipt SmartTUNTrialReceipt
 	err = m.withActivationJournalLock(syscall.Fsync, func(store *activationJournalDir) error {
 		if _, err := reloadSmartTUNTrialLocked(store, snapshot); err != nil {
 			return err
@@ -620,6 +673,9 @@ func supervisedFinishStop(store *activationJournalDir, r *smartTUNTrialJournal, 
 // it. Each new incident additionally has an absolute bounded recovery deadline.
 func advanceSupervisedHealth(r smartTUNTrialJournal, e SmartTUNHealthEvidence, now int64) (smartTUNTrialJournal, string, bool) {
 	next := cloneSmartTUNTrial(r)
+	if next.Supervised.Version == 1 {
+		return next, "legacy_reapply_required", false
+	}
 	s := next.Supervised
 	s.Generation++
 	s.Rounds++
@@ -678,6 +734,9 @@ func advanceSupervisedHealth(r smartTUNTrialJournal, e SmartTUNHealthEvidence, n
 
 func supervisedReconnectBudget(r smartTUNTrialJournal, now int64) (time.Duration, string) {
 	s := r.Supervised
+	if s != nil && s.Version == 1 {
+		return 0, "legacy_reapply_required"
+	}
 	if s == nil || !s.Confirmed || r.Phase != "trial_pending" || r.Native.StopReason != "" {
 		return 0, "reconnect_authority_unavailable"
 	}
@@ -994,6 +1053,9 @@ func (m *Manager) RunSmartTUNHealthRound(qaKill string) (SmartTUNTrialReceipt, e
 func smartTUNSupervisedStatusLabel(r smartTUNTrialJournal) string {
 	if r.Supervised == nil {
 		return r.Phase
+	}
+	if r.Supervised.Version == 1 && r.Phase == "trial_pending" {
+		return "supervised_reapply_required"
 	}
 	return "supervised_" + r.Supervised.State
 }

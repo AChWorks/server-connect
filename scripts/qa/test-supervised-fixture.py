@@ -4,13 +4,18 @@
 import argparse
 import contextlib
 import copy
+import hashlib
 import importlib.util
 import io
 import itertools
 import json
+import os
 from pathlib import Path
+import stat
 import subprocess
 import sys
+import tarfile
+import tempfile
 import time
 import traceback
 import unittest
@@ -1133,7 +1138,10 @@ class FakeFinalReceipt:
         self.boot = "a1234567-89ab-cdef-0123-456789abcdef"
         evidence = {"underlay_healthy": True, "vpn_healthy": True, "ipv4_tcp": True, "ipv4_udp": True,
                     "ipv4_dns": True, "ipv6_tcp": False, "ipv6_udp": False, "ipv6_dns": False,
-                    "failed_targets": 0, "probe_count": 7, "elapsed_ms": 10, "reason": "healthy"}
+                    "failed_targets": 0, "probe_count": 9, "elapsed_ms": 10, "reason": "healthy",
+                    "ipv4_https": True, "ipv6_https": False,
+                    "https_results": [{"result": "pass", "status_code": 200}, {"result": "pass", "status_code": 200},
+                                      {"result": "not_run", "status_code": 0}, {"result": "not_run", "status_code": 0}]}
         self.snapshot = {"confirmed": True, "state": "healthy", "attempts": 0, "failures": 0,
                          "recovery_deadline_uptime_ms": 0, "rounds": 3, "last_probe_uptime_ms": 50000,
                          "lease_deadline_uptime_ms": 60000, "evidence": evidence}
@@ -1141,7 +1149,7 @@ class FakeFinalReceipt:
                       "experiment_only": True, "activation_ready": False, "management_confirmed": True,
                       "health_reason": reason, "reconnect_attempts": 0, "health_failures": 0,
                       "recovery_deadline_uptime_ms": 0, "health_round": 3, "health_last_uptime_ms": 50000,
-                      "health_evidence": copy.deepcopy(evidence)}
+                      "health_evidence_version": 2, "health_evidence": copy.deepcopy(evidence)}
         self.unit = driver.RECOVERY
         self.transform_rows = None
         self.commands = []
@@ -1664,6 +1672,594 @@ class SustainedFaultTests(unittest.TestCase):
         self.assertNotIn("SUPERVISED_TUN_FINAL_RECEIPT=", final.output.getvalue())
 
 
+class HTTPSFixtureEvidenceTests(unittest.TestCase):
+    def test_independent_controls_cannot_cross_the_reconnect_boundary(self):
+        for attempts, accepted in ((0, True), (1, False)):
+            fixture = ForeignCleanupTests.new_fixture()
+            fixture.op = "a" * 32
+            evidence = copy.deepcopy(FakeFinalReceipt().snapshot["evidence"])
+            evidence.update(vpn_healthy=False, ipv4_https=False, reason="vpn_ipv4_https_failed", failed_targets=2)
+            evidence["https_results"][:2] = [{"result": "http_status", "status_code": 503} for _ in range(2)]
+            measured = {"rounds": 2, "state": "degraded", "attempts": 0, "failures": 1, "evidence": evidence}
+            with patch.object(fixture, "health", side_effect=[{"rounds": 1}, measured]), \
+                    patch.object(fixture, "event_position", return_value=0), patch.object(fixture, "controls") as controls, \
+                    patch.object(fixture, "wires") as wires, patch.object(fixture, "https_peer_evidence") as peer, \
+                    patch.object(fixture, "journal", return_value={"phase": "trial_pending", "supervised": {"attempts": attempts}}), \
+                    patch.object(fixture, "command", side_effect=AssertionError("unexpected extra command")), \
+                    contextlib.redirect_stdout(io.StringIO()):
+                if accepted:
+                    fixture.https_fault_round({target: "status503" for target in driver.PUBLIC4},
+                        {0: ("http_status", 503), 1: ("http_status", 503)}, healthy=False, before_reconnect=True)
+                    peer.assert_called_once()
+                else:
+                    with self.assertRaisesRegex(AssertionError, "crossed an actual reconnect"):
+                        fixture.https_fault_round({target: "status503" for target in driver.PUBLIC4},
+                            {0: ("http_status", 503), 1: ("http_status", 503)}, healthy=False, before_reconnect=True)
+                    peer.assert_not_called()
+                wires.assert_called_once_with("vpn", ("tcp", "udp", "dns"))
+                self.assertTrue(all(key.startswith("https@") for key in controls.call_args.args[0]))
+
+    def test_current_evidence_requires_exact_shape_count_and_disabled_slots(self):
+        fixture = ForeignCleanupTests.new_fixture()
+        good = FakeFinalReceipt().value["health_evidence"]
+        fixture.require_https_evidence(good, healthy=True)
+        bad = []
+        for key, value in (("probe_count", 7), ("probe_count", True), ("ipv4_https", 1),
+                           ("ipv6_https", True), ("https_results", None)):
+            row = copy.deepcopy(good)
+            row[key] = value
+            bad.append(row)
+        for index, value in ((0, {"result": "pass", "status_code": 0}),
+                             (0, {"result": "future", "status_code": 0}),
+                             (0, {"result": "tls_identity_failed", "status_code": 200}),
+                             (0, {"result": "pass", "status_code": True}),
+                             (2, {"result": "pass", "status_code": 200})):
+            row = copy.deepcopy(good)
+            row["https_results"][index] = value
+            bad.append(row)
+        for row in bad:
+            with self.subTest(row=row), self.assertRaises(AssertionError):
+                fixture.require_https_evidence(row)
+
+    def test_peer_evidence_requires_actual_source_fresh_nonce_and_every_target(self):
+        fixture = ForeignCleanupTests.new_fixture()
+        fixture.direct_counts = {"known-counter": 11}
+        rows = [{"protocol": "https", "destination": target, "peer": target, "mode": "normal",
+                 "result": "replied", "nonce": ("a" if index == 0 else "b") * 32}
+                for index, target in enumerate(driver.PUBLIC4)]
+        with tempfile.TemporaryDirectory() as directory, patch.object(driver, "ROOT", Path(directory)), \
+                patch.object(fixture, "counters", return_value=fixture.direct_counts):
+            path = Path(directory) / "events.jsonl"
+            path.write_text("".join(json.dumps(row) + "\n" for row in rows))
+            fixture.https_peer_evidence(0)
+            corruptions = [rows[:1], rows + [rows[0]]]
+            for key, value in (("peer", "10.254.72.1"), ("nonce", "stale"), ("result", "disabled"), ("mode", "direct")):
+                changed = copy.deepcopy(rows)
+                changed[0][key] = value
+                corruptions.append(changed)
+            for changed in corruptions:
+                path.write_text("".join(json.dumps(row) + "\n" for row in changed))
+                with self.assertRaises(AssertionError):
+                    fixture.https_peer_evidence(0)
+            injected = copy.deepcopy(rows)
+            injected[0]["mode"] = "direct"
+            path.write_text("".join(json.dumps(row) + "\n" for row in injected))
+            fixture.https_peer_evidence(0, {driver.PUBLIC4[0]: "direct", driver.PUBLIC4[1]: "normal"})
+
+    def test_legacy_public_receipt_never_turns_old_values_into_https_proof(self):
+        fake = FakeFinalReceipt("legacy_reapply_required")
+        old = {key: fake.snapshot["evidence"][key] for key in driver.LEGACY_EVIDENCE_KEYS}
+        old["probe_count"] = 7
+        retained = copy.deepcopy(fake.snapshot)
+        retained["evidence"] = old
+        fake.value["health_evidence_version"] = 1
+        fake.value["health_evidence"].update(old)
+        fake.value["health_evidence"].update(ipv4_https=False, ipv6_https=False,
+            https_results=[{"result": "not_run", "status_code": 0} for _ in range(4)])
+        fixture = ForeignCleanupTests.new_fixture()
+        fixture.op = fake.operation
+        with patch.object(driver, "Path", side_effect=fake.path), patch.object(fixture, "command", side_effect=fake.command), \
+                patch.object(driver.time, "sleep"), contextlib.redirect_stdout(fake.output):
+            fixture.final_receipt("legacy_reapply_required", 0, evidence_version=1, retained_legacy=retained)
+            original = copy.deepcopy(fake.value)
+            for field, value in (("ipv4_https", True), ("vpn_healthy", 1),
+                                 ("https_results", [{"result": "not_run", "status_code": False} for _ in range(4)])):
+                fake.value = copy.deepcopy(original)
+                fake.value["health_evidence"][field] = value
+                with self.subTest(field=field), self.assertRaises(AssertionError):
+                    fixture.final_receipt("legacy_reapply_required", 0, evidence_version=1, retained_legacy=retained)
+            fake.value = copy.deepcopy(original)
+            fake.value["health_evidence_version"] = True
+            with self.assertRaises(AssertionError):
+                fixture.final_receipt("legacy_reapply_required", 0, evidence_version=1, retained_legacy=retained)
+
+
+class LegacyFixtureTests(unittest.TestCase):
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.root = Path(self.directory.name)
+        self.journal = self.root / "route-activation-journal.json"
+        self.patch_journal = patch.object(driver, "JOURNAL", self.journal)
+        self.patch_root = patch.object(driver, "ROOT", self.root)
+        self.patch_journal.start()
+        self.patch_root.start()
+        self.addCleanup(self.patch_journal.stop)
+        self.addCleanup(self.patch_root.stop)
+        self.fixture = ForeignCleanupTests.new_fixture()
+        self.fixture.op = "a" * 32
+        current = FakeFinalReceipt()
+        self.original = {"version": 4, "operation_id": self.fixture.op, "phase": "trial_pending", "revision": 1,
+                         "intent_type": "smart_tun_native_supervised_trial_v1", "boot_id": current.boot,
+                         "native": {"version": 1, "stop_reason": "", "complete-test-ledger": {"handle": 73, "receipt": "original"}},
+                         "supervised": copy.deepcopy(current.snapshot)}
+        self.original["supervised"].update(version=2, generation=5)
+        self.fixture.applied_record = copy.deepcopy(self.original)
+        self.journal.write_text(json.dumps(self.original))
+        self.journal.chmod(0o600)
+        self.parent = os.open(self.root, os.O_RDONLY | os.O_DIRECTORY)
+        self.addCleanup(os.close, self.parent)
+        self.held = False
+        self.commands = []
+        self.fail_command = None
+        self.status = {name: "active" if name.endswith(".timer") else "inactive"
+                       for name in (driver.TIMER, driver.RECOVERY_TIMER, driver.HEALTH, driver.RECOVERY)}
+        self.fixture.legacy_roles = {name: ((1, index + 1, b"unit"), (1, index + 9, b"digest"))
+                                     for index, name in enumerate(self.status)}
+        self.fixture.legacy_operation_lock = self.lock
+        self.fixture.legacy_private_read = self.private_read
+        self.fixture.legacy_unit_proof = self.proof
+        self.fixture.command = self.command
+        self.fixture.cli = self.cli
+
+    @contextlib.contextmanager
+    def lock(self):
+        self.assertFalse(self.held)
+        self.held = True
+        try:
+            yield self.parent, (1, 42)
+        finally:
+            self.held = False
+
+    def private_read(self, path, limit=262144):
+        # Root/regular-file checks are native-only. This fake exercises exact
+        # inode and whole-value CAS using ordinary disposable files.
+        info = path.stat()
+        body = path.read_bytes()
+        self.assertLessEqual(len(body), limit)
+        return body, (info.st_dev, info.st_ino)
+
+    def proof(self, state):
+        self.assertTrue(self.held, "role proof outside the original operation lock")
+        if state == "idle":
+            self.assertTrue(all(value == "inactive" for value in self.status.values()))
+        elif state == "rearmed":
+            self.assertTrue(all(self.status[name] == "active" for name in (driver.TIMER, driver.RECOVERY_TIMER)))
+
+    def command(self, argv, *, timeout):
+        self.assertTrue(self.held, "role mutation outside the original operation lock")
+        self.assertEqual(timeout, 2)
+        self.assertIsNotNone(self.fixture.legacy_pause, "role effect preceded the durable pause receipt")
+        self.assertTrue((self.root / "legacy-pause.json").is_file())
+        self.commands.append(argv)
+        self.status[argv[2]] = "active" if argv[1] == "start" else "inactive"
+        if len(self.commands) == self.fail_command:
+            raise subprocess.TimeoutExpired(argv, timeout)
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    def cli(self, *args, **kwargs):
+        self.assertFalse(self.held, "product CLI invoked while fixture held its lock")
+        self.assertEqual(args, ("smart-tun-trial-status",))
+        current = json.loads(self.journal.read_text())
+        evidence = copy.deepcopy(current["supervised"]["evidence"])
+        evidence.update(ipv4_https=False, ipv6_https=False,
+                        https_results=[{"result": "not_run", "status_code": 0} for _ in range(4)])
+        return subprocess.CompletedProcess(args, 1, "", ""), {"ok": False,
+            "error": {"code": "trial_observation_uncertain"}, "data": {"operation_id": self.fixture.op,
+            "health_evidence_version": 1, "health_evidence": evidence, "health_reason": "legacy_reapply_required",
+            "supervision_state": "uncertain", "experiment_only": True}}
+
+    def project(self):
+        with contextlib.redirect_stdout(io.StringIO()):
+            return self.fixture.pause_and_project_legacy()
+
+    def test_projection_keeps_complete_native_identity_and_original_value(self):
+        projected = self.project()
+        self.assertEqual(projected["native"], self.original["native"])
+        self.assertEqual(self.fixture.applied_record, self.original)
+        self.assertEqual(set(projected["supervised"]["evidence"]), driver.LEGACY_EVIDENCE_KEYS)
+        self.assertEqual(projected["supervised"]["evidence"]["probe_count"], 7)
+        self.assertEqual(json.loads(self.journal.read_text()), projected)
+        self.assertTrue((self.root / "legacy-pause.json").is_file())
+
+    def test_projection_rejects_any_changed_outer_or_native_value(self):
+        for key, value in (("boot_id", "other"), ("version", 4.0), ("revision", True),
+                           ("operation_id", "b" * 32), ("extra", "unexpected"),
+                           ("native", {"version": 1, "stop_reason": "", "complete-test-ledger": {"handle": 74}})):
+            changed = copy.deepcopy(self.original)
+            changed[key] = value
+            with self.subTest(key=key), self.assertRaises(AssertionError):
+                self.fixture.legacy_projection(changed)
+        self.assertEqual(self.commands, [])
+
+    def test_partial_stop_retains_receipt_and_rearm_drains_every_role(self):
+        self.fail_command = 2
+        with self.assertRaises(subprocess.TimeoutExpired):
+            self.project()
+        self.assertFalse(self.fixture.legacy_pause["rearmed"])
+        self.assertEqual(json.loads(self.journal.read_text()), self.original)
+        self.fail_command = None
+        self.fixture.resume_legacy()
+        self.assertTrue(self.fixture.legacy_pause["rearmed"])
+        self.assertEqual([argv[2] for argv in self.commands[-6:-2]],
+                         [driver.TIMER, driver.RECOVERY_TIMER, driver.HEALTH, driver.RECOVERY])
+        self.assertTrue((self.root / "legacy-pause.json").exists(), "resume erased its still-unfinalized pause receipt")
+
+    def test_partial_timer_start_retains_receipt_without_false_rearm_success(self):
+        self.project()
+        self.fail_command = len(self.commands) + 5
+        with self.assertRaises(subprocess.TimeoutExpired):
+            self.fixture.resume_legacy()
+        self.assertFalse(self.fixture.legacy_pause["rearmed"])
+        self.assertEqual(self.status[driver.RECOVERY_TIMER], "active")
+        self.assertEqual(self.status[driver.TIMER], "inactive")
+        self.assertTrue((self.root / "legacy-pause.json").exists())
+        self.fail_command = None
+        self.fixture.resume_legacy()
+        self.assertTrue(self.fixture.legacy_pause["rearmed"])
+
+    def test_changed_ledger_prevents_rearm_without_new_native_mutation(self):
+        projected = self.project()
+        projected["native"]["complete-test-ledger"]["handle"] += 1
+        self.journal.write_text(json.dumps(projected))
+        before = list(self.commands)
+        with self.assertRaisesRegex(AssertionError, "changed operation or ownership"):
+            self.fixture.resume_legacy()
+        self.assertEqual(self.commands, before)
+        self.assertTrue((self.root / "legacy-pause.json").exists())
+
+    def test_failed_cas_preserves_competing_whole_journal_and_removes_only_staging(self):
+        original, raw, identity = self.fixture.legacy_read_journal()
+        projected = self.fixture.legacy_projection(original)
+        changed = copy.deepcopy(original)
+        changed["native"]["complete-test-ledger"]["receipt"] = "changed-owner"
+        self.journal.write_text(json.dumps(changed))
+        with self.assertRaisesRegex(AssertionError, "compare-and-swap"):
+            self.fixture.legacy_write_projection(self.parent, original, raw, identity, projected)
+        self.assertEqual(json.loads(self.journal.read_text()), changed)
+        self.assertFalse(list(self.root.glob("*.scqa-legacy-*")))
+
+    def test_post_replace_error_retains_projected_journal_for_owned_recovery(self):
+        original, raw, identity = self.fixture.legacy_read_journal()
+        projected = self.fixture.legacy_projection(original)
+        replace = driver.os.replace
+
+        def committed_then_error(*args, **kwargs):
+            replace(*args, **kwargs)
+            raise OSError("injected error after replacement")
+
+        with patch.object(driver.os, "replace", side_effect=committed_then_error), self.assertRaises(OSError):
+            self.fixture.legacy_write_projection(self.parent, original, raw, identity, projected)
+        self.assertEqual(json.loads(self.journal.read_text()), projected)
+        self.assertEqual(projected["native"], original["native"])
+        self.assertFalse(list(self.root.glob("*.scqa-legacy-*")))
+
+
+class TLSFixtureStagingTests(unittest.TestCase):
+    """Execute the embedded byte stager/cleanup with ordinary temporary files."""
+
+    names = {"qa-root.pem", "qa-server.pem", "qa-server-key.pem", "qa-wrong-name.pem", "qa-wrong-trust.pem",
+             "qa-wrong-root.pem", "qa-expired.pem", "qa-client-auth-only.pem"}
+
+    @classmethod
+    def setUpClass(cls):
+        source = Path(__file__).with_name("test-installed-host.sh").read_text()
+        for marker, name in (("PYTLSINPUT", "prepare_tls_fixture"), ("PYTLSSTAGE", "stage_tls_fixture"),
+                             ("PYTLSCLEANUP", "cleanup_tls_fixture")):
+            script = source.split("<<'" + marker + "'\n", 1)[1].split("\n" + marker, 1)[0]
+            scope = {"__name__": "tls_fixture_regression"}
+            exec(compile(script, marker, "exec"), scope)
+            setattr(cls, name, staticmethod(scope[name]))
+
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.base = Path(temporary.name)
+        self.serial = itertools.count()
+        self.source = self.new_source()
+        self.packet, self.manifest = self.prepare_tls_fixture(self.source)
+
+    def new_source(self):
+        source = self.base / ("source-" + str(next(self.serial)))
+        source.mkdir()
+        source.chmod(0o777)
+        for name in sorted(self.names):
+            (source / name).write_bytes(("fixture bytes: " + name + "\n").encode("ascii"))
+            (source / name).chmod(0o666)
+        return source
+
+    def new_guest(self):
+        parent = self.base / ("guest-" + str(next(self.serial)))
+        parent.mkdir(mode=0o700)
+        return parent, parent / "qa-smart-health-tls", parent / "qa-smart-health-tls-receipt.json"
+
+    @staticmethod
+    def metadata(path):
+        info = path.lstat()
+        return (info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_gid,
+                info.st_nlink, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+
+    def test_writable_source_metadata_creates_private_owned_files_and_exact_cleanup(self):
+        parent, root, receipt = self.new_guest()
+        self.assertEqual(self.prepare_tls_fixture(self.source), (self.packet, self.manifest))
+        self.stage_tls_fixture(parent, self.packet)
+        self.assertEqual(set(path.name for path in root.iterdir()), self.names)
+        self.assertEqual(stat.S_IMODE(root.stat().st_mode), 0o700)
+        self.assertEqual(stat.S_IMODE(receipt.stat().st_mode), 0o600)
+        for name in sorted(self.names):
+            path = root / name
+            self.assertEqual(path.read_bytes(), (self.source / name).read_bytes())
+            self.assertEqual((stat.S_IMODE(path.stat().st_mode), path.stat().st_uid, path.stat().st_nlink),
+                             (0o600, os.geteuid(), 1))
+            self.assertIn((hashlib.sha256(path.read_bytes()).hexdigest() + "  ./" + name + "\n").encode("ascii"), self.manifest)
+        self.cleanup_tls_fixture(parent)
+        self.assertEqual(list(parent.iterdir()), [])
+
+    def test_wrapper_keeps_initial_manifest_check_and_enters_bounded_cleanup_directly(self):
+        source = Path(__file__).with_name("test-installed-host.sh").read_text()
+        manifest_check = 'docker exec -i -w /root/qa-smart-health-tls "$container" sha256sum -c - <"$tls_fixture_manifest"'
+        self.assertEqual(source.count(manifest_check), 1)
+        self.assertGreater(source.index(manifest_check), source.index("\nPYTLSSTAGE\n"))
+        cleanup = source.split("# Remove exactly the QA helpers copied for the completed TUN trials. This\n", 1)[1]
+        entry = cleanup.split("<<'PYTLSCLEANUP'", 1)[0]
+        commands = [line for line in entry.splitlines() if line and not line.startswith("#")]
+        self.assertEqual(commands, ['docker exec "$container" /usr/bin/python3 -I -B -c "$(cat '])
+        self.assertNotIn("sha256sum", entry)
+
+    def test_source_rejects_extra_missing_symlink_hardlink_fifo_and_oversized_objects(self):
+        for fault in ("extra", "missing", "symlink", "hardlink", "fifo", "oversized", "empty", "directory-symlink"):
+            source = self.new_source()
+            victim = source / sorted(self.names)[0]
+            outside = source.with_name(source.name + "-outside")
+            outside.write_bytes(b"unrelated source")
+            with self.subTest(fault=fault):
+                if fault == "extra":
+                    (source / "unexpected.pem").write_bytes(b"extra")
+                elif fault == "directory-symlink":
+                    link = source.with_name(source.name + "-link")
+                    link.symlink_to(source, target_is_directory=True)
+                    source = link
+                else:
+                    victim.unlink()
+                    if fault == "symlink":
+                        victim.symlink_to(outside)
+                    elif fault == "hardlink":
+                        os.link(outside, victim)
+                    elif fault == "fifo":
+                        os.mkfifo(victim)
+                    elif fault in ("oversized", "empty"):
+                        victim.write_bytes(b"x" * (4097 if fault == "oversized" else 0))
+                with self.assertRaises((AssertionError, OSError)):
+                    self.prepare_tls_fixture(source)
+                self.assertEqual(outside.read_bytes(), b"unrelated source")
+
+    def test_source_replacement_or_later_in_place_mutation_refuses_packet(self):
+        first, second = sorted(self.names)[:2]
+        real_open, real_stat, real_fstat = os.open, os.stat, os.fstat
+        class AliasedTimes:
+            def __init__(self, current, original):
+                self.current, self.original = current, original
+            def __getattr__(self, name):
+                if name in ("st_mtime", "st_mtime_ns", "st_ctime", "st_ctime_ns"):
+                    return getattr(self.original, name)
+                return getattr(self.current, name)
+        for fault in ("same-size-edit", "file-replacement", "directory-replacement"):
+            source = self.new_source()
+            original = (source / first).read_bytes()
+            original_info = real_stat(source / first)
+            changed = False
+            def alias(info):
+                if fault == "same-size-edit" and (info.st_dev, info.st_ino) == (original_info.st_dev, original_info.st_ino):
+                    return AliasedTimes(info, original_info)
+                return info
+            def opened(name, flags, *args, **kwargs):
+                nonlocal changed
+                if name == second and not changed:
+                    changed = True
+                    if fault == "same-size-edit":
+                        (source / first).write_bytes(b"X" + original[1:])
+                    elif fault == "file-replacement":
+                        (source / first).rename(source.with_name(source.name + "-old-file"))
+                        (source / first).write_bytes(original)
+                    else:
+                        source.rename(source.with_name(source.name + "-old-directory"))
+                        source.mkdir()
+                        (source / "foreign").write_bytes(b"retain")
+                return real_open(name, flags, *args, **kwargs)
+            reason = "TLS source content changed after read" if fault == "same-size-edit" else ""
+            with self.subTest(fault=fault), patch.object(os, "open", side_effect=opened), \
+                 patch.object(os, "stat", side_effect=lambda *args, **kwargs: alias(real_stat(*args, **kwargs))), \
+                 patch.object(os, "fstat", side_effect=lambda descriptor: alias(real_fstat(descriptor))), \
+                 self.assertRaisesRegex(AssertionError, reason):
+                self.prepare_tls_fixture(source)
+            self.assertTrue(changed)
+
+    def test_invalid_and_duplicate_packets_fail_before_any_destination_effect(self):
+        decoded = json.loads(self.packet)
+        first = sorted(self.names)[0]
+        changed = []
+        for fault in ("extra", "missing", "digest", "extra-field", "oversized-file"):
+            value = copy.deepcopy(decoded)
+            if fault == "extra":
+                value["../outside.pem"] = value[first]
+            elif fault == "missing":
+                del value[first]
+            elif fault == "digest":
+                value[first]["sha256"] = "0" * 64
+            elif fault == "extra-field":
+                value[first]["mode"] = 0o777
+            else:
+                import base64
+                value[first] = {"data": base64.b64encode(b"x" * 4097).decode("ascii"), "sha256": hashlib.sha256(b"x" * 4097).hexdigest()}
+            changed.append(json.dumps(value, sort_keys=True, separators=(",", ":")).encode("ascii"))
+        duplicate = (json.dumps(first) + ":" + json.dumps(decoded[first], separators=(",", ":")) + ",").encode("ascii")
+        nested_duplicate = self.packet.replace(b'"data":', b'"data":"unused","data":', 1)
+        for raw in [b"", b"[", b"x" * 65537, b"{" + duplicate + self.packet[1:], nested_duplicate, *changed]:
+            parent, _, _ = self.new_guest()
+            with self.subTest(size=len(raw)), self.assertRaises((AssertionError, ValueError)):
+                self.stage_tls_fixture(parent, raw)
+            self.assertEqual(list(parent.iterdir()), [])
+
+    def test_existing_paths_and_parent_symlink_refuse_without_adoption(self):
+        for fault in ("directory", "directory-symlink", "receipt", "receipt-symlink", "parent-symlink", "writable-parent"):
+            parent, root, receipt = self.new_guest()
+            target = parent / "foreign"
+            target.write_bytes(b"retain foreign bytes")
+            if fault == "directory":
+                root.mkdir(mode=0o777)
+            elif fault == "directory-symlink":
+                root.symlink_to(parent / "missing", target_is_directory=True)
+            elif fault == "receipt":
+                receipt.write_bytes(b"foreign receipt")
+            elif fault == "receipt-symlink":
+                receipt.symlink_to(parent / "missing-receipt")
+            elif fault == "parent-symlink":
+                link = parent.with_name(parent.name + "-link")
+                link.symlink_to(parent, target_is_directory=True)
+                parent = link
+            else:
+                parent.chmod(0o777)
+            before = {path.name: (self.metadata(path), path.read_bytes() if path.is_file() else None) for path in parent.iterdir()}
+            with self.subTest(fault=fault), self.assertRaises((AssertionError, OSError)):
+                self.stage_tls_fixture(parent, self.packet)
+            after = {path.name: (self.metadata(path), path.read_bytes() if path.is_file() else None) for path in parent.iterdir()}
+            self.assertEqual(before, after)
+
+    def test_parent_directory_file_and_receipt_replacement_never_mutate_foreign_objects(self):
+        real_fsync = os.fsync
+        for fault in ("parent", "directory", "file", "receipt"):
+            parent, root, receipt = self.new_guest()
+            injected = False
+            foreign = None
+            def sync(descriptor):
+                nonlocal injected, foreign
+                real_fsync(descriptor)
+                is_directory = stat.S_ISDIR(os.fstat(descriptor).st_mode)
+                if not injected and is_directory == (fault == "receipt"):
+                    injected = True
+                    if fault == "parent":
+                        parent.rename(parent.with_name(parent.name + "-owned"))
+                        parent.mkdir(mode=0o700)
+                        foreign = parent / "foreign"
+                    elif fault == "directory":
+                        root.rename(parent / "owned-directory")
+                        root.mkdir(mode=0o700)
+                        foreign = root / "foreign"
+                    elif fault == "file":
+                        foreign = root / sorted(self.names)[0]
+                        foreign.rename(parent / "owned-file")
+                    else:
+                        foreign = receipt
+                    foreign.write_bytes(b"retain replacement")
+                    foreign.chmod(0o666)
+            with self.subTest(fault=fault), patch.object(os, "fsync", side_effect=sync), self.assertRaises((AssertionError, OSError)):
+                self.stage_tls_fixture(parent, self.packet)
+            self.assertTrue(injected)
+            self.assertEqual(foreign.read_bytes(), b"retain replacement")
+            self.assertEqual(stat.S_IMODE(foreign.stat().st_mode), 0o666)
+            if fault != "receipt":
+                self.assertFalse(receipt.exists())
+
+    def test_creation_short_write_and_fsync_failures_do_not_publish_a_receipt(self):
+        real_mkdir, real_fdopen = os.mkdir, os.fdopen
+        for fault in ("before-mkdir", "after-mkdir", "short-write", "fsync"):
+            parent, root, receipt = self.new_guest()
+            def mkdir(*args, **kwargs):
+                if fault == "after-mkdir":
+                    real_mkdir(*args, **kwargs)
+                raise OSError("injected directory creation result")
+            @contextlib.contextmanager
+            def fdopen(*args, **kwargs):
+                with real_fdopen(*args, **kwargs) as handle:
+                    short = Mock(wraps=handle)
+                    short.write.side_effect = lambda data: handle.write(data[:-1])
+                    yield short
+            if fault in ("before-mkdir", "after-mkdir"):
+                injection = patch.object(os, "mkdir", side_effect=mkdir)
+            elif fault == "short-write":
+                injection = patch.object(os, "fdopen", side_effect=fdopen)
+            else:
+                injection = patch.object(os, "fsync", side_effect=OSError("injected fsync failure"))
+            with self.subTest(fault=fault), injection, self.assertRaises((AssertionError, OSError)):
+                self.stage_tls_fixture(parent, self.packet)
+            self.assertFalse(receipt.exists())
+            self.assertEqual(root.exists(), fault != "before-mkdir")
+            if root.exists():
+                self.assertEqual(stat.S_IMODE(root.stat().st_mode), 0o700)
+                self.assertLessEqual(len(list(root.iterdir())), 1)
+
+    def test_cleanup_refuses_replaced_parent_directory_file_and_changed_metadata(self):
+        for fault in ("parent", "directory", "file", "content", "mode", "symlink", "hardlink", "extra", "missing", "receipt-symlink"):
+            parent, root, receipt = self.new_guest()
+            self.stage_tls_fixture(parent, self.packet)
+            first = root / sorted(self.names)[0]
+            if fault == "parent":
+                old = parent.with_name(parent.name + "-owned")
+                parent.rename(old)
+                parent.mkdir(mode=0o700)
+                (old / root.name).rename(root)
+                (old / receipt.name).rename(receipt)
+            elif fault == "directory":
+                root.rename(parent / "owned-directory")
+                root.mkdir(mode=0o700)
+                (root / "foreign").write_bytes(b"retain")
+            elif fault in ("file", "symlink", "hardlink", "missing"):
+                old = parent / "owned-file"
+                first.rename(old)
+                if fault == "file":
+                    first.write_bytes(old.read_bytes())
+                    first.chmod(0o600)
+                elif fault == "symlink":
+                    first.symlink_to(old)
+                elif fault == "hardlink":
+                    os.link(old, first)
+            elif fault == "content":
+                first.write_bytes(b"X" + first.read_bytes()[1:])
+            elif fault == "mode":
+                first.chmod(0o666)
+            elif fault == "extra":
+                (root / "foreign").write_bytes(b"retain")
+            else:
+                receipt.rename(parent / "owned-receipt")
+                receipt.symlink_to(parent / "owned-receipt")
+            before = {path.name: self.metadata(path) for path in root.iterdir()}
+            with self.subTest(fault=fault), self.assertRaises((AssertionError, OSError)):
+                self.cleanup_tls_fixture(parent)
+            self.assertEqual(before, {path.name: self.metadata(path) for path in root.iterdir()})
+            self.assertTrue(os.path.lexists(receipt))
+
+
+class TLSArchiveExclusionTests(unittest.TestCase):
+    def test_actual_pem_and_der_key_bytes_are_excluded_even_across_read_boundary(self):
+        import base64
+        root = Path(__file__).resolve().parents[2]
+        source = (root / "scripts/qa/test-installed-host.sh").read_text()
+        script = source.split("<<'PYTLSARCHIVE'\n", 1)[1].split("\nPYTLSARCHIVE", 1)[0]
+        key = (root / "internal/sc/testdata/smart-health-tls/qa-server-key.pem").read_bytes().strip()
+        der = base64.b64decode(b"".join(line for line in key.splitlines() if not line.startswith(b"-----")))
+        for payload, accepted in ((b"ordinary binary marker -----BEGIN PRIVATE KEY-----", True),
+                                  (key, False), (b"x" * 65530 + der, False)):
+            with tempfile.TemporaryDirectory() as directory:
+                archive = Path(directory) / "bundle.tar.gz"
+                with tarfile.open(archive, "w:gz") as output:
+                    info = tarfile.TarInfo("bin/server-connect")
+                    info.size = len(payload)
+                    output.addfile(info, io.BytesIO(payload))
+                result = subprocess.run([sys.executable, "-I", "-B", "-c", script, str(archive)],
+                                        cwd=root, capture_output=True, text=True, timeout=3)
+                self.assertEqual(result.returncode == 0, accepted, result.stderr)
+
+
 if __name__ == "__main__":
     result = unittest.main(exit=False).result
     if not result.wasSuccessful():
@@ -1676,3 +2272,7 @@ if __name__ == "__main__":
     print("SUPERVISED_FIXTURE_EXECUTOR_FAULT_CAUSAL_CONTEXT=PASS")
     print("SUPERVISED_FIXTURE_SUPERVISOR_OFF_CAUSAL_RECEIPTS=PASS")
     print("SUPERVISED_FIXTURE_SUSTAINED_EXECUTOR_FAULT_BOUNDS=PASS")
+    print("SUPERVISED_FIXTURE_HTTPS_CAUSAL_EVIDENCE=PASS")
+    print("SUPERVISED_FIXTURE_LEGACY_PROJECTION_PAUSE_AND_CAS=PASS")
+    print("SMART_HEALTH_QA_KEY_ARCHIVE_EXCLUSION_REGRESSIONS=PASS")
+    print("SMART_HEALTH_QA_TLS_PRIVATE_STAGING_REGRESSIONS=PASS")
