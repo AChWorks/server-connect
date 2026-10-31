@@ -220,7 +220,7 @@ func (m *Manager) DisconnectSmartTUNTrial(operationID string, revision uint64, q
 	if err := validateSmartTUNCleanupKillPoint(qaKillPoint, true); err != nil {
 		return SmartTUNTrialReceipt{}, err
 	}
-	if err := trialDisposableContext(); err != nil {
+	if err := smartTUNNativeHostContext(); err != nil {
 		return SmartTUNTrialReceipt{}, err
 	}
 	var receipt SmartTUNTrialReceipt
@@ -284,7 +284,7 @@ func (m *Manager) ClearSmartTUNTrialWithQAKill(operationID string, revision uint
 	if err := validateSmartTUNCleanupKillPoint(qaKillPoint, false); err != nil {
 		return err
 	}
-	if err := trialDisposableContext(); err != nil {
+	if err := smartTUNNativeHostContext(); err != nil {
 		return err
 	}
 	return m.withActivationJournalLock(syscall.Fsync, func(store *activationJournalDir) error {

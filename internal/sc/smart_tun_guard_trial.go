@@ -298,7 +298,7 @@ func inspectSmartTUNBaseline(endpoint, peer string) (string, error) {
 // guest and a native endpoint route via the *declared* underlay. The Docker
 // marker alone would not distinguish a customer system from a QA fixture.
 func smartTUNTrialGuest(underlay, tunnel, endpoint string) error {
-	if err := trialDisposableContext(); err != nil {
+	if err := smartTUNNativeHostContext(); err != nil {
 		return err
 	}
 	raw, err := nativeIPJSON("-j", "link", "show")
@@ -657,8 +657,11 @@ func (m *Manager) admitSmartTUNTrialLocked(store *activationJournalDir, opts Sma
 		endpoint.IsLoopback() || endpoint.IsLinkLocalUnicast() {
 		return smartTUNTrialAdmission{}, Fault("trial_unsupported", "selected profile requires a literal public IPv4 endpoint")
 	}
-	if endpoint.String() != "10.254.72.2" || managementPeer != "10.254.72.2" {
-		return smartTUNTrialAdmission{}, Fault("trial_unsupported", "disconnected disposable peer identity required")
+	if (endpoint.String() == "10.254.72.2" && managementPeer == "10.254.72.2") ||
+		(endpoint.String() == smartTUNVMEndpoint && managementPeer == smartTUNVMEndpoint && smartTUNVMPolicySupported(opts)) {
+		// Continue with the independently observed underlay and guarded native admission.
+	} else {
+		return smartTUNTrialAdmission{}, Fault("trial_unsupported", "unrecognized disconnected peer identity")
 	}
 	if err := smartTUNTrialGuest(opts.UnderlayInterface, opts.TunnelInterface, endpoint.String()); err != nil {
 		return smartTUNTrialAdmission{}, err
@@ -741,20 +744,40 @@ func (m *Manager) beginSmartTUNTrial(opts SmartTUNCandidateOptions, managementPe
 	if err := nativeTrialApplyPlatform(); err != nil {
 		return SmartTUNTrialReceipt{}, err
 	}
-	if !smartTUNTrialFixturePolicySupported(opts) {
-		return SmartTUNTrialReceipt{}, Fault("trial_unsupported", "only the exact disposable IPv4 or dual-stack TUN fixtures are supported")
+	if !smartTUNTrialFixturePolicySupported(opts) && !smartTUNVMPolicySupported(opts) {
+		return SmartTUNTrialReceipt{}, Fault("trial_unsupported", "unsupported disposable native TUN policy")
 	}
 	if err := EnsureCore(m.Core); err != nil {
 		return SmartTUNTrialReceipt{}, err
 	}
-	if err := trialDisposableContext(); err != nil {
+	if err := smartTUNNativeCandidateContext(opts, managementPeer); err != nil {
 		return SmartTUNTrialReceipt{}, err
 	}
 	var planned smartTUNTrialAdmission
+	var vmRulesDigest string
 	if err := m.withActivationJournalLock(syscall.Fsync, func(store *activationJournalDir) error {
 		var err error
 		if err := checkSavedSmartTUNPolicyLocked(store, saved); err != nil {
 			return err
+		}
+		// The isolated VM's slow systemd health oneshot can retain FAILED
+		// after the previous independent guard completed an exact safe Off.
+		// Repair only stale bookkeeping under the existing lifecycle lock.
+		if health != nil && opts.TunnelInterface == smartTUNVMInterface {
+			if err := normalizeQuiescentSmartTUNHealthUnit(store); err != nil {
+				return err
+			}
+		}
+		if opts.TunnelInterface == smartTUNVMInterface {
+			if saved == nil && len(opts.Exceptions) != 0 {
+				return Fault("routing_rules_invalid", "VM Smart Routing exceptions must come from the saved operator rule registry")
+			}
+			var next SmartTUNCandidateOptions
+			next, vmRulesDigest, err = smartTUNVMReadSavedRulesLocked(store, opts)
+			if err != nil {
+				return err
+			}
+			opts = next
 		}
 		planned, err = m.admitSmartTUNTrialLocked(store, opts, managementPeer)
 		return err
@@ -817,6 +840,15 @@ func (m *Manager) beginSmartTUNTrial(opts SmartTUNCandidateOptions, managementPe
 	err := m.withActivationJournalLock(syscall.Fsync, func(store *activationJournalDir) error {
 		if err := checkSavedSmartTUNPolicyLocked(store, saved); err != nil {
 			return err
+		}
+		if vmRulesDigest != "" {
+			_, digest, err := smartTUNVMReadSavedRulesLocked(store, opts)
+			if err != nil {
+				return err
+			}
+			if digest != vmRulesDigest {
+				return Fault("routing_rules_conflict", "operator rules changed while prearming native Smart Routing")
+			}
 		}
 		admission, err := m.admitSmartTUNTrialLocked(store, opts, managementPeer)
 		if err != nil {
