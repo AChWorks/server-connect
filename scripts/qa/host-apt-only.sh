@@ -428,7 +428,10 @@ disabled_transports() {
   # this exact scanner detects actual Internet-family socket activity.
   disabled_control=$base/trace-disabled-control
   mkdir -m 0700 "$disabled_control"
-  /usr/bin/strace -ff -q -yy -v -s 2048 -e trace=%network,%process \
+  # Go's runtime may leave a self-thread tgkill(SIGURG) unfinished when
+  # the process group exits. Exclude only that signal syscall; keep all
+  # fork/exec/exit and network attempts in the complete trace witness.
+  /usr/bin/strace -ff -q -yy -v -s 2048 -e trace=%network,%process -e trace=!tgkill \
     -o "$disabled_control/trace" /usr/bin/curl -q --fail --silent --show-error \
     --max-time 4 --noproxy '*' "$origin/dists/qa/Release" \
     >"$base/disabled-control.out" 2>"$base/disabled-control.err" ||
@@ -454,7 +457,7 @@ disabled_transports() {
     chmod 0644 "$disabled_source"
     disabled_rc=0
     "$apt_timeout" --kill-after=5s 35s /usr/bin/strace -ff -q -yy -v -s 2048 \
-      -e trace=%network,%process -o "$disabled_trace/trace" \
+      -e trace=%network,%process -e trace=!tgkill -o "$disabled_trace/trace" \
       /usr/bin/env -i HOME=/root PATH=/usr/sbin:/usr/bin:/sbin:/bin LC_ALL=C \
       "$manager" apt -- apt-get update \
       -o "Dir::Etc::sourcelist=$disabled_source" -o 'Dir::Etc::sourceparts=-' \
