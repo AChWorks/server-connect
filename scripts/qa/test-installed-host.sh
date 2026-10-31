@@ -713,6 +713,134 @@ assert r["ok"] is True and r["data"]["revision"]==3
 assert r["data"]["activation_ready"] is False
 assert len(r["data"]["rules"])==3
 '
+# Independent R2 REQUIRED-01: run the *installed executable's actual menu*
+# mutation paths against a second unique private state root, including
+# rejections and file-byte/revision preservation. The same guest-local
+# fixture exercises positive CLI preview after selecting a real core-validated
+# synthetic VLESS profile. No TUN activation or host-network mutation occurs.
+docker exec -i "$container" python3 -B - <<'PYROUTINGMENU'
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import subprocess
+import tempfile
+
+BIN = "/usr/local/bin/server-connect"
+with tempfile.TemporaryDirectory(prefix="scqa-operator-menu-", dir="/run") as tmp:
+    state = Path(tmp, "state")
+    fixture = Path(tmp, "rules.txt")
+    original = b"cidr vpn 9.9.9.9/32\nsuffix vpn sub.example.org\n"
+    updated = b"cidr vpn 4.4.4.4/32\n"
+    fixture.write_bytes(original)
+    os.chmod(fixture, 0o600)
+    sha = hashlib.sha256(original).hexdigest()
+    new_sha = hashlib.sha256(updated).hexdigest()
+    count = 0
+
+    def execute(*args, stdin=None):
+        return subprocess.run([BIN, "--state-dir", str(state), *args],
+                              input=stdin, text=True, capture_output=True, timeout=18)
+
+    def cli(*args, stdin=None, ok=True):
+        result = execute("--json", *args, stdin=stdin)
+        reply = json.loads(result.stdout)
+        assert (result.returncode == 0) == ok and reply["ok"] is ok and not result.stderr, (
+            args, result.returncode, result.stderr, reply)
+        return reply
+
+    def snapshot():
+        report = cli("smart-routing-rules", "list")["data"]
+        path = state / "smart-routing-rules.json"
+        return report, path.read_bytes() if path.exists() else None
+
+    def menu(label, lines, expected_rev, expected_rules, rejected=False):
+        global count
+        previous, original_bytes = snapshot()
+        result = execute("menu", stdin="19\n" + lines + "0\n")
+        assert result.returncode == 0 and "Routing Rules:" in result.stdout, (
+            label, result.returncode, result.stdout[-400:], result.stderr)
+        current, now_bytes = snapshot()
+        assert current["revision"] == expected_rev and len(current["rules"]) == expected_rules, (
+            label, current)
+        assert current["state"] == "saved_not_applied" and current["activation_ready"] is False
+        assert current["general_host_admitted"] is False
+        if rejected:
+            assert "Error:" in result.stderr and now_bytes == original_bytes, (
+                label, result.stderr, "mutated rejected state")
+            assert current == previous, (label, "rejected operation changed rule report")
+        else:
+            assert not result.stderr and now_bytes != original_bytes, (
+                label, result.stderr, "positive operation did not persist")
+        count += 1
+
+    menu("add CIDR", "2\n1.1.1.0/24\ndirect\n", 1, 1)
+    menu("add VPN exact domain", "3\nexample.org\nn\n", 2, 2)
+    menu("add VPN suffix domain", "3\ntest.example.org\ny\n", 3, 3)
+    menu("import local file", f"4\n{fixture}\nmenu-source\n2026-10-01\n{sha}\n\n", 4, 5)
+    menu("reject special IPv6", "2\n100::/64\ndirect\n", 4, 5, True)
+    menu("reject ICANN public suffix", "3\nco.uk\ny\n", 4, 5, True)
+    menu("reject PRIVATE public suffix", "3\ngithub.io\ny\n", 4, 5, True)
+    menu("reject duplicate CIDR", "2\n1.1.1.0/24\ndirect\n", 4, 5, True)
+    menu("reject import SHA mismatch",
+         f"4\n{fixture}\nbad-source\n2026-10-01\n{'0'*64}\n\n", 4, 5, True)
+    menu("reject wrong replacement CAS",
+         f"4\n{fixture}\nmenu-source\n2026-10-02\n{sha}\n{'0'*64}\n", 4, 5, True)
+
+    # Same regular CLI used by operators. Import performs actual installed
+    # sing-box config checking, but it never opens a VPN connection.
+    test_uri = ("vless://c2902f3a-1c25-41ef-a8dc-760b483aa247"
+                "@8.8.8.8:443?type=tcp&security=none#QA-Offline-Preview")
+    imported = cli("import", "--file", "-", stdin=test_uri)["data"]
+    selected = imported["id"]
+    cli("select", selected)
+    preview_args = ("smart-routing-rules", "preview",
+                    "--tunnel-if", "sctunqa0",
+                    "--underlay-if", "qaedge0",
+                    "--tunnel-ipv4", "172.31.99.1/30",
+                    "--domestic-cidr", "5.22.0.0/17",
+                    "--protected-cidr", "203.0.113.42/32")
+    before, saved_bytes = snapshot()
+    p = cli(*preview_args)["data"]
+    assert p["selected_profile_id"] == selected
+    assert p["rules_revision"] == 4 and p["rule_count"] == 5
+    assert p["validation_level"] == "native_policy_compile_only"
+    assert re.fullmatch(r"[0-9a-f]{64}", p["native_config_sha256"])
+    assert all(p[key] is False for key in (
+        "core_execution_tested", "host_network_inspected", "activation_ready", "applied"))
+    assert cli(*preview_args)["data"] == p, "preview emitted nondeterministic config"
+    after, current_bytes = snapshot()
+    assert before == after and saved_bytes == current_bytes, "preview modified saved rules"
+    assert not any(state.glob("*activation*journal*")), "preview created an activation journal"
+    print("INSTALLED_OPERATOR_CLI_NATIVE_PREVIEW=PASS "
+          "(selected pinned-core VLESS, exact rev/count/config digest, compile only, immutable rules)", flush=True)
+
+    fixture.write_bytes(updated)
+    menu("replace source", f"4\n{fixture}\nmenu-source\n2026-10-02\n{new_sha}\n{sha}\n", 5, 4)
+    menu("reject stale source removal", f"7\nmenu-source\n{sha}\n", 5, 4, True)
+    menu("remove CIDR", "5\n1.1.1.0/24\n", 6, 3)
+    menu("remove exact domain", "6\nexample.org\nn\n", 7, 2)
+    menu("remove suffix domain", "6\ntest.example.org\ny\n", 8, 1)
+    menu("remove imported source", f"7\nmenu-source\n{new_sha}\n", 9, 0)
+    listed = execute("menu", stdin="19\n1\n0\n")
+    assert listed.returncode == 0 and not listed.stderr
+    assert '"activation_ready": false' in listed.stdout and "saved_not_applied" in listed.stdout
+    final = cli("smart-routing-rules", "list")["data"]
+    assert final["revision"] == 9 and final["rules"] == [] and final["imports"] == []
+    assert final["state"] == "saved_not_applied" and final["activation_ready"] is False
+    # The menu offers VPN-only domain entry; an explicitly attempted
+    # Direct-domain CLI is separately rejected by the same validated store.
+    direct = cli("smart-routing-rules", "add", "--domain", "example.org",
+                 "--via", "direct", ok=False)
+    assert direct["error"]["code"] == "routing_rules_invalid"
+    assert cli("smart-routing-rules", "list")["data"] == final
+    print(f"INSTALLED_OPERATOR_MENU_MUTATIONS_AND_REFUSALS=PASS "
+          f"({count} positive/negative real stdin menu flows, byte/revision CAS, "
+          "Direct-domain refusal, cleanup)", flush=True)
+PYROUTINGMENU
+assert_network_unchanged installed-rules-menu-r2 "$offline_before"
+verify_host_services installed-rules-menu-r2
 # Independent R1/R2 remediation: negative INPUTS must not persist, advance
 # the revision, reclassify a public suffix as registrable, or affect any
 # network/SSH/HTTP state. Re-run on the actual installed binary in D12/D13.
