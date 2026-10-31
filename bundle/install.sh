@@ -117,7 +117,7 @@ check_service_owner() {
 }
 # Independently installed recovery units start DISABLED. The exact owner and
 # manifest digest of each are checked before ANY subsequent replacement.
-check_guard_units() {
+check_guard_units() (
  for name in server-connect-activation-recover.service server-connect-activation-recover.timer server-connect-smart-tun.service server-connect-smart-health.service server-connect-smart-health.timer; do
   target=/etc/systemd/system/$name
   digest_file=$PREFIX/$name.sha256
@@ -143,15 +143,15 @@ check_guard_units() {
     die 'foreign recovery unit name already registered'
   fi
  done
-}
+)
 # systemd can retain a FAILED health oneshot long after the independent guard
 # has removed all owned routing. Do not strand verified offline updates solely
 # because systemd garbage collection has not yet normalized that stale result.
 # The installer holds the product .lock and previously checked the journal,
 # all exact unit files and their owner hashes before calling this helper.
 normalize_idle_health_failure() {
- name=server-connect-smart-health.service
- state=$(systemctl show "$name" -p ActiveState --value) ||
+ health_unit_name=server-connect-smart-health.service
+ state=$(systemctl show "$health_unit_name" -p ActiveState --value) ||
    die 'health executor state cannot be inspected'
  [ "$state" = failed ] || return 0
  # A failed oneshot is not sufficient evidence of a cleared operation.
@@ -161,18 +161,18 @@ normalize_idle_health_failure() {
   [ "$(systemctl show "$role" -p ActiveState --value)" = inactive ] ||
     die 'cannot normalize health failure while another TUN/guard role is active'
  done
- [ "$(systemctl show "$name" -p MainPID --value)" = 0 ] &&
- [ "$(systemctl show "$name" -p ControlPID --value)" = 0 ] ||
+ [ "$(systemctl show "$health_unit_name" -p MainPID --value)" = 0 ] &&
+ [ "$(systemctl show "$health_unit_name" -p ControlPID --value)" = 0 ] ||
    die 'cannot normalize health failure with a live executor'
  check_guard_units
- if ! systemctl reset-failed "$name"; then
+ if ! systemctl reset-failed "$health_unit_name"; then
   # A collected failed oneshot may become inactive concurrently. Do not
   # retry an uncertain reset or accept any still-failed/transient state.
-  [ "$(systemctl show "$name" -p ActiveState --value)" = inactive ] ||
+  [ "$(systemctl show "$health_unit_name" -p ActiveState --value)" = inactive ] ||
     die 'owned health executor failure could not be normalized'
  fi
- [ "$(systemctl show "$name" -p ActiveState --value)" = inactive ] &&
- [ "$(systemctl show "$name" -p Result --value)" = success ] ||
+ [ "$(systemctl show "$health_unit_name" -p ActiveState --value)" = inactive ] &&
+ [ "$(systemctl show "$health_unit_name" -p Result --value)" = success ] ||
    die 'owned health executor did not return to an inactive healthy state'
  check_guard_units
 }

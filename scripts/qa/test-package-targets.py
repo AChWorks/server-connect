@@ -202,6 +202,7 @@ class InstallerIdleHealthNormalizationTests(unittest.TestCase):
             "SC_MAIN_PID": "0",
             "SC_CONTROL_PID": "0",
             "SC_ROLE_TRUSTED": "yes",
+            "SC_QA_CLOBBER_GUARD_NAME": "no",
             "SC_QA_RESET_BEHAVIOR": "success",
         })
         env.update(changes)
@@ -235,7 +236,12 @@ systemctl() {
  esac
 }
 die() { printf 'REFUSED: %s\n' "$*" >&2; exit 1; }
-check_guard_units() { [ "$SC_ROLE_TRUSTED" = yes ] || die 'foreign health role provenance'; }
+check_guard_units() {
+ [ "$SC_ROLE_TRUSTED" = yes ] || die 'foreign health role provenance'
+ # Model the observed POSIX-sh dynamic-scope collision from guard inspection.
+ # A guard checker must never retarget reset-failed to the last timer name.
+ if [ "$SC_QA_CLOBBER_GUARD_NAME" = yes ]; then name=server-connect-smart-health.timer; fi
+}
 """
         response = subprocess.run(["/bin/sh", "-s"],
             input=fake + self.normalize + "\n" + self.require_inactive
@@ -251,6 +257,11 @@ check_guard_units() { [ "$SC_ROLE_TRUSTED" = yes ] || die 'foreign health role p
 
     def test_stale_failed_owned_executor_is_reconciled_only_when_quiescent(self):
         run, calls = self.invoke()
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertEqual(calls, ["reset"])
+
+    def test_nested_guard_helper_cannot_redirect_failed_service_reset_to_timer(self):
+        run, calls = self.invoke(SC_QA_CLOBBER_GUARD_NAME="yes")
         self.assertEqual(run.returncode, 0, run.stderr)
         self.assertEqual(calls, ["reset"])
 
