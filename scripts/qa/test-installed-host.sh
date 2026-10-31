@@ -588,6 +588,43 @@ assert_no_offline_fetch missing-core
 echo 'OFFLINE_MISSING_CORE_FAIL_CLOSED=PASS (installer NOT applied)'
 run_offline first-install --offline
 verify_direct_install
+# Run the newly installed operator overview on BOTH target OS lanes. The
+# installed service is verified inactive above; no host-route or VPN proof
+# is inferred from that local service observation.
+docker exec "$container" /usr/local/bin/server-connect --json mode-overview |
+  python3 -c '
+import json,sys
+reply=json.load(sys.stdin)
+assert reply["ok"] is True and "error" not in reply
+data=reply["data"]
+assert data["desired_mode"]=="direct"
+assert data["observed_mode"]=="unknown"
+assert data["proxy_service_state"]=="inactive"
+assert data["status_health"]=="not_tested"
+assert data["evidence_scope"]=="local_proxy_service_only"
+assert data["host_direct_path_proof"]=="not_run"
+assert data["vpn_path_proof"]=="not_run"
+assert data["active_route_verified"] is False
+assert [(mode["id"],mode["availability"],mode["general_host_activation"]) for mode in data["modes"]]==[
+    ("direct","implemented",True),
+    ("proxy_only","implemented",True),
+    ("smart_routing","disposable_guest_only",False),
+]
+'
+printf '18\n0\n' | docker exec -i "$container" /usr/local/bin/server-connect menu >"$scratch/installed-mode-menu.log"
+python3 - "$scratch/installed-mode-menu.log" <<'PYMODEMENU'
+import sys
+from pathlib import Path
+message=Path(sys.argv[1]).read_text()
+assert "18 Mode Overview" in message
+assert '"observed_mode": "unknown"' in message
+assert '"host_direct_path_proof": "not_run"' in message
+assert '"availability": "disposable_guest_only"' in message
+assert '"general_host_activation": false' in message
+PYMODEMENU
+assert_network_unchanged installed-mode-overview "$offline_before"
+verify_host_services installed-mode-overview
+echo 'INSTALLED_OPERATOR_MODE_OVERVIEW=PASS (inactive service, honest Direct unknown, non-admitted TUN, CLI/menu parity)'
 if [[ $qa_version == 12 ]]; then
   native_refusal_nft=$(docker exec "$container" /usr/sbin/nft -j list ruleset)
   private_state_digest() {
