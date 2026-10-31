@@ -1001,6 +1001,27 @@ echo 'REAL_TUN_LAB_STAGE=build-guest-generator'
 GOPROXY=off GOTOOLCHAIN=local CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
   go build -trimpath -o "$scratch/tun-config-qa" ./scripts/qa/tun_config_generator.go
 test -x "$scratch/tun-config-qa"
+# The PSL policy is loaded by the real native config compiler. Exercise both
+# IPv4 and opted-in IPv6 *before* expensive disposable TUN network experiments
+# so a stale synthetic QA suffix cannot masquerade as a routing regression.
+for family in ipv4 ipv6; do
+  qa_ipv6=
+  if [[ $family == ipv6 ]]; then qa_ipv6=yes; fi
+  SC_QA_TUN_IPV6="$qa_ipv6" "$scratch/tun-config-qa" >"$scratch/tun-psl-$family.json"
+  python3 - "$scratch/tun-psl-$family.json" <<'PYPSLGEN'
+import json,sys
+with open(sys.argv[1],encoding="utf-8") as f:
+    config=json.load(f)
+rules=config["route"]["rules"]
+assert any(r.get("domain_suffix")==[".scqa.example.org"] and
+           r.get("domain")==["scqa.example.org"] and
+           r.get("outbound")=="upstream" for r in rules)
+assert any(r.get("domain")==["only-exact.test"] and
+           "domain_suffix" not in r and r.get("outbound")=="upstream" for r in rules)
+assert config["route"]["final"]=="upstream"
+PYPSLGEN
+done
+echo 'REAL_TUN_PSL_QA_GENERATOR=PASS (registered suffix and exact domain in IPv4/IPv6 candidate compiler; no network mutation)'
 docker cp "$scratch/tun-config-qa" "$container:/root/qa-tun-config-qa"
 # The actual guest generator must refuse all unsafe Direct admissions
 # BEFORE it emits runnable config or starts any TUN. This complements Go

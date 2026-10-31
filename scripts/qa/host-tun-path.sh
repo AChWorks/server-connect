@@ -795,7 +795,7 @@ origin_pid=$!
 # guest; the QA client deliberately skips public-PKI verification. Only the
 # TLS ClientHello/SNI and independently witnessed destination path matter.
 if ! openssl req -x509 -newkey rsa:2048 -nodes -sha256 -days 1 \
-  -subj '/CN=scqa.test' -keyout "$tls_key" -out "$tls_cert" \
+  -subj '/CN=scqa.example.org' -keyout "$tls_key" -out "$tls_cert" \
   >/run/sc-qa-tun-cert.log 2>&1; then
   cat /run/sc-qa-tun-cert.log >&2
   echo 'REAL_TUN_TLS_SETUP=FAIL (ephemeral guest certificate)' >&2
@@ -893,8 +893,8 @@ attempt=0
 while [ "$attempt" -lt 25 ]; do
   if expect_source 5.22.0.10 10.254.72.1 &&
      expect_source 8.8.8.8 10.254.72.1 &&
-     tls_path native.scqa.test 5.22.0.10 10.254.72.1 reply &&
-     tls_path native.scqa.test 8.8.8.8 10.254.72.1 reply &&
+     tls_path native.scqa.example.org 5.22.0.10 10.254.72.1 reply &&
+     tls_path native.scqa.example.org 8.8.8.8 10.254.72.1 reply &&
      udp_path 5.22.0.10 10.254.72.1 ready-domestic reply &&
      udp_path 8.8.8.8 10.254.72.1 ready-foreign reply &&
      dns_path 5.22.0.10 192.0.2.11 ready-domestic-udp udp reply &&
@@ -1159,7 +1159,7 @@ fi
 test "$(direct_witness_packets)" -eq "$witness_baseline" || {
   echo 'REAL_TUN_SNIFFED_DOMAIN_EXCEPTION=FAIL (pre-existing foreign leak)' >&2; exit 1;
 }
-expect_named_source vpn.scqa.test 5.22.0.10 5.22.0.10 || {
+expect_named_source vpn.scqa.example.org 5.22.0.10 5.22.0.10 || {
   echo 'REAL_TUN_SNIFFED_DOMAIN_EXCEPTION=FAIL (suffix VPN over domestic IP)' >&2; exit 1;
 }
 # The exact name MUST be outside the suffix fixture. Otherwise the suffix
@@ -1188,7 +1188,7 @@ echo 'REAL_TUN_SNIFFED_DOMAIN_EXCEPTION=PASS (VPN-only HTTP names; no Direct lea
 # Compare independent VETH counters on each path. The peer's VLESS outbound
 # accesses destination loopback and MUST NOT increment a native VETH witness.
 assert_tun_policy_active || { echo 'REAL_TUN_TLS_SNI_VPN_ONLY=FAIL (TUN unavailable)' >&2; exit 1; }
-tls_path vpn.scqa.test 5.22.0.10 5.22.0.10 reply
+tls_path vpn.scqa.example.org 5.22.0.10 5.22.0.10 reply
 tls_path only-exact.test 5.22.0.10 5.22.0.10 reply
 test "$(domestic_tls_direct_packets)" -eq "$domestic_tls_baseline" || {
   echo 'REAL_TUN_TLS_SNI_VPN_ONLY=FAIL (matched domestic SNI leaked Direct)' >&2; exit 1;
@@ -1410,7 +1410,7 @@ assert_tun_policy_active || {
 # stopped when the explicit SNI rule still requires VPN. A nonmatching SNI
 # to the SAME destination must remain Direct: independent routing proof.
 assert_tun_policy_active || { echo 'REAL_TUN_TLS_SNI_NO_DIRECT_ON_UPSTREAM_LOSS=FAIL (TUN lost)' >&2; exit 1; }
-tls_path vpn.scqa.test 5.22.0.10 - no-reply
+tls_path vpn.scqa.example.org 5.22.0.10 - no-reply
 tls_path only-exact.test 5.22.0.10 - no-reply
 tls_path unmatched.test 8.8.8.8 - no-reply
 test "$(domestic_tls_direct_packets)" -eq "$domestic_tls_active" &&

@@ -22,7 +22,7 @@ func main() {
 		// This is NOT an authenticated or complete Iran-prefix database.
 		DomesticCIDRs: []string{"5.22.0.10/32"},
 		DomainExceptions: []sc.SmartTUNDomainException{
-			{Domain: "scqa.test", Suffix: true, Via: "vpn"},
+			{Domain: "scqa.example.org", Suffix: true, Via: "vpn"},
 			{Domain: "only-exact.test", Via: "vpn"},
 		},
 	}
