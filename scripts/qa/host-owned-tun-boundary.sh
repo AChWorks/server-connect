@@ -313,7 +313,7 @@ PYOWNEDCONFIG
   for owned_dest in 8.8.8.8/32 5.22.0.10/32; do
     ip -4 route add "$owned_dest" dev sctunqa0 src 172.31.99.1 table 42740 proto 186
   done
-  for owned_dest in 2001:db8:8::8/128 2001:db8:5::10/128 2001:db8:5::11/128 2001:db8:8::9/128; do
+  for owned_dest in 2606:4700:8::8/128 2606:4700:5::10/128 2606:4700:5::11/128 2606:4700:8::9/128; do
     ip -6 route add "$owned_dest" dev sctunqa0 src fd73:99::1 table 42740 proto 186
   done
   # The mark exception is before capture and routes core Direct/VLESS
@@ -322,10 +322,10 @@ PYOWNEDCONFIG
   owned_add_rule -6 priority 29800 fwmark 0x7420 lookup main
   owned_add_rule -4 priority 29900 to 8.8.8.8/32 lookup 42740
   owned_add_rule -4 priority 29901 to 5.22.0.10/32 lookup 42740
-  owned_add_rule -6 priority 29900 to 2001:db8:8::8/128 lookup 42740
-  owned_add_rule -6 priority 29901 to 2001:db8:5::10/128 lookup 42740
-  owned_add_rule -6 priority 29902 to 2001:db8:5::11/128 lookup 42740
-  owned_add_rule -6 priority 29903 to 2001:db8:8::9/128 lookup 42740
+  owned_add_rule -6 priority 29900 to 2606:4700:8::8/128 lookup 42740
+  owned_add_rule -6 priority 29901 to 2606:4700:5::10/128 lookup 42740
+  owned_add_rule -6 priority 29902 to 2606:4700:5::11/128 lookup 42740
+  owned_add_rule -6 priority 29903 to 2606:4700:8::9/128 lookup 42740
   owned_add_rule -4 priority 30003 to 198.18.41.0/24 lookup 42741
   owned_add_rule -6 priority 30003 to 2001:db8:41::/64 lookup 42741
   owned_add_rule -4 priority 30020 fwmark 0x7421 lookup 42741
@@ -353,7 +353,7 @@ PYOWNEDFLAGS
   echo OWNED_TUN_NO_CORE_ROUTE_RULE_NFT_CREATION=PASS
   python3 - <<'PYOWNEDCAPTURE'
 import json,subprocess
-for family,destination in (('-4','5.22.0.10'),('-6','2001:db8:5::11')):
+for family,destination in (('-4','5.22.0.10'),('-6','2606:4700:5::11')):
     def route(*extra):return json.loads(subprocess.check_output(['ip','-N','-j',family,'route','get',destination,*extra]))
     captured=route();bypassed=route('mark','0x7420')
     assert len(captured)==1 and captured[0]['dev']=='sctunqa0', 'Direct destination bypassed the QA TUN'
@@ -366,13 +366,13 @@ PYOWNEDCAPTURE
   expect_source 5.22.0.10 10.254.72.1
   udp_path 5.22.0.10 10.254.72.1 owned-domestic reply
   test "$(cat /sys/class/net/sctunqa0/statistics/tx_packets)" -gt "$owned_direct_tx"
-  ipv6_path tcp 2001:db8:8::8 2001:db8:8::8 reply
-  ipv6_path udp 2001:db8:8::8 2001:db8:8::8 reply
-  ipv6_path tcp 2001:db8:5::10 2001:db8:5::10 reply
-  ipv6_path udp 2001:db8:5::10 2001:db8:5::10 reply
+  ipv6_path tcp 2606:4700:8::8 2606:4700:8::8 reply
+  ipv6_path udp 2606:4700:8::8 2606:4700:8::8 reply
+  ipv6_path tcp 2606:4700:5::10 2606:4700:5::10 reply
+  ipv6_path udp 2606:4700:5::10 2606:4700:5::10 reply
   owned_direct_tx=$(cat /sys/class/net/sctunqa0/statistics/tx_packets)
-  ipv6_path tcp 2001:db8:5::11 fd73:1::1 reply
-  ipv6_path udp 2001:db8:8::9 fd73:1::1 reply
+  ipv6_path tcp 2606:4700:5::11 fd73:1::1 reply
+  ipv6_path udp 2606:4700:8::9 fd73:1::1 reply
   test "$(cat /sys/class/net/sctunqa0/statistics/tx_packets)" -gt "$owned_direct_tx"
   payload_path tcp 8.8.8.8 8.8.8.8 reply
   payload_path udp 8.8.8.8 8.8.8.8 reply
@@ -428,7 +428,7 @@ PYOWNEDCAPTURE
   owned_boundary_cleanup
   owned_require_snapshot "$owned_baseline" explicit-native-cleanup
   expect_source 8.8.8.8 10.254.72.1
-  ipv6_path tcp 2001:db8:8::8 fd73:1::1 reply
+  ipv6_path tcp 2606:4700:8::8 fd73:1::1 reply
   /bin/sh /root/qa-host-coexistence.sh probe
   expect_foreign_hosted_reply
   echo OWNED_TUN_NATIVE_BOUNDARY_CLEANUP=PASS

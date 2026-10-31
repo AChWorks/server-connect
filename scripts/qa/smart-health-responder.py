@@ -27,7 +27,7 @@ import time
 NONCE_REQUEST = re.compile(rb"SCHEALTH1 ([0-9a-f]{32})\n\Z")
 DNS_LABEL = re.compile(rb"[0-9a-f]{28}\Z")
 PUBLIC_ADDRESSES = (
-    "8.8.8.8", "198.51.100.42", "2001:db8:8::8", "2001:db8:5::10",
+    "8.8.8.8", "198.51.100.42", "2606:4700:8::8", "2606:4700:5::10",
 )
 PORTS = {"tcp": 19220, "udp": 19221, "dns": 19222, "https": 19224}
 MAX_CLIENTS = 64

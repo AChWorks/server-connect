@@ -68,7 +68,7 @@ func smartTUNHealthPlan(ipv6 bool) []smartTUNHealthProbe {
 		address: "10.254.72.2", expectedSource: "10.254.72.1", underlay: true}}
 	addresses := []string{"8.8.8.8", "198.51.100.42"}
 	if ipv6 {
-		addresses = append(addresses, "2001:db8:8::8", "2001:db8:5::10")
+		addresses = append(addresses, "2606:4700:8::8", "2606:4700:5::10")
 	}
 	for target, address := range addresses {
 		family := 4

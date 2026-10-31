@@ -351,8 +351,8 @@ PYSTALEDISCONNECT
           set -- --tunnel-ipv6 fd73:99::1/64 ;;
         broad)
           set -- --tunnel-ipv6 fd73:99::1/64 \
-            --domestic-ipv6-cidr 2001:db8:5::/64 \
-            --ipv6-vpn-cidr 2001:db8:5::10/128 \
+            --domestic-ipv6-cidr 2606:4700:5::/64 \
+            --ipv6-vpn-cidr 2606:4700:5::10/128 \
             --ipv6-direct-cidr 2000::/3 ;;
       esac
       if apply 8 "$@" > /run/sc-qa-product-tun-conflict.json; then
@@ -376,9 +376,9 @@ PYV6REFUSED
     # This is a separate *installed product* trial with the existing real
     # native dual-stack fixture, not the older QA shell-owned TUN process.
     if ! apply 55 --tunnel-ipv6 fd73:99::1/64 \
-      --domestic-ipv6-cidr 2001:db8:5::/64 \
-      --ipv6-vpn-cidr 2001:db8:5::10/128 \
-      --ipv6-direct-cidr 2001:db8:8::9/128 \
+      --domestic-ipv6-cidr 2606:4700:5::/64 \
+      --ipv6-vpn-cidr 2606:4700:5::10/128 \
+      --ipv6-direct-cidr 2606:4700:8::9/128 \
       > /run/sc-qa-product-tun-apply.json; then
       report_apply_failure || :
       return 1
@@ -410,14 +410,14 @@ PYV6REFUSED
     test "$ipv6_foreign_udp_baseline" -gt 0
     test "$ipv6_override_baseline" -gt 0
     test "$ipv6_override_udp_baseline" -gt 0
-    ipv6_path tcp 2001:db8:5::11 fd73:1::1 reply
-    ipv6_path udp 2001:db8:5::11 fd73:1::1 reply
-    ipv6_path tcp 2001:db8:5::10 2001:db8:5::10 reply
-    ipv6_path udp 2001:db8:5::10 2001:db8:5::10 reply
-    ipv6_path tcp 2001:db8:8::8 2001:db8:8::8 reply
-    ipv6_path udp 2001:db8:8::8 2001:db8:8::8 reply
-    ipv6_path tcp 2001:db8:8::9 fd73:1::1 reply
-    ipv6_path udp 2001:db8:8::9 fd73:1::1 reply
+    ipv6_path tcp 2606:4700:5::11 fd73:1::1 reply
+    ipv6_path udp 2606:4700:5::11 fd73:1::1 reply
+    ipv6_path tcp 2606:4700:5::10 2606:4700:5::10 reply
+    ipv6_path udp 2606:4700:5::10 2606:4700:5::10 reply
+    ipv6_path tcp 2606:4700:8::8 2606:4700:8::8 reply
+    ipv6_path udp 2606:4700:8::8 2606:4700:8::8 reply
+    ipv6_path tcp 2606:4700:8::9 fd73:1::1 reply
+    ipv6_path udp 2606:4700:8::9 fd73:1::1 reply
     test "$(ipv6_foreign_tcp_direct_packets)" -eq "$ipv6_foreign_tcp_baseline"
     test "$(ipv6_foreign_udp_direct_packets)" -eq "$ipv6_foreign_udp_baseline"
     test "$(ipv6_override_direct_packets)" -eq "$ipv6_override_baseline"
@@ -442,10 +442,10 @@ PYV6REFUSED
     previous_op=$op
     disconnect_now "$op" 1
     expect_source 8.8.8.8 10.254.72.1
-    ipv6_path tcp 2001:db8:8::8 fd73:1::1 reply
-    ipv6_path udp 2001:db8:8::8 fd73:1::1 reply
-    ipv6_path tcp 2001:db8:5::10 fd73:1::1 reply
-    ipv6_path udp 2001:db8:5::10 fd73:1::1 reply
+    ipv6_path tcp 2606:4700:8::8 fd73:1::1 reply
+    ipv6_path udp 2606:4700:8::8 fd73:1::1 reply
+    ipv6_path tcp 2606:4700:5::10 fd73:1::1 reply
+    ipv6_path udp 2606:4700:5::10 fd73:1::1 reply
     test "$(ipv6_foreign_tcp_direct_packets)" -gt "$ipv6_foreign_tcp_baseline"
     test "$(ipv6_foreign_udp_direct_packets)" -gt "$ipv6_foreign_udp_baseline"
     test "$(ipv6_override_direct_packets)" -gt "$ipv6_override_baseline"
@@ -459,10 +459,10 @@ PYV6REFUSED
     test "$op" != "$previous_op"
     require_selected_ready
     test "$(saved_policy_hashes)" = "$saved_policy_before"
-    ipv6_path tcp 2001:db8:8::8 2001:db8:8::8 reply
-    ipv6_path udp 2001:db8:8::8 2001:db8:8::8 reply
-    ipv6_path tcp 2001:db8:5::10 2001:db8:5::10 reply
-    ipv6_path udp 2001:db8:5::10 2001:db8:5::10 reply
+    ipv6_path tcp 2606:4700:8::8 2606:4700:8::8 reply
+    ipv6_path udp 2606:4700:8::8 2606:4700:8::8 reply
+    ipv6_path tcp 2606:4700:5::10 2606:4700:5::10 reply
+    ipv6_path udp 2606:4700:5::10 2606:4700:5::10 reply
     test "$(ipv6_foreign_tcp_direct_packets)" -eq "$ipv6_foreign_tcp_baseline"
     test "$(ipv6_foreign_udp_direct_packets)" -eq "$ipv6_foreign_udp_baseline"
     test "$(ipv6_override_direct_packets)" -eq "$ipv6_override_baseline"
@@ -484,15 +484,15 @@ PYV6REFUSED
     # IPv6 TCP/UDP must fail CLOSED, not leak native Direct packets.
     kill "$server_pid"
     wait "$server_pid" || :
-    ipv6_path tcp 2001:db8:8::8 none no-reply
-    ipv6_path udp 2001:db8:8::8 none no-reply
-    ipv6_path tcp 2001:db8:5::10 none no-reply
-    ipv6_path udp 2001:db8:5::10 none no-reply
+    ipv6_path tcp 2606:4700:8::8 none no-reply
+    ipv6_path udp 2606:4700:8::8 none no-reply
+    ipv6_path tcp 2606:4700:5::10 none no-reply
+    ipv6_path udp 2606:4700:5::10 none no-reply
     kill -0 "$ipv6_pid" 2>/dev/null
-    ipv6_path tcp 2001:db8:5::11 fd73:1::1 reply
-    ipv6_path udp 2001:db8:5::11 fd73:1::1 reply
-    ipv6_path tcp 2001:db8:8::9 fd73:1::1 reply
-    ipv6_path udp 2001:db8:8::9 fd73:1::1 reply
+    ipv6_path tcp 2606:4700:5::11 fd73:1::1 reply
+    ipv6_path udp 2606:4700:5::11 fd73:1::1 reply
+    ipv6_path tcp 2606:4700:8::9 fd73:1::1 reply
+    ipv6_path udp 2606:4700:8::9 fd73:1::1 reply
     test "$(ipv6_foreign_tcp_direct_packets)" -eq "$ipv6_foreign_tcp_baseline"
     test "$(ipv6_foreign_udp_direct_packets)" -eq "$ipv6_foreign_udp_baseline"
     test "$(ipv6_override_direct_packets)" -eq "$ipv6_override_baseline"

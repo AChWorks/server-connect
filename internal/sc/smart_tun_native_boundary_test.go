@@ -397,22 +397,22 @@ func TestSmartTUNNativeIndependentClassifierKeepsColdNeighborControl(t *testing.
 		allowed bool
 	}{
 		{"public unmarked TCP cannot leak after capture loss", nativeGuardPacket{family: 2, protocol: 6, oif: 3, destination: "8.8.8.8"}, false},
-		{"public marked UDP cannot leak after rule loss", nativeGuardPacket{family: 10, protocol: 17, oif: 3, mark: nativeTUNCaptureMark, destination: "2001:db8:5::10"}, false},
+		{"public marked UDP cannot leak after rule loss", nativeGuardPacket{family: 10, protocol: 17, oif: 3, mark: nativeTUNCaptureMark, destination: "2606:4700:5::10"}, false},
 		{"actual TUN TCP", nativeGuardPacket{family: 2, protocol: 6, oif: 7, destination: "8.8.8.8"}, true},
 		{"foreign visitor reply", nativeGuardPacket{family: 2, protocol: 6, oif: 3, reply: true, destination: "8.8.8.8"}, true},
-		{"core outer socket", nativeGuardPacket{family: 10, protocol: 17, oif: 3, mark: nativeTUNBypassMark, destination: "2001:db8:5::10"}, true},
+		{"core outer socket", nativeGuardPacket{family: 10, protocol: 17, oif: 3, mark: nativeTUNBypassMark, destination: "2606:4700:5::10"}, true},
 		{"cold IPv6 neighbor solicitation", nativeGuardPacket{family: 10, protocol: 58, oif: 3, icmpType: 135, destination: "ff02::1:ff00:2"}, true},
 		{"cold IPv6 neighbor advertisement", nativeGuardPacket{family: 10, protocol: 58, oif: 3, icmpType: 136, destination: "ff02::1"}, true},
 		{"ND payload type cannot exempt UDP", nativeGuardPacket{family: 10, protocol: 17, oif: 3, icmpType: 135, destination: "ff02::1"}, false},
-		{"ND cannot bypass public unicast", nativeGuardPacket{family: 10, protocol: 58, oif: 3, icmpType: 135, destination: "2001:db8:5::10"}, false},
-		{"arbitrary public ICMPv6 is unsupported", nativeGuardPacket{family: 10, protocol: 58, oif: 3, icmpType: 128, destination: "2001:db8:5::10"}, false},
+		{"ND cannot bypass public unicast", nativeGuardPacket{family: 10, protocol: 58, oif: 3, icmpType: 135, destination: "2606:4700:5::10"}, false},
+		{"arbitrary public ICMPv6 is unsupported", nativeGuardPacket{family: 10, protocol: 58, oif: 3, icmpType: 128, destination: "2606:4700:5::10"}, false},
 		{"link-local multicast DHCP4", nativeGuardPacket{family: 2, protocol: 17, oif: 3, sport: 68, dport: 67, destination: "255.255.255.255"}, true},
 		{"DHCP ports cannot exempt TCP", nativeGuardPacket{family: 2, protocol: 6, oif: 3, sport: 68, dport: 67, destination: "255.255.255.255"}, false},
 		{"broadcast arbitrary UDP denied", nativeGuardPacket{family: 2, protocol: 17, oif: 3, sport: 1234, dport: 1234, destination: "255.255.255.255"}, false},
 		{"local IPv4 link control", nativeGuardPacket{family: 2, protocol: 2, oif: 3, destination: "224.0.0.1"}, true},
 		{"forwarded IPv4 public TCP remains foreign-owned", nativeGuardPacket{family: 2, protocol: 6, iif: 9, oif: 3, destination: "8.8.8.8"}, true},
-		{"forwarded IPv6 public UDP remains foreign-owned", nativeGuardPacket{family: 10, protocol: 17, iif: 9, oif: 3, destination: "2001:db8:8::8"}, true},
-		{"forwarded unsupported public protocol remains foreign-owned", nativeGuardPacket{family: 10, protocol: 58, iif: 9, oif: 3, icmpType: 128, destination: "2001:db8:8::8"}, true},
+		{"forwarded IPv6 public UDP remains foreign-owned", nativeGuardPacket{family: 10, protocol: 17, iif: 9, oif: 3, destination: "2606:4700:8::8"}, true},
+		{"forwarded unsupported public protocol remains foreign-owned", nativeGuardPacket{family: 10, protocol: 58, iif: 9, oif: 3, icmpType: 128, destination: "2606:4700:8::8"}, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := nativeGuardAllows(t, r, tc.p); got != tc.allowed {

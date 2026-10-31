@@ -32,7 +32,7 @@ CORE = "server-connect-smart-tun.service"
 UNITS = Path("/etc/systemd/system")
 ROOT = Path("/run/sc-qa-supervised")
 PUBLIC4 = ("8.8.8.8", "198.51.100.42")
-PUBLIC6 = ("2001:db8:8::8", "2001:db8:5::10")
+PUBLIC6 = ("2606:4700:8::8", "2606:4700:5::10")
 PROTOCOLS = ("tcp", "udp", "dns", "https")
 TLS_BUNDLE = Path("/root/qa-smart-health-tls")
 TLS_FILES = ("qa-root.pem", "qa-server.pem", "qa-server-key.pem", "qa-wrong-name.pem",
@@ -537,8 +537,8 @@ class Fixture:
                      "--tunnel-ipv4", "172.31.99.1/30", "--management-peer", "10.254.72.2",
                      "--domestic-cidr", "5.22.0.10/32", "--protected-cidr", "10.254.72.0/30"]
             if self.args.ipv6:
-                args += ["--tunnel-ipv6", "fd73:99::1/64", "--domestic-ipv6-cidr", "2001:db8:5::/64",
-                         "--ipv6-vpn-cidr", "2001:db8:5::10/128", "--ipv6-direct-cidr", "2001:db8:8::9/128"]
+                args += ["--tunnel-ipv6", "fd73:99::1/64", "--domestic-ipv6-cidr", "2606:4700:5::/64",
+                         "--ipv6-vpn-cidr", "2606:4700:5::10/128", "--ipv6-direct-cidr", "2606:4700:8::9/128"]
         args += ["--deadline-seconds", str(deadline), "--supervised", "--health-interval", "5",
                  "--health-grace", "0", "--health-failures", "1", "--health-attempts", "2",
                  "--health-recovery-seconds", "30"]
@@ -840,6 +840,18 @@ class Fixture:
     def marker(self, name):
         print("SUPERVISED_TUN_" + name + "=PASS", flush=True)
 
+    def wait_one_target_measurement(self, previous):
+        # Sample the durable journal once per attempt: comparing two separate
+        # reads can splice an old failure onto a newer round. Allow enough
+        # time for a full independent timer interval and bounded probe work.
+        def measured():
+            current = self.health()
+            if current["rounds"] > previous and current["evidence"]["failed_targets"] == 1:
+                return current
+            return None
+
+        return self.wait(measured, 24, "one-target measurement")
+
     def confirmations_and_health(self):
         if not self.args.ipv6:
             # An authenticated old transport must stay stale even if a new
@@ -892,11 +904,10 @@ class Fixture:
 
         previous = self.health()["rounds"]
         self.controls({protocol + "@8.8.8.8": "drop" for protocol in PROTOCOLS})
-        self.wait(lambda: self.health()["rounds"] > previous and
-                  self.health()["evidence"]["failed_targets"] == 1, 15, "one-target measurement")
-        assert self.health()["state"] == "healthy" and self.health()["attempts"] == 0
-        assert self.health()["evidence"]["reason"] == "healthy_partial_targets"
-        assert self.health()["evidence"]["failed_targets"] == 1
+        observed = self.wait_one_target_measurement(previous)
+        assert observed["state"] == "healthy" and observed["attempts"] == 0
+        assert observed["evidence"]["reason"] == "healthy_partial_targets"
+        assert observed["evidence"]["failed_targets"] == 1
         self.controls()
         self.marker("ONE_TARGET_FALSE_ALARM_REJECTED")
 

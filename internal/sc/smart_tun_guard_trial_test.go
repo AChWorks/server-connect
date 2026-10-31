@@ -632,10 +632,10 @@ func TestSmartTUNTrialFixtureScopeRejectsPartialAndBroaderIPv6(t *testing.T) {
 	dual := func() SmartTUNCandidateOptions {
 		o := base()
 		o.TunnelIPv6 = "fd73:99::1/64"
-		o.DomesticIPv6CIDRs = []string{"2001:db8:5::/64"}
+		o.DomesticIPv6CIDRs = []string{"2606:4700:5::/64"}
 		o.IPv6Exceptions = []SmartTUNCIDRException{
-			{CIDR: "2001:db8:5::10/128", Via: "vpn"},
-			{CIDR: "2001:db8:8::9/128", Via: "direct"},
+			{CIDR: "2606:4700:5::10/128", Via: "vpn"},
+			{CIDR: "2606:4700:8::9/128", Via: "direct"},
 		}
 		return o
 	}
@@ -649,17 +649,17 @@ func TestSmartTUNTrialFixtureScopeRejectsPartialAndBroaderIPv6(t *testing.T) {
 		{"missing IPv6 TUN", func(o *SmartTUNCandidateOptions) { o.TunnelIPv6 = "" }},
 		{"missing IPv6 domestic", func(o *SmartTUNCandidateOptions) { o.DomesticIPv6CIDRs = nil }},
 		{"extra IPv6 domestic", func(o *SmartTUNCandidateOptions) {
-			o.DomesticIPv6CIDRs = append(o.DomesticIPv6CIDRs, "2001:db8:9::/64")
+			o.DomesticIPv6CIDRs = append(o.DomesticIPv6CIDRs, "2606:4700:9::/64")
 		}},
 		{"wrong IPv6 TUN", func(o *SmartTUNCandidateOptions) { o.TunnelIPv6 = "fd73:98::1/64" }},
-		{"public IPv6 TUN", func(o *SmartTUNCandidateOptions) { o.TunnelIPv6 = "2001:db8:ffff::1/64" }},
+		{"public IPv6 TUN", func(o *SmartTUNCandidateOptions) { o.TunnelIPv6 = "2606:4700:ffff::1/64" }},
 		{"missing VPN override", func(o *SmartTUNCandidateOptions) { o.IPv6Exceptions = o.IPv6Exceptions[1:] }},
 		{"missing Direct override", func(o *SmartTUNCandidateOptions) { o.IPv6Exceptions = o.IPv6Exceptions[:1] }},
-		{"wrong VPN override", func(o *SmartTUNCandidateOptions) { o.IPv6Exceptions[0].CIDR = "2001:db8:5::11/128" }},
+		{"wrong VPN override", func(o *SmartTUNCandidateOptions) { o.IPv6Exceptions[0].CIDR = "2606:4700:5::11/128" }},
 		{"swapped override precedence", func(o *SmartTUNCandidateOptions) {
 			o.IPv6Exceptions[0], o.IPv6Exceptions[1] = o.IPv6Exceptions[1], o.IPv6Exceptions[0]
 		}},
-		{"protected IPv6 stranger", func(o *SmartTUNCandidateOptions) { o.ProtectedIPv6CIDRs = []string{"2001:db8:ffff::42/128"} }},
+		{"protected IPv6 stranger", func(o *SmartTUNCandidateOptions) { o.ProtectedIPv6CIDRs = []string{"2606:4700:ffff::42/128"} }},
 		{"foreign IPv4 exception", func(o *SmartTUNCandidateOptions) {
 			o.Exceptions = []SmartTUNCIDRException{{CIDR: "8.8.8.8/32", Via: "direct"}}
 		}},

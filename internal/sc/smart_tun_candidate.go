@@ -7,6 +7,8 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+
+	"golang.org/x/net/publicsuffix"
 )
 
 // SmartTUNCandidateOptions only compiles configuration. It never authorizes
@@ -61,6 +63,23 @@ func canonicalSmartTUNDomain(raw string, suffix bool) (string, error) {
 	for _, label := range labels {
 		if !smartTUNDomainLabel.MatchString(label) {
 			return "", errors.New("invalid operator domain label")
+		}
+	}
+	if suffix {
+		// Offline PSL from the pinned Go module includes ICANN and PRIVATE
+		// boundaries (e.g. co.uk, com.au, github.io, blogspot.com),
+		// with wildcard/exception semantics. A dot is not proof of
+		// registrability. Unknown/unmanaged TLDs fail closed until the
+		// pinned PSL snapshot is updated, without relying on DNS.
+		root, icann := publicsuffix.PublicSuffix(name)
+		if root == name {
+			return "", errors.New("whole public suffix is not an operator domain exception")
+		}
+		if !icann && !strings.Contains(root, ".") {
+			return "", errors.New("unrecognized top-level public suffix")
+		}
+		if _, err := publicsuffix.EffectiveTLDPlusOne(name); err != nil {
+			return "", errors.New("domain suffix has no registrable parent")
 		}
 	}
 	return name, nil
@@ -140,8 +159,9 @@ func smartTUNIPv6Policy(o SmartTUNCandidateOptions) ([]string, []any, error) {
 	operator := []netip.Prefix{}
 	for _, exception := range o.IPv6Exceptions {
 		prefix, err := canonicalRoutePrefixFamily(exception.CIDR, true)
-		if err != nil || (exception.Via != "direct" && exception.Via != "vpn") {
-			return nil, nil, errors.New("invalid IPv6 operator exception")
+		if err != nil || (exception.Via != "direct" && exception.Via != "vpn") ||
+			!conservativelyPublicIPv6Prefix(prefix) {
+			return nil, nil, errors.New("invalid or special-purpose IPv6 operator exception")
 		}
 		for _, p := range protections {
 			if routePrefixesOverlap(prefix, p) {
@@ -172,9 +192,7 @@ func smartTUNIPv6Policy(o SmartTUNCandidateOptions) ([]string, []any, error) {
 	for _, raw := range o.DomesticIPv6CIDRs {
 		prefix, err := canonicalRoutePrefixFamily(raw, true)
 		if err != nil || prefix.Bits() < minDomesticDirectBits ||
-			!prefix.Addr().IsGlobalUnicast() || prefix.Addr().IsPrivate() ||
-			prefix.Addr().IsLoopback() || prefix.Addr().IsLinkLocalUnicast() ||
-			seen[raw] {
+			!conservativelyPublicIPv6Prefix(prefix) || seen[raw] {
 			return nil, nil, errors.New("invalid, broad or duplicate IPv6 domestic Direct prefix")
 		}
 		seen[raw] = true

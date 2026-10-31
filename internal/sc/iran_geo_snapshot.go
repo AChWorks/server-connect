@@ -165,13 +165,16 @@ func decodeIranGeoSnapshot(raw []byte) (iranGeoSnapshot, error) {
 	return snapshot, nil
 }
 
-// Conservative offline IANA IPv4 Special-Purpose Address Space, last updated
-// 2025-10-09: https://www.iana.org/assignments/iana-ipv4-special-registry
-// Every registered block is excluded, even if a special-use service is marked
-// globally reachable. More-specific assignments inside 0/8, 192.0.0/24 and
-// 192.88.99/24 are covered by their parent blocks. IPv4 multicast and the
-// existing IPv6 documentation exclusion are also retained. This static list
-// is an admission boundary, not proof of geography or current reachability.
+// Conservative, pinned offline IANA IPv4 and IPv6 Special-Purpose Address
+// Space as of 2025-10-09 (the IANA registry date at review):
+// https://www.iana.org/assignments/iana-ipv4-special-registry
+// https://www.iana.org/assignments/iana-ipv6-special-registry
+// Reject all listed blocks for operator public routing, even when an entry
+// describes a globally reachable special-use anycast. IPv4 0/8, 192.0.0/24
+// and 192.88.99/24 include their more-specific IANA entries; IPv6 2001::/23
+// includes Teredo, benchmark, ORCHID and other protocol assignments.
+// This is conservative *address admission*, not geo or field path evidence.
+// Regenerate/review this list when IANA changes the authoritative registry.
 var specialPurposeExclusions = [...]netip.Prefix{
 	netip.MustParsePrefix("0.0.0.0/8"),
 	netip.MustParsePrefix("10.0.0.0/8"),
@@ -191,7 +194,36 @@ var specialPurposeExclusions = [...]netip.Prefix{
 	netip.MustParsePrefix("203.0.113.0/24"),
 	netip.MustParsePrefix("224.0.0.0/4"), // Multicast (outside the unicast IANA registry).
 	netip.MustParsePrefix("240.0.0.0/4"),
+	// All distinct IANA IPv6 special-purpose roots, including globally
+	// reachable special-use cases and all registered descendants of /23.
+	netip.MustParsePrefix("::/128"),
+	netip.MustParsePrefix("::1/128"),
+	netip.MustParsePrefix("::ffff:0:0/96"),
+	netip.MustParsePrefix("64:ff9b::/96"),
+	netip.MustParsePrefix("64:ff9b:1::/48"),
+	netip.MustParsePrefix("100::/64"),
+	netip.MustParsePrefix("100:0:0:1::/64"),
+	netip.MustParsePrefix("2001::/23"),
 	netip.MustParsePrefix("2001:db8::/32"),
+	netip.MustParsePrefix("2002::/16"),
+	netip.MustParsePrefix("2620:4f:8000::/48"),
+	netip.MustParsePrefix("3fff::/20"),
+	netip.MustParsePrefix("5f00::/16"),
+	netip.MustParsePrefix("fc00::/7"),
+	netip.MustParsePrefix("fe80::/10"),
+}
+
+// IANA IPv6 Address Space allocates global-unicast address space from
+// 2000::/3. netip.IsGlobalUnicast alone also accepts special or not-yet
+// allocated ranges. This offline snapshot intentionally fails closed until
+// a future registry review admits additional public IPv6 space.
+var ianaIPv6AllocatedUnicast = netip.MustParsePrefix("2000::/3")
+
+func conservativelyPublicIPv6Prefix(p netip.Prefix) bool {
+	return p.IsValid() && p.Addr().Is6() &&
+		p.Bits() >= ianaIPv6AllocatedUnicast.Bits() &&
+		ianaIPv6AllocatedUnicast.Contains(p.Addr()) &&
+		!overlapsSpecialPurpose(p)
 }
 
 func overlapsSpecialPurpose(p netip.Prefix) bool {

@@ -12,9 +12,9 @@ import (
 func TestSmartTUNDomainExceptionOrdering(t *testing.T) {
 	p, o := smartTUNFixture()
 	o.DomainExceptions = []SmartTUNDomainException{
-		{Domain: "example.test", Suffix: true, Via: "vpn"},
-		{Domain: "sub.example.test", Via: "vpn"},
-		{Domain: "EXAMPLE.TEST", Via: "vpn"},
+		{Domain: "example.org", Suffix: true, Via: "vpn"},
+		{Domain: "sub.example.org", Via: "vpn"},
+		{Domain: "EXAMPLE.ORG", Via: "vpn"},
 	}
 	raw, err := SmartTUNCandidateConfig(p, o)
 	if err != nil {
@@ -35,9 +35,9 @@ func TestSmartTUNDomainExceptionOrdering(t *testing.T) {
 	}
 	r := cfg.Route.Rules
 	if len(r) != 7 || r[0].Action != "bypass" || r[2].Action != "sniff" ||
-		r[3].Domain[0] != "sub.example.test" || r[3].Outbound != "upstream" ||
-		r[4].Domain[0] != "example.test" || r[4].Outbound != "upstream" ||
-		r[5].DomainSuffix[0] != ".example.test" || r[5].Outbound != "upstream" {
+		r[3].Domain[0] != "sub.example.org" || r[3].Outbound != "upstream" ||
+		r[4].Domain[0] != "example.org" || r[4].Outbound != "upstream" ||
+		r[5].DomainSuffix[0] != ".example.org" || r[5].Outbound != "upstream" {
 		t.Fatalf("unexpected rule ordering: %+v", r)
 	}
 	o.DomainExceptions[0], o.DomainExceptions[2] = o.DomainExceptions[2], o.DomainExceptions[0]

@@ -19,6 +19,12 @@ import os
 from pathlib import Path
 scratch = Path(os.environ["SC_QA_APT_TEST_ROOT"])
 source = Path(os.environ["SC_QA_APT_SOURCE"]).read_text()
+# One inclusive set retains all network syscalls and process creation,
+# execution, wait and termination. Do NOT use two -e trace selectors:
+# on strace the second can select ALL syscalls except tgkill.
+selector = "-e trace=%network,clone,clone3,fork,vfork,execve,execveat,wait4,waitid,exit,exit_group"
+if source.count(selector) != 2 or "-e trace=!tgkill" in source:
+    raise SystemExit("Native APT trace must use the exact bounded syscall selector")
 edits = [
     ("manager=/usr/local/bin/server-connect", f"manager={scratch}/bin/manager"),
     ("apt_cache=/usr/bin/apt-cache", f"apt_cache={scratch}/bin/apt-cache"),
@@ -464,6 +470,20 @@ interrupted = altered(10,
     '--- SIGCHLD {si_signo=SIGCHLD, si_pid=11, si_status=0} ---\n'
     '<... clone resumed>) = 11\n')
 module.check_payloads(interrupted)
+# strace can split exit_group across an unfinished line and the terminal
+# record. It is safe only when the exact exit status is independently recorded.
+partial_exit = altered(13, 'exit_group(100) = ?\n',
+                      'exit_group(100 <unfinished ...>\n')
+module.check_payloads(partial_exit)
+refused("conflicting interrupted exit code",
+        altered(13, 'exit_group(100) = ?\n', 'exit_group(0 <unfinished ...>\n'),
+        "incomplete syscall at process exit (exit_group)")
+refused("incomplete clone must stay rejected",
+        altered(13, 'exit_group(100) = ?\n', 'clone(child_stack=NULL <unfinished ...>\n'),
+        "incomplete syscall at process exit (clone)")
+refused("unfinished execve must stay rejected",
+        altered(13, 'exit_group(100) = ?\n', 'execve(\"/usr/bin/true\" <unfinished ...>\n'),
+        "incomplete syscall at process exit (execve)")
 refused("lost clone resumption", {**interrupted, 10: interrupted[10].replace('<... clone resumed>) = 11\n', '')})
 refused("mismatched resumption", {**interrupted, 10: interrupted[10].replace('<... clone resumed>', '<... fork resumed>')})
 refused("standalone resumption", altered(10, 'clone(child_stack=NULL, flags=SIGCHLD) = 11', '<... clone resumed>) = 11'))

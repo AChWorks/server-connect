@@ -720,10 +720,10 @@ func smartTUNTrialFixturePolicySupported(opts SmartTUNCandidateOptions) bool {
 		return len(opts.DomesticIPv6CIDRs) == 0 && len(opts.IPv6Exceptions) == 0
 	}
 	return opts.TunnelIPv6 == "fd73:99::1/64" &&
-		len(opts.DomesticIPv6CIDRs) == 1 && opts.DomesticIPv6CIDRs[0] == "2001:db8:5::/64" &&
+		len(opts.DomesticIPv6CIDRs) == 1 && opts.DomesticIPv6CIDRs[0] == "2606:4700:5::/64" &&
 		len(opts.IPv6Exceptions) == 2 &&
-		opts.IPv6Exceptions[0] == (SmartTUNCIDRException{CIDR: "2001:db8:5::10/128", Via: "vpn"}) &&
-		opts.IPv6Exceptions[1] == (SmartTUNCIDRException{CIDR: "2001:db8:8::9/128", Via: "direct"})
+		opts.IPv6Exceptions[0] == (SmartTUNCIDRException{CIDR: "2606:4700:5::10/128", Via: "vpn"}) &&
+		opts.IPv6Exceptions[1] == (SmartTUNCIDRException{CIDR: "2606:4700:8::9/128", Via: "direct"})
 }
 
 func (m *Manager) BeginSmartTUNTrial(opts SmartTUNCandidateOptions, managementPeer string, deadlineSeconds int, qaKillPoint string) (SmartTUNTrialReceipt, error) {

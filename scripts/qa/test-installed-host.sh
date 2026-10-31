@@ -625,6 +625,293 @@ PYMODEMENU
 assert_network_unchanged installed-mode-overview "$offline_before"
 verify_host_services installed-mode-overview
 echo 'INSTALLED_OPERATOR_MODE_OVERVIEW=PASS (inactive service, honest Direct unknown, non-admitted TUN, CLI/menu parity)'
+# A separately named, never-applied private rule store proves real installed
+# CLI/menu behavior without sharing experimental TUN journals or altering any
+# host policy. Both Debian 12 and 13 must keep SSH/HTTP and routes unchanged.
+rules_dir=/run/scqa-operator-rules
+docker exec "$container" /bin/sh -c 'test ! -e /run/scqa-operator-rules && test ! -L /run/scqa-operator-rules'
+docker exec "$container" /usr/local/bin/server-connect --state-dir "$rules_dir" --json smart-routing-rules list |
+  python3 -c '
+import json,sys
+r=json.load(sys.stdin)
+assert r["ok"] is True and r["data"]["revision"]==0 and not r["data"]["present"]
+assert r["data"]["activation_ready"] is False and r["data"]["general_host_admitted"] is False
+'
+docker exec "$container" /usr/local/bin/server-connect --state-dir "$rules_dir" --json \
+  smart-routing-rules add --cidr 1.1.1.0/24 --via direct |
+  python3 -c '
+import json,sys
+r=json.load(sys.stdin)
+assert r["ok"] is True and r["data"]["revision"]==1
+assert r["data"]["rules"][0]["source"]=="manual"
+assert r["data"]["rules"][0]["value"]=="1.1.1.0/24"
+assert r["data"]["activation_ready"] is False
+'
+docker exec "$container" /usr/local/bin/server-connect --state-dir "$rules_dir" --json \
+  smart-routing-rules add --domain example.org --via vpn |
+  python3 -c '
+import json,sys
+r=json.load(sys.stdin)
+assert r["ok"] is True and r["data"]["revision"]==2
+assert len(r["data"]["rules"])==2
+'
+if docker exec "$container" /usr/local/bin/server-connect --state-dir "$rules_dir" --json \
+  smart-routing-rules add --domain example.org --via direct >"$scratch/operator-direct-domain-refusal.json"; then
+  echo "INSTALLED_OPERATOR_ROUTING_RULES=FAIL (unauthenticated domain Direct accepted)" >&2
+  exit 1
+fi
+python3 - "$scratch/operator-direct-domain-refusal.json" <<'PYRULESNEG'
+import json,sys
+r=json.load(open(sys.argv[1]))
+assert r["ok"] is False and r["error"]["code"]=="routing_rules_invalid"
+PYRULESNEG
+rules_blob='cidr vpn 9.9.9.9/32'
+rules_sha=$(printf '%s\n' "$rules_blob" | sha256sum | cut -d ' ' -f1)
+printf '%s\n' "$rules_blob" |
+  docker exec -i "$container" /usr/local/bin/server-connect --state-dir "$rules_dir" --json \
+    smart-routing-rules import --source fixture --as-of 2026-10-01 --sha256 "$rules_sha" --file - |
+  python3 -c '
+import json,sys
+r=json.load(sys.stdin)
+assert r["ok"] is True and r["data"]["revision"]==3
+assert len(r["data"]["rules"])==3 and len(r["data"]["imports"])==1
+assert r["data"]["imports"][0]["source"]=="fixture"
+assert r["data"]["imports"][0]["publisher_signature_verified"] is False
+assert r["data"]["state"]=="saved_not_applied"
+assert r["data"]["activation_ready"] is False
+'
+if printf '%s\n' "$rules_blob" |
+  docker exec -i "$container" /usr/local/bin/server-connect --state-dir "$rules_dir" --json \
+    smart-routing-rules import --source other --as-of 2026-10-01 \
+      --sha256 0000000000000000000000000000000000000000000000000000000000000000 --file - \
+    >"$scratch/operator-wrong-hash-refusal.json"; then
+  echo "INSTALLED_OPERATOR_ROUTING_RULES=FAIL (wrong import digest accepted)" >&2
+  exit 1
+fi
+python3 - "$scratch/operator-wrong-hash-refusal.json" <<'PYRULESHASH'
+import json,sys
+r=json.load(open(sys.argv[1]))
+assert r["ok"] is False and r["error"]["code"]=="routing_rules_hash_mismatch"
+PYRULESHASH
+printf '19\n1\n0\n' |
+  docker exec -i "$container" /usr/local/bin/server-connect --state-dir "$rules_dir" menu \
+  >"$scratch/operator-rules-menu.log"
+python3 - "$scratch/operator-rules-menu.log" <<'PYRULESMENU'
+from pathlib import Path
+import sys
+text=Path(sys.argv[1]).read_text()
+assert "19 Routing Rules" in text
+assert "saved_not_applied" in text
+assert "9.9.9.9/32" in text
+assert '"activation_ready": false' in text
+PYRULESMENU
+docker exec "$container" /usr/local/bin/server-connect --state-dir "$rules_dir" --json smart-routing-rules list |
+  python3 -c '
+import json,sys
+r=json.load(sys.stdin)
+assert r["ok"] is True and r["data"]["revision"]==3
+assert r["data"]["activation_ready"] is False
+assert len(r["data"]["rules"])==3
+'
+# Independent R2 REQUIRED-01: run the *installed executable's actual menu*
+# mutation paths against a second unique private state root, including
+# rejections and file-byte/revision preservation. The same guest-local
+# fixture exercises positive CLI preview after selecting a real core-validated
+# synthetic VLESS profile. No TUN activation or host-network mutation occurs.
+docker exec -i "$container" python3 -B - <<'PYROUTINGMENU'
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import subprocess
+import tempfile
+
+BIN = "/usr/local/bin/server-connect"
+with tempfile.TemporaryDirectory(prefix="scqa-operator-menu-", dir="/run") as tmp:
+    state = Path(tmp, "state")
+    fixture = Path(tmp, "rules.txt")
+    original = b"cidr vpn 9.9.9.9/32\nsuffix vpn sub.example.org\n"
+    updated = b"cidr vpn 4.4.4.4/32\n"
+    fixture.write_bytes(original)
+    os.chmod(fixture, 0o600)
+    sha = hashlib.sha256(original).hexdigest()
+    new_sha = hashlib.sha256(updated).hexdigest()
+    count = 0
+
+    def execute(*args, stdin=None):
+        return subprocess.run([BIN, "--state-dir", str(state), *args],
+                              input=stdin, text=True, capture_output=True, timeout=18)
+
+    def cli(*args, stdin=None, ok=True):
+        result = execute("--json", *args, stdin=stdin)
+        reply = json.loads(result.stdout)
+        assert (result.returncode == 0) == ok and reply["ok"] is ok and not result.stderr, (
+            args, result.returncode, result.stderr, reply)
+        return reply
+
+    def snapshot():
+        report = cli("smart-routing-rules", "list")["data"]
+        path = state / "smart-routing-rules.json"
+        return report, path.read_bytes() if path.exists() else None
+
+    def menu(label, lines, expected_rev, expected_rules, rejected=False):
+        global count
+        previous, original_bytes = snapshot()
+        result = execute("menu", stdin="19\n" + lines + "0\n")
+        assert result.returncode == 0 and "Routing Rules:" in result.stdout, (
+            label, result.returncode, result.stdout[-400:], result.stderr)
+        current, now_bytes = snapshot()
+        assert current["revision"] == expected_rev and len(current["rules"]) == expected_rules, (
+            label, current)
+        assert current["state"] == "saved_not_applied" and current["activation_ready"] is False
+        assert current["general_host_admitted"] is False
+        if rejected:
+            assert "Error:" in result.stderr and now_bytes == original_bytes, (
+                label, result.stderr, "mutated rejected state")
+            assert current == previous, (label, "rejected operation changed rule report")
+        else:
+            assert not result.stderr and now_bytes != original_bytes, (
+                label, result.stderr, "positive operation did not persist")
+        count += 1
+
+    menu("add CIDR", "2\n1.1.1.0/24\ndirect\n", 1, 1)
+    menu("add VPN exact domain", "3\nexample.org\nn\n", 2, 2)
+    menu("add VPN suffix domain", "3\ntest.example.org\ny\n", 3, 3)
+    menu("import local file", f"4\n{fixture}\nmenu-source\n2026-10-01\n{sha}\n\n", 4, 5)
+    menu("reject special IPv6", "2\n100::/64\ndirect\n", 4, 5, True)
+    menu("reject ICANN public suffix", "3\nco.uk\ny\n", 4, 5, True)
+    menu("reject PRIVATE public suffix", "3\ngithub.io\ny\n", 4, 5, True)
+    menu("reject duplicate CIDR", "2\n1.1.1.0/24\ndirect\n", 4, 5, True)
+    menu("reject import SHA mismatch",
+         f"4\n{fixture}\nbad-source\n2026-10-01\n{'0'*64}\n\n", 4, 5, True)
+    menu("reject wrong replacement CAS",
+         f"4\n{fixture}\nmenu-source\n2026-10-02\n{sha}\n{'0'*64}\n", 4, 5, True)
+
+    # Same regular CLI used by operators. Import performs actual installed
+    # sing-box config checking, but it never opens a VPN connection.
+    test_uri = ("vless://c2902f3a-1c25-41ef-a8dc-760b483aa247"
+                "@8.8.8.8:443?type=tcp&security=none#QA-Offline-Preview")
+    imported = cli("import", "--file", "-", stdin=test_uri)["data"]
+    selected = imported["id"]
+    cli("select", selected)
+    preview_args = ("smart-routing-rules", "preview",
+                    "--tunnel-if", "sctunqa0",
+                    "--underlay-if", "qaedge0",
+                    "--tunnel-ipv4", "172.31.99.1/30",
+                    "--domestic-cidr", "5.22.0.0/17",
+                    "--protected-cidr", "203.0.113.42/32")
+    before, saved_bytes = snapshot()
+    p = cli(*preview_args)["data"]
+    assert p["selected_profile_id"] == selected
+    assert p["rules_revision"] == 4 and p["rule_count"] == 5
+    assert p["validation_level"] == "native_policy_compile_only"
+    assert re.fullmatch(r"[0-9a-f]{64}", p["native_config_sha256"])
+    assert all(p[key] is False for key in (
+        "core_execution_tested", "host_network_inspected", "activation_ready", "applied"))
+    assert cli(*preview_args)["data"] == p, "preview emitted nondeterministic config"
+    after, current_bytes = snapshot()
+    assert before == after and saved_bytes == current_bytes, "preview modified saved rules"
+    assert not any(state.glob("*activation*journal*")), "preview created an activation journal"
+    print("INSTALLED_OPERATOR_CLI_NATIVE_PREVIEW=PASS "
+          "(selected pinned-core VLESS, exact rev/count/config digest, compile only, immutable rules)", flush=True)
+
+    fixture.write_bytes(updated)
+    menu("replace source", f"4\n{fixture}\nmenu-source\n2026-10-02\n{new_sha}\n{sha}\n", 5, 4)
+    menu("reject stale source removal", f"7\nmenu-source\n{sha}\n", 5, 4, True)
+    menu("remove CIDR", "5\n1.1.1.0/24\n", 6, 3)
+    menu("remove exact domain", "6\nexample.org\nn\n", 7, 2)
+    menu("remove suffix domain", "6\ntest.example.org\ny\n", 8, 1)
+    menu("remove imported source", f"7\nmenu-source\n{new_sha}\n", 9, 0)
+    listed = execute("menu", stdin="19\n1\n0\n")
+    assert listed.returncode == 0 and not listed.stderr
+    assert '"activation_ready": false' in listed.stdout and "saved_not_applied" in listed.stdout
+    final = cli("smart-routing-rules", "list")["data"]
+    assert final["revision"] == 9 and final["rules"] == [] and final["imports"] == []
+    assert final["state"] == "saved_not_applied" and final["activation_ready"] is False
+    # The menu offers VPN-only domain entry; an explicitly attempted
+    # Direct-domain CLI is separately rejected by the same validated store.
+    direct = cli("smart-routing-rules", "add", "--domain", "example.org",
+                 "--via", "direct", ok=False)
+    assert direct["error"]["code"] == "routing_rules_invalid"
+    assert cli("smart-routing-rules", "list")["data"] == final
+    print(f"INSTALLED_OPERATOR_MENU_MUTATIONS_AND_REFUSALS=PASS "
+          f"({count} positive/negative real stdin menu flows, byte/revision CAS, "
+          "Direct-domain refusal, cleanup)", flush=True)
+PYROUTINGMENU
+assert_network_unchanged installed-rules-menu-r2 "$offline_before"
+verify_host_services installed-rules-menu-r2
+# Independent R1/R2 remediation: negative INPUTS must not persist, advance
+# the revision, reclassify a public suffix as registrable, or affect any
+# network/SSH/HTTP state. Re-run on the actual installed binary in D12/D13.
+rule_file="$rules_dir/smart-routing-rules.json"
+rules_before_sha=$(docker exec "$container" sha256sum "$rule_file" | cut -d ' ' -f1)
+for invalid_cidr in 100::/64 2001::/64 2001:2::/64 3fff::/64; do
+  if docker exec "$container" /usr/local/bin/server-connect --state-dir "$rules_dir" --json \
+      smart-routing-rules add --cidr "$invalid_cidr" --via direct >"$scratch/operator-v6-registry-refusal.json"; then
+    echo "INSTALLED_OPERATOR_REGISTRY_R1_R2=FAIL (IANA IPv6 special-purpose accepted)" >&2
+    exit 1
+  fi
+  python3 - "$scratch/operator-v6-registry-refusal.json" <<'PYR1'
+import json,sys
+r=json.load(open(sys.argv[1]))
+assert r["ok"] is False and r["error"]["code"]=="routing_rules_invalid"
+PYR1
+  blob="cidr vpn $invalid_cidr"
+  invalid_sha=$(printf '%s\n' "$blob" | sha256sum | cut -d ' ' -f1)
+  if printf '%s\n' "$blob" |
+      docker exec -i "$container" /usr/local/bin/server-connect --state-dir "$rules_dir" --json \
+        smart-routing-rules import --source badv6 --as-of 2026-10-01 \
+        --sha256 "$invalid_sha" --file - >"$scratch/operator-v6-registry-refusal.json"; then
+    echo "INSTALLED_OPERATOR_REGISTRY_R1_R2=FAIL (IANA IPv6 import accepted)" >&2
+    exit 1
+  fi
+done
+for invalid_suffix in co.uk com.au github.io; do
+  if docker exec "$container" /usr/local/bin/server-connect --state-dir "$rules_dir" --json \
+      smart-routing-rules add --domain "$invalid_suffix" --suffix --via vpn >"$scratch/operator-psl-refusal.json"; then
+    echo "INSTALLED_OPERATOR_REGISTRY_R1_R2=FAIL (whole public/private suffix accepted)" >&2
+    exit 1
+  fi
+  python3 - "$scratch/operator-psl-refusal.json" <<'PYR2'
+import json,sys
+r=json.load(open(sys.argv[1]))
+assert r["ok"] is False and r["error"]["code"]=="routing_rules_invalid"
+PYR2
+  blob="suffix vpn $invalid_suffix"
+  invalid_sha=$(printf '%s\n' "$blob" | sha256sum | cut -d ' ' -f1)
+  if printf '%s\n' "$blob" |
+      docker exec -i "$container" /usr/local/bin/server-connect --state-dir "$rules_dir" --json \
+        smart-routing-rules import --source badsuffix --as-of 2026-10-01 \
+        --sha256 "$invalid_sha" --file - >"$scratch/operator-psl-refusal.json"; then
+    echo "INSTALLED_OPERATOR_REGISTRY_R1_R2=FAIL (whole PSL import accepted)" >&2
+    exit 1
+  fi
+done
+test "$(docker exec "$container" sha256sum "$rule_file" | cut -d ' ' -f1)" = "$rules_before_sha"
+docker exec "$container" /usr/local/bin/server-connect --state-dir "$rules_dir" --json smart-routing-rules list |
+  python3 -c '
+import json,sys
+r=json.load(sys.stdin)
+assert r["ok"] is True and r["data"]["revision"]==3
+assert len(r["data"]["rules"])==3 and len(r["data"]["imports"])==1
+assert r["data"]["activation_ready"] is False
+'
+assert_network_unchanged installed-registry-r1-r2 "$offline_before"
+verify_host_services installed-registry-r1-r2
+echo 'INSTALLED_OPERATOR_REGISTRY_R1_R2=PASS (IANA IPv6 and ICANN/PRIVATE PSL manual/import refusal, byte/revision CAS unchanged, network and SSH/HTTP preserved)'
+assert_network_unchanged installed-routing-rules "$offline_before"
+verify_host_services installed-routing-rules
+# Remove only our verified, unique QA private state path after verification.
+docker exec "$container" /bin/sh -c '
+set -eu
+d=/run/scqa-operator-rules
+test -d "$d" && test ! -L "$d" && test "$(stat -c %u "$d")" = 0
+test "$(stat -c %a "$d")" = 700
+rm -r -- "$d"
+test ! -e "$d"
+'
+echo 'INSTALLED_OPERATOR_ROUTING_RULES=PASS (real CLI/menu, SHA-pinned import, no network effects, SSH/HTTP preserved)'
 if [[ $qa_version == 12 ]]; then
   native_refusal_nft=$(docker exec "$container" /usr/sbin/nft -j list ruleset)
   private_state_digest() {
@@ -842,6 +1129,27 @@ echo 'REAL_TUN_LAB_STAGE=build-guest-generator'
 GOPROXY=off GOTOOLCHAIN=local CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
   go build -trimpath -o "$scratch/tun-config-qa" ./scripts/qa/tun_config_generator.go
 test -x "$scratch/tun-config-qa"
+# The PSL policy is loaded by the real native config compiler. Exercise both
+# IPv4 and opted-in IPv6 *before* expensive disposable TUN network experiments
+# so a stale synthetic QA suffix cannot masquerade as a routing regression.
+for family in ipv4 ipv6; do
+  qa_ipv6=
+  if [[ $family == ipv6 ]]; then qa_ipv6=yes; fi
+  SC_QA_TUN_IPV6="$qa_ipv6" "$scratch/tun-config-qa" >"$scratch/tun-psl-$family.json"
+  python3 - "$scratch/tun-psl-$family.json" <<'PYPSLGEN'
+import json,sys
+with open(sys.argv[1],encoding="utf-8") as f:
+    config=json.load(f)
+rules=config["route"]["rules"]
+assert any(r.get("domain_suffix")==[".scqa.example.org"] and
+           r.get("domain")==["scqa.example.org"] and
+           r.get("outbound")=="upstream" for r in rules)
+assert any(r.get("domain")==["only-exact.test"] and
+           "domain_suffix" not in r and r.get("outbound")=="upstream" for r in rules)
+assert config["route"]["final"]=="upstream"
+PYPSLGEN
+done
+echo 'REAL_TUN_PSL_QA_GENERATOR=PASS (registered suffix and exact domain in IPv4/IPv6 candidate compiler; no network mutation)'
 docker cp "$scratch/tun-config-qa" "$container:/root/qa-tun-config-qa"
 # The actual guest generator must refuse all unsafe Direct admissions
 # BEFORE it emits runnable config or starts any TUN. This complements Go

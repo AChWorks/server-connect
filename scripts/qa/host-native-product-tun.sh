@@ -158,7 +158,7 @@ if mode=='loss':
     stage,transport,before,tcp_before,udp_before=sys.argv[3:]
     assert stage in ('route','rule','capture','core','containment') and transport in ('tcp','udp')
     assert all(re.fullmatch('[0-9]{1,20}',x) and 0<int(x)<2**64 for x in (tcp_before,udp_before))
-    destination='2001:db8:8::8';expected='no-response'
+    destination='2606:4700:8::8';expected='no-response'
 silent=mode in ('sample','loss-sample')
 prefix=('PRODUCT_NATIVE_APPLY_DIAGNOSTIC' if mode=='apply' else
         'PRODUCT_NATIVE_LOSS_DIAGNOSTIC' if mode=='loss' else 'PRODUCT_NATIVE_READINESS_DIAGNOSTIC')
@@ -1142,7 +1142,7 @@ def mutate(verb):
             run('ip','link','set','scqanative0','alias','scqa-native-disjoint','up')
             run('ip','-4','addr','add','172.31.96.9/32','dev','scqanative0')
             run('nft','add','table','inet','scqa_native_foreign')
-        for family,destination in (('-4','198.18.60.0/24'),('-6','2001:db8:60::/64')):
+        for family,destination in (('-4','198.18.60.0/24'),('-6','2606:4700:60::/64')):
             run('ip',family,'rule',verb,'priority','30555','to',destination,'lookup','52525','protocol','186')
             run('ip',family,'route',verb,destination,'dev','lo','table','52525','protocol','186')
         if not add:
@@ -1216,13 +1216,13 @@ native_no_direct_leak() {
     # Read identity/counters only before traffic; route-get is deliberately
     # confined to failure reporting so it cannot prime the probe's route cache.
     native_loss_before=$(native_failure_observation loss-sample "$op") || native_loss_before=null
-    if ipv6_path tcp 2001:db8:8::8 none no-reply; then :; else
+    if ipv6_path tcp 2606:4700:8::8 none no-reply; then :; else
       native_probe_rc=$?
       native_failure_observation loss "$op" "$native_probe_fault" tcp "$native_loss_before" "$native_tcp6_before" "$native_udp6_before" >&2 ||
         echo 'PRODUCT_NATIVE_LOSS_DIAGNOSTIC observer unavailable=bounded-observer-failed' >&2
       return "$native_probe_rc"
     fi
-    if ipv6_path udp 2001:db8:8::8 none no-reply; then :; else
+    if ipv6_path udp 2606:4700:8::8 none no-reply; then :; else
       native_probe_rc=$?
       native_failure_observation loss "$op" "$native_probe_fault" udp "$native_loss_before" "$native_tcp6_before" "$native_udp6_before" >&2 ||
         echo 'PRODUCT_NATIVE_LOSS_DIAGNOSTIC observer unavailable=bounded-observer-failed' >&2
@@ -1376,10 +1376,10 @@ for prefix,interface,destination in (([], 'scqaedge0','fd73:1::2'),(['-n','scqap
     subprocess.run(['ip',*prefix,'-6','neigh','del',destination,'dev',interface],check=True)
     assert not rows(), 'fixture neighbor did not become cold'
 PYNATIVECOLD
-  ipv6_path tcp 2001:db8:5::11 fd73:1::1 reply
-  ipv6_path udp 2001:db8:5::11 fd73:1::1 reply
-  ipv6_path tcp 2001:db8:8::8 2001:db8:8::8 reply
-  ipv6_path udp 2001:db8:8::8 2001:db8:8::8 reply
+  ipv6_path tcp 2606:4700:5::11 fd73:1::1 reply
+  ipv6_path udp 2606:4700:5::11 fd73:1::1 reply
+  ipv6_path tcp 2606:4700:8::8 2606:4700:8::8 reply
+  ipv6_path udp 2606:4700:8::8 2606:4700:8::8 reply
   python3 - <<'PYNATIVERELEARN'
 import json,subprocess
 def query(args):return json.loads(subprocess.check_output(args))
@@ -1648,7 +1648,7 @@ PYNATIVEGUARDUNCERTAIN
   require_finalized
   test "$(saved_policy_hashes)" = "$saved_policy_before"
   expect_source 8.8.8.8 10.254.72.1
-  ipv6_path tcp 2001:db8:8::8 fd73:1::1 reply
+  ipv6_path tcp 2606:4700:8::8 fd73:1::1 reply
   echo PRODUCT_NATIVE_GUARD_LOSS_OPERATOR_ASSISTED_DIRECT=PASS
 }
 

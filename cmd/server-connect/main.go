@@ -197,6 +197,8 @@ func run(j bool, m *sc.Manager, args []string) int {
 		return output(j, report, err)
 	case "status":
 		return runStatus(j, m.Status)
+	case "smart-routing-rules":
+		return runSmartRoutingRules(j, m, args)
 	case "mode-overview":
 		if len(args) != 0 {
 			return output(j, nil, sc.Fault("invalid_arguments", "mode-overview accepts no command options"))
@@ -652,6 +654,18 @@ Usage:
 Commands:
   menu                       Interactive menu (no machine-output contract)
   mode-overview              Read-only Direct / Proxy Only / Smart Routing availability
+  smart-routing-rules list   Inspect saved-only operator Direct/VPN exceptions
+  smart-routing-rules add --cidr CIDR --via direct|vpn
+  smart-routing-rules add --domain NAME [--suffix] --via vpn
+  smart-routing-rules remove --cidr CIDR | --domain NAME [--suffix]
+  smart-routing-rules import --source ID --as-of YYYY-MM-DD --sha256 HEX --file FILE|-
+                             [--replaces-sha256 HEX] for explicit source replacement
+  smart-routing-rules remove-source --source ID --sha256 HEX
+  smart-routing-rules preview --tunnel-if NAME --underlay-if NAME --tunnel-ipv4 CIDR
+                              --domestic-cidr CIDR [--protected-cidr CIDR...]
+                              Compiles saved rules with selected native VLESS profile;
+                              no core execution, route inspection or activation
+                             Offline saved settings ONLY, no TUN activation
                               Local service state is not foreign VPN path proof;
                               Smart Routing remains disposable-guest-only
   import [--file FILE|-]      Import VLESS URI or sing-box outbound/config
@@ -691,8 +705,8 @@ Commands:
   smart-tun-trial-apply --tunnel-if sctunqa0 --underlay-if scqaedge0
                         --tunnel-ipv4 172.31.99.1/30 --management-peer 10.254.72.2
                         --domestic-cidr 5.22.0.10/32 --protected-cidr 10.254.72.0/30
-                        [--tunnel-ipv6 fd73:99::1/64 --domestic-ipv6-cidr 2001:db8:5::/64
-                         --ipv6-vpn-cidr 2001:db8:5::10/128 --ipv6-direct-cidr 2001:db8:8::9/128]
+                        [--tunnel-ipv6 fd73:99::1/64 --domestic-ipv6-cidr 2606:4700:5::/64
+                         --ipv6-vpn-cidr 2606:4700:5::10/128 --ipv6-direct-cidr 2606:4700:8::9/128]
                         [--deadline-seconds 600]
                               DISPOSABLE DOCKER GUEST ONLY: pending genuine sing-box
                               TUN with mandatory independent timeout recovery.
@@ -787,7 +801,7 @@ func menu(m *sc.Manager) int {
 	in := bufio.NewReader(os.Stdin)
 	for {
 		fmt.Println("\nServer Connect | Direct / Proxy Only / Smart Routing (experimental only)")
-		fmt.Println("  Modes      18 Mode Overview  1 Status  5 Connect (Proxy Only)  7 Disconnect")
+		fmt.Println("  Modes      18 Mode Overview  19 Routing Rules  1 Status  5 Connect (Proxy Only)  7 Disconnect")
 		fmt.Println("  Profiles   2 Profiles  3 Import  4 Select  8 Remove")
 		fmt.Println("  Network    6 Test  11 Path Diagnostics  12 Selective Plan  13 Underlay TCP  14 Underlay DNS")
 		fmt.Println("  Safety     10 Host Preflight  15 Host Drift  16 Activation Journal  17 Firewall Preflight")
@@ -805,6 +819,104 @@ func menu(m *sc.Manager) int {
 			run(false, m, []string{"status"})
 		case "18":
 			run(false, m, []string{"mode-overview"})
+		case "19":
+			fmt.Print("Routing Rules: 1 List  2 Add CIDR  3 Add VPN Domain  4 Import List  5 Remove CIDR  6 Remove Domain  7 Remove Source: ")
+			operation, err := in.ReadString('\n')
+			if err != nil {
+				return 0
+			}
+			switch strings.TrimSpace(operation) {
+			case "1":
+				run(false, m, []string{"smart-routing-rules", "list"})
+			case "2", "3", "5", "6":
+				fmt.Print("Canonical CIDR or domain value: ")
+				value, err := in.ReadString('\n')
+				if err != nil {
+					return 0
+				}
+				name := strings.TrimSpace(operation)
+				op := "add"
+				if name == "5" || name == "6" {
+					op = "remove"
+				}
+				command := []string{"smart-routing-rules", op}
+				if name == "2" || name == "5" {
+					command = append(command, "--cidr", strings.TrimSpace(value))
+				} else {
+					fmt.Print("Suffix match (y/N): ")
+					mode, err := in.ReadString('\n')
+					if err != nil {
+						return 0
+					}
+					command = append(command, "--domain", strings.TrimSpace(value))
+					if strings.EqualFold(strings.TrimSpace(mode), "y") {
+						command = append(command, "--suffix")
+					}
+				}
+				if op == "add" {
+					via := "vpn"
+					if name == "2" {
+						fmt.Print("Route via direct or vpn: ")
+						answer, err := in.ReadString('\n')
+						if err != nil {
+							return 0
+						}
+						via = strings.TrimSpace(answer)
+					}
+					command = append(command, "--via", via)
+				}
+				run(false, m, command)
+			case "4":
+				fmt.Print("Local list file path (use CLI for stdin): ")
+				file, err := in.ReadString('\n')
+				if err != nil {
+					return 0
+				}
+				if strings.TrimSpace(file) == "-" {
+					fmt.Println("Menu cannot import stdin; use server-connect smart-routing-rules import --file - instead")
+					continue
+				}
+				fmt.Print("Source label (lowercase a-z, 0-9, -, _): ")
+				source, err := in.ReadString('\n')
+				if err != nil {
+					return 0
+				}
+				fmt.Print("Source as-of date (YYYY-MM-DD): ")
+				date, err := in.ReadString('\n')
+				if err != nil {
+					return 0
+				}
+				fmt.Print("Independently supplied SHA-256 of raw list: ")
+				digest, err := in.ReadString('\n')
+				if err != nil {
+					return 0
+				}
+				fmt.Print("Expected prior source SHA-256 for replacement (blank for new): ")
+				prior, err := in.ReadString('\n')
+				if err != nil {
+					return 0
+				}
+				args := []string{"smart-routing-rules", "import", "--file", strings.TrimSpace(file),
+					"--source", strings.TrimSpace(source), "--as-of", strings.TrimSpace(date), "--sha256", strings.TrimSpace(digest)}
+				if previous := strings.TrimSpace(prior); previous != "" {
+					args = append(args, "--replaces-sha256", previous)
+				}
+				run(false, m, args)
+			case "7":
+				fmt.Print("Existing source label: ")
+				source, err := in.ReadString('\n')
+				if err != nil {
+					return 0
+				}
+				fmt.Print("Exact current source SHA-256: ")
+				digest, err := in.ReadString('\n')
+				if err != nil {
+					return 0
+				}
+				run(false, m, []string{"smart-routing-rules", "remove-source", "--source", strings.TrimSpace(source), "--sha256", strings.TrimSpace(digest)})
+			default:
+				fmt.Println("Unknown routing rule action; no changes made")
+			}
 		case "2":
 			run(false, m, []string{"profiles"})
 		case "3":
