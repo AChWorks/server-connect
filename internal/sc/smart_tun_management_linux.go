@@ -259,8 +259,29 @@ func managementOpenSSH(pid int) (bool, error) {
 		return false, managementFault("OpenSSH executable identity changed")
 	}
 	stat, ok := process.Sys().(*syscall.Stat_t)
-	if !ok || stat.Uid != 0 {
-		return false, managementFault("confirmation requires an authenticated root OpenSSH session")
+	if !ok {
+		return false, managementFault("OpenSSH process owner identity unavailable")
+	}
+	if stat.Uid != 0 {
+		// Cloud-init deliberately disables root SSH on the isolated VM. A
+		// fresh scqa (UID 1000) SSH command reached through sudo is acceptable
+		// ONLY when its session is an actual OpenSSH child of the trusted root
+		// sshd-session and both carry the same native transport ownership.
+		if stat.Uid != 1000 || smartTUNQAVMContext() != nil {
+			return false, managementFault("confirmation requires an authenticated root OpenSSH session")
+		}
+		users, err := os.ReadFile("/etc/passwd")
+		if err != nil || len(users) > 65536 || !strings.Contains("\n"+string(users), "\nscqa:x:1000:1000:") {
+			return false, managementFault("QEMU management account identity changed")
+		}
+		process, err := readManagementProcess(pid)
+		if err != nil || process.Parent <= 1 {
+			return false, managementFault("authenticated SSH child parent is unknown")
+		}
+		rootSession, err := managementOpenSSH(process.Parent)
+		if err != nil || !rootSession {
+			return false, managementFault("QEMU SSH child lacks a trusted root OpenSSH transport ancestor")
+		}
 	}
 	ours, e1 := os.Stat("/proc/self/ns/net")
 	theirs, e2 := os.Stat(base + "/ns/net")

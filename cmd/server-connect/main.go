@@ -708,15 +708,23 @@ Commands:
                         [--tunnel-ipv6 fd73:99::1/64 --domestic-ipv6-cidr 2606:4700:5::/64
                          --ipv6-vpn-cidr 2606:4700:5::10/128 --ipv6-direct-cidr 2606:4700:8::9/128]
                         [--deadline-seconds 600]
-                              DISPOSABLE DOCKER GUEST ONLY: pending genuine sing-box
-                              TUN with mandatory independent timeout recovery.
+                              Guarded genuine sing-box TUN: historical Docker fixture
+                              or exactly admitted non-Docker US01 Debian 13 QEMU VM.
+                              Never a general-host or production activation.
                               Unconfirmed by default; NOT production Apply
+  smart-tun-trial-apply --supervised --tunnel-if scqavm0 --underlay-if ens3
+                       --tunnel-ipv4 172.31.99.1/30 --management-peer 10.0.2.2
+                       --domestic-cidr 5.22.0.10/32 --protected-cidr 10.0.2.2/32
+                              US01 IPv4-only QEMU VM QA lane. Saved CIDR rules
+                              (up to eight, excluding the VPN health witness)
+                              are included atomically; no general-host Apply.
   smart-tun-trial-apply --saved [--deadline-seconds 600]
                               Revalidate saved trial settings; always a new guarded operation
   smart-tun-trial-apply --supervised [--saved] [--health-interval 15]
                        [--health-grace 30] [--health-failures 3]
                        [--health-attempts 3] [--health-recovery-seconds 120]
-                              Experimental confirmed lifecycle in the same fixture.
+                              Experimental confirmed lifecycle with independent
+                              runtime health and no-reboot product-owned rollback.
                               Intervals and total recovery are seconds; bounds apply.
   smart-tun-trial-confirm --operation-id HEX32 --revision N --challenge HEX
                               Confirm once from a genuinely NEW root SSH connection.
@@ -801,7 +809,8 @@ func menu(m *sc.Manager) int {
 	in := bufio.NewReader(os.Stdin)
 	for {
 		fmt.Println("\nServer Connect | Direct / Proxy Only / Smart Routing (experimental only)")
-		fmt.Println("  Modes      18 Mode Overview  19 Routing Rules  1 Status  5 Connect (Proxy Only)  7 Disconnect")
+		fmt.Println("  Modes      18 Mode Overview  19 Routing Rules  20 Guarded Smart TUN (QA VM)  1 Status")
+		fmt.Println("  Connections 5 Connect (Proxy Only)  7 Disconnect (Proxy Only)")
 		fmt.Println("  Profiles   2 Profiles  3 Import  4 Select  8 Remove")
 		fmt.Println("  Network    6 Test  11 Path Diagnostics  12 Selective Plan  13 Underlay TCP  14 Underlay DNS")
 		fmt.Println("  Safety     10 Host Preflight  15 Host Drift  16 Activation Journal  17 Firewall Preflight")
@@ -819,6 +828,74 @@ func menu(m *sc.Manager) int {
 			run(false, m, []string{"status"})
 		case "18":
 			run(false, m, []string{"mode-overview"})
+		case "20":
+			fmt.Println("Smart Routing is admitted ONLY on the exact isolated QEMU Debian 13 QA guest; never production.")
+			fmt.Print("1 Status  2 First guarded VM Connect  3 Reconnect saved  4 Safe Disconnect  5 Confirm from NEW SSH  6 Saved policy: ")
+			sub, err := in.ReadString('\n')
+			if err != nil {
+				return 0
+			}
+			switch strings.TrimSpace(sub) {
+			case "1":
+				run(false, m, []string{"smart-tun-trial-status"})
+			case "2":
+				fmt.Print("This starts independent rollback/health guards on the isolated QA VM. Type VM-CONNECT: ")
+				ack, err := in.ReadString('\n')
+				if err != nil || strings.TrimSpace(ack) != "VM-CONNECT" {
+					fmt.Println("Canceled; no host change")
+					continue
+				}
+				run(false, m, []string{"smart-tun-trial-apply", "--supervised", "--tunnel-if", "scqavm0", "--underlay-if", "ens3", "--tunnel-ipv4", "172.31.99.1/30", "--management-peer", "10.0.2.2", "--domestic-cidr", "5.22.0.10/32", "--protected-cidr", "10.0.2.2/32", "--deadline-seconds", "180"})
+				fmt.Println("For confirmation open a completely NEW SSH connection, then use option 20 > 5 within the shown deadline.")
+			case "3":
+				fmt.Print("Revalidate saved profile and rules, start an independently guarded VM trial? Type VM-RECONNECT: ")
+				ack, err := in.ReadString('\n')
+				if err != nil || strings.TrimSpace(ack) != "VM-RECONNECT" {
+					fmt.Println("Canceled; no host change")
+					continue
+				}
+				run(false, m, []string{"smart-tun-trial-apply", "--saved", "--supervised", "--deadline-seconds", "180"})
+				fmt.Println("Open a NEW SSH connection to confirm the one-time challenge.")
+			case "4":
+				r, err := m.InspectSmartTUNTrial()
+				if err != nil {
+					fmt.Fprintln(os.Stderr, "Error:", err)
+					continue
+				}
+				if r.Phase == "absent" {
+					fmt.Println("Already Off; no owned TUN resources")
+					continue
+				}
+				fmt.Printf("Disconnect exact operation %s revision %d? Type VM-DISCONNECT: ", r.OperationID, r.Revision)
+				ack, err := in.ReadString('\n')
+				if err != nil || strings.TrimSpace(ack) != "VM-DISCONNECT" {
+					fmt.Println("Canceled; no host change")
+					continue
+				}
+				run(false, m, []string{"smart-tun-trial-disconnect", "--operation-id", r.OperationID, "--revision", strconv.FormatUint(r.Revision, 10)})
+			case "5":
+				fmt.Println("Use a freshly authenticated SSH connection, not the existing Apply session or a multiplexed channel.")
+				fmt.Print("Operation ID: ")
+				op, err := in.ReadString('\n')
+				if err != nil {
+					return 0
+				}
+				fmt.Print("Revision: ")
+				revision, err := in.ReadString('\n')
+				if err != nil {
+					return 0
+				}
+				fmt.Print("Single-use challenge: ")
+				challenge, err := in.ReadString('\n')
+				if err != nil {
+					return 0
+				}
+				run(false, m, []string{"smart-tun-trial-confirm", "--operation-id", strings.TrimSpace(op), "--revision", strings.TrimSpace(revision), "--challenge", strings.TrimSpace(challenge)})
+			case "6":
+				run(false, m, []string{"smart-tun-trial-policy"})
+			default:
+				fmt.Println("Unknown Smart TUN choice; no change")
+			}
 		case "19":
 			fmt.Print("Routing Rules: 1 List  2 Add CIDR  3 Add VPN Domain  4 Import List  5 Remove CIDR  6 Remove Domain  7 Remove Source: ")
 			operation, err := in.ReadString('\n')

@@ -101,3 +101,39 @@ func TestSmartTUNQAVMHealthWireEvidence(t *testing.T) {
 		})
 	}
 }
+
+func TestSmartTUNQAVMRealOperatorRuleCompilation(t *testing.T) {
+	opts := qaVMPolicyFixture()
+	opts.Exceptions = nil
+	doc := smartRoutingRulesDocument{Version: 1, Revision: 2,
+		Manual:  []SmartRoutingRule{{Type: "cidr", Value: "1.1.1.1/32", Via: "direct"}},
+		Imports: []smartRoutingRuleSource{{Source: "operator-qa", AsOf: "2026-10-31", Rules: []SmartRoutingRule{{Type: "cidr", Value: "9.9.9.9/32", Via: "vpn"}}}},
+	}
+	effective, err := smartTUNVMApplySavedRules(opts, doc)
+	if err != nil || len(effective.Exceptions) != 2 ||
+		effective.Exceptions[0] != (SmartTUNCIDRException{CIDR: "1.1.1.1/32", Via: "direct"}) ||
+		effective.Exceptions[1] != (SmartTUNCIDRException{CIDR: "9.9.9.9/32", Via: "vpn"}) {
+		t.Fatalf("VM operator rules not included in exact policy: %+v, %v", effective.Exceptions, err)
+	}
+	profile := Profile{Outbound: []byte(`{"type":"vless","tag":"upstream","server":"10.0.2.2","server_port":19182,"uuid":"bcf4b2f0-71d1-4c2a-8122-17f137f8acb1"}`)}
+	if _, err = smartTUNNativeConfig(profile, effective); err != nil {
+		t.Fatalf("selected native Smart Routing config rejected valid registry rule set: %v", err)
+	}
+	for _, tc := range []struct {
+		name string
+		rule SmartRoutingRule
+	}{
+		{"no-witness-direct", SmartRoutingRule{Type: "cidr", Value: "1.0.0.1/32", Via: "direct"}},
+		{"no-witness-vpn-override", SmartRoutingRule{Type: "cidr", Value: "1.0.0.0/24", Via: "vpn"}},
+		{"no-unknown-domain-direct", SmartRoutingRule{Type: "domain", Value: "example.org", Via: "direct"}},
+		{"no-IPv6-without-TUN", SmartRoutingRule{Type: "cidr", Value: "2606:4700::1111/128", Via: "vpn"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			next := doc
+			next.Manual = []SmartRoutingRule{tc.rule}
+			if _, err := smartTUNVMApplySavedRules(opts, next); err == nil {
+				t.Fatal("unsupported VM operator rule admitted")
+			}
+		})
+	}
+}

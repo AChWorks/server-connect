@@ -754,10 +754,22 @@ func (m *Manager) beginSmartTUNTrial(opts SmartTUNCandidateOptions, managementPe
 		return SmartTUNTrialReceipt{}, err
 	}
 	var planned smartTUNTrialAdmission
+	var vmRulesDigest string
 	if err := m.withActivationJournalLock(syscall.Fsync, func(store *activationJournalDir) error {
 		var err error
 		if err := checkSavedSmartTUNPolicyLocked(store, saved); err != nil {
 			return err
+		}
+		if opts.TunnelInterface == smartTUNVMInterface {
+			if saved == nil && len(opts.Exceptions) != 0 {
+				return Fault("routing_rules_invalid", "VM Smart Routing exceptions must come from the saved operator rule registry")
+			}
+			var next SmartTUNCandidateOptions
+			next, vmRulesDigest, err = smartTUNVMReadSavedRulesLocked(store, opts)
+			if err != nil {
+				return err
+			}
+			opts = next
 		}
 		planned, err = m.admitSmartTUNTrialLocked(store, opts, managementPeer)
 		return err
@@ -820,6 +832,15 @@ func (m *Manager) beginSmartTUNTrial(opts SmartTUNCandidateOptions, managementPe
 	err := m.withActivationJournalLock(syscall.Fsync, func(store *activationJournalDir) error {
 		if err := checkSavedSmartTUNPolicyLocked(store, saved); err != nil {
 			return err
+		}
+		if vmRulesDigest != "" {
+			_, digest, err := smartTUNVMReadSavedRulesLocked(store, opts)
+			if err != nil {
+				return err
+			}
+			if digest != vmRulesDigest {
+				return Fault("routing_rules_conflict", "operator rules changed while prearming native Smart Routing")
+			}
 		}
 		admission, err := m.admitSmartTUNTrialLocked(store, opts, managementPeer)
 		if err != nil {
