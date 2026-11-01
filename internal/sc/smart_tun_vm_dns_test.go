@@ -6,6 +6,20 @@ import (
 	"testing"
 )
 
+func TestSmartTUNVMOwnedLinkDNSQACrashGate(t *testing.T) {
+	if !nativeTUNQAKillValid("after-native-dns-effect", true) ||
+		nativeTUNQAKillValid("after-native-dns-effect", false) {
+		t.Fatal("partial DNS fault injection has incorrect apply/recover scope")
+	}
+	// This must be rejected before even installed-path or privileged
+	// platform inspection; a QA crash flag cannot silently do nothing.
+	m := New(t.TempDir(), DefaultCore, DefaultPort)
+	_, err := m.BeginSmartTUNTrial(qaVMPolicyFixture(), smartTUNVMEndpoint, 180, "after-native-dns-effect")
+	if ErrorCode(err) != "invalid_arguments" {
+		t.Fatalf("missing DNS policy accepted privileged crash point: %v", err)
+	}
+}
+
 func TestSmartTUNVMOwnedLinkDNSPolicyFailClosed(t *testing.T) {
 	o := qaVMPolicyFixture()
 	o.Exceptions = nil

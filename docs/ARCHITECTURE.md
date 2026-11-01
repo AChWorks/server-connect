@@ -120,6 +120,16 @@ optional QA setting does **not** enable sing-box DNS hijack or constitute
 trusted DNS/IP correlation, geographic domain policy, full DNS health
 verification or general-host DNS support. Unsupported systemd-resolved/link
 identity or resolver states are refused before a new guarded operation.
+A bounded disposable-only `--qa-kill-at after-native-dns-effect` SIGKILL
+boundary tests recovery after the first DNS setter but before the routing
+`~.` domain is installed. An executor failure can make
+`guard_scheduled=false` and report `guard_unavailable` even while the
+systemd Timer remains armed; this field represents verified effective Guard
+readiness, not the Timer's raw `ActiveState`. After an exact guest-only
+foreign-resolver collision is resolved and all owned network resources are
+observed absent, use `smart-tun-trial-reconcile-idle-guard` to reset an
+independently proven idle failed recovery service. Never discard the journal
+or force-clean an unknown owner merely to get a green status.
 
 Native OUTPUT capture and a separate POSTROUTING containment chain classify
 the same protected paths. OUTPUT route hooks can change the packet's route

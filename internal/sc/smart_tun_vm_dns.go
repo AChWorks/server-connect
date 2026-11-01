@@ -158,7 +158,7 @@ func nativeTUNVMVerifyResolver(record smartTUNTrialJournal, active bool) error {
 	return nativeTUNConflict("owned-link DNS has unreceipted or foreign configuration")
 }
 
-func nativeTUNVMApplyResolver(store *activationJournalDir, record *smartTUNTrialJournal) error {
+func nativeTUNVMApplyResolver(store *activationJournalDir, record *smartTUNTrialJournal, qaKillPoint string) error {
 	if record.Native == nil || record.Native.DNSResolverIPv4 == "" {
 		return nil
 	}
@@ -175,6 +175,11 @@ func nativeTUNVMApplyResolver(store *activationJournalDir, record *smartTUNTrial
 	}
 	index := strconv.Itoa(record.Native.LinkIndex)
 	if _, err := nativeTUNVMResolverCommand(store, "dns", index, record.Native.DNSResolverIPv4); err != nil {
+		return err
+	}
+	// A true process SIGKILL between the two DNS setters exercises the
+	// durable effect_possible recovery path, not merely a mocked parser.
+	if err := trialQAKillAt("after-native-dns-effect", qaKillPoint); err != nil {
 		return err
 	}
 	if _, err := nativeTUNVMResolverCommand(store, "domain", index, "~."); err != nil {

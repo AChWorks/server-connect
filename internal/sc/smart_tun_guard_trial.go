@@ -761,6 +761,9 @@ func (m *Manager) beginSmartTUNTrial(opts SmartTUNCandidateOptions, managementPe
 	if qaKillPoint != "" && qaKillPoint != "after-journal" && qaKillPoint != "after-start" && !nativeTUNQAKillValid(qaKillPoint, true) && !(health != nil && qaKillPoint == "after-supervised-ready") {
 		return SmartTUNTrialReceipt{}, Fault("invalid_arguments", "unsupported disposable TUN SIGKILL boundary")
 	}
+	if qaKillPoint == "after-native-dns-effect" && opts.DNSResolverIPv4 == "" {
+		return SmartTUNTrialReceipt{}, Fault("invalid_arguments", "DNS fault injection requires opted-in VM DNS")
+	}
 	if m.Dir != DefaultDir || m.Core != DefaultCore ||
 		deadlineSeconds < 4 || deadlineSeconds > 600 {
 		return SmartTUNTrialReceipt{}, Fault("trial_unsupported", "installed paths and deadline 4-600s required")
@@ -986,7 +989,7 @@ func (m *Manager) beginSmartTUNTrial(opts SmartTUNCandidateOptions, managementPe
 			return err
 		}
 		if record.Native.DNSResolverIPv4 != "" {
-			if err := nativeTUNVMApplyResolver(store, &record); err != nil {
+			if err := nativeTUNVMApplyResolver(store, &record, qaKillPoint); err != nil {
 				return err
 			}
 		}

@@ -11,7 +11,7 @@ import (
 func nativeTUNQAKillValid(point string, apply bool) bool {
 	if apply {
 		switch point {
-		case "after-native-link-bind", "after-native-persist", "after-native-route-effect", "after-native-rule-effect", "after-native-nft-effect", "after-native-capture":
+		case "after-native-link-bind", "after-native-persist", "after-native-route-effect", "after-native-rule-effect", "after-native-nft-effect", "after-native-dns-effect", "after-native-capture":
 			return true
 		}
 	}
