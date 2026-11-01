@@ -430,10 +430,11 @@ disabled_transports() {
   mkdir -m 0700 "$disabled_control"
   # Trace every network call and the complete process creation/exec/wait/
   # termination boundary, excluding irrelevant Go scheduler signal calls.
-  # Go threads may exit with a pending futex; trace it explicitly so an
-  # unselected syscall cannot appear as the ambiguous ???( at process exit.
-  # Use ONE explicit selector: a second -e trace may override the first.
-  /usr/bin/strace -ff -q -yy -v -s 2048 -e trace=%network,clone,clone3,fork,vfork,execve,execveat,wait4,waitid,exit,exit_group,futex \
+  # At Go thread exit strace can emit ???( or ???() despite selection.
+  # -n pins its kernel syscall identity; the checker accepts only bounded
+  # harmless x86_64 terminal calls with a matching verified exit receipt.
+  # Trace futex explicitly too. A second -e trace may override the first.
+  /usr/bin/strace -ff -q -n -yy -v -s 2048 -e trace=%network,clone,clone3,fork,vfork,execve,execveat,wait4,waitid,exit,exit_group,futex \
     -o "$disabled_control/trace" /usr/bin/curl -q --fail --silent --show-error \
     --max-time 4 --noproxy '*' "$origin/dists/qa/Release" \
     >"$base/disabled-control.out" 2>"$base/disabled-control.err" ||
@@ -458,7 +459,7 @@ disabled_transports() {
     printf 'deb [trusted=yes] %s://127.0.0.1:19180/sc-qa-apt qa main\n' "$transport" >"$disabled_source"
     chmod 0644 "$disabled_source"
     disabled_rc=0
-    "$apt_timeout" --kill-after=5s 35s /usr/bin/strace -ff -q -yy -v -s 2048 \
+    "$apt_timeout" --kill-after=5s 35s /usr/bin/strace -ff -q -n -yy -v -s 2048 \
       -e trace=%network,clone,clone3,fork,vfork,execve,execveat,wait4,waitid,exit,exit_group,futex -o "$disabled_trace/trace" \
       /usr/bin/env -i HOME=/root PATH=/usr/sbin:/usr/bin:/sbin:/bin LC_ALL=C \
       "$manager" apt -- apt-get update \

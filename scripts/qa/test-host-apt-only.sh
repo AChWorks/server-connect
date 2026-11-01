@@ -23,7 +23,7 @@ source = Path(os.environ["SC_QA_APT_SOURCE"]).read_text()
 # execution, wait and termination. Do NOT use two -e trace selectors:
 # on strace the second can select ALL syscalls except tgkill.
 selector = "-e trace=%network,clone,clone3,fork,vfork,execve,execveat,wait4,waitid,exit,exit_group,futex"
-if source.count(selector) != 2 or "-e trace=!tgkill" in source:
+if source.count(selector) != 2 or source.count("strace -ff -q -n -yy -v -s 2048") != 2 or "-e trace=!tgkill" in source:
     raise SystemExit("Native APT trace must use the exact bounded syscall selector")
 edits = [
     ("manager=/usr/local/bin/server-connect", f"manager={scratch}/bin/manager"),
@@ -484,7 +484,7 @@ partial_futex = altered(13, 'exit_group(100) = ?\n',
 module.check_payloads(partial_futex)
 refused("unknown unfinished syscall stays rejected",
         altered(13, 'exit_group(100) = ?\n', '???( <unfinished ...>\n'),
-        "incomplete syscall at process exit (unknown)")
+        "opaque terminal syscall not verified")
 refused("futex-looking hidden network remains rejected",
         altered(13, 'exit_group(100) = ?\n',
                 'futex(AF_INET, FUTEX_WAIT_PRIVATE <unfinished ...>\n'),
@@ -501,6 +501,61 @@ refused("unfinished execve must stay rejected",
 refused("lost clone resumption", {**interrupted, 10: interrupted[10].replace('<... clone resumed>) = 11\n', '')})
 refused("mismatched resumption", {**interrupted, 10: interrupted[10].replace('<... clone resumed>', '<... fork resumed>')})
 refused("standalone resumption", altered(10, 'clone(child_stack=NULL, flags=SIGCHLD) = 11', '<... clone resumed>) = 11'))
+
+# Real strace -n can leave a Go thread with an opaque terminal event despite
+# tracing futex. Only x86_64 numbers for four harmless terminal waits/queries
+# may complete immediately before a verified same-number exit receipt.
+# Network, process creation, execution and all other numbers must fail closed.
+def numbered_trace(payload):
+    parts = []
+    for line in payload.splitlines():
+        if line.startswith("execve("):
+            number = 59
+        elif line.startswith("clone("):
+            number = 56
+        elif line.startswith("exit_group(") or line.startswith("+++ exited with"):
+            number = 231
+        else:
+            raise SystemExit("Unsupported synthetic numbered trace")
+        parts.append(f"[{number:4d}] {line}\n")
+    return "".join(parts)
+
+numbered_valid = {pid: numbered_trace(blob) for pid, blob in valid.items()}
+module.check_payloads(numbered_valid)
+original_end = '[ 231] exit_group(100) = ?\n[ 231] +++ exited with 100 +++\n'
+def numbered_tail(replacement):
+    payloads = dict(numbered_valid)
+    if original_end not in payloads[13]:
+        raise SystemExit("Numbered synthetic fixture drifted")
+    payloads[13] = payloads[13].replace(original_end, replacement, 1)
+    return payloads
+
+for number in (35, 39, 202, 281):
+    module.check_payloads(numbered_tail(
+        f'[{number:4d}] ???( <unfinished ...>\n'
+        f'[{number:4d}] +++ exited with 100 +++\n'))
+    module.check_payloads(numbered_tail(
+        f'[{number:4d}] ???()                         = ?\n'
+        f'[{number:4d}] +++ exited with 100 +++\n'))
+
+for number in (41, 42, 44, 56, 59, 231, 257, 425, 435):
+    refused("unsafe opaque terminal syscall " + str(number),
+            numbered_tail(f'[{number:4d}] ???( <unfinished ...>\n'
+                          f'[{number:4d}] +++ exited with 100 +++\n'),
+            "opaque terminal syscall not verified")
+refused("wrong opaque terminal receipt",
+        numbered_tail('[ 202] ???() = ?\n[ 231] +++ exited with 100 +++\n'),
+        "opaque terminal syscall receipt mismatch")
+refused("opaque event followed by another syscall",
+        numbered_tail('[ 202] ???() = ?\n[ 231] exit_group(100) = ?\n'
+                      '[ 231] +++ exited with 100 +++\n'),
+        "opaque syscall not immediately terminated")
+mixed = dict(numbered_valid)
+mixed[13] = mixed[13].replace('[  59] execve(', 'execve(', 1)
+refused("mixed syscall number evidence", mixed, "mixed syscall number presentation")
+refused("unnumbered opaque event",
+        altered(13, 'exit_group(100) = ?\n', '???( <unfinished ...>\n'),
+        "opaque terminal syscall not verified")
 
 trace_dir = Path(sys.argv[2]) / "trace-reader-fixture"
 trace_dir.mkdir(mode=0o700)
