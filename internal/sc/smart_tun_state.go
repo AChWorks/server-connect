@@ -172,7 +172,8 @@ var smartTUNSavedPolicyFields = map[string]bool{
 var smartTUNSavedOptionsFields = map[string]bool{
 	"tunnel_interface": true, "underlay_interface": true,
 	"tunnel_ipv4": true, "tunnel_ipv6": true,
-	"protected_cidrs": true, "protected_ipv6_cidrs": true,
+	"dns_resolver_ipv4": true,
+	"protected_cidrs":   true, "protected_ipv6_cidrs": true,
 	"domestic_cidrs": true, "domestic_ipv6_cidrs": true,
 	"exceptions": true, "ipv6_exceptions": true, "domain_exceptions": true,
 }
@@ -186,8 +187,32 @@ func decodeSavedSmartTUNPolicy(data []byte) (smartTUNSavedPolicy, error) {
 		return invalid()
 	}
 	var fields map[string]json.RawMessage
-	if json.Unmarshal(data, &fields) != nil || requireExactJournalKeys(fields["options"], smartTUNSavedOptionsFields) != nil {
+	if json.Unmarshal(data, &fields) != nil {
 		return invalid()
+	}
+	// The DNS field is opt-in and absent from all previously saved fixture
+	// records. Require an exact schema in both cases, without invalidating
+	// clean existing policies or accepting case-variant extra members.
+	var optionsRaw map[string]json.RawMessage
+	if json.Unmarshal(fields["options"], &optionsRaw) != nil {
+		return invalid()
+	}
+	keys := make(map[string]bool, len(smartTUNSavedOptionsFields))
+	for key, allowed := range smartTUNSavedOptionsFields {
+		if key != "dns_resolver_ipv4" {
+			keys[key] = allowed
+		}
+	}
+	if _, present := optionsRaw["dns_resolver_ipv4"]; present {
+		keys["dns_resolver_ipv4"] = true
+	}
+	if requireExactJournalKeys(fields["options"], keys) != nil {
+		return invalid()
+	}
+	if raw, present := optionsRaw["dns_resolver_ipv4"]; present {
+		if len(raw) < 2 || raw[0] != '"' {
+			return invalid()
+		}
 	}
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.DisallowUnknownFields()

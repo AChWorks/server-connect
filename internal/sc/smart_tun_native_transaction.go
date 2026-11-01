@@ -44,6 +44,9 @@ func nativeTUNAdmission(options SmartTUNCandidateOptions, host HostPreflight) (s
 	}
 	n := smartTUNNativeLedger{Version: 1, NamespaceDev: dev, NamespaceIno: ino, UnderlayIndex: underlay, LinkStage: "planned",
 		IPv4: nativeTUNPlannedFamily(options.TunnelIPv4, nativeTUNTable4), IPv6: nativeTUNPlannedFamily(options.TunnelIPv6, nativeTUNTable6), NFT: smartTUNNativeObject{Stage: "planned"}}
+	if options.DNSResolverIPv4 != "" {
+		n.DNSResolverIPv4, n.DNSStage = options.DNSResolverIPv4, "planned"
+	}
 	// The actual operation name is bound after the second admission. This
 	// placeholder authorizes only observations; exclusive nft creation is later.
 	record := smartTUNTrialJournal{OperationID: strings.Repeat("0", 32), TunnelInterface: options.TunnelInterface, UnderlayInterface: options.UnderlayInterface, Native: &n}
@@ -315,6 +318,14 @@ func nativeTUNVerifyPending(record smartTUNTrialJournal) error {
 	if !nativeTUNNFTReceiptCovers(record, nft, true) {
 		return nativeTUNConflict("native capture or independent guard graph changed")
 	}
+	if n.DNSResolverIPv4 != "" {
+		if n.DNSStage != "observed" || n.DNSSHA256 != nativeTUNVMResolverDigest(record) {
+			return nativeTUNUncertain("owned-link DNS was not durably observed")
+		}
+		if err := nativeTUNVMVerifyResolver(record, true); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -331,6 +342,11 @@ func nativeTUNCheckRecoveryGraph(record smartTUNTrialJournal) error {
 	}
 	if link.Present && record.Native.LinkStage == "removed" {
 		return nativeTUNConflict("native TUN reappeared after removal")
+	}
+	if link.Present && record.Native.DNSResolverIPv4 != "" {
+		if err := nativeTUNVMVerifyResolver(record, false); err != nil {
+			return err
+		}
 	}
 	remaining := cloneSmartTUNTrial(record)
 	if !link.Present {
@@ -480,6 +496,13 @@ func nativeTUNRemoveLink(store *activationJournalDir, record *smartTUNTrialJourn
 			return err
 		}
 		if link.Present {
+			// A foreign resolver mutation may have occurred after the prior
+			// recovery graph read. Never delete an altered link silently.
+			if record.Native.DNSResolverIPv4 != "" {
+				if err := nativeTUNVMVerifyResolver(*record, false); err != nil {
+					return err
+				}
+			}
 			if err := nativeTUNDeleteLink(link.Index); err != nil {
 				return err
 			}
@@ -497,6 +520,9 @@ func nativeTUNRemoveLink(store *activationJournalDir, record *smartTUNTrialJourn
 	}
 	next := cloneSmartTUNTrial(*record)
 	next.Native.LinkStage = "removed"
+	if next.Native.DNSResolverIPv4 != "" {
+		next.Native.DNSStage = "removed"
+	}
 	return nativeTUNAdvance(store, record, next)
 }
 
@@ -697,6 +723,9 @@ func recoverSmartTUNNativeLocked(store *activationJournalDir, record *smartTUNTr
 	}
 	next := cloneSmartTUNTrial(*record)
 	next.Native.LinkStage = "removed"
+	if next.Native.DNSResolverIPv4 != "" {
+		next.Native.DNSStage = "removed"
+	}
 	next.Native.NFT.Stage = "removed"
 	for _, family := range []int{4, 6} {
 		if nativeFamily(next.Native, family).Address != "" {

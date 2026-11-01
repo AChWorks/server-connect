@@ -323,6 +323,7 @@ func run(j bool, m *sc.Manager, args []string) int {
 		tunnel := opts.String("tunnel-if", "", "disposable TUN name")
 		underlay := opts.String("underlay-if", "", "disposable peer underlay")
 		tunnelIPv4 := opts.String("tunnel-ipv4", "", "private guest TUN CIDR")
+		vmDNSResolver := opts.String("vm-dns-resolver", "", "explicit supervised QEMU-only DNS resolver IP on the owned TUN link")
 		tunnelIPv6 := opts.String("tunnel-ipv6", "", "optional synthetic private IPv6 TUN CIDR")
 		ipv6VPN := opts.String("ipv6-vpn-cidr", "", "synthetic IPv6 VPN exception")
 		ipv6Direct := opts.String("ipv6-direct-cidr", "", "synthetic IPv6 Direct exception")
@@ -384,7 +385,8 @@ func run(j bool, m *sc.Manager, args []string) int {
 		candidate := sc.SmartTUNCandidateOptions{
 			TunnelInterface: *tunnel, UnderlayInterface: *underlay,
 			TunnelIPv4: *tunnelIPv4, TunnelIPv6: *tunnelIPv6,
-			DomesticCIDRs: domestic, ProtectedCIDRs: protected,
+			DNSResolverIPv4: *vmDNSResolver,
+			DomesticCIDRs:   domestic, ProtectedCIDRs: protected,
 			DomesticIPv6CIDRs: domesticIPv6, IPv6Exceptions: ipv6Exceptions,
 		}
 		if *supervised {
@@ -725,6 +727,10 @@ Commands:
                               US01 IPv4-only QEMU VM QA lane. Saved CIDR rules
                               (up to eight, excluding the VPN health witness)
                               are included atomically; no general-host Apply.
+                       [--vm-dns-resolver 1.1.1.1]
+                              Optional supervised VM-only public IPv4 resolver
+                              on the product-owned TUN link. Refused elsewhere;
+                              DNS is NOT verified by the current VM Health witness.
   smart-tun-trial-apply --saved [--deadline-seconds 600]
                               Revalidate saved trial settings; always a new guarded operation
   smart-tun-trial-apply --supervised [--saved] [--health-interval 15]

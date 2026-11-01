@@ -108,6 +108,19 @@ Core socket marks are injected into the narrowly supported native profile so
 the outer VPN and core Direct outbounds use the underlay without recursion.
 The existing Proxy Only profile-import behavior is unchanged.
 
+**Experimental DNS ownership (exact supervised Debian13 QEMU guest only):** an
+explicit public IPv4 resolver may be attached as a route-only `~.` domain to
+the *product-owned* TUN link through `resolvectl`, with a durable effect intent
+before mutation, exact link-index/readback receipts and the same pinned journal
+lock as native network mutators. The existing `ens3`/global resolver is never
+modified. The independent Guard must verify the receipted link setting during
+pending supervision and refuse a foreign/resolver mismatch during cleanup;
+removing the precisely owned TUN also removes its link-scoped DNS state. This
+optional QA setting does **not** enable sing-box DNS hijack or constitute
+trusted DNS/IP correlation, geographic domain policy, full DNS health
+verification or general-host DNS support. Unsupported systemd-resolved/link
+identity or resolver states are refused before a new guarded operation.
+
 Native OUTPUT capture and a separate POSTROUTING containment chain classify
 the same protected paths. OUTPUT route hooks can change the packet's route
 while later OUTPUT hooks still observe the initial output interface. The guard

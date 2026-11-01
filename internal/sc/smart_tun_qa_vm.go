@@ -36,6 +36,23 @@ func smartTUNVMPolicySupported(o SmartTUNCandidateOptions) bool {
 		len(o.Exceptions) > 8 {
 		return false
 	}
+	// A VPN DNS server is an explicit VM-only policy: never let it be
+	// loopback/private/underlay, the protected HTTPS witness, a domestic
+	// Direct target, or an operator-selected Direct exception.
+	if o.DNSResolverIPv4 != "" {
+		resolver, err := netip.ParseAddr(o.DNSResolverIPv4)
+		if err != nil || !resolver.Is4() || !resolver.IsGlobalUnicast() || resolver.IsPrivate() ||
+			resolver.IsLoopback() || resolver.IsLinkLocalUnicast() ||
+			resolver.String() == "1.0.0.1" || resolver.String() == "5.22.0.10" {
+			return false
+		}
+		for _, r := range o.Exceptions {
+			prefix, err := canonicalRoutePrefix(r.CIDR)
+			if err != nil || (r.Via == "direct" && prefix.Contains(resolver)) {
+				return false
+			}
+		}
+	}
 	// User-selected explicit IPv4 exceptions are supported inside the compiler's
 	// bounded, disjoint public-CIDR policy; no unstated domain authority is added.
 	for _, r := range o.Exceptions {

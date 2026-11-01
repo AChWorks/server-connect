@@ -17,6 +17,9 @@ type SmartTUNCandidateOptions struct {
 	TunnelInterface   string `json:"tunnel_interface"`
 	UnderlayInterface string `json:"underlay_interface"`
 	TunnelIPv4        string `json:"tunnel_ipv4"`
+	// Only an explicitly opt-in supervised QEMU trial may attach DNS to
+	// its manager-owned TUN link. This is not a general-host DNS setting.
+	DNSResolverIPv4 string `json:"dns_resolver_ipv4,omitempty"`
 	// Optional, explicitly selected dual-stack development candidate.
 	// This does not authorize privileged routing or production activation.
 	TunnelIPv6         string                    `json:"tunnel_ipv6"`
@@ -211,6 +214,9 @@ func smartTUNIPv6Policy(o SmartTUNCandidateOptions) ([]string, []any, error) {
 // resource ownership, guards and verified rollback remain unimplemented and
 // must block production activation.
 func SmartTUNCandidateConfig(profile Profile, o SmartTUNCandidateOptions) ([]byte, error) {
+	if o.DNSResolverIPv4 != "" && !smartTUNVMPolicySupported(o) {
+		return nil, errors.New("owned-link DNS is restricted to the explicit QEMU-only policy")
+	}
 	if !smartTUNDeviceName.MatchString(o.TunnelInterface) ||
 		!smartTUNDeviceName.MatchString(o.UnderlayInterface) ||
 		o.TunnelInterface == o.UnderlayInterface ||
