@@ -104,6 +104,27 @@ func TestSmartTUNVMIngressAddressAndRouteArePinned(t *testing.T) {
 	if !smartTUNVMIngressRouteValid(testVMIngressRows(t, route)) {
 		t.Fatal("exact connected-route proof refused")
 	}
+	// Real Debian 13 iproute2: an explicit "show dev scqavh0" filters the
+	// kernel rows but omits their "dev" JSON property. Only a full main
+	// table observation can bind the route to this independently owned link.
+	if smartTUNVMIngressRouteValid(testVMIngressRows(t, strings.Replace(route, `"dev":"scqavh0",`, "", 1))) {
+		t.Fatal("device-filtered route without identity passed")
+	}
+	mainRoutes := `[{"dst":"default","gateway":"10.0.2.2","dev":"ens3","protocol":"dhcp","prefsrc":"10.0.2.15","metric":100,"flags":[]},` +
+		strings.TrimPrefix(route, "[")
+	if !smartTUNVMIngressRouteValid(testVMIngressRows(t, mainRoutes)) {
+		t.Fatal("full Debian 13 main table rejected exact fixture")
+	}
+	for _, invalid := range []string{
+		strings.TrimSuffix(mainRoutes, "]") + `,{"dst":"198.51.100.2/32","dev":"scqavh0","protocol":"static"}]`,
+		strings.Replace(mainRoutes, `"dev":"scqavh0"`, `"dev":"ens3"`, 1),
+		strings.TrimSuffix(mainRoutes, "]") + `,{"dst":"198.51.100.0/30","dev":"other0","protocol":"static"}]`,
+		strings.TrimSuffix(mainRoutes, "]") + `,{"dst":"8.8.8.0/24","dev":"ens3","prefsrc":"198.51.100.1"}]`,
+	} {
+		if smartTUNVMIngressRouteValid(testVMIngressRows(t, invalid)) {
+			t.Fatal("extra, displaced or foreign-owned fixture route admitted")
+		}
+	}
 	for _, tc := range []struct{ name, old, next string }{
 		{"wrong-link", `"scqavh0"`, `"eth1"`},
 		{"wrong-IP", `"198.51.100.1"`, `"198.51.100.2"`},

@@ -103,7 +103,10 @@ func smartTUNVMIngressFixture() error {
 	if err != nil || !smartTUNVMIngressAddressValid(ipv6, true) {
 		return denied()
 	}
-	routeRaw, err := nativeIPJSON("-j", "-4", "route", "show", "dev", smartTUNVMIngress)
+	// iproute2 omits "dev" from JSON when filtering by "dev". Inspect
+	// the complete main table instead: every allowed fixture route must
+	// carry an observable device identity in the kernel result.
+	routeRaw, err := nativeIPJSON("-j", "-4", "route", "show", "table", "main")
 	if err != nil {
 		return denied()
 	}
@@ -135,27 +138,41 @@ func smartTUNVMIngressLinkValid(link map[string]json.RawMessage) bool {
 }
 
 func smartTUNVMIngressRouteValid(routes []map[string]json.RawMessage) bool {
-	if len(routes) != 1 {
-		return false
-	}
-	row := routes[0]
-	for key, value := range row {
-		switch key {
-		case "dst", "dev", "protocol", "scope", "prefsrc":
-		case "flags":
-			var flags []string
-			if json.Unmarshal(value, &flags) != nil || len(flags) != 0 {
+	matched := 0
+	for _, row := range routes {
+		if selectiveText(row["dev"]) != smartTUNVMIngress {
+			// Reject another owner of the fixed QA subnet/source; unrelated
+			// original underlay/main-table routes are not our resources.
+			if selectiveText(row["dst"]) == "198.51.100.0/30" ||
+				selectiveText(row["prefsrc"]) == smartTUNVMIngressIP {
 				return false
 			}
-		default:
+			continue
+		}
+		matched++
+		if matched != 1 {
+			return false
+		}
+		for key, value := range row {
+			switch key {
+			case "dst", "dev", "protocol", "scope", "prefsrc":
+			case "flags":
+				var flags []string
+				if json.Unmarshal(value, &flags) != nil || len(flags) != 0 {
+					return false
+				}
+			default:
+				return false
+			}
+		}
+		if selectiveText(row["dst"]) != "198.51.100.0/30" ||
+			selectiveText(row["protocol"]) != "kernel" ||
+			selectiveText(row["scope"]) != "link" ||
+			selectiveText(row["prefsrc"]) != smartTUNVMIngressIP {
 			return false
 		}
 	}
-	return selectiveText(row["dst"]) == "198.51.100.0/30" &&
-		selectiveText(row["dev"]) == smartTUNVMIngress &&
-		selectiveText(row["protocol"]) == "kernel" &&
-		selectiveText(row["scope"]) == "link" &&
-		selectiveText(row["prefsrc"]) == smartTUNVMIngressIP
+	return matched == 1
 }
 
 func linkFlagsContain(flags []string, wanted ...string) bool {
