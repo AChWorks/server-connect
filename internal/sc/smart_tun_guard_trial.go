@@ -294,9 +294,10 @@ func inspectSmartTUNBaseline(endpoint, peer string) (string, error) {
 	return smartTUNTrialSnapshot(host)
 }
 
-// Enforce an actual disconnected, two-interface, root/systemd disposable
-// guest and a native endpoint route via the *declared* underlay. The Docker
-// marker alone would not distinguish a customer system from a QA fixture.
+// The Docker fixture remains restricted to lo + its sole VETH underlay.
+// The exact non-Docker VM additionally accepts one independently validated,
+// preexisting test-only hosted-ingress VETH, never an arbitrary third device.
+// No general host or multi-interface routing authority is granted.
 func smartTUNTrialGuest(underlay, tunnel, endpoint string) error {
 	if err := smartTUNNativeHostContext(); err != nil {
 		return err
@@ -306,19 +307,13 @@ func smartTUNTrialGuest(underlay, tunnel, endpoint string) error {
 		return Fault("trial_unsupported", "disposable link inventory unavailable")
 	}
 	rows, err := selectiveRows(raw)
-	if err != nil || len(rows) != 2 {
-		return Fault("trial_unsupported", "TUN trial requires an isolated lo + one VETH guest")
+	if err != nil || !smartTUNTrialLinkInventoryAllowed(rows, underlay, tunnel) {
+		return Fault("trial_unsupported", "unrecognized disposable guest network interfaces")
 	}
-	seen := map[string]bool{}
-	for _, row := range rows {
-		name := selectiveText(row["ifname"])
-		if name == "" || seen[name] || (name != "lo" && name != underlay) {
-			return Fault("trial_unsupported", "guest has foreign or ambiguous links")
+	if len(rows) == 3 {
+		if err := smartTUNVMIngressFixture(); err != nil {
+			return err
 		}
-		seen[name] = true
-	}
-	if !seen["lo"] || !seen[underlay] || seen[tunnel] {
-		return Fault("trial_unsupported", "unowned or missing disposable interfaces")
 	}
 	lookup, err := lookupHostRoute(netip.MustParseAddr(endpoint))
 	if err != nil || lookup == nil {
