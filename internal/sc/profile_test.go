@@ -212,3 +212,88 @@ func TestSharedLifecycleFlockSerializesIndependentOperations(t *testing.T) {
 		t.Fatal("lock not released to waiting operation")
 	}
 }
+
+// Xray subscription links commonly include inert headerType metadata even
+// when the real transport is plain TCP, WS or HTTPUpgrade. Preserve effective
+// wire behavior, including TLS/SNI and Host/path, but reject HTTP-header
+// camouflage rather than silently downgrading it to ordinary TCP.
+func TestVLESSShareURITransportCompatibility(t *testing.T) {
+	base := "vless://" + testUUID + "@edge.example.org:443?security=tls&sni=expected.example.org"
+	tests := []struct {
+		name, query, wantTransport, wantPath, wantHost string
+		valid                                          bool
+	}{
+		{"ws inert empty header", "&type=ws&headerType=&path=%2Fws%3Ftoken%3Dsample&host=front.example.org", "ws", "/ws?token=sample", "front.example.org", true},
+		{"ws explicit none", "&type=ws&headerType=none&path=%2Fws", "ws", "/ws", "", true},
+		{"tcp explicit none and Xray unused path", "&type=tcp&headerType=none&path=%2Funused&host=", "", "", "", true},
+		{"tcp inert empty fields", "&type=tcp&headerType=&path=&host=", "", "", "", true},
+		{"httpupgrade inert metadata", "&type=httpupgrade&headerType=&host=front.example.org&path=%2Fup%3Ftest%3D1", "httpupgrade", "/up?test=1", "front.example.org", true},
+		{"httpupgrade omitted fields", "&type=httpupgrade&headerType=none", "httpupgrade", "/", "", true},
+		{"tcp meaningful http header", "&type=tcp&headerType=http", "", "", "", false},
+		{"tcp meaningful host field", "&type=tcp&headerType=none&host=unexpected.example.org", "", "", "", false},
+		{"tcp meaningful path without explicit no-header", "&type=tcp&headerType=&path=%2Funexpected", "", "", "", false},
+		{"unknown headerType", "&type=ws&headerType=unknown", "", "", "", false},
+		{"repeated headerType", "&type=ws&headerType=&headerType=none", "", "", "", false},
+		{"xhttp needs independent support", "&type=xhttp&headerType=&mode=auto", "", "", "", false},
+		{"HTTPUpgrade flow unsupported", "&type=httpupgrade&headerType=&flow=xtls-rprx-vision", "", "", "", false},
+		{"unknown security override", "&type=ws&headerType=&allowInsecure=1", "", "", "", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p, err := ValidateSource([]byte(base+tt.query), "")
+			if tt.valid != (err == nil) {
+				t.Fatalf("wrong URI acceptance: %v", err)
+			}
+			if err != nil {
+				if strings.Contains(err.Error(), testUUID) || strings.Contains(err.Error(), "expected.example.org") {
+					t.Fatalf("private URI data in error: %v", err)
+				}
+				return
+			}
+			var outbound struct {
+				Type      string `json:"type"`
+				Server    string `json:"server"`
+				UUID      string `json:"uuid"`
+				Transport *struct {
+					Type    string            `json:"type"`
+					Path    string            `json:"path"`
+					Host    string            `json:"host"`
+					Headers map[string]string `json:"headers"`
+				} `json:"transport"`
+				TLS struct {
+					Enabled    bool   `json:"enabled"`
+					ServerName string `json:"server_name"`
+				} `json:"tls"`
+			}
+			if err := json.Unmarshal(p.Outbound, &outbound); err != nil {
+				t.Fatal(err)
+			}
+			if outbound.Type != "vless" || outbound.UUID != testUUID || outbound.Server != "edge.example.org" ||
+				!outbound.TLS.Enabled || outbound.TLS.ServerName != "expected.example.org" {
+				t.Fatal("URI identity or TLS/remote semantics changed")
+			}
+			if tt.wantTransport == "" {
+				if outbound.Transport != nil {
+					t.Fatal("Xray-only transport metadata created a native TCP transport")
+				}
+				return
+			}
+			if outbound.Transport == nil || outbound.Transport.Type != tt.wantTransport ||
+				outbound.Transport.Path != tt.wantPath {
+				t.Fatalf("wrong transport type/path %+v", outbound.Transport)
+			}
+			host := outbound.Transport.Host
+			if tt.wantTransport == "ws" {
+				host = outbound.Transport.Headers["Host"]
+				if outbound.Transport.Host != "" {
+					t.Fatal("WebSocket Host must be an HTTP header")
+				}
+			} else if len(outbound.Transport.Headers) != 0 {
+				t.Fatal("HTTPUpgrade Host must use the native host field")
+			}
+			if host != tt.wantHost {
+				t.Fatal("HTTP transport Host semantics changed")
+			}
+		})
+	}
+}

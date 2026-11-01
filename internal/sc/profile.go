@@ -131,7 +131,7 @@ func parseVLESS(raw string) (json.RawMessage, string, error) {
 	allowed := map[string]bool{
 		"type": true, "security": true, "encryption": true, "flow": true,
 		"sni": true, "fp": true, "alpn": true, "pbk": true, "sid": true,
-		"path": true, "host": true,
+		"path": true, "host": true, "headerType": true,
 	}
 	for name, values := range q {
 		if !allowed[name] || len(values) != 1 {
@@ -142,8 +142,14 @@ func parseVLESS(raw string) (json.RawMessage, string, error) {
 	if typ == "" {
 		typ = "tcp"
 	}
-	if typ != "tcp" && typ != "ws" {
+	if typ != "tcp" && typ != "ws" && typ != "httpupgrade" {
 		return nil, "", Fault("unsupported_profile", "unsupported VLESS transport")
+	}
+	// Xray share links often include headerType even on transports where
+	// it is inert. Never interpret TCP HTTP-header camouflage as plain TCP:
+	// sing-box's HTTPUpgrade is a different wire protocol.
+	if header := q.Get("headerType"); header != "" && header != "none" {
+		return nil, "", Fault("unsupported_profile", "unsupported VLESS TCP header camouflage")
 	}
 	security := q.Get("security")
 	if security == "" {
@@ -152,8 +158,13 @@ func parseVLESS(raw string) (json.RawMessage, string, error) {
 	if security != "none" && security != "tls" && security != "reality" {
 		return nil, "", Fault("unsupported_profile", "unsupported VLESS security")
 	}
-	if typ != "ws" && (q.Has("path") || q.Has("host")) {
-		return nil, "", Fault("unsupported_profile", "WebSocket-specific options require WebSocket transport")
+	if typ == "tcp" {
+		// Xray's path does not apply to TCP with explicitly disabled header
+		// camouflage. Keep accepting old empty metadata; refuse meaningful
+		// transport fields unless the source explicitly declares plain TCP.
+		if q.Get("host") != "" || (q.Get("path") != "" && q.Get("headerType") != "none") {
+			return nil, "", Fault("unsupported_profile", "HTTP transport fields require WebSocket or HTTPUpgrade")
+		}
 	}
 	if security == "none" && (q.Has("sni") || q.Has("fp") || q.Has("alpn") || q.Has("pbk") || q.Has("sid")) {
 		return nil, "", Fault("unsupported_profile", "TLS-specific options require TLS or Reality")
@@ -167,8 +178,8 @@ func parseVLESS(raw string) (json.RawMessage, string, error) {
 	if q.Get("flow") != "" && q.Get("flow") != "xtls-rprx-vision" {
 		return nil, "", errors.New("unsupported VLESS flow")
 	}
-	if typ == "ws" && q.Get("flow") != "" {
-		return nil, "", errors.New("VLESS websocket with vision flow is unsupported")
+	if typ != "tcp" && q.Get("flow") != "" {
+		return nil, "", errors.New("VLESS HTTP transport with vision flow is unsupported")
 	}
 	if security == "none" && q.Get("flow") != "" {
 		return nil, "", errors.New("vision flow requires TLS")
@@ -177,15 +188,19 @@ func parseVLESS(raw string) (json.RawMessage, string, error) {
 	if q.Get("flow") != "" {
 		ob["flow"] = q.Get("flow")
 	}
-	if typ == "ws" {
-		ws := map[string]any{"type": "ws", "path": "/"}
+	if typ == "ws" || typ == "httpupgrade" {
+		transport := map[string]any{"type": typ, "path": "/"}
 		if q.Get("path") != "" {
-			ws["path"] = q.Get("path")
+			transport["path"] = q.Get("path")
 		}
 		if q.Get("host") != "" {
-			ws["headers"] = map[string]string{"Host": q.Get("host")}
+			if typ == "ws" {
+				transport["headers"] = map[string]string{"Host": q.Get("host")}
+			} else {
+				transport["host"] = q.Get("host")
+			}
 		}
-		ob["transport"] = ws
+		ob["transport"] = transport
 	}
 	if security != "none" {
 		sni := q.Get("sni")

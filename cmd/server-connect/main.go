@@ -674,7 +674,8 @@ Commands:
                              Offline saved settings ONLY, no TUN activation
                               Local service state is not foreign VPN path proof;
                               Smart Routing remains disposable-guest-only
-  import [--file FILE|-]      Import VLESS URI or sing-box outbound/config
+  import [--file FILE|-]      Import one VLESS TCP/WS/HTTPUpgrade URI or
+                             supported sing-box outbound/config (private file/stdin)
   validate [--file FILE|-]    Validate against pinned sing-box without saving
   profiles                   List saved profiles (no credentials)
   select ID                  Select a saved profile (disconnect first)
