@@ -24,6 +24,22 @@ The planned distribution offers **official online**, **operator-hosted HTTPS mir
 
 The existing source includes a Go CLI, secure profile storage, real pinned sing-box **Proxy Only** development tests, a shared offline installer and a developer online bootstrap. **General-host Smart Routing, the production Runtime Health Guard, real foreign-path acceptance and Cloudflare Tunnel integration remain unavailable.** The disposable native trial includes an independent expiry/recovery executor; its explicit supervised mode adds fresh SSH confirmation, selected-path TCP/UDP/DNS and authenticated fixture HTTPS health checks, and bounded recovery inside the same isolated fixture. Target-specific Debian 12/amd64 and Debian 13/amd64 QA bundles support the Direct/Proxy Only installation lifecycle. New native trials additionally require Debian 13 and the existing isolated fixture; installing on Debian 12 does not admit TUN. See [the distribution contract](docs/OFFLINE-DISTRIBUTION.md) for these development targets and their limits; they are not a public support promise.
 
+**Profile URL compatibility (development candidate):** one `vless://` link can
+be imported with `server-connect --json import --file /private/link.txt`
+or on stdin (never put bearer links in the command line or shared logs).
+The URI parser supports plain TCP, WebSocket and HTTPUpgrade with their
+appropriate native sing-box 1.14.3 transport mapping; inert Xray
+`headerType=none` / empty metadata is accepted. TCP HTTP-header
+camouflage (`headerType=http`), XHTTP, malformed or repeated query
+options, Xray `path?ed=...` Early Data on WebSocket/HTTPUpgrade, unsupported
+REALITY-over-HTTP transports, and insecure TLS overrides are **refused**
+without silently changing wire semantics. Full subscription
+URL downloading, bulk URI import and automatic refresh are not currently
+implemented; supported Trojan/VMess profiles require explicit native
+sing-box JSON inputs. Saved profiles are secrets and require private
+operator-controlled state. This URL compatibility is separate from general-host
+TUN admission and does not make the project production-ready.
+
 For operator inspection, `server-connect --json mode-overview` (or menu option **18 Mode Overview**) reports the **desired** mode, the observed Proxy Only service state and whether the experimental Smart Routing trial blocks an ordinary Direct claim. It exposes three mode choices but explicitly marks general-host Smart Routing as **unavailable**: neither an inactive Proxy Only service nor an experimental journal proves baseline Direct routes, selected VPN egress or safe production TUN. `not_run` is retained for real path evidence until measured separately; a guard/service error remains a nonzero, structured failure. This diagnostic may initialize private manager state/locks, as the existing `status` command does, but never changes host routing.
 
 ### Saved Smart Routing rules (not activated)

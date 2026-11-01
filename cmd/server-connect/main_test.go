@@ -65,6 +65,45 @@ func TestUntrustedUnitFlagRefusedWithoutServiceOperation(t *testing.T) {
 	}
 }
 
+// JSON import and validate must not turn a malformed TLS share link into a
+// successful profile, nor echo any bearer-link content in their envelopes.
+func TestMalformedVLESSCLIJSONSanitization(t *testing.T) {
+	source := "vless://c2902f3a-1c25-41ef-a8dc-760b483aa247@secret-edge.invalid:443?security=tls%ZZ&type=ws#private-label"
+	path := filepath.Join(t.TempDir(), "private-profile.txt")
+	if err := os.WriteFile(path, []byte(source), 0600); err != nil {
+		t.Fatal(err)
+	}
+	manager := sc.New(filepath.Join(t.TempDir(), "state"), "/no-core-required-for-invalid-input", sc.DefaultPort)
+	for _, action := range []string{"validate", "import"} {
+		t.Run(action, func(t *testing.T) {
+			rd, wr, err := os.Pipe()
+			if err != nil {
+				t.Fatal(err)
+			}
+			old := os.Stdout
+			os.Stdout = wr
+			code := run(true, manager, []string{action, "--file", path})
+			_ = wr.Close()
+			os.Stdout = old
+			defer rd.Close()
+			raw, err := io.ReadAll(rd)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var reply envelope
+			if code == 0 || json.Unmarshal(raw, &reply) != nil || reply.OK ||
+				reply.Error == nil || reply.Error.Code != "unsupported_profile" {
+				t.Fatal("malformed link produced success or an incorrect error code")
+			}
+			for _, secret := range []string{"c2902f3a", "secret-edge.invalid", "private-label", "tls%ZZ", path} {
+				if bytes.Contains(raw, []byte(secret)) {
+					t.Fatal("credential-bearing input leaked into JSON output")
+				}
+			}
+		})
+	}
+}
+
 func TestInputSourceNeverEchoesCredentialURIOrFilename(t *testing.T) {
 	sensitive := "vless://c2902f3a-1c25-41ef-a8dc-760b483aa247@server.invalid:443?type=ws"
 	_, err := readInput(sensitive)

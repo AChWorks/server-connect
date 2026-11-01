@@ -127,11 +127,25 @@ func parseVLESS(raw string) (json.RawMessage, string, error) {
 	if net.ParseIP(host) == nil && len(host) > 253 {
 		return nil, "", errors.New("endpoint hostname too long")
 	}
-	q := u.Query()
+	// URL.Query discards malformed pairs without an error. A dropped TLS or
+	// transport option could silently change the wire security of a link.
+	// ParseQuery also tolerates empty components and bare keys; treat those as
+	// ambiguous instead of silently applying TCP or security defaults.
+	if u.RawQuery != "" {
+		for _, pair := range strings.Split(u.RawQuery, "&") {
+			if pair == "" || !strings.Contains(pair, "=") {
+				return nil, "", Fault("unsupported_profile", "malformed VLESS query")
+			}
+		}
+	}
+	q, err := url.ParseQuery(u.RawQuery)
+	if err != nil {
+		return nil, "", Fault("unsupported_profile", "malformed VLESS query")
+	}
 	allowed := map[string]bool{
 		"type": true, "security": true, "encryption": true, "flow": true,
 		"sni": true, "fp": true, "alpn": true, "pbk": true, "sid": true,
-		"path": true, "host": true,
+		"path": true, "host": true, "headerType": true,
 	}
 	for name, values := range q {
 		if !allowed[name] || len(values) != 1 {
@@ -142,8 +156,14 @@ func parseVLESS(raw string) (json.RawMessage, string, error) {
 	if typ == "" {
 		typ = "tcp"
 	}
-	if typ != "tcp" && typ != "ws" {
+	if typ != "tcp" && typ != "ws" && typ != "httpupgrade" {
 		return nil, "", Fault("unsupported_profile", "unsupported VLESS transport")
+	}
+	// Xray share links often include headerType even on transports where
+	// it is inert. Never interpret TCP HTTP-header camouflage as plain TCP:
+	// sing-box's HTTPUpgrade is a different wire protocol.
+	if header := q.Get("headerType"); header != "" && header != "none" {
+		return nil, "", Fault("unsupported_profile", "unsupported VLESS TCP header camouflage")
 	}
 	security := q.Get("security")
 	if security == "" {
@@ -152,8 +172,23 @@ func parseVLESS(raw string) (json.RawMessage, string, error) {
 	if security != "none" && security != "tls" && security != "reality" {
 		return nil, "", Fault("unsupported_profile", "unsupported VLESS security")
 	}
-	if typ != "ws" && (q.Has("path") || q.Has("host")) {
-		return nil, "", Fault("unsupported_profile", "WebSocket-specific options require WebSocket transport")
+	// Xray's REALITY compatibility matrix excludes WebSocket/HTTPUpgrade.
+	// A syntactically valid sing-box outbound does not imply server support.
+	if security == "reality" && typ != "tcp" {
+		return nil, "", Fault("unsupported_profile", "REALITY requires plain TCP transport")
+	}
+	if (typ == "ws" || typ == "httpupgrade") && q.Get("path") != "" {
+		if err := rejectXrayEarlyDataPath(q.Get("path")); err != nil {
+			return nil, "", err
+		}
+	}
+	if typ == "tcp" {
+		// Xray's path does not apply to TCP with explicitly disabled header
+		// camouflage. Keep accepting old empty metadata; refuse meaningful
+		// transport fields unless the source explicitly declares plain TCP.
+		if q.Get("host") != "" || (q.Get("path") != "" && q.Get("headerType") != "none") {
+			return nil, "", Fault("unsupported_profile", "HTTP transport fields require WebSocket or HTTPUpgrade")
+		}
 	}
 	if security == "none" && (q.Has("sni") || q.Has("fp") || q.Has("alpn") || q.Has("pbk") || q.Has("sid")) {
 		return nil, "", Fault("unsupported_profile", "TLS-specific options require TLS or Reality")
@@ -167,8 +202,8 @@ func parseVLESS(raw string) (json.RawMessage, string, error) {
 	if q.Get("flow") != "" && q.Get("flow") != "xtls-rprx-vision" {
 		return nil, "", errors.New("unsupported VLESS flow")
 	}
-	if typ == "ws" && q.Get("flow") != "" {
-		return nil, "", errors.New("VLESS websocket with vision flow is unsupported")
+	if typ != "tcp" && q.Get("flow") != "" {
+		return nil, "", errors.New("VLESS HTTP transport with vision flow is unsupported")
 	}
 	if security == "none" && q.Get("flow") != "" {
 		return nil, "", errors.New("vision flow requires TLS")
@@ -177,15 +212,19 @@ func parseVLESS(raw string) (json.RawMessage, string, error) {
 	if q.Get("flow") != "" {
 		ob["flow"] = q.Get("flow")
 	}
-	if typ == "ws" {
-		ws := map[string]any{"type": "ws", "path": "/"}
+	if typ == "ws" || typ == "httpupgrade" {
+		transport := map[string]any{"type": typ, "path": "/"}
 		if q.Get("path") != "" {
-			ws["path"] = q.Get("path")
+			transport["path"] = q.Get("path")
 		}
 		if q.Get("host") != "" {
-			ws["headers"] = map[string]string{"Host": q.Get("host")}
+			if typ == "ws" {
+				transport["headers"] = map[string]string{"Host": q.Get("host")}
+			} else {
+				transport["host"] = q.Get("host")
+			}
 		}
-		ob["transport"] = ws
+		ob["transport"] = transport
 	}
 	if security != "none" {
 		sni := q.Get("sni")
@@ -225,6 +264,26 @@ func parseVLESS(raw string) (json.RawMessage, string, error) {
 		return r
 	}, name)
 	return b, name, nil
+}
+
+// Xray interprets an `ed` query parameter inside the HTTP transport path as
+// early-data handshake configuration. Passing it through as a literal sing-box
+// path silently changes the protocol (sing-box WS has separate settings;
+// HTTPUpgrade has no equivalent). Until equivalent wire behavior is proved,
+// reject such links; preserve all unrelated path queries byte-for-byte.
+func rejectXrayEarlyDataPath(path string) error {
+	_, rawQuery, found := strings.Cut(path, "?")
+	if !found {
+		return nil
+	}
+	options, err := url.ParseQuery(rawQuery)
+	if err != nil {
+		return Fault("unsupported_profile", "malformed VLESS HTTP transport path query")
+	}
+	if _, found := options["ed"]; found {
+		return Fault("unsupported_profile", "Xray HTTP transport Early Data is unsupported")
+	}
+	return nil
 }
 
 func CoreConfig(p Profile, port int, password string) ([]byte, error) {
