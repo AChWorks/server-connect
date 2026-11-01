@@ -731,7 +731,14 @@ func (m *Manager) BeginSmartTUNTrial(opts SmartTUNCandidateOptions, managementPe
 // An unsuccessful read-only admission must never authorize privileged
 // bookkeeping (including systemctl reset-failed). Keep this ordering explicit
 // and independently testable; the caller holds the operation journal lock.
-func smartTUNAdmitBeforeHealthBookkeeping(admit func() (smartTUNTrialAdmission, error), normalize func() error) (smartTUNTrialAdmission, error) {
+func smartTUNAdmitBeforeHealthBookkeeping(health *SmartTUNHealthOptions, admit func() (smartTUNTrialAdmission, error), normalize func() error) (smartTUNTrialAdmission, error) {
+	// Health options are part of admission too: reject malformed requests
+	// before touching even an otherwise idle, owned FAILED health receipt.
+	if health != nil {
+		if err := validateSmartTUNHealthOptions(*health); err != nil {
+			return smartTUNTrialAdmission{}, err
+		}
+	}
 	planned, err := admit()
 	if err != nil {
 		return smartTUNTrialAdmission{}, err
@@ -789,7 +796,7 @@ func (m *Manager) beginSmartTUNTrial(opts SmartTUNCandidateOptions, managementPe
 		if health != nil && opts.TunnelInterface == smartTUNVMInterface {
 			normalize = func() error { return normalizeQuiescentSmartTUNHealthUnit(store) }
 		}
-		planned, err = smartTUNAdmitBeforeHealthBookkeeping(
+		planned, err = smartTUNAdmitBeforeHealthBookkeeping(health,
 			func() (smartTUNTrialAdmission, error) {
 				return m.admitSmartTUNTrialLocked(store, opts, managementPeer)
 			}, normalize)
@@ -799,9 +806,6 @@ func (m *Manager) beginSmartTUNTrial(opts SmartTUNCandidateOptions, managementPe
 	}
 	var roles [2]smartTUNHealthUnitIdentity
 	if health != nil {
-		if err := validateSmartTUNHealthOptions(*health); err != nil {
-			return SmartTUNTrialReceipt{}, err
-		}
 		var err error
 		roles, err = smartTUNHealthUnits(false, nil)
 		if err != nil {

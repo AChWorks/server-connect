@@ -12,6 +12,7 @@ func TestSmartTUNHealthBookkeepingOnlyAfterSuccessfulAdmission(t *testing.T) {
 	invalid := errors.New("trial_unsupported")
 	normalizationFailed := errors.New("guard_unavailable")
 	fixture := smartTUNTrialAdmission{endpoint: "10.0.2.2", baseline: "already-read"}
+	validHealth := &SmartTUNHealthOptions{IntervalSeconds: 5, FailureThreshold: 1, MaxAttempts: 1, RecoverySeconds: 10}
 
 	for _, tc := range []struct {
 		name               string
@@ -44,7 +45,11 @@ func TestSmartTUNHealthBookkeepingOnlyAfterSuccessfulAdmission(t *testing.T) {
 					return tc.normalizationError
 				}
 			}
-			receipt, err := smartTUNAdmitBeforeHealthBookkeeping(admit, normalize)
+			var health *SmartTUNHealthOptions
+			if tc.normalize {
+				health = validHealth
+			}
+			receipt, err := smartTUNAdmitBeforeHealthBookkeeping(health, admit, normalize)
 			if !reflect.DeepEqual(calls, tc.wantCalls) || !errors.Is(err, tc.wantError) {
 				t.Fatalf("incorrect pre-mutation ordering: calls=%q err=%v", calls, err)
 			}
@@ -57,4 +62,13 @@ func TestSmartTUNHealthBookkeepingOnlyAfterSuccessfulAdmission(t *testing.T) {
 			}
 		})
 	}
+	t.Run("invalid-health-options-preserves-failed-health", func(t *testing.T) {
+		called := 0
+		receipt, err := smartTUNAdmitBeforeHealthBookkeeping(&SmartTUNHealthOptions{},
+			func() (smartTUNTrialAdmission, error) { called++; return fixture, nil },
+			func() error { called++; return nil })
+		if err == nil || called != 0 || receipt.endpoint != "" || receipt.baseline != "" {
+			t.Fatalf("invalid health request touched admission or bookkeeping: calls=%d receipt=%+v err=%v", called, receipt, err)
+		}
+	})
 }
