@@ -124,9 +124,7 @@ func validateSmartTUNNative(record smartTUNTrialJournal) error {
 		if record.TunnelInterface != smartTUNVMInterface || record.UnderlayInterface != smartTUNVMUnderlay {
 			return bad()
 		}
-		resolver, err := netip.ParseAddr(n.DNSResolverIPv4)
-		if err != nil || !resolver.Is4() || !resolver.IsGlobalUnicast() || resolver.IsPrivate() ||
-			resolver.IsLoopback() || resolver.IsLinkLocalUnicast() {
+		if _, approved := smartTUNVMApprovedDNSResolver(n.DNSResolverIPv4); !approved {
 			return bad()
 		}
 		switch n.DNSStage {

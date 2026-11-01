@@ -109,8 +109,9 @@ the outer VPN and core Direct outbounds use the underlay without recursion.
 The existing Proxy Only profile-import behavior is unchanged.
 
 **Experimental DNS ownership (exact supervised Debian13 QEMU guest only):** an
-explicit public IPv4 resolver may be attached as a route-only `~.` domain to
-the *product-owned* TUN link through `resolvectl`, with a durable effect intent
+explicit allowlisted IPv4 resolver (currently only `1.1.1.1` or `9.9.9.9`)
+may be attached as a route-only `~.` domain to the *product-owned* TUN link
+through `resolvectl`, with a durable effect intent
 before mutation, exact link-index/readback receipts and the same pinned journal
 lock as native network mutators. The existing `ens3`/global resolver is never
 modified. The independent Guard must verify the receipted link setting during
@@ -122,7 +123,11 @@ verification or general-host DNS support. Unsupported systemd-resolved/link
 identity or resolver states are refused before a new guarded operation.
 A bounded disposable-only `--qa-kill-at after-native-dns-effect` SIGKILL
 boundary tests recovery after the first DNS setter but before the routing
-`~.` domain is installed. An executor failure can make
+`~.` domain is installed. At `effect_possible`, only no DNS/no domain,
+expected DNS/no domain, and expected DNS/`~.` can authorize owned cleanup.
+A route-only `~.` without the expected DNS is foreign or ambiguous and must
+retain the journal and recovery evidence rather than silently remove the link.
+An executor failure can make
 `guard_scheduled=false` and report `guard_unavailable` even while the
 systemd Timer remains armed; this field represents verified effective Guard
 readiness, not the Timer's raw `ActiveState`. After an exact guest-only

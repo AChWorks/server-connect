@@ -114,6 +114,24 @@ func nativeTUNVMResolverDigest(record smartTUNTrialJournal) string {
 		record.Native.LinkIndex, record.TunnelInterface, record.Native.DNSResolverIPv4)))
 }
 
+// Resolver setters run in strict order: DNS, then route-only "~." domain.
+// This finite state machine refuses a domain-only observation; it cannot be
+// proven to originate from the owned setters. "removed" applies only after
+// independent proof that the owned link no longer exists.
+func nativeTUNVMResolverStateOwned(stage, expected, dns, domain string) bool {
+	switch stage {
+	case "planned":
+		return dns == "" && domain == ""
+	case "effect_possible":
+		return (dns == "" && domain == "") ||
+			(dns == expected && (domain == "" || domain == "~."))
+	case "observed":
+		return dns == expected && domain == "~."
+	default:
+		return false
+	}
+}
+
 func nativeTUNVMVerifyResolver(record smartTUNTrialJournal, active bool) error {
 	n := record.Native
 	if n == nil || n.DNSResolverIPv4 == "" {
@@ -136,26 +154,16 @@ func nativeTUNVMVerifyResolver(record smartTUNTrialJournal, active bool) error {
 	if err != nil {
 		return err
 	}
-	if active || n.DNSStage == "observed" {
-		if dns != n.DNSResolverIPv4 || domain != "~." || n.DNSSHA256 != nativeTUNVMResolverDigest(record) {
-			return nativeTUNConflict("owned-link DNS or routing domain differs from receipted state")
-		}
-		return nil
+	if active && n.DNSStage != "observed" {
+		return nativeTUNConflict("active owned-link DNS has no completed receipt")
 	}
-	switch n.DNSStage {
-	case "planned":
-		if dns == "" && domain == "" {
-			return nil
-		}
-	case "effect_possible":
-		// Only our exact two setters can have run; a partial result is safe
-		// to remove by deleting the exclusively owned interface. A foreign
-		// address or domain never gains product cleanup authority.
-		if (dns == "" || dns == n.DNSResolverIPv4) && (domain == "" || domain == "~.") {
-			return nil
-		}
+	if n.DNSStage == "observed" && n.DNSSHA256 != nativeTUNVMResolverDigest(record) {
+		return nativeTUNConflict("owned-link DNS receipt identity differs")
 	}
-	return nativeTUNConflict("owned-link DNS has unreceipted or foreign configuration")
+	if !nativeTUNVMResolverStateOwned(n.DNSStage, n.DNSResolverIPv4, dns, domain) {
+		return nativeTUNConflict("owned-link DNS has unreceipted or foreign configuration")
+	}
+	return nil
 }
 
 func nativeTUNVMApplyResolver(store *activationJournalDir, record *smartTUNTrialJournal, qaKillPoint string) error {
