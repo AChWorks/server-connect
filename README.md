@@ -30,8 +30,10 @@ or on stdin (never put bearer links in the command line or shared logs).
 The URI parser supports plain TCP, WebSocket and HTTPUpgrade with their
 appropriate native sing-box 1.14.3 transport mapping; inert Xray
 `headerType=none` / empty metadata is accepted. TCP HTTP-header
-camouflage (`headerType=http`), XHTTP, unknown or repeated options, and
-insecure TLS overrides are **not** silently reinterpreted. Full subscription
+camouflage (`headerType=http`), XHTTP, malformed or repeated query
+options, Xray `path?ed=...` Early Data on WebSocket/HTTPUpgrade, unsupported
+REALITY-over-HTTP transports, and insecure TLS overrides are **refused**
+without silently changing wire semantics. Full subscription
 URL downloading, bulk URI import and automatic refresh are not currently
 implemented; supported Trojan/VMess profiles require explicit native
 sing-box JSON inputs. Saved profiles are secrets and require private

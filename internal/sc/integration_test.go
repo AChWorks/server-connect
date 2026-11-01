@@ -206,10 +206,11 @@ func TestPinnedCoreAcceptsSupportedVLESSConfigShapes(t *testing.T) {
 		t.Fatal(err)
 	}
 	cases := map[string]string{
-		"vless-tcp":     "vless://" + testUUID + "@127.0.0.1:443?type=tcp&security=none",
-		"vless-tls":     "vless://" + testUUID + "@example.org:443?type=tcp&security=tls&sni=example.org",
-		"vless-ws-tls":  "vless://" + testUUID + "@example.org:443?type=ws&security=tls&sni=example.org&path=%2Fws&host=example.org",
-		"vless-reality": "vless://" + testUUID + "@example.org:443?type=tcp&security=reality&sni=example.org&pbk=AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA&sid=1234&fp=chrome",
+		"vless-tcp":             "vless://" + testUUID + "@127.0.0.1:443?type=tcp&security=none",
+		"vless-tls":             "vless://" + testUUID + "@example.org:443?type=tcp&security=tls&sni=example.org",
+		"vless-ws-tls":          "vless://" + testUUID + "@example.org:443?type=ws&security=tls&sni=example.org&path=%2Fws&host=example.org",
+		"vless-httpupgrade-tls": "vless://" + testUUID + "@example.org:443?type=httpupgrade&security=tls&sni=example.org&path=%2Fup&host=example.org",
+		"vless-reality":         "vless://" + testUUID + "@example.org:443?type=tcp&security=reality&sni=example.org&pbk=AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA&sid=1234&fp=chrome",
 	}
 	for name, source := range cases {
 		t.Run(name, func(t *testing.T) {

@@ -127,7 +127,21 @@ func parseVLESS(raw string) (json.RawMessage, string, error) {
 	if net.ParseIP(host) == nil && len(host) > 253 {
 		return nil, "", errors.New("endpoint hostname too long")
 	}
-	q := u.Query()
+	// URL.Query discards malformed pairs without an error. A dropped TLS or
+	// transport option could silently change the wire security of a link.
+	// ParseQuery also tolerates empty components and bare keys; treat those as
+	// ambiguous instead of silently applying TCP or security defaults.
+	if u.RawQuery != "" {
+		for _, pair := range strings.Split(u.RawQuery, "&") {
+			if pair == "" || !strings.Contains(pair, "=") {
+				return nil, "", Fault("unsupported_profile", "malformed VLESS query")
+			}
+		}
+	}
+	q, err := url.ParseQuery(u.RawQuery)
+	if err != nil {
+		return nil, "", Fault("unsupported_profile", "malformed VLESS query")
+	}
 	allowed := map[string]bool{
 		"type": true, "security": true, "encryption": true, "flow": true,
 		"sni": true, "fp": true, "alpn": true, "pbk": true, "sid": true,
@@ -157,6 +171,16 @@ func parseVLESS(raw string) (json.RawMessage, string, error) {
 	}
 	if security != "none" && security != "tls" && security != "reality" {
 		return nil, "", Fault("unsupported_profile", "unsupported VLESS security")
+	}
+	// Xray's REALITY compatibility matrix excludes WebSocket/HTTPUpgrade.
+	// A syntactically valid sing-box outbound does not imply server support.
+	if security == "reality" && typ != "tcp" {
+		return nil, "", Fault("unsupported_profile", "REALITY requires plain TCP transport")
+	}
+	if (typ == "ws" || typ == "httpupgrade") && q.Get("path") != "" {
+		if err := rejectXrayEarlyDataPath(q.Get("path")); err != nil {
+			return nil, "", err
+		}
 	}
 	if typ == "tcp" {
 		// Xray's path does not apply to TCP with explicitly disabled header
@@ -240,6 +264,26 @@ func parseVLESS(raw string) (json.RawMessage, string, error) {
 		return r
 	}, name)
 	return b, name, nil
+}
+
+// Xray interprets an `ed` query parameter inside the HTTP transport path as
+// early-data handshake configuration. Passing it through as a literal sing-box
+// path silently changes the protocol (sing-box WS has separate settings;
+// HTTPUpgrade has no equivalent). Until equivalent wire behavior is proved,
+// reject such links; preserve all unrelated path queries byte-for-byte.
+func rejectXrayEarlyDataPath(path string) error {
+	_, rawQuery, found := strings.Cut(path, "?")
+	if !found {
+		return nil
+	}
+	options, err := url.ParseQuery(rawQuery)
+	if err != nil {
+		return Fault("unsupported_profile", "malformed VLESS HTTP transport path query")
+	}
+	if _, found := options["ed"]; found {
+		return Fault("unsupported_profile", "Xray HTTP transport Early Data is unsupported")
+	}
+	return nil
 }
 
 func CoreConfig(p Profile, port int, password string) ([]byte, error) {
