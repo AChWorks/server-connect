@@ -22,6 +22,16 @@ class TraceFailure(ValueError):
 DISABLED = ("ftp", "rsh", "ssh", "mirror+ftp")
 DISABLED_PATH = "/usr/lib/apt/methods/false"
 
+# x86_64 Linux UAPI: nanosleep=35, getpid=39, futex=202,
+# epoll_pwait=281. These cannot create sockets, execute a helper or fork.
+# This is not permission to ignore an arbitrary unknown syscall.
+# https://github.com/torvalds/linux/tree/master/tools/arch/x86/include/uapi/asm
+VERIFIED_TERMINAL_SYSCALLS_X86_64 = frozenset({35, 39, 202, 281})
+
+
+def verified_opaque_exit(number: int | None) -> bool:
+    return os.uname().machine == "x86_64" and number in VERIFIED_TERMINAL_SYSCALLS_X86_64
+
 
 def require(condition: bool, label: str) -> None:
     if not condition:
@@ -45,37 +55,67 @@ def check_payloads(payloads: dict[int, str]) -> None:
         require(all(family in ("AF_UNIX", "AF_LOCAL", "AF_NETLINK") for family in families), "nonlocal network attempt")
         require(re.search(r"<(?:TCP|UDP|IP)(?:v6)?:", text) is None, "decoded Internet descriptor used")
         pending = ""
+        pending_number = None
+        opaque_exit_number = None
+        numbered_records: set[bool] = set()
         finished = False
-        for line in text.splitlines():
+        for raw_line in text.splitlines():
+            annotated = re.fullmatch(r"\[\s*([0-9]+)\]\s+(.+)", raw_line)
+            number = int(annotated.group(1)) if annotated else None
+            line = annotated.group(2) if annotated else raw_line
+            numbered_records.add(annotated is not None)
+            require(not raw_line.startswith("[") or annotated is not None,
+                    "unverifiable syscall number annotation")
             require(not finished, "records after process completion")
             terminal = re.fullmatch(r"\+\+\+ exited with (0|100) \+\+\+", line)
             if terminal:
+                if opaque_exit_number is not None:
+                    require(number == opaque_exit_number, "opaque terminal syscall receipt mismatch")
                 if pending:
                     syscall = re.match(r"([a-z0-9_]+)\(", pending)
                     name = syscall.group(1) if syscall else "unknown"
-                    # A trace of exit_group can be split at process death.
-                    # Only a matching kernel-observed terminal status proves
-                    # that exact nonreturning syscall completed. Any pending
-                    # network, exec, fork or other operation stays untrusted.
-                    final_exit = re.fullmatch(r"exit_group\((0|100)\)?", pending)
-                    benign_wait = name in ("wait4", "waitid")
-                    require(benign_wait or (final_exit is not None and
-                            int(final_exit.group(1)) == int(terminal.group(1))),
-                            "incomplete syscall at process exit (" + name + ")")
+                    if pending == "???(":
+                        require(verified_opaque_exit(number) and pending_number == number,
+                                "opaque terminal syscall not verified")
+                    else:
+                        # Only named synchronization/wait calls and a matching
+                        # nonreturning exit_group may be interrupted at death.
+                        # Network, exec and process-creation calls stay unsafe.
+                        final_exit = re.fullmatch(r"exit_group\((0|100)\)?", pending)
+                        benign_wait = name in ("wait4", "waitid", "futex")
+                        require(benign_wait or (final_exit is not None and
+                                int(final_exit.group(1)) == int(terminal.group(1))),
+                                "incomplete syscall at process exit (" + name + ")")
                 exits[pid] = int(terminal.group(1))
                 finished = True
                 continue
+            require(opaque_exit_number is None, "opaque syscall not immediately terminated")
             if re.fullmatch(r"--- SIG[A-Z0-9]+ .* ---", line):
+                continue
+            # At thread-group exit strace can emit ???() = ? even for
+            # explicitly selected futex. The syscall *number* is the proof;
+            # the next record MUST be this same thread's exit receipt.
+            if re.fullmatch(r"\?\?\?\(\)\s+=\s+\?", line):
+                require(not pending and verified_opaque_exit(number),
+                        "opaque terminal syscall not verified")
+                opaque_exit_number = number
                 continue
             if line.endswith(" <unfinished ...>"):
                 require(not pending, "overlapping interrupted syscalls")
                 pending = line.removesuffix(" <unfinished ...>")
+                pending_number = number
+                if pending == "???(":
+                    require(verified_opaque_exit(number), "opaque terminal syscall not verified")
                 continue
             resumed = re.fullmatch(r"<\.\.\. ([a-z0-9_]+) resumed>(.*)", line)
             if resumed:
-                require(bool(pending) and pending.startswith(resumed.group(1) + "("), "unmatched syscall resumption")
+                require(bool(pending) and pending.startswith(resumed.group(1) + "("),
+                        "unmatched syscall resumption")
+                if pending_number is not None and number is not None:
+                    require(pending_number == number, "resumed syscall number mismatch")
                 line = pending + resumed.group(2)
                 pending = ""
+                pending_number = None
             require(re.fullmatch(r"[a-z0-9_]+\(.*\)\s+=\s+.+", line) is not None,
                     "unrecognized or incomplete syscall evidence")
             require(not line.startswith("execveat("), "unverifiable alternate execution")
@@ -106,6 +146,7 @@ def check_payloads(payloads: dict[int, str]) -> None:
                             require(setting in argv, "native APT lost an owned transport denial")
                         acquisition_pids.add(pid)
         require(finished, "missing process completion evidence")
+        require(len(numbered_records) == 1, "mixed syscall number presentation")
     require(parents.keys() <= payloads.keys(), "missing descendant trace")
     roots = payloads.keys() - parents.keys()
     require(len(roots) == 1 and roots == manager_pids, "missing or ambiguous manager root")
