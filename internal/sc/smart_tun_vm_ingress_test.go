@@ -119,6 +119,9 @@ func TestSmartTUNVMIngressAddressAndRouteArePinned(t *testing.T) {
 		strings.TrimSuffix(mainRoutes, "]") + `,{"dst":"198.51.100.2/32","dev":"scqavh0","protocol":"static"}]`,
 		strings.Replace(mainRoutes, `"dev":"scqavh0"`, `"dev":"ens3"`, 1),
 		strings.TrimSuffix(mainRoutes, "]") + `,{"dst":"198.51.100.0/30","dev":"other0","protocol":"static"}]`,
+		strings.TrimSuffix(mainRoutes, "]") + `,{"dst":"198.51.100.2/32","dev":"ens3","protocol":"static"}]`,
+		strings.TrimSuffix(mainRoutes, "]") + `,{"dst":"198.51.100.1","dev":"ens3","protocol":"static"}]`,
+		strings.TrimSuffix(mainRoutes, "]") + `,{"dst":"198.51.100.0/31","dev":"ens3","protocol":"static"}]`,
 		strings.TrimSuffix(mainRoutes, "]") + `,{"dst":"8.8.8.0/24","dev":"ens3","prefsrc":"198.51.100.1"}]`,
 	} {
 		if smartTUNVMIngressRouteValid(testVMIngressRows(t, invalid)) {

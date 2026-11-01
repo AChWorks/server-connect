@@ -141,9 +141,11 @@ func smartTUNVMIngressRouteValid(routes []map[string]json.RawMessage) bool {
 	matched := 0
 	for _, row := range routes {
 		if selectiveText(row["dev"]) != smartTUNVMIngress {
-			// Reject another owner of the fixed QA subnet/source; unrelated
-			// original underlay/main-table routes are not our resources.
-			if selectiveText(row["dst"]) == "198.51.100.0/30" ||
+			// A foreign route for a host or any overlapping prefix can
+			// silently steal reply packets even while our connected route
+			// remains installed. The original underlay default and unrelated
+			// local routes are retained, never adopted as task-owned.
+			if smartTUNVMIngressForeignDestinationOverlaps(selectiveText(row["dst"])) ||
 				selectiveText(row["prefsrc"]) == smartTUNVMIngressIP {
 				return false
 			}
@@ -173,6 +175,22 @@ func smartTUNVMIngressRouteValid(routes []map[string]json.RawMessage) bool {
 		}
 	}
 	return matched == 1
+}
+
+// The default underlay route is intentionally allowed, but no more-specific
+// foreign path may intersect the independently verified fixture subnet.
+func smartTUNVMIngressForeignDestinationOverlaps(dst string) bool {
+	if dst == "default" {
+		return false
+	}
+	fixture := netip.MustParsePrefix("198.51.100.0/30")
+	if prefix, err := netip.ParsePrefix(dst); err == nil {
+		return prefix.Overlaps(fixture)
+	}
+	if addr, err := netip.ParseAddr(dst); err == nil {
+		return fixture.Contains(addr)
+	}
+	return true // Unknown kernel destination is not provably disjoint.
 }
 
 func linkFlagsContain(flags []string, wanted ...string) bool {
