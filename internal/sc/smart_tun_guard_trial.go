@@ -728,6 +728,22 @@ func (m *Manager) BeginSmartTUNTrial(opts SmartTUNCandidateOptions, managementPe
 	return m.beginSmartTUNTrial(opts, managementPeer, deadlineSeconds, qaKillPoint, nil, nil)
 }
 
+// An unsuccessful read-only admission must never authorize privileged
+// bookkeeping (including systemctl reset-failed). Keep this ordering explicit
+// and independently testable; the caller holds the operation journal lock.
+func smartTUNAdmitBeforeHealthBookkeeping(admit func() (smartTUNTrialAdmission, error), normalize func() error) (smartTUNTrialAdmission, error) {
+	planned, err := admit()
+	if err != nil {
+		return smartTUNTrialAdmission{}, err
+	}
+	if normalize != nil {
+		if err := normalize(); err != nil {
+			return smartTUNTrialAdmission{}, err
+		}
+	}
+	return planned, nil
+}
+
 func (m *Manager) beginSmartTUNTrial(opts SmartTUNCandidateOptions, managementPeer string, deadlineSeconds int, qaKillPoint string, saved *smartTUNSavedPolicyBinding, health *SmartTUNHealthOptions) (SmartTUNTrialReceipt, error) {
 	if qaKillPoint != "" && qaKillPoint != "after-journal" && qaKillPoint != "after-start" && !nativeTUNQAKillValid(qaKillPoint, true) && !(health != nil && qaKillPoint == "after-supervised-ready") {
 		return SmartTUNTrialReceipt{}, Fault("invalid_arguments", "unsupported disposable TUN SIGKILL boundary")
@@ -755,14 +771,6 @@ func (m *Manager) beginSmartTUNTrial(opts SmartTUNCandidateOptions, managementPe
 		if err := checkSavedSmartTUNPolicyLocked(store, saved); err != nil {
 			return err
 		}
-		// The isolated VM's slow systemd health oneshot can retain FAILED
-		// after the previous independent guard completed an exact safe Off.
-		// Repair only stale bookkeeping under the existing lifecycle lock.
-		if health != nil && opts.TunnelInterface == smartTUNVMInterface {
-			if err := normalizeQuiescentSmartTUNHealthUnit(store); err != nil {
-				return err
-			}
-		}
 		if opts.TunnelInterface == smartTUNVMInterface {
 			if saved == nil && len(opts.Exceptions) != 0 {
 				return Fault("routing_rules_invalid", "VM Smart Routing exceptions must come from the saved operator rule registry")
@@ -774,7 +782,17 @@ func (m *Manager) beginSmartTUNTrial(opts SmartTUNCandidateOptions, managementPe
 			}
 			opts = next
 		}
-		planned, err = m.admitSmartTUNTrialLocked(store, opts, managementPeer)
+		// Complete the side-effect-free topology, route and resource admission
+		// BEFORE any optional systemctl reset-failed. The same journal lock
+		// protects the admitted session and owned Health Unit normalization.
+		var normalize func() error
+		if health != nil && opts.TunnelInterface == smartTUNVMInterface {
+			normalize = func() error { return normalizeQuiescentSmartTUNHealthUnit(store) }
+		}
+		planned, err = smartTUNAdmitBeforeHealthBookkeeping(
+			func() (smartTUNTrialAdmission, error) {
+				return m.admitSmartTUNTrialLocked(store, opts, managementPeer)
+			}, normalize)
 		return err
 	}); err != nil {
 		return SmartTUNTrialReceipt{}, err
