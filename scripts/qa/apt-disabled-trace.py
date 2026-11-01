@@ -54,11 +54,15 @@ def check_payloads(payloads: dict[int, str]) -> None:
                     syscall = re.match(r"([a-z0-9_]+)\(", pending)
                     name = syscall.group(1) if syscall else "unknown"
                     # A trace of exit_group can be split at process death.
-                    # Only a matching kernel-observed terminal status proves
-                    # that exact nonreturning syscall completed. Any pending
-                    # network, exec, fork or other operation stays untrusted.
+                    # A Go thread can also exit with a pending FUTEX wait;
+                    # futex is synchronization, not network/exec/fork. Trace
+                    # it by name in the scanner rather than accepting the
+                    # unidentifiable ???( output of an unselected syscall.
+                    # An actual exit receipt must still complete this trace.
+                    # All pending network, exec and process-creation calls
+                    # remain untrusted even if the process subsequently exits.
                     final_exit = re.fullmatch(r"exit_group\((0|100)\)?", pending)
-                    benign_wait = name in ("wait4", "waitid")
+                    benign_wait = name in ("wait4", "waitid", "futex")
                     require(benign_wait or (final_exit is not None and
                             int(final_exit.group(1)) == int(terminal.group(1))),
                             "incomplete syscall at process exit (" + name + ")")

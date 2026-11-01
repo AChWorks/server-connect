@@ -22,7 +22,7 @@ source = Path(os.environ["SC_QA_APT_SOURCE"]).read_text()
 # One inclusive set retains all network syscalls and process creation,
 # execution, wait and termination. Do NOT use two -e trace selectors:
 # on strace the second can select ALL syscalls except tgkill.
-selector = "-e trace=%network,clone,clone3,fork,vfork,execve,execveat,wait4,waitid,exit,exit_group"
+selector = "-e trace=%network,clone,clone3,fork,vfork,execve,execveat,wait4,waitid,exit,exit_group,futex"
 if source.count(selector) != 2 or "-e trace=!tgkill" in source:
     raise SystemExit("Native APT trace must use the exact bounded syscall selector")
 edits = [
@@ -475,6 +475,20 @@ module.check_payloads(interrupted)
 partial_exit = altered(13, 'exit_group(100) = ?\n',
                       'exit_group(100 <unfinished ...>\n')
 module.check_payloads(partial_exit)
+# When a Go thread exits during a traced futex synchronization wait, the
+# kernel exit receipt closes its lifetime without a network/exec/fork effect.
+# The strace selector MUST name futex; an ambiguous unselected ???( remains
+# untrusted and must NEVER be treated as an equivalent benign wait.
+partial_futex = altered(13, 'exit_group(100) = ?\n',
+                        'futex(0x1234, FUTEX_WAIT_PRIVATE, 0, NULL <unfinished ...>\n')
+module.check_payloads(partial_futex)
+refused("unknown unfinished syscall stays rejected",
+        altered(13, 'exit_group(100) = ?\n', '???( <unfinished ...>\n'),
+        "incomplete syscall at process exit (unknown)")
+refused("futex-looking hidden network remains rejected",
+        altered(13, 'exit_group(100) = ?\n',
+                'futex(AF_INET, FUTEX_WAIT_PRIVATE <unfinished ...>\n'),
+        "nonlocal network attempt")
 refused("conflicting interrupted exit code",
         altered(13, 'exit_group(100) = ?\n', 'exit_group(0 <unfinished ...>\n'),
         "incomplete syscall at process exit (exit_group)")
