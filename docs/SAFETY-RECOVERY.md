@@ -64,8 +64,11 @@ specific owned service is reobserved after its bookkeeping reset, followed
 by complete idle-unit and native rechecks; no other service is touched, no
 network mutation occurs and journaled diagnostic logs are not deleted.
 Changed, masked, unknown or active executors remain blocking failures.
-The result separately reports Recovery and Health reconciliation; no TUN
-activation follows.
+The result separately reports Recovery and Health reconciliation, including
+each independently verified reset when a subsequent reset or final validation
+fails. A failed command still returns a nonzero exit and `ok=false` with
+`guard_idle_verified=false`; an uncertain reset or unverified observation
+never counts as success. No TUN activation follows.
 A failed/uncertain restoration retains the journal, never presents Direct
 as safely verified and blocks installer/update/profile/Proxy Only transitions.
 The native fingerprint includes preexisting guest nftables objects. Native

@@ -65,6 +65,14 @@ func output(j bool, value any, err error) int {
 	return 0
 }
 
+// Keep the real operator command's JSON exit/error contract testable without
+// invoking privileged systemd/network operations in CLI unit tests. Verified
+// partial effects must be serialized even when a later step fails.
+func runIdleGuardReconcile(j bool, reconcile func() (sc.SmartTUNIdleGuardReconcileResult, error)) int {
+	result, err := reconcile()
+	return output(j, result, err)
+}
+
 // Status may fail after safely loading desired state. Keep that bounded
 // diagnostic visible for operators without changing unrelated CLI errors.
 // An unavailable state load has no trustworthy partial report to display.
@@ -437,8 +445,7 @@ func run(j bool, m *sc.Manager, args []string) int {
 		if len(args) != 0 {
 			return output(j, nil, sc.Fault("invalid_arguments", "idle recovery guard reconciliation takes no options"))
 		}
-		result, err := m.ReconcileIdleSmartTUNRecoveryGuard()
-		return output(j, result, err)
+		return runIdleGuardReconcile(j, m.ReconcileIdleSmartTUNRecoveryGuard)
 	case "smart-tun-trial-status":
 		if len(args) != 0 {
 			return output(j, nil, sc.Fault("invalid_arguments", "guarded TUN status accepts no options"))

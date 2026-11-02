@@ -44,8 +44,12 @@ first prove absent journal/credential, idle Core, **both** inactive disabled
 timers, native policy slots free, and exact Health/Recovery oneshot identities
 with zero PID/job/cgroup. After this proof it may reset only the failed owned
 oneshots, reobserve each service, and recheck the idle network baseline.
-Test both-failed, either-failed, and already-healthy idempotence, plus negative
-pending/unknown/foreign/masked/active states. Validate true installed systemd
+Test both-failed, either-failed, and already-healthy idempotence; simulate
+Health-reset-success followed by Recovery reset/observation/final-native
+failure, verifying `ok=false` with the known partial reset flags preserved
+and `guard_idle_verified=false`. Reject unverified reset outcomes. Include
+negative pending/unknown/foreign/masked/active states. Validate true installed
+systemd
 FAILED -> inactive/success without erasing historical journals, then a
 subsequent independently guarded fresh-SSH Apply where the VM scheduler can
 meet the unmodified time bounds. Neither safe Off nor a timer alone proves a

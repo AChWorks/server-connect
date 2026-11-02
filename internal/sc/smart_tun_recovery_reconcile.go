@@ -189,6 +189,63 @@ func smartTUNVMIdleNativePreflight() error {
 	return rejectSmartTUNOrphanedTables(rows)
 }
 
+// These operations are injected only so fault-path tests can exercise the
+// real ordered reconciliation without touching systemd or the guest network.
+// The production caller supplies exact owned-service observers and executes
+// this sequence while holding the journal lock, after all host/VM admission
+// and idle journal, credential, core and timer checks have passed.
+type smartTUNIdleReconcileOperations struct {
+	observeHealth   func() (smartTUNHealthUnitIdentity, bool, error)
+	observeRecovery func() (smartTUNHealthUnitIdentity, bool, error)
+	inspectNative   func() error
+	resetFailed     func(string) error
+	verifyFinal     func() error
+}
+
+// A reset-failed command can fail after changing systemd state. Report only
+// progress independently confirmed by the matching post-reset observation.
+// In particular, a later failure must not turn an already verified Health
+// reset back into false in the JSON error response.
+func reconcileIdleSmartTUNServices(ops smartTUNIdleReconcileOperations) (SmartTUNIdleGuardReconcileResult, error) {
+	var result SmartTUNIdleGuardReconcileResult
+	healthID, healthFailed, err := ops.observeHealth()
+	if err != nil {
+		return result, err
+	}
+	recoveryID, recoveryFailed, err := ops.observeRecovery()
+	if err != nil {
+		return result, err
+	}
+	if err := ops.inspectNative(); err != nil {
+		return result, err
+	}
+	if healthFailed {
+		if err := ops.resetFailed(smartTUNHealthUnit); err != nil {
+			return result, err
+		}
+	}
+	afterHealth, stillHealthFailed, err := ops.observeHealth()
+	if err != nil || stillHealthFailed || healthID != afterHealth {
+		return result, Fault("guard_unavailable", "owned health executor failed-state reset is not independently verified")
+	}
+	result.HealthReconciled = healthFailed
+	if recoveryFailed {
+		if err := ops.resetFailed(trialRecoveryUnit); err != nil {
+			return result, err
+		}
+	}
+	afterRecovery, stillRecoveryFailed, err := ops.observeRecovery()
+	if err != nil || stillRecoveryFailed || recoveryID != afterRecovery {
+		return result, Fault("guard_unavailable", "owned recovery executor failed-state reset is not independently verified")
+	}
+	result.Reconciled = recoveryFailed
+	if err := ops.verifyFinal(); err != nil {
+		return result, err
+	}
+	result.GuardIdleVerified = true
+	return result, nil
+}
+
 // ReconcileIdleSmartTUNRecoveryGuard is an explicit operator action, not a
 // new-Apply fallback. It only clears systemd FAILED bookkeeping after an
 // independent, complete OFF/ownership proof on the named disposable VM.
@@ -234,56 +291,34 @@ func (m *Manager) ReconcileIdleSmartTUNRecoveryGuard() (SmartTUNIdleGuardReconci
 			return Fault("guard_unavailable", "independent recovery timer must be inactive and disabled")
 		}
 		// Both oneshots can time out under disposable QEMU TCG and become
-		// mutually blocking: new Apply cannot normalize Health while Recovery
-		// is failed, and the previous recovery-only repair refused failed
-		// Health. Prove BOTH are genuinely quiescent before resetting either.
-		healthID, healthFailed, err := observeSmartTUNIdleHealthService()
-		if err != nil {
-			return err
-		}
-		recoveryID, recoveryFailed, err := observeSmartTUNIdleRecoveryService()
-		if err != nil {
-			return err
-		}
-		if err := smartTUNVMIdleNativePreflight(); err != nil {
-			return err
-		}
-		if healthFailed {
-			if err := smartTUNTrialSystemctl("reset-failed", smartTUNHealthUnit); err != nil {
-				return err
-			}
-		}
-		afterHealth, stillHealthFailed, err := observeSmartTUNIdleHealthService()
-		if err != nil || stillHealthFailed || healthID != afterHealth {
-			return Fault("guard_unavailable", "owned health executor failed-state reset is not independently verified")
-		}
-		if recoveryFailed {
-			if err := smartTUNTrialSystemctl("reset-failed", trialRecoveryUnit); err != nil {
-				return err
-			}
-		}
-		afterRecovery, stillRecoveryFailed, err := observeSmartTUNIdleRecoveryService()
-		if err != nil || stillRecoveryFailed || recoveryID != afterRecovery {
-			return Fault("guard_unavailable", "owned recovery executor failed-state reset is not independently verified")
-		}
-		if _, err := smartTUNHealthUnits(false, nil); err != nil {
-			return err
-		}
-		if err := trialGuardUnits(false); err != nil {
-			return err
-		}
-		// Check for journal/native drift after the only authorized bookkeeping changes.
-		if err := store.checkTarget(nil); err != nil {
-			return err
-		}
-		if err := smartTUNVMIdleNativePreflight(); err != nil {
-			return err
-		}
-		result = SmartTUNIdleGuardReconcileResult{
-			Reconciled: recoveryFailed, HealthReconciled: healthFailed,
-			GuardIdleVerified: true, ActivationReady: false,
-		}
-		return nil
+		// mutually blocking. Explicitly reconcile only after every external
+		// admission/ownership check above, under this same journal lock.
+		progress, err := reconcileIdleSmartTUNServices(smartTUNIdleReconcileOperations{
+			observeHealth:   observeSmartTUNIdleHealthService,
+			observeRecovery: observeSmartTUNIdleRecoveryService,
+			inspectNative:   smartTUNVMIdleNativePreflight,
+			resetFailed: func(unit string) error {
+				return smartTUNTrialSystemctl("reset-failed", unit)
+			},
+			verifyFinal: func() error {
+				if _, err := smartTUNHealthUnits(false, nil); err != nil {
+					return err
+				}
+				if err := trialGuardUnits(false); err != nil {
+					return err
+				}
+				// Failed bookkeeping resets do not authorize adoption or cleanup
+				// of any native or unjournaled network resource.
+				if err := store.checkTarget(nil); err != nil {
+					return err
+				}
+				return smartTUNVMIdleNativePreflight()
+			},
+		})
+		// Preserve separately verified effects even when a later reset or
+		// final check fails. GuardIdleVerified remains false on errors.
+		result = progress
+		return err
 	})
 	return result, err
 }
