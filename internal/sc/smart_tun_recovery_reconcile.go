@@ -1,8 +1,8 @@
 package sc
 
-// An explicitly requested, VM-only repair for a stale FAILED independent
-// recovery oneshot. Never normalize a failed guard as part of new Apply:
-// a failure is a safety signal until the operator deliberately reconciles it.
+// An explicitly requested, VM-only repair for stale FAILED Health/Recovery
+// oneshots. Never normalize a failed independent Guard as part of new Apply:
+// failures remain safety signals until an operator proves exact idle ownership.
 import (
 	"context"
 	"errors"
@@ -15,15 +15,19 @@ import (
 
 type SmartTUNIdleGuardReconcileResult struct {
 	Reconciled        bool `json:"reconciled"`
+	HealthReconciled  bool `json:"health_reconciled"`
 	GuardIdleVerified bool `json:"guard_idle_verified"`
 	ActivationReady   bool `json:"activation_ready"`
 }
 
 // The accepted result is either a known, fully idle FAILED oneshot or an
 // already idle SUCCESS oneshot. Never infer quiescence from ActiveState alone.
-func parseSmartTUNIdleRecoveryService(raw []byte) (failed bool, err error) {
+func parseSmartTUNIdleManagedService(raw []byte, name string) (failed bool, err error) {
 	invalid := func() (bool, error) {
-		return false, Fault("guard_unavailable", "independent recovery executor state is not safely idle")
+		return false, Fault("guard_unavailable", "owned independent executor state is not safely idle")
+	}
+	if name != trialRecoveryUnit && name != smartTUNHealthUnit {
+		return invalid()
 	}
 	if len(raw) == 0 || len(raw) > 16384 {
 		return invalid()
@@ -45,9 +49,9 @@ func parseSmartTUNIdleRecoveryService(raw []byte) (failed bool, err error) {
 		}
 		fields[pair[0]] = pair[1]
 	}
-	if len(fields) != len(allowed) || fields["Id"] != trialRecoveryUnit ||
+	if len(fields) != len(allowed) || fields["Id"] != name ||
 		fields["LoadState"] != "loaded" ||
-		fields["FragmentPath"] != filepath.Join(trialGuardUnitDir, trialRecoveryUnit) ||
+		fields["FragmentPath"] != filepath.Join(trialGuardUnitDir, name) ||
 		fields["DropInPaths"] != "" || fields["Transient"] != "no" ||
 		fields["UnitFileState"] != "static" ||
 		fields["MainPID"] != "0" || fields["ControlPID"] != "0" ||
@@ -67,16 +71,29 @@ func parseSmartTUNIdleRecoveryService(raw []byte) (failed bool, err error) {
 	return invalid()
 }
 
+func parseSmartTUNIdleRecoveryService(raw []byte) (bool, error) {
+	return parseSmartTUNIdleManagedService(raw, trialRecoveryUnit)
+}
+
 // Reobserve provenance before and after the detailed systemd process/job
 // query. The first-party unit and manifest must match across observations.
-func observeSmartTUNIdleRecoveryService() (smartTUNHealthUnitIdentity, bool, error) {
-	id, first, err := observeSmartTUNRecoveryUnit(trialRecoveryUnit)
+func observeSmartTUNIdleManagedService(name string) (smartTUNHealthUnitIdentity, bool, error) {
+	var observe func(string) (smartTUNHealthUnitIdentity, map[string]string, error)
+	switch name {
+	case trialRecoveryUnit:
+		observe = observeSmartTUNRecoveryUnit
+	case smartTUNHealthUnit:
+		observe = observeSmartTUNHealthUnit
+	default:
+		return smartTUNHealthUnitIdentity{}, false, Fault("guard_unavailable", "unknown idle executor role")
+	}
+	id, first, err := observe(name)
 	if err != nil {
 		return smartTUNHealthUnitIdentity{}, false, err
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
 	defer cancel()
-	cmd, err := trustedSystemctlCommand(ctx, "show", trialRecoveryUnit,
+	cmd, err := trustedSystemctlCommand(ctx, "show", name,
 		"-p", "Id", "-p", "LoadState", "-p", "FragmentPath", "-p", "DropInPaths",
 		"-p", "Transient", "-p", "UnitFileState", "-p", "ActiveState",
 		"-p", "SubState", "-p", "Result", "-p", "MainPID", "-p", "ControlPID",
@@ -86,21 +103,29 @@ func observeSmartTUNIdleRecoveryService() (smartTUNHealthUnitIdentity, bool, err
 	}
 	raw, err := cmd.Output()
 	if err != nil || ctx.Err() != nil {
-		return smartTUNHealthUnitIdentity{}, false, Fault("guard_unavailable", "independent recovery executor cannot be inspected")
+		return smartTUNHealthUnitIdentity{}, false, Fault("guard_unavailable", "owned independent executor cannot be inspected")
 	}
-	failed, err := parseSmartTUNIdleRecoveryService(raw)
+	failed, err := parseSmartTUNIdleManagedService(raw, name)
 	if err != nil {
 		return smartTUNHealthUnitIdentity{}, false, err
 	}
-	nextID, next, err := observeSmartTUNRecoveryUnit(trialRecoveryUnit)
+	nextID, next, err := observe(name)
 	if err != nil || nextID != id ||
 		next["ActiveState"] != first["ActiveState"] ||
 		next["Result"] != first["Result"] ||
 		(failed && (first["ActiveState"] != "failed" || first["Result"] == "success")) ||
 		(!failed && (first["ActiveState"] != "inactive" || first["Result"] != "success")) {
-		return smartTUNHealthUnitIdentity{}, false, Fault("guard_unavailable", "independent recovery executor changed during observation")
+		return smartTUNHealthUnitIdentity{}, false, Fault("guard_unavailable", "owned independent executor changed during observation")
 	}
 	return id, failed, nil
+}
+
+func observeSmartTUNIdleRecoveryService() (smartTUNHealthUnitIdentity, bool, error) {
+	return observeSmartTUNIdleManagedService(trialRecoveryUnit)
+}
+
+func observeSmartTUNIdleHealthService() (smartTUNHealthUnitIdentity, bool, error) {
+	return observeSmartTUNIdleManagedService(smartTUNHealthUnit)
 }
 
 // A lost journal must not hide an old operation-named product nft table,
@@ -202,38 +227,52 @@ func (m *Manager) ReconcileIdleSmartTUNRecoveryGuard() (SmartTUNIdleGuardReconci
 			healthTimer["Result"] != "success" || healthTimer["Unit"] != smartTUNHealthUnit {
 			return Fault("guard_unavailable", "health timer must be inactive and disabled")
 		}
-		// The Health service is a distinct potential active mutator. Do not
-		// reset an independent guard while that role is failed, unknown or
-		// running: it must be independently reconciled first.
-		if _, err := smartTUNHealthUnits(false, nil); err != nil {
-			return err
-		}
 		_, recoveryTimer, err := observeSmartTUNRecoveryUnit(trialRecoveryTimer)
 		if err != nil || recoveryTimer["ActiveState"] != "inactive" ||
 			recoveryTimer["UnitFileState"] != "disabled" ||
 			recoveryTimer["Result"] != "success" || recoveryTimer["Unit"] != trialRecoveryUnit {
 			return Fault("guard_unavailable", "independent recovery timer must be inactive and disabled")
 		}
-		before, failed, err := observeSmartTUNIdleRecoveryService()
+		// Both oneshots can time out under disposable QEMU TCG and become
+		// mutually blocking: new Apply cannot normalize Health while Recovery
+		// is failed, and the previous recovery-only repair refused failed
+		// Health. Prove BOTH are genuinely quiescent before resetting either.
+		healthID, healthFailed, err := observeSmartTUNIdleHealthService()
+		if err != nil {
+			return err
+		}
+		recoveryID, recoveryFailed, err := observeSmartTUNIdleRecoveryService()
 		if err != nil {
 			return err
 		}
 		if err := smartTUNVMIdleNativePreflight(); err != nil {
 			return err
 		}
-		if failed {
+		if healthFailed {
+			if err := smartTUNTrialSystemctl("reset-failed", smartTUNHealthUnit); err != nil {
+				return err
+			}
+		}
+		afterHealth, stillHealthFailed, err := observeSmartTUNIdleHealthService()
+		if err != nil || stillHealthFailed || healthID != afterHealth {
+			return Fault("guard_unavailable", "owned health executor failed-state reset is not independently verified")
+		}
+		if recoveryFailed {
 			if err := smartTUNTrialSystemctl("reset-failed", trialRecoveryUnit); err != nil {
 				return err
 			}
 		}
-		after, stillFailed, err := observeSmartTUNIdleRecoveryService()
-		if err != nil || stillFailed || before != after {
+		afterRecovery, stillRecoveryFailed, err := observeSmartTUNIdleRecoveryService()
+		if err != nil || stillRecoveryFailed || recoveryID != afterRecovery {
 			return Fault("guard_unavailable", "owned recovery executor failed-state reset is not independently verified")
+		}
+		if _, err := smartTUNHealthUnits(false, nil); err != nil {
+			return err
 		}
 		if err := trialGuardUnits(false); err != nil {
 			return err
 		}
-		// Check for journal/native drift after the only authorized mutation.
+		// Check for journal/native drift after the only authorized bookkeeping changes.
 		if err := store.checkTarget(nil); err != nil {
 			return err
 		}
@@ -241,7 +280,8 @@ func (m *Manager) ReconcileIdleSmartTUNRecoveryGuard() (SmartTUNIdleGuardReconci
 			return err
 		}
 		result = SmartTUNIdleGuardReconcileResult{
-			Reconciled: failed, GuardIdleVerified: true, ActivationReady: false,
+			Reconciled: recoveryFailed, HealthReconciled: healthFailed,
+			GuardIdleVerified: true, ActivationReady: false,
 		}
 		return nil
 	})

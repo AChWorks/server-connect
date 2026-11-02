@@ -746,8 +746,8 @@ Commands:
   smart-tun-trial-policy      Inspect saved non-secret trial policy; never activates routing
   smart-tun-trial-status      Experimental TUN operation/recovery receipt
   smart-tun-trial-reconcile-idle-guard
-                             Explicitly reset only an exact failed, quiescent
-                             recovery service after proven QA VM Direct/off;
+                             Reconcile only exact failed, quiescent Health and
+                             Recovery services after proven QA VM Direct/off;
                              never automatically bypass a failed guard
   smart-tun-trial-disconnect --operation-id HEX32 --revision N
                               Stop exactly this trial, verify native rollback and finalize
@@ -911,7 +911,7 @@ func menu(m *sc.Manager) int {
 			case "6":
 				run(false, m, []string{"smart-tun-trial-policy"})
 			case "7":
-				fmt.Print("Only on the exact isolated QA VM, after confirmed Direct/off and no owned resources. This resets only stale FAILED systemd recovery bookkeeping. Type VM-RECONCILE-GUARD: ")
+				fmt.Print("Only on the exact isolated QA VM, after confirmed Direct/off and no owned resources. This resets only stale FAILED owned Health/Recovery systemd bookkeeping. Type VM-RECONCILE-GUARD: ")
 				ack, err := in.ReadString('\n')
 				if err != nil || strings.TrimSpace(ack) != "VM-RECONCILE-GUARD" {
 					fmt.Println("Canceled; no host change")
