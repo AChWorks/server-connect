@@ -120,3 +120,48 @@ func TestManagedRecoveryObserverDoesNotWidenHealthOrArbitraryUnitScope(t *testin
 		t.Fatalf("managed observer accepted untrusted unit: %v", err)
 	}
 }
+
+// A failed Health oneshot and a failed Recovery oneshot may coexist after a
+// TCG timeout even though the Guard has restored all native resources. Both
+// must be proved quiescent before either FAILED bookkeeping record is reset.
+func TestParseSmartTUNIdleHealthServiceExactProof(t *testing.T) {
+	failed := strings.ReplaceAll(idleRecoveryObservation(), trialRecoveryUnit, smartTUNHealthUnit)
+	for _, state := range []string{"exit-code", "timeout", "signal", "core-dump"} {
+		raw := strings.Replace(failed, "Result=exit-code", "Result="+state, 1)
+		if got, err := parseSmartTUNIdleManagedService([]byte(raw), smartTUNHealthUnit); err != nil || !got {
+			t.Fatalf("quiescent failed Health %s rejected: %v %v", state, got, err)
+		}
+	}
+	healthy := strings.NewReplacer("ActiveState=failed", "ActiveState=inactive",
+		"SubState=failed", "SubState=dead", "Result=exit-code", "Result=success").Replace(failed)
+	if got, err := parseSmartTUNIdleManagedService([]byte(healthy), smartTUNHealthUnit); err != nil || got {
+		t.Fatalf("idle healthy Health rejected: %v %v", got, err)
+	}
+	for name, raw := range map[string]string{
+		"running unit":                 strings.Replace(failed, "ActiveState=failed", "ActiveState=active", 1),
+		"still-activating":             strings.Replace(failed, "ActiveState=failed", "ActiveState=activating", 1),
+		"live main PID":                strings.Replace(failed, "MainPID=0", "MainPID=314", 1),
+		"queued systemd job":           strings.Replace(failed, "Job=\n", "Job=42\n", 1),
+		"nonempty cgroup":              strings.Replace(failed, "ControlGroup=\n", "ControlGroup=/system.slice/server-connect-smart-health.service\n", 1),
+		"other unit id":                strings.Replace(failed, "Id="+smartTUNHealthUnit, "Id="+trialRecoveryUnit, 1),
+		"other unit path":              strings.Replace(failed, "FragmentPath=/etc/systemd/system/", "FragmentPath=/run/systemd/system/", 1),
+		"unknown result":               strings.Replace(failed, "Result=exit-code", "Result=start-limit-hit", 1),
+		"failed with healthy substate": strings.Replace(failed, "SubState=failed", "SubState=dead", 1),
+		"unapproved drop-in":           strings.Replace(failed, "DropInPaths=\n", "DropInPaths=/tmp/override.conf\n", 1),
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := parseSmartTUNIdleManagedService([]byte(raw), smartTUNHealthUnit); ErrorCode(err) != "guard_unavailable" {
+				t.Fatalf("unsafe Health service state accepted: %v", err)
+			}
+		})
+	}
+	if _, err := parseSmartTUNIdleManagedService([]byte(failed), trialRecoveryUnit); err == nil {
+		t.Fatal("Health identity was accepted as Recovery authority")
+	}
+	if _, err := parseSmartTUNIdleManagedService([]byte(idleRecoveryObservation()), smartTUNHealthUnit); err == nil {
+		t.Fatal("Recovery identity was accepted as Health authority")
+	}
+	if _, err := parseSmartTUNIdleManagedService([]byte(failed), "ssh.service"); err == nil {
+		t.Fatal("arbitrary foreign systemd service accepted as owned Health")
+	}
+}
