@@ -17,7 +17,12 @@ if [[ ! -f $expected ]]; then
   echo 'Build the regular source QA package before this clean-checkout comparison' >&2
   exit 2
 fi
-if [[ -n $(git -C "$root" status --porcelain) ]]; then
+# A failed Git inspection must never be interpreted as an empty/clean status.
+status=$(git -C "$root" status --porcelain) || {
+  echo 'Cannot verify source checkout cleanliness' >&2
+  exit 2
+}
+if [[ -n $status ]]; then
   echo 'Refusing to compare a dirty source checkout' >&2
   exit 2
 fi
@@ -42,8 +47,20 @@ cleanup() {
 }
 trap cleanup EXIT
 
-git -C "$root" worktree add --detach "$checkout" HEAD
-attached=yes
+# Git may register an exact worktree and then report failure. If that
+# happens, remove only our registered checkout via the existing cleanup
+# path; never prune unrelated/unknown worktrees or erase ambiguous files.
+if git -C "$root" worktree add --detach "$checkout" HEAD; then
+  attached=yes
+else
+  add_rc=$?
+  if registrations=$(git -C "$root" worktree list --porcelain) &&
+     grep -Fxq -- "worktree $checkout" <<< "$registrations"; then
+    attached=yes
+  fi
+  echo 'Cannot create detached QA worktree' >&2
+  exit "$add_rc"
+fi
 test ! -e "$checkout/build" || {
   echo 'Detached checkout was not clean of ignored build/ state' >&2
   exit 1

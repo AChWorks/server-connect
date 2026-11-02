@@ -1,17 +1,19 @@
 #!/usr/bin/env python3
-"""Ordinary package argument and installer preflight-order regressions.
+"""Package target, installer preflight, and clean-worktree QA regressions.
 
-The builder sees only an intentionally invalid core archive, so these tests
-never build or unpack a candidate. The installer harness executes its actual
-verify_payload function against private inert executables and real checksums;
-file ownership checks are replaced with unprivileged fixture checks. This is
-not native platform, installed-host, ABI or publisher-authenticity evidence.
+The target builder sees an intentionally invalid core archive; the separate
+worktree tests use an inert fake package builder and isolated Git repository.
+The installer harness executes its actual verify_payload function against
+private inert executables and real checksums, replacing ownership checks with
+unprivileged fixture checks. No test here installs a product or proves native
+host, upstream publisher identity, or cross-environment reproducibility.
 """
 from __future__ import annotations
 
 import hashlib
 import json
 import os
+import shutil
 from pathlib import Path
 import subprocess
 import tempfile
@@ -21,6 +23,7 @@ import unittest
 ROOT = Path(__file__).resolve().parents[2]
 PACKAGE = ROOT / "scripts" / "package.sh"
 INSTALLER = ROOT / "bundle" / "install.sh"
+CLEAN_CHECKOUT = ROOT / "scripts" / "qa" / "test-package-clean-checkout.sh"
 PAYLOAD_FILES = (
     "bin/server-connect",
     "bin/sing-box",
@@ -297,6 +300,161 @@ check_guard_units() {
         apply = "\nnormalize_idle_health_failure\nrequire_guard_inactive"
         self.assertLess(text.index(claim), text.index(check))
         self.assertLess(text.index(check), text.index(apply))
+
+
+class CleanCheckoutFailureTests(unittest.TestCase):
+    """Real Git worktree lifecycle with inert package and isolated fixtures.
+
+    No genuine binary is packaged, no product installation occurs, and the
+    fixture Git repository has no relationship to the developer checkout.
+    The existing CI step independently builds the genuine pinned core twice.
+    """
+
+    def setUp(self):
+        self.git = shutil.which("git")
+        self.assertIsNotNone(self.git, "Git is needed for worktree regressions")
+        self.temporary = tempfile.TemporaryDirectory(prefix="sc-clean-checkout-negative-")
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name)
+        self.repo = self.root / "repo"
+        self.repo.mkdir()
+        (self.repo / "scripts" / "qa").mkdir(parents=True)
+        (self.repo / "scripts" / "package.sh").write_text("""#!/bin/sh
+set -eu
+printf '%s\n' "$PWD" > "$SC_QA_PACKAGE_MARKER"
+if [ "${SC_QA_PACKAGE_FAIL:-no}" = yes ]; then exit 47; fi
+mkdir -p dist
+printf 'INERT CLEAN QA PACKAGE\n' > dist/server-connect-0.1.0-dev-debian13-amd64-local-qa.tar.gz
+""")
+        (self.repo / "scripts" / "package.sh").chmod(0o755)
+        shutil.copy2(CLEAN_CHECKOUT, self.repo / "scripts" / "qa" / CLEAN_CHECKOUT.name)
+        (self.repo / ".gitignore").write_text("build/\ndist/\n")
+        self.git_run("init", "-q")
+        self.git_run("add", "-A")
+        self.git_run("-c", "user.name=QA Test", "-c", "user.email=qa@example.invalid",
+                     "commit", "-qm", "inert fixture")
+        (self.repo / "dist").mkdir()
+        (self.repo / "dist" / "server-connect-0.1.0-dev-debian13-amd64-local-qa.tar.gz").write_bytes(
+            b"INERT CLEAN QA PACKAGE\n")
+        self.core = self.root / "inert-core.tar.gz"
+        self.core.write_bytes(b"UNTRUSTED QA FIXTURE - NEVER UNPACK\n")
+        self.marker = self.root / "package-ran"
+        self.scratch_parent = self.root / "scratch"
+        self.scratch_parent.mkdir()
+        self.bin = self.root / "bin"
+        self.bin.mkdir()
+        shim = self.bin / "git"
+        shim.write_text("""#!/bin/sh
+# Isolated test seam: only the script's exact Git admission/attachment calls.
+if [ "$#" -ge 4 ] && [ "$1" = -C ] && [ "$3" = status ] &&
+   [ "$4" = --porcelain ]; then
+  case "${SC_QA_STATUS_MODE:-normal}" in
+    fail-empty) exit 77 ;;
+    synthetic-dirty) printf ' M synthetic\n'; exit 0 ;;
+  esac
+fi
+if [ "$#" -ge 4 ] && [ "$1" = -C ] && [ "$3" = worktree ] &&
+   [ "$4" = add ]; then
+  case "${SC_QA_ADD_MODE:-normal}" in
+    fail-before) exit 48 ;;
+    fail-after) "$SC_QA_REAL_GIT" "$@" || exit "$?"; exit 48 ;;
+  esac
+fi
+exec "$SC_QA_REAL_GIT" "$@"
+""")
+        shim.chmod(0o700)
+
+    def git_run(self, *args):
+        return subprocess.run([self.git, "-C", str(self.repo), *args],
+                              check=True, capture_output=True, text=True)
+
+    def registry(self):
+        return self.git_run("worktree", "list", "--porcelain").stdout
+
+    def run_check(self, **options):
+        env = os.environ.copy()
+        env.update({
+            "PATH": str(self.bin) + os.pathsep + os.environ.get("PATH", ""),
+            "SC_QA_REAL_GIT": self.git,
+            "SC_QA_PACKAGE_MARKER": str(self.marker),
+            "SC_QA_PACKAGE_FAIL": "no",
+            "SC_QA_STATUS_MODE": "normal",
+            "SC_QA_ADD_MODE": "normal",
+            "TMPDIR": str(self.scratch_parent),
+        })
+        env.update(options)
+        return subprocess.run(
+            ["bash", str(self.repo / "scripts" / "qa" / CLEAN_CHECKOUT.name), str(self.core)],
+            cwd=self.repo, env=env, capture_output=True, text=True, timeout=20,
+        )
+
+    def assert_no_owned_scratch(self):
+        self.assertEqual(list(self.scratch_parent.iterdir()), [])
+
+    def test_clean_status_accepts_and_removes_registered_worktree(self):
+        before = self.registry()
+        result = self.run_check()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("PASS: clean checkout", result.stdout)
+        self.assertEqual(self.registry(), before)
+        self.assert_no_owned_scratch()
+        self.assertTrue(self.marker.is_file())
+        self.assertFalse(Path(self.marker.read_text().strip()).exists())
+
+    def test_actual_dirty_status_refuses_before_creating_worktree(self):
+        (self.repo / "untracked-data").write_text("not clean\n")
+        before = self.registry()
+        result = self.run_check()
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn("Refusing to compare a dirty source checkout", result.stderr)
+        self.assertEqual(self.registry(), before)
+        self.assert_no_owned_scratch()
+        self.assertFalse(self.marker.exists())
+
+    def test_failed_status_with_empty_stdout_refuses_before_worktree(self):
+        before = self.registry()
+        result = self.run_check(SC_QA_STATUS_MODE="fail-empty")
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn("Cannot verify source checkout cleanliness", result.stderr)
+        self.assertEqual(self.registry(), before)
+        self.assert_no_owned_scratch()
+        self.assertFalse(self.marker.exists())
+
+    def test_package_error_after_attachment_preserves_exit_and_unrelated_tree(self):
+        unrelated = self.root / "unrelated-worktree"
+        self.git_run("worktree", "add", "--detach", str(unrelated), "HEAD")
+        before = self.registry()
+        result = self.run_check(SC_QA_PACKAGE_FAIL="yes")
+        self.assertEqual(result.returncode, 47, result.stderr)
+        self.assertEqual(self.registry(), before)
+        self.assertTrue(unrelated.is_dir())
+        self.assert_no_owned_scratch()
+        self.assertTrue(self.marker.is_file())
+        self.assertFalse(Path(self.marker.read_text().strip()).exists())
+
+    def test_git_add_failure_before_attachment_preserves_other_worktrees(self):
+        unrelated = self.root / "unrelated-worktree"
+        self.git_run("worktree", "add", "--detach", str(unrelated), "HEAD")
+        before = self.registry()
+        result = self.run_check(SC_QA_ADD_MODE="fail-before")
+        self.assertEqual(result.returncode, 48, result.stderr)
+        self.assertIn("Cannot create detached QA worktree", result.stderr)
+        self.assertEqual(self.registry(), before)
+        self.assertTrue(unrelated.is_dir())
+        self.assert_no_owned_scratch()
+        self.assertFalse(self.marker.exists())
+
+    def test_git_add_failure_after_registration_removes_only_owned_tree(self):
+        unrelated = self.root / "unrelated-worktree"
+        self.git_run("worktree", "add", "--detach", str(unrelated), "HEAD")
+        before = self.registry()
+        result = self.run_check(SC_QA_ADD_MODE="fail-after")
+        self.assertEqual(result.returncode, 48, result.stderr)
+        self.assertIn("Cannot create detached QA worktree", result.stderr)
+        self.assertEqual(self.registry(), before)
+        self.assertTrue(unrelated.is_dir())
+        self.assert_no_owned_scratch()
+        self.assertFalse(self.marker.exists())
 
 
 if __name__ == "__main__":
