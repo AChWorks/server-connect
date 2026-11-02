@@ -18,6 +18,9 @@ CORE_ARCHIVE=$(realpath "$CORE_ARCHIVE")
 EXPECTED=e2bdf179c15a3652955dc44867e33ca0965c9c9b91b34267dcc5a5d639a5feee
 printf '%s  %s\n' "$EXPECTED" "$CORE_ARCHIVE" | sha256sum --quiet -c - || { echo 'Pinned upstream core archive digest mismatch' >&2;exit 1; }
 cd "$ROOT"
+# A fresh Git checkout has no ignored build/ directory. Staging must work
+# without relying on a previous CI step or a developer-created directory.
+mkdir -p "$ROOT/build"
 work=$(mktemp -d "$ROOT/build/pack.XXXXXXXX")
 trap 'rm -rf -- "$work"' EXIT HUP INT TERM
 mkdir -p "$work/extract" "$work/server-connect/bin" "$work/server-connect/THIRD-PARTY-LICENSES" "$ROOT/dist"

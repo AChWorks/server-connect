@@ -347,6 +347,9 @@ jobs:
           export GIT_CONFIG_VALUE_0="$GITHUB_WORKSPACE"
           git status --porcelain
           scripts/package.sh "$PWD/build/ci/sing-box.tar.gz"
+          # Prove the same package can be built from a detached clean checkout
+          # without the ignored build/ directory, and has identical bytes.
+          bash scripts/qa/test-package-clean-checkout.sh "$PWD/build/ci/sing-box.tar.gz"
           mkdir -p build/ci/http
           cp dist/server-connect-0.1.0-dev-debian13-amd64-local-qa.tar.gz build/ci/http/bundle.tar.gz
           DIGEST=$(sha256sum build/ci/http/bundle.tar.gz | cut -d' ' -f1)
