@@ -156,10 +156,20 @@ iptables -D FORWARD -i scfqah -o "$host_if" -m comment --comment "$owner" -j ACC
 iptables -D FORWARD -i "$host_if" -o scfqah -m conntrack --ctstate RELATED,ESTABLISHED -m comment --comment "$owner" -j ACCEPT 2>/dev/null || :
 iptables -t nat -D POSTROUTING -s 172.31.249.0/30 -o "$host_if" -m comment --comment "$owner" -j MASQUERADE 2>/dev/null || :
 if [[ -e /sys/class/net/scfqah ]]; then
-  if [[ "$(cat /sys/class/net/scfqah/ifalias)" == "$owner" ]]; then
-    ip link delete scfqah 2>/dev/null || :
+  # A newly-created VETH can exist before the alias assignment succeeds.
+  # Verify the exact kernel ifindex and MAC captured immediately after add.
+  [[ -f "$work/link-identity" ]] ||
+    { echo 'REFUSED: missing link creation receipt' >&2; exit 3; }
+  read -r expected_index expected_mac < "$work/link-identity" || exit 3
+  current_alias=$(cat /sys/class/net/scfqah/ifalias)
+  if [[ "$expected_index" =~ ^[0-9]+$ &&
+        "$expected_mac" =~ ^([[:xdigit:]]{2}:){5}[[:xdigit:]]{2}$ &&
+        "$(cat /sys/class/net/scfqah/ifindex)" == "$expected_index" &&
+        "$(cat /sys/class/net/scfqah/address)" == "$expected_mac" &&
+        ( -z "$current_alias" || "$current_alias" == "$owner" ) ]]; then
+    ip link delete scfqah || exit 3
   else
-    echo 'REFUSED: unknown link ownership' >&2; exit 3
+    echo 'REFUSED: unknown/changed link ownership' >&2; exit 3
   fi
 fi
 if ip netns list | grep -Eq '^scfieldqa([[:space:]]|$)'; then
@@ -168,13 +178,18 @@ if ip netns list | grep -Eq '^scfieldqa([[:space:]]|$)'; then
   fi
   ip netns delete scfieldqa || exit 3
 fi
-if [[ -f /etc/netns/scfieldqa/resolv.conf ]]; then
-  if cmp -s /etc/netns/scfieldqa/resolv.conf "$work/resolv.conf"; then
+if [[ -d /etc/netns/scfieldqa ]]; then
+  # A failure immediately after mkdir but before cp must still remove the
+  # task-created empty directory, never any directory with foreign contents.
+  [[ -f "$work/created-resolver-dir" ]] ||
+    { echo 'REFUSED: DNS directory ownership missing' >&2; exit 4; }
+  if [[ -e /etc/netns/scfieldqa/resolv.conf ]]; then
+    cmp -s /etc/netns/scfieldqa/resolv.conf "$work/resolv.conf" ||
+      { echo 'REFUSED: DNS fixture changed' >&2; exit 4; }
     rm -f /etc/netns/scfieldqa/resolv.conf
-    rmdir /etc/netns/scfieldqa 2>/dev/null || :
-  else
-    echo 'REFUSED: DNS fixture changed' >&2; exit 4
   fi
+  rmdir /etc/netns/scfieldqa ||
+    { echo 'REFUSED: unknown DNS directory contents' >&2; exit 4; }
 fi
 if [[ -f "$work/created-resolver-parent" ]]; then
   rmdir /etc/netns 2>/dev/null || :
@@ -225,7 +240,7 @@ finalize() {
   bash "$work/cleanup.sh" || cleanup_ok=no
   if [[ -e /sys/class/net/$veth_host ]] ||
      ip netns list | grep -Eq "^$namespace([[:space:]]|$)" ||
-     [[ -e "/etc/netns/$namespace/resolv.conf" ]] ||
+     [[ -d "/etc/netns/$namespace" ]] ||
      { [[ -f "$work/created-resolver-parent" ]] && [[ -d /etc/netns ]]; }; then
     echo 'CLEANUP_CONFLICT=FAIL; evidence preserved' >&2
     cleanup_ok=no
@@ -255,7 +270,7 @@ finalize() {
   fi
   if [[ "$cleanup_ok" == yes ]]; then
     echo 'ROOT_NETWORK_RESTORED=PASS'
-    rm -f "$work/config.json" "$work/resolver-port" "$work/provider-host" "$work/provider-ips" "$work/owner" "$work/cleanup.sh" "$work/resolv.conf" "$work/underlay-interface" "$work/pid" "$work/core.log" "$work/created-resolver-parent" "$work/split-ip"
+    rm -f "$work/config.json" "$work/resolver-port" "$work/provider-host" "$work/provider-ips" "$work/owner" "$work/cleanup.sh" "$work/resolv.conf" "$work/underlay-interface" "$work/pid" "$work/core.log" "$work/created-resolver-parent" "$work/created-resolver-dir" "$work/link-identity" "$work/split-ip"
     rmdir "$work" || rc=1
   else
     echo 'QA_FAILED_OR_UNCERTAIN; private evidence retained for manual reconciliation' >&2
@@ -278,6 +293,10 @@ echo 'GUARD_TIMER=PASS'
 
 ip netns add "$namespace"
 ip link add "$veth_host" type veth peer name "$veth_guest"
+# This receipt makes a failure before alias assignment recoverable without
+# adopting an unrecognized link that merely reuses our QA interface name.
+printf '%s %s\n' "$(cat "/sys/class/net/$veth_host/ifindex")" \
+  "$(cat "/sys/class/net/$veth_host/address")" > "$work/link-identity"
 ip link set "$veth_host" alias "$comment"
 ip link set "$veth_guest" netns "$namespace"
 ip addr add "$host_ip" dev "$veth_host"
@@ -291,6 +310,7 @@ if [[ ! -d /etc/netns ]]; then
   : > "$work/created-resolver-parent"
 fi
 mkdir -m 755 "/etc/netns/$namespace"
+: > "$work/created-resolver-dir"
 cp "$work/resolv.conf" "/etc/netns/$namespace/resolv.conf"
 iptables -I FORWARD 1 -i "$veth_host" -o "$host_if" -m comment --comment "$comment" -j ACCEPT
 iptables -I FORWARD 1 -i "$host_if" -o "$veth_host" -m conntrack --ctstate RELATED,ESTABLISHED -m comment --comment "$comment" -j ACCEPT
