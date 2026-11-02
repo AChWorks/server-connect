@@ -65,6 +65,14 @@ func output(j bool, value any, err error) int {
 	return 0
 }
 
+// Keep the real operator command's JSON exit/error contract testable without
+// invoking privileged systemd/network operations in CLI unit tests. Verified
+// partial effects must be serialized even when a later step fails.
+func runIdleGuardReconcile(j bool, reconcile func() (sc.SmartTUNIdleGuardReconcileResult, error)) int {
+	result, err := reconcile()
+	return output(j, result, err)
+}
+
 // Status may fail after safely loading desired state. Keep that bounded
 // diagnostic visible for operators without changing unrelated CLI errors.
 // An unavailable state load has no trustworthy partial report to display.
@@ -437,8 +445,7 @@ func run(j bool, m *sc.Manager, args []string) int {
 		if len(args) != 0 {
 			return output(j, nil, sc.Fault("invalid_arguments", "idle recovery guard reconciliation takes no options"))
 		}
-		result, err := m.ReconcileIdleSmartTUNRecoveryGuard()
-		return output(j, result, err)
+		return runIdleGuardReconcile(j, m.ReconcileIdleSmartTUNRecoveryGuard)
 	case "smart-tun-trial-status":
 		if len(args) != 0 {
 			return output(j, nil, sc.Fault("invalid_arguments", "guarded TUN status accepts no options"))
@@ -746,8 +753,8 @@ Commands:
   smart-tun-trial-policy      Inspect saved non-secret trial policy; never activates routing
   smart-tun-trial-status      Experimental TUN operation/recovery receipt
   smart-tun-trial-reconcile-idle-guard
-                             Explicitly reset only an exact failed, quiescent
-                             recovery service after proven QA VM Direct/off;
+                             Reconcile only exact failed, quiescent Health and
+                             Recovery services after proven QA VM Direct/off;
                              never automatically bypass a failed guard
   smart-tun-trial-disconnect --operation-id HEX32 --revision N
                               Stop exactly this trial, verify native rollback and finalize
@@ -911,7 +918,7 @@ func menu(m *sc.Manager) int {
 			case "6":
 				run(false, m, []string{"smart-tun-trial-policy"})
 			case "7":
-				fmt.Print("Only on the exact isolated QA VM, after confirmed Direct/off and no owned resources. This resets only stale FAILED systemd recovery bookkeeping. Type VM-RECONCILE-GUARD: ")
+				fmt.Print("Only on the exact isolated QA VM, after confirmed Direct/off and no owned resources. This resets only stale FAILED owned Health/Recovery systemd bookkeeping. Type VM-RECONCILE-GUARD: ")
 				ack, err := in.ReadString('\n')
 				if err != nil || strings.TrimSpace(ack) != "VM-RECONCILE-GUARD" {
 					fmt.Println("Canceled; no host change")

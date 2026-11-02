@@ -37,17 +37,24 @@ The existing Docker fixture and the narrowly admitted `sc-qa-vm-us01` QEMU VM ar
 
 The VM acceptance matrix is **not complete** until separately and repeatably proven: exact Direct/no-TUN baseline before and after, the selected VLESS outbound vs a separately observed Direct packet path, saved rules applied from the operator registry and revalidated on reconnect, fresh SSH success and old/wrong/replayed confirmation rejection, normal exact-operation Disconnect, independent recovery after a real Core SIGKILL (no reboot), upstream outage/reconnect/exhaustion, lost/hung health executor and expired pending deadline, and preservation of an unrelated foreign-owned nft/routing object through recovery. Record both the kernel path snapshot and the peer-side VPN witness. The current VM-only health witness validates TUN-bound IPv4 HTTPS plus protected underlay TCP; **UDP/DNS/IPv6 are not measured and must not be claimed working** merely because that health receipt is positive.
 
-A previously failed but fully quiescent independent Recovery Guard oneshot
-must **not** be automatically normalized by new Apply. The exact-QA-VM
-operator-only `smart-tun-trial-reconcile-idle-guard` must verify absent
-journal/credential, idle Core/Health, inactive disabled timers, native policy
-slots free and exact service provenance, with zero PID/job/cgroup, before
-resetting only its own stale failure status. Validate true installed systemd
-FAILED -> inactive/success, subsequent healthy fresh-SSH Apply, and negative
-pending/unknown/foreign/masked/active states. Neither a safe Off nor an
-unsupervised timer is sufficient to infer a runnable guard. Use
-`tcpdump -p` for read-only QA capture; default promiscuous mode changes
-owned TUN link flags and correctly triggers native ownership conflict.
+Failed Health and Recovery oneshots can coexist after a software-TCG
+timeout. A new Apply must never silently reset a failed independent Guard;
+the exact-QA-VM operator-only `smart-tun-trial-reconcile-idle-guard` must
+first prove absent journal/credential, idle Core, **both** inactive disabled
+timers, native policy slots free, and exact Health/Recovery oneshot identities
+with zero PID/job/cgroup. After this proof it may reset only the failed owned
+oneshots, reobserve each service, and recheck the idle network baseline.
+Test both-failed, either-failed, and already-healthy idempotence; simulate
+Health-reset-success followed by Recovery reset/observation/final-native
+failure, verifying `ok=false` with the known partial reset flags preserved
+and `guard_idle_verified=false`. Reject unverified reset outcomes. Include
+negative pending/unknown/foreign/masked/active states. Validate true installed
+systemd
+FAILED -> inactive/success without erasing historical journals, then a
+subsequent independently guarded fresh-SSH Apply where the VM scheduler can
+meet the unmodified time bounds. Neither safe Off nor a timer alone proves a
+runnable Guard. Use `tcpdump -p` for read-only QA capture; default promiscuous
+mode changes owned TUN link flags and triggers native ownership conflict.
 
 The QEMU NAT's dynamic IPv6 `nhid` default route is conservatively rejected by native admission, rather than globally weakening indirect-nexthop ownership checks; the explicitly IPv4-only VM launch does not authorize IPv6 Smart Routing. Under software `TCG` emulation, a 20-second systemd oneshot can time out even while earlier HTTPS/underlay probes were healthy. The Activation Guard's subsequent exact Off is a safety success, not an accepted sustained-VPN session. After a **verified absent** journal and idle/timer/core state, normalization of a stale failed health oneshot is bounded and must never hide an active/uncertain operation. Better VM scheduling or genuinely authorized KVM acceleration may be used for stable acceptance; do not extend global health leases just to make a slow fixture appear healthy.
 
