@@ -75,6 +75,25 @@ jobs:
           # This privileged field harness is only for explicitly approved
           # disposable hosts, never run its real netns/TUN path in CI.
           bash -n scripts/qa/field-selected-tun-netns.sh
+          # bash -n does not parse embedded scripts. Check the actual recovery
+          # body and all generated Python config/preflight snippets as source.
+          python3 - <<'PYQA'
+          from pathlib import Path
+          import ast
+          import subprocess
+          source = Path("scripts/qa/field-selected-tun-netns.sh").read_text()
+          marker = "<<'CLEANUP'\n"
+          assert source.count(marker) == 1
+          cleanup = source.partition(marker)[2].partition("\nCLEANUP\n")[0]
+          assert cleanup.startswith("#!/usr/bin/env bash\n")
+          subprocess.run(["bash", "-n"], input=cleanup, text=True, check=True)
+          for label in ("PYIP", "PYSPLIT", "PY", "PYPROVIDER"):
+              marker = "<<'" + label + "'\n"
+              assert source.count(marker) == 1, label
+              script = source.partition(marker)[2].partition("\n" + label + "\n")[0]
+              ast.parse(script)
+          print("FIELD_EMBEDDED_SOURCE_SYNTAX=PASS")
+          PYQA
           set +e
           bash scripts/qa/field-selected-tun-netns.sh > build/ci/field-noargs.log 2>&1
           field_rc=$?
