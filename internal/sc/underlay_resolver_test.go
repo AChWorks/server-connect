@@ -147,6 +147,24 @@ func TestUnderlayExplicitResolverPinsDNSAndMatchesEndpoint(t *testing.T) {
 	}
 }
 
+// A selected-host probe must reject a different kernel route before
+// the resolver can transmit a hostname query.
+func TestSelectedUnderlayDNSWrongInterfaceNoQuery(t *testing.T) {
+	nativeExplicitResolverReady(t)
+	port, queries := localExplicitResolver(t, [4]byte{198, 51, 100, 17})
+	report, err := inspectUnderlayDNSOnDevice("node.example.test", "198.51.100.17", "127.0.0.1", port, "ens3")
+	if ErrorCode(err) != "underlay_policy_unsupported" ||
+		report.Outcome != "resolver_wrong_underlay" ||
+		report.ResolverDialCount != 0 || report.NameMatched || queries.Load() != 0 {
+		t.Fatalf("wrong underlay transmitted DNS: %+v err=%v queries=%d", report, err, queries.Load())
+	}
+	positive, err := inspectUnderlayDNSOnDevice("node.example.test", "198.51.100.17", "127.0.0.1", port, "lo")
+	if err != nil || !positive.NameMatched || positive.ResolverRouteDevice != "lo" ||
+		!positive.InterfaceBound || !positive.RouteStable || queries.Load() == 0 {
+		t.Fatalf("expected lo underlay DNS refused: %+v err=%v queries=%d", positive, err, queries.Load())
+	}
+}
+
 func TestUnderlayExplicitResolverMismatchFailsClosed(t *testing.T) {
 	nativeExplicitResolverReady(t)
 	port, queries := localExplicitResolver(t, [4]byte{198, 51, 100, 17})

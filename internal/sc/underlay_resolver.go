@@ -9,6 +9,7 @@ import (
 	"os"
 	"sort"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -78,6 +79,13 @@ func matchingResolverTransportRoute(ip netip.Addr, port, uid int) (underlayRoute
 // Queries are initiated only on explicit operator invocation; this method
 // changes no Linux routes, rules, firewall, DNS settings or product state.
 func InspectUnderlayDNS(hostname, endpointIP, resolverIP string, resolverPort int) (UnderlayDNSReport, error) {
+	return inspectUnderlayDNSOnDevice(hostname, endpointIP, resolverIP, resolverPort, "")
+}
+
+// inspectUnderlayDNSOnDevice is the selected-host variant. It refuses
+// nonmatching UDP or TCP resolver flow routes before sending DNS data.
+// Existing standalone diagnostics retain their original route selection.
+func inspectUnderlayDNSOnDevice(hostname, endpointIP, resolverIP string, resolverPort int, expectedDevice string) (UnderlayDNSReport, error) {
 	endpoint, err := parsePreflightAddress(endpointIP, "endpoint")
 	if err != nil || !endpoint.IsValid() {
 		return UnderlayDNSReport{}, Fault("invalid_arguments", "underlay DNS endpoint must be a literal unicast IPv4/IPv6 address")
@@ -131,6 +139,10 @@ func InspectUnderlayDNS(hostname, endpointIP, resolverIP string, resolverPort in
 	}
 	report.ResolverRouteDevice, report.ResolverRouteGateway, report.ResolverRouteSource =
 		before.Device, before.Gateway, before.Source
+	if err := verifyExpectedFlowBeforeDial(expectedDevice, before, before); err != nil {
+		report.Outcome = "resolver_wrong_underlay"
+		return report, err
+	}
 
 	var boundDials atomic.Int64
 	var failedBinds atomic.Int64
@@ -160,8 +172,32 @@ func InspectUnderlayDNS(hostname, endpointIP, resolverIP string, resolverPort in
 		PreferGo:     true,
 		StrictErrors: true,
 		Dial: func(ctx context.Context, network, _ string) (net.Conn, error) {
-			// Go asks for udp/tcp connections as necessary. No fallback
-			// to the host-configured address supplied by the resolver.
+			// The resolver may retry UDP as TCP. With an expected underlay,
+			// recheck that exact protocol's route and policy before each
+			// socket. Never let a later route change select a foreign device.
+			if expectedDevice != "" {
+				proto := ""
+				switch {
+				case strings.HasPrefix(network, "udp"):
+					proto = "udp"
+				case strings.HasPrefix(network, "tcp"):
+					proto = "tcp"
+				default:
+					return nil, Fault("underlay_policy_unsupported", "unexpected DNS socket transport")
+				}
+				current, routeErr := resolverFlowRoute(resolver, resolverPort, uid, proto)
+				if routeErr != nil {
+					return nil, routeErr
+				}
+				if err := verifyExpectedFlowBeforeDial(expectedDevice, before, current); err != nil {
+					return nil, err
+				}
+				currentPolicy, policyErr := inspectTCPPolicyRules(resolver)
+				if policyErr != nil || !bytes.Equal(policyBefore, currentPolicy) {
+					return nil, Fault("underlay_policy_unsupported", "DNS flow policy changed before dialing")
+				}
+			}
+			// No fallback to the host-configured resolver or unbound socket.
 			return dialer.DialContext(ctx, network, pinnedResolver)
 		},
 	}
