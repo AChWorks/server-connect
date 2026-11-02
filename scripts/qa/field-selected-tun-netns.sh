@@ -5,6 +5,8 @@ set -Eeuo pipefail
 umask 077
 export PATH=/usr/sbin:/usr/bin:/sbin:/bin
 export LC_ALL=C
+# Python assertions are safety gates; caller PYTHONOPTIMIZE must not disable them.
+unset PYTHONOPTIMIZE PYTHONPATH PYTHONHOME
 namespace=scfieldqa
 veth_host=scfqah
 veth_guest=scfqap
@@ -111,7 +113,7 @@ trap pre_guard_cleanup EXIT
 printf 'host=%s boot=%s owner=%s\n' "$expected_host" "$boot" "$comment" > "$work/owner"
 printf '%s\n' "$host_if" > "$work/underlay-interface"
 if [[ "$split_mode" == yes ]]; then
-  split_ip=$(getent ahostsv4 www.cloudflare.com | awk 'NR==1 {print $1}')
+  split_ip=$(timeout 12s getent ahostsv4 www.cloudflare.com | awk 'NR==1 {print $1}')
   python3 - "$split_ip" <<'PYSPLIT'
 import ipaddress,sys
 assert ipaddress.IPv4Address(sys.argv[1]).is_global, "Nonpublic exception IP"
@@ -227,7 +229,7 @@ p=w/'config.json';p.write_text(json.dumps(cfg));p.chmod(0o600)
 (w/'resolver-port').write_text(str(out['server_port']))
 (w/'provider-host').write_text(out['server'])
 PY
-"$core" check -c "$work/config.json" >/dev/null || die "real selected profile TUN config invalid"
+timeout 20s "$core" check -c "$work/config.json" >/dev/null || die "real selected profile TUN config invalid"
 printf 'nameserver %s\nnameserver %s\n' "$resolver_ip" "$secondary_resolver" > "$work/resolv.conf"
 
 finalize() {
@@ -319,14 +321,14 @@ echo 'NETWORK_NAMESPACE=READY'
 
 # Resolve once before TUN so the real HTTPS/VLESS test is independent of
 # later DNS behavior. DNS under active TUN gets a separate FAIL/PASS result.
-foreign_ip=$(ip netns exec "$namespace" getent ahostsv4 api.ipify.org | awk 'NR==1 {print $1}')
+foreign_ip=$(timeout 12s ip netns exec "$namespace" getent ahostsv4 api.ipify.org | awk 'NR==1 {print $1}')
 [[ "$foreign_ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "cannot resolve test destination before TUN"
 echo 'DIRECT_PRE_TUN_DNS=PASS'
 # Resolve only the real selected provider's IPv4 endpoint(s), in this
 # namespace, before TUN. Port-only outage rules are invalid: many VLESS
 # transports use TCP/443, exactly like the foreign HTTPS leak probe.
 provider_host=$(cat "$work/provider-host")
-provider_answers=$(ip netns exec "$namespace" getent ahostsv4 "$provider_host") ||
+provider_answers=$(timeout 12s ip netns exec "$namespace" getent ahostsv4 "$provider_host") ||
   die "cannot resolve the selected upstream from this namespace"
 printf '%s\n' "$provider_answers" | awk '{print $1}' | sort -u > "$work/provider-ips"
 python3 - "$work/provider-ips" "$foreign_ip" <<'PYPROVIDER'
