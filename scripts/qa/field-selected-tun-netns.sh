@@ -7,13 +7,13 @@ export PATH=/usr/sbin:/usr/bin:/sbin:/bin
 export LC_ALL=C
 # Python assertions are safety gates; caller PYTHONOPTIMIZE must not disable them.
 unset PYTHONOPTIMIZE PYTHONPATH PYTHONHOME
-namespace=scfieldqa
+namespace=''
 veth_host=scfqah
 veth_guest=scfqap
 tun=scfqat
 work=/root/server-connect-field-netns-qa
 watch=server-connect-field-netns-watch
-comment=server-connect-field-netns-qa
+comment=''
 manager=/usr/local/bin/server-connect
 core=/opt/server-connect/current/bin/sing-box
 expected_ip=''
@@ -40,6 +40,11 @@ fi
    "$resolver_ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ &&
    "$secondary_resolver" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "invalid bound host arguments"
 [[ "$(hostname)" == "$expected_host" ]] || die "wrong host"
+# Per-invocation names and comments prevent fixed-name foreign adoption.
+run_id=$(od -An -N8 -tx1 /dev/urandom | tr -d '[:space:]') || die "random identity failed"
+[[ "$run_id" =~ ^[0-9a-f]{16}$ ]] || die "invalid invocation identity"
+namespace="scf$run_id"
+comment="server-connect-field-netns-qa:$run_id"
 [[ "$EUID" -eq 0 ]] || die "root required"
 [[ "$(cat /etc/debian_version)" == 12* ]] || die "expected disposable Debian 12"
 [[ -e /dev/net/tun && -x "$manager" && -x "$core" ]] || die "missing installed manager/core/tun"
@@ -73,9 +78,15 @@ except Exception:
 [[ "$(readlink /proc/1/ns/net)" == "$(readlink /proc/self/ns/net)" ]] ||
   die "PID 1 is not in the host network namespace"
 [[ "$(systemctl is-active ssh 2>/dev/null || :)" == active ]] || die "SSH management service is not active"
-[[ ! -e "$work" && ! -e "/etc/netns/$namespace" ]] || die "existing trial state"
+[[ ! -e "$work" && ! -L "$work" && ! -e "/etc/netns/$namespace" &&
+   ! -L "/etc/netns/$namespace" ]] || die "existing trial state"
+[[ ! -L /etc/netns && ( ! -e /etc/netns || -d /etc/netns ) ]] || die "resolver parent is not a regular directory"
 [[ ! -e "/sys/class/net/$veth_host" && ! -e "/sys/class/net/$veth_guest" && ! -e "/sys/class/net/$tun" ]] || die "link conflict"
 existing_ns=$(ip netns list) || die "cannot inspect network namespaces"
+while IFS= read -r entry; do
+  [[ -z "$entry" || "$entry" =~ ^[a-zA-Z0-9_.-]+([[:space:]]+\(id:[[:space:]]*[0-9]+\))?$ ]] ||
+    die "malformed preflight namespace inventory"
+done <<< "$existing_ns"
 if printf '%s\n' "$existing_ns" | grep -E "^$namespace([[:space:]]|$)" >/dev/null; then
   die "namespace conflict"
 fi
@@ -109,11 +120,13 @@ pre_guard_cleanup() {
   # The guarded finalizer replaces this trap before systemd-run can be
   # invoked. Therefore no future watchdog can reference these files.
   rm -f "$work/config.json" "$work/resolver-port" "$work/provider-host" "$work/owner" \
-        "$work/cleanup.sh" "$work/resolv.conf" "$work/underlay-interface" "$work/split-ip"
+        "$work/cleanup.sh" "$work/resolv.conf" "$work/underlay-interface" "$work/split-ip"         "$work/run-id" "$work/root-baseline"
   rmdir "$work" 2>/dev/null || echo 'PRIVATE_PREARM_STATE_RETAINED'
   exit "$rc"
 }
 trap pre_guard_cleanup EXIT
+printf '%s\n' "$run_id" > "$work/run-id"
+printf '%s %s %s %s %s\n' "$baseline_routes" "$baseline_rpdb" "$baseline_filter" "$baseline_nat" "$boot" > "$work/root-baseline"
 printf 'host=%s boot=%s owner=%s\n' "$expected_host" "$boot" "$comment" > "$work/owner"
 printf '%s\n' "$host_if" > "$work/underlay-interface"
 if [[ "$split_mode" == yes ]]; then
@@ -126,94 +139,197 @@ PYSPLIT
 fi
 cat > "$work/cleanup.sh" <<'CLEANUP'
 #!/usr/bin/env bash
-set -u
+# Independent recovery: no removal on unknown namespace/DNS ownership and
+# no successful watchdog exit until all owned changes are independently absent.
+set -Eeuo pipefail
 export PATH=/usr/sbin:/usr/bin:/sbin:/bin
+export LC_ALL=C
 work=/root/server-connect-field-netns-qa
-owner=server-connect-field-netns-qa
-namespace=scfieldqa
-host_if=$(cat "$work/underlay-interface" 2>/dev/null) || exit 2
-[[ "$host_if" =~ ^[a-zA-Z0-9_.-]{1,15}$ ]] || exit 2
-if [[ ! -f "$work/owner" ]] ||
-   ! grep -Fq "owner=$owner" "$work/owner" ||
-   ! grep -Fq "boot=$(cat /proc/sys/kernel/random/boot_id)" "$work/owner"; then
-  echo 'REFUSED: missing exact QA cleanup ownership' >&2; exit 2
+fail() { echo "RECOVERY_UNCERTAIN: $*" >&2; exit 3; }
+[[ -d "$work" && ! -L "$work" && -f "$work/run-id" ]] ||
+  fail 'private owner directory or invocation identity unavailable'
+run_id=$(cat "$work/run-id") || fail 'invocation identity unreadable'
+[[ "$run_id" =~ ^[0-9a-f]{16}$ ]] || fail 'invalid invocation identity'
+namespace="scf$run_id"
+owner="server-connect-field-netns-qa:$run_id"
+host_if=$(cat "$work/underlay-interface") || fail 'underlay receipt unavailable'
+[[ "$host_if" =~ ^[a-zA-Z0-9_.-]{1,15}$ ]] || fail 'invalid underlay receipt'
+boot_now=$(cat /proc/sys/kernel/random/boot_id) || fail 'boot identity unavailable'
+[[ -f "$work/owner" ]] &&
+  grep -Fqx "host=$(hostname) boot=$boot_now owner=$owner" "$work/owner" ||
+  fail 'host/boot/owner receipt mismatch'
+read -r baseline_routes baseline_rpdb baseline_filter baseline_nat baseline_boot < "$work/root-baseline" ||
+  fail 'original root-network fingerprints unavailable'
+for digest in "$baseline_routes" "$baseline_rpdb" "$baseline_filter" "$baseline_nat"; do
+  [[ "$digest" =~ ^[0-9a-f]{64}$ ]] || fail 'invalid original root-network fingerprint'
+done
+[[ "$baseline_boot" == "$boot_now" ]] || fail 'root baseline boot changed'
+
+# A successful but malformed listing is also UNKNOWN. iproute2 prints
+# NAME or NAME (id: N); other formats are not proof of absence.
+valid_netns_list() {
+  local line
+  while IFS= read -r line; do
+    [[ -z "$line" ]] && continue
+    [[ "$line" =~ ^[a-zA-Z0-9_.-]+([[:space:]]+\(id:[[:space:]]*[0-9]+\))?$ ]] ||
+      return 1
+  done <<< "$1"
+}
+# A failed namespace listing or PID query is UNKNOWN, never absence.
+listed=$(ip netns list) || fail 'namespace listing failed'
+valid_netns_list "$listed" || fail 'malformed namespace listing'
+active=no
+if printf '%s\n' "$listed" | grep -Eq "^$namespace([[:space:]]|$)"; then
+  [[ -s "$work/namespace-id" && ! -L "$work/namespace-id" ]] ||
+    fail 'namespace exists without confirmed creation receipt'
+  observed=$(stat -Lc '%d:%i' "/var/run/netns/$namespace") ||
+    fail 'namespace NSFS identity cannot be inspected'
+  [[ "$observed" == "$(cat "$work/namespace-id")" ]] ||
+    fail 'namespace NSFS identity changed or belongs to another actor'
+  active=yes
+else
+  [[ ! -e "/var/run/netns/$namespace" && ! -L "/var/run/netns/$namespace" ]] ||
+    fail 'namespace listing and path disagree'
+  if [[ -f "$work/namespace-id" && ! -f "$work/namespace-deleted" ]]; then
+    fail 'created namespace missing without verified deletion receipt'
+  fi
 fi
-# Check PID identity AND its kernel start tick before signaling; a recycled PID
-# must never be treated as a task-owned sing-box process.
-if [[ -f "$work/pid" ]]; then
-  read -r pid start_tick < "$work/pid" || exit 3
-  if [[ "$pid" =~ ^[1-9][0-9]*$ && "$start_tick" =~ ^[0-9]+$ ]] &&
-     [[ -r "/proc/$pid/stat" && -r "/proc/$pid/cmdline" ]] &&
-     [[ "$(awk '{print $22}' "/proc/$pid/stat")" == "$start_tick" ]] &&
-     tr '\0' ' ' < "/proc/$pid/cmdline" | grep -Fq "$work/config.json"; then
-    kill -TERM "$pid" 2>/dev/null || :
-    for i in 1 2 3 4 5; do
-      [[ ! -d "/proc/$pid" ]] && break
-      sleep 1
-    done
-    if [[ -r "/proc/$pid/stat" ]] &&
-       [[ "$(awk '{print $22}' "/proc/$pid/stat")" == "$start_tick" ]] &&
-       tr '\0' ' ' < "/proc/$pid/cmdline" | grep -Fq "$work/config.json"; then
-      kill -KILL "$pid" 2>/dev/null || :
+
+# Only the positively identified namespace may supply process candidates.
+if [[ "$active" == yes ]]; then
+  candidates=$(ip netns pids "$namespace") || fail 'namespace PID query failed'
+  while IFS= read -r candidate; do
+    [[ -n "$candidate" ]] || continue
+    [[ "$candidate" =~ ^[1-9][0-9]*$ ]] || fail 'malformed namespace PID inventory'
+    [[ -r "/proc/$candidate/cmdline" && -r "/proc/$candidate/stat" ]] ||
+      fail 'namespace process identity unavailable'
+    if tr '\0' ' ' < "/proc/$candidate/cmdline" | grep -Fq "$work/config.json"; then
+      candidate_tick=$(awk '{print $22}' "/proc/$candidate/stat") ||
+        fail 'namespace process start tick unavailable'
+      [[ "$candidate_tick" =~ ^[0-9]+$ ]] || fail 'invalid process start identity'
+      if [[ -r "/proc/$candidate/stat" &&
+            "$(awk '{print $22}' "/proc/$candidate/stat")" == "$candidate_tick" ]]; then
+        kill -TERM "$candidate" 2>/dev/null || :
+        for i in 1 2 3 4 5; do
+          [[ ! -e "/proc/$candidate" ]] && break
+          sleep 1
+        done
+        if [[ -r "/proc/$candidate/stat" &&
+              "$(awk '{print $22}' "/proc/$candidate/stat")" == "$candidate_tick" ]] &&
+           tr '\0' ' ' < "/proc/$candidate/cmdline" | grep -Fq "$work/config.json"; then
+          kill -KILL "$candidate" 2>/dev/null || :
+        fi
+      fi
     fi
-  fi
+  done <<< "$candidates"
+  remaining=$(ip netns pids "$namespace") ||
+    fail 'post-signal namespace PID query failed'
+  [[ -z "$remaining" ]] ||
+    fail 'namespace has live/unknown processes; deletion refused'
 fi
-# A SIGKILL between starting the namespace process and writing the PID
-# receipt (or unexpected fork) must not permanently defeat independent
-# recovery. The namespace was absent at preflight and is task-owned.
-# Signal only a process found there whose argv names our private config.
-while IFS= read -r candidate; do
-  [[ "$candidate" =~ ^[1-9][0-9]*$ ]] || continue
-  [[ -r "/proc/$candidate/cmdline" && -r "/proc/$candidate/stat" ]] || continue
-  if tr '\0' ' ' < "/proc/$candidate/cmdline" | grep -Fq "$work/config.json"; then
-    candidate_tick=$(awk '{print $22}' "/proc/$candidate/stat") || continue
-    [[ "$candidate_tick" =~ ^[0-9]+$ ]] || continue
-    if [[ -r "/proc/$candidate/stat" &&
-          "$(awk '{print $22}' "/proc/$candidate/stat")" == "$candidate_tick" ]]; then
-      kill -TERM "$candidate" 2>/dev/null || :
-      for i in 1 2 3 4 5; do
-        [[ ! -e "/proc/$candidate" ]] && break
-        sleep 1
-      done
+
+# Bounded xtables lock wait and retries. Missing and deletion failure are
+# distinguished by a separately successful listing, never by suppressing -D.
+remove_root_rule() {
+  local table=$1 chain=$2 tag=$3 attempt current
+  shift 3
+  for attempt in 1 2 3; do
+    current=$(iptables -w 2 -t "$table" -S "$chain") ||
+      fail "root $table/$chain listing failed"
+    if ! printf '%s\n' "$current" | grep -Fq -- "$tag"; then
+      return 0
     fi
+    if iptables -w 2 -t "$table" -D "$chain" "$@"; then
+      continue
+    fi
+    sleep 1
+  done
+  current=$(iptables -w 2 -t "$table" -S "$chain") ||
+    fail "root $table/$chain post-retry listing failed"
+  if printf '%s\n' "$current" | grep -Fq -- "$tag"; then
+    fail "root $table/$chain tagged rule remains after bounded deletion"
   fi
-done < <(ip netns pids "$namespace" 2>/dev/null || :)
-iptables -D FORWARD -i scfqah -o "$host_if" -m comment --comment "$owner" -j ACCEPT 2>/dev/null || :
-iptables -D FORWARD -i "$host_if" -o scfqah -m conntrack --ctstate RELATED,ESTABLISHED -m comment --comment "$owner" -j ACCEPT 2>/dev/null || :
-iptables -t nat -D POSTROUTING -s 172.31.249.0/30 -o "$host_if" -m comment --comment "$owner" -j MASQUERADE 2>/dev/null || :
-if [[ -e /sys/class/net/scfqah ]]; then
-  # Both veth ends originate inside the owned namespace; the root-facing
-  # end is labelled BEFORE it moves into the host netns. There is no
-  # unlabelled root-veth creation window to recover or accidentally adopt.
-  if [[ "$(cat /sys/class/net/scfqah/ifalias)" == "$owner" ]]; then
-    ip link delete scfqah || exit 3
-  else
-    echo 'REFUSED: unknown/changed root veth alias' >&2; exit 3
+}
+remove_root_rule filter FORWARD "$owner:forward-out" -i scfqah -o "$host_if" -m comment --comment "$owner:forward-out" -j ACCEPT
+remove_root_rule filter FORWARD "$owner:forward-in" -i "$host_if" -o scfqah -m conntrack --ctstate RELATED,ESTABLISHED -m comment --comment "$owner:forward-in" -j ACCEPT
+remove_root_rule nat POSTROUTING "$owner:nat" -s 172.31.249.0/30 -o "$host_if" -m comment --comment "$owner:nat" -j MASQUERADE
+inventory=$(iptables-save) || fail 'independent firewall listing failed'
+if printf '%s\n' "$inventory" | grep -Fq -- "$owner"; then
+  fail 'one or more tagged root firewall rules remain'
+fi
+
+if [[ -e /sys/class/net/scfqah || -L /sys/class/net/scfqah ]]; then
+  [[ -r /sys/class/net/scfqah/ifalias ]] || fail 'root veth alias unavailable'
+  [[ "$(cat /sys/class/net/scfqah/ifalias)" == "$owner" ]] ||
+    fail 'root veth alias is foreign or changed'
+  ip link delete scfqah || fail 'owned root veth deletion failed'
+  [[ ! -e /sys/class/net/scfqah ]] || fail 'root veth still present'
+fi
+if [[ "$active" == yes ]]; then
+  ip netns delete "$namespace" || fail 'owned namespace deletion failed'
+  after=$(ip netns list) || fail 'post-deletion namespace listing failed'
+  valid_netns_list "$after" || fail 'malformed post-deletion namespace listing'
+  if printf '%s\n' "$after" | grep -Eq "^$namespace([[:space:]]|$)"; then
+    fail 'deleted namespace still listed'
+  fi
+  [[ ! -e "/var/run/netns/$namespace" && ! -L "/var/run/netns/$namespace" ]] ||
+    fail 'namespace path still exists'
+  : > "$work/namespace-deleted"
+fi
+
+dns_dir="/etc/netns/$namespace"
+if [[ -d "$dns_dir" || -L "$dns_dir" ]]; then
+  [[ -d "$dns_dir" && ! -L "$dns_dir" && -s "$work/created-resolver-dir" ]] ||
+    fail 'DNS directory exists without verified creation'
+  [[ "$(stat -Lc '%d:%i' "$dns_dir")" == "$(cat "$work/created-resolver-dir")" ]] ||
+    fail 'DNS directory inode differs from receipt'
+  temp="$dns_dir/resolv.conf.tmp.$run_id"
+  if [[ -e "$temp" || -L "$temp" ]]; then
+    [[ -f "$temp" && ! -L "$temp" ]] || fail 'DNS temporary entry unrecognized'
+    rm -- "$temp" || fail 'owned partial DNS temporary removal failed'
+  fi
+  if [[ -e "$dns_dir/resolv.conf" || -L "$dns_dir/resolv.conf" ]]; then
+    [[ -f "$dns_dir/resolv.conf" && ! -L "$dns_dir/resolv.conf" ]] ||
+      fail 'active DNS fixture is not regular'
+    cmp -s "$dns_dir/resolv.conf" "$work/resolv.conf" ||
+      fail 'active DNS fixture changed or unreadable'
+    rm -- "$dns_dir/resolv.conf" || fail 'owned DNS fixture removal failed'
+  fi
+  rmdir -- "$dns_dir" || fail 'DNS directory not empty or removal failed'
+  [[ ! -e "$dns_dir" ]] || fail 'deleted DNS directory still exists'
+  : > "$work/dns-dir-deleted"
+elif [[ -f "$work/created-resolver-dir" && ! -f "$work/dns-dir-deleted" ]]; then
+  fail 'created DNS directory missing without verified removal'
+fi
+if [[ -f "$work/created-resolver-parent-intent" ]]; then
+  if [[ -d /etc/netns || -L /etc/netns ]]; then
+    [[ -d /etc/netns && ! -L /etc/netns && -s "$work/created-resolver-parent" ]] ||
+      fail 'DNS parent exists without verified creation'
+    [[ "$(stat -Lc '%d:%i' /etc/netns)" == "$(cat "$work/created-resolver-parent")" ]] ||
+      fail 'DNS parent inode differs from receipt'
+    rmdir /etc/netns || fail 'DNS parent contains foreign entries or deletion failed'
+    [[ ! -e /etc/netns ]] || fail 'deleted DNS parent still exists'
+    : > "$work/dns-parent-deleted"
+  elif [[ -f "$work/created-resolver-parent" && ! -f "$work/dns-parent-deleted" ]]; then
+    fail 'created DNS parent missing without verified removal'
   fi
 fi
-if ip netns list | grep -Eq '^scfieldqa([[:space:]]|$)'; then
-  if ip netns pids scfieldqa | grep -Eq '^[0-9]+$'; then
-    echo 'REFUSED: unexpected active namespace process' >&2; exit 3
-  fi
-  ip netns delete scfieldqa || exit 3
-fi
-if [[ -d /etc/netns/scfieldqa ]]; then
-  # A failure immediately after mkdir but before cp must still remove the
-  # task-created empty directory, never any directory with foreign contents.
-  [[ -f "$work/created-resolver-dir" ]] ||
-    { echo 'REFUSED: DNS directory ownership missing' >&2; exit 4; }
-  if [[ -e /etc/netns/scfieldqa/resolv.conf ]]; then
-    cmp -s /etc/netns/scfieldqa/resolv.conf "$work/resolv.conf" ||
-      { echo 'REFUSED: DNS fixture changed' >&2; exit 4; }
-    rm -f /etc/netns/scfieldqa/resolv.conf
-  fi
-  rmdir /etc/netns/scfieldqa ||
-    { echo 'REFUSED: unknown DNS directory contents' >&2; exit 4; }
-fi
-if [[ -f "$work/created-resolver-parent" ]]; then
-  rmdir /etc/netns 2>/dev/null || :
-fi
-echo QA_SCOPED_CLEANUP_ATTEMPTED
+# Independently verify actual root network even when only watchdog survives.
+current=$(ip -4 route show table all | sha256sum | cut -d' ' -f1) ||
+  fail 'root route fingerprint unavailable'
+[[ "$current" == "$baseline_routes" ]] || fail 'root route baseline differs'
+current=$(ip -4 rule show | sha256sum | cut -d' ' -f1) ||
+  fail 'root RPDB fingerprint unavailable'
+[[ "$current" == "$baseline_rpdb" ]] || fail 'root RPDB baseline differs'
+current=$(iptables -w 2 -t filter -S | sha256sum | cut -d' ' -f1) ||
+  fail 'root filter fingerprint unavailable'
+[[ "$current" == "$baseline_filter" ]] || fail 'root filter baseline differs'
+current=$(iptables -w 2 -t nat -S | sha256sum | cut -d' ' -f1) ||
+  fail 'root NAT fingerprint unavailable'
+[[ "$current" == "$baseline_nat" ]] || fail 'root NAT baseline differs'
+[[ "$(systemctl is-active ssh)" == active ]] ||
+  fail 'root SSH inactive'
+echo 'QA_SCOPED_CLEANUP_VERIFIED=PASS'
 CLEANUP
 chmod 0700 "$work/cleanup.sh"
 python3 - "$work" <<'PY'
@@ -257,10 +373,20 @@ finalize() {
   # verified; a signal/failure during cleanup must not lose its recovery path.
   cleanup_ok=yes
   bash "$work/cleanup.sh" || cleanup_ok=no
+  post_namespaces=$(ip netns list) || { echo 'ROOT_NAMESPACE_DISCOVERY_FAILED=FAIL'; cleanup_ok=no; post_namespaces=''; }
+  # The parent finalizer also rejects malformed (but successful) listing output.
+  if ! printf '%s\n' "$post_namespaces" | python3 -c '
+import re,sys
+lines=sys.stdin.read().splitlines()
+sys.exit(0 if all(re.fullmatch(r"[a-zA-Z0-9_.-]+(?: \(id: [0-9]+\))?", x) for x in lines) else 1)
+'; then
+    echo 'ROOT_NAMESPACE_FORMAT_UNKNOWN=FAIL' >&2
+    cleanup_ok=no
+  fi
   if [[ -e /sys/class/net/$veth_host ]] ||
-     ip netns list | grep -Eq "^$namespace([[:space:]]|$)" ||
+     printf '%s\n' "$post_namespaces" | grep -Eq "^$namespace([[:space:]]|$)" ||
      [[ -d "/etc/netns/$namespace" ]] ||
-     { [[ -f "$work/created-resolver-parent" ]] && [[ -d /etc/netns ]]; }; then
+     { [[ -f "$work/created-resolver-parent-intent" ]] && [[ -d /etc/netns ]]; }; then
     echo 'CLEANUP_CONFLICT=FAIL; evidence preserved' >&2
     cleanup_ok=no
   fi
@@ -289,7 +415,7 @@ finalize() {
   fi
   if [[ "$cleanup_ok" == yes ]]; then
     echo 'ROOT_NETWORK_RESTORED=PASS'
-    rm -f "$work/config.json" "$work/resolver-port" "$work/provider-host" "$work/provider-ips" "$work/owner" "$work/cleanup.sh" "$work/resolv.conf" "$work/underlay-interface" "$work/pid" "$work/core.log" "$work/created-resolver-parent" "$work/created-resolver-dir" "$work/split-ip"
+    rm -f "$work/config.json" "$work/resolver-port" "$work/provider-host" "$work/provider-ips" "$work/owner" "$work/cleanup.sh" "$work/resolv.conf" "$work/underlay-interface" "$work/pid" "$work/core.log" "$work/created-resolver-parent" "$work/created-resolver-dir" "$work/split-ip" "$work/run-id" "$work/root-baseline" "$work/namespace-intent" "$work/namespace-id" "$work/namespace-deleted" "$work/created-resolver-parent-intent" "$work/created-resolver-dir-intent" "$work/dns-dir-deleted" "$work/dns-parent-deleted"
     rmdir "$work" || rc=1
   else
     echo 'QA_FAILED_OR_UNCERTAIN; private evidence retained for manual reconciliation' >&2
@@ -310,7 +436,11 @@ fi
   die "watchdog service command identity mismatch"
 echo 'GUARD_TIMER=PASS'
 
+# An intent is NOT an ownership receipt. Uncertain creation is retained.
+: > "$work/namespace-intent"
 ip netns add "$namespace"
+stat -Lc '%d:%i' "/var/run/netns/$namespace" > "$work/namespace-id" ||
+  die "created namespace identity unverified"
 # Create BOTH veth ends inside our empty, exclusively named test namespace.
 # Crashes before the alias assignment leave NO unknown root link: deleting
 # the empty namespace destroys its temporary veth pair.
@@ -326,18 +456,23 @@ ip netns exec "$namespace" ip addr add "$guest_ip" dev "$veth_guest"
 ip netns exec "$namespace" ip link set "$veth_guest" up
 ip netns exec "$namespace" ip route add default via 172.31.249.1 dev "$veth_guest"
 if [[ ! -d /etc/netns ]]; then
-  # Write recovery intent BEFORE each mkdir so a crash between creation
-  # and receipt cannot leave an unowned empty directory. Cleanup removes
-  # only exact empty task-named directories/verified resolver contents.
-  : > "$work/created-resolver-parent"
+  : > "$work/created-resolver-parent-intent"
   mkdir -m 755 /etc/netns
+  stat -Lc '%d:%i' /etc/netns > "$work/created-resolver-parent" ||
+    die "created resolver parent identity unverified"
 fi
-: > "$work/created-resolver-dir"
+: > "$work/created-resolver-dir-intent"
 mkdir -m 755 "/etc/netns/$namespace"
-cp "$work/resolv.conf" "/etc/netns/$namespace/resolv.conf"
-iptables -I FORWARD 1 -i "$veth_host" -o "$host_if" -m comment --comment "$comment" -j ACCEPT
-iptables -I FORWARD 1 -i "$host_if" -o "$veth_host" -m conntrack --ctstate RELATED,ESTABLISHED -m comment --comment "$comment" -j ACCEPT
-iptables -t nat -I POSTROUTING 1 -s "$subnet" -o "$host_if" -m comment --comment "$comment" -j MASQUERADE
+stat -Lc '%d:%i' "/etc/netns/$namespace" > "$work/created-resolver-dir" ||
+  die "created resolver directory identity unverified"
+# An interrupted copy leaves only a private temp file, not an active resolver.
+cp "$work/resolv.conf" "/etc/netns/$namespace/resolv.conf.tmp.$run_id"
+cmp -s "$work/resolv.conf" "/etc/netns/$namespace/resolv.conf.tmp.$run_id" ||
+  die "DNS temporary copy differs"
+mv -T "/etc/netns/$namespace/resolv.conf.tmp.$run_id" "/etc/netns/$namespace/resolv.conf"
+iptables -I FORWARD 1 -i "$veth_host" -o "$host_if" -m comment --comment "$comment:forward-out" -j ACCEPT
+iptables -I FORWARD 1 -i "$host_if" -o "$veth_host" -m conntrack --ctstate RELATED,ESTABLISHED -m comment --comment "$comment:forward-in" -j ACCEPT
+iptables -t nat -I POSTROUTING 1 -s "$subnet" -o "$host_if" -m comment --comment "$comment:nat" -j MASQUERADE
 echo 'NETWORK_NAMESPACE=READY'
 
 # Resolve once before TUN so the real HTTPS/VLESS test is independent of

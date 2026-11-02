@@ -127,6 +127,9 @@ jobs:
           grep -Fq 'REFUSED: usage:' build/ci/field-noargs.log
           grep -Fq 'REFUSED: wrong host' build/ci/field-wronghost.log
           echo 'FIELD_NETNS_EARLY_REFUSAL=PASS (no root networking operations)'
+          # Execute the actual embedded independent cleanup under non-root
+          # disposable filesystem/kernel-command fault injection (no real ip/netns).
+          python3 scripts/qa/test-field-netns-recovery.py
           python3 scripts/qa/test-package-targets.py
           PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/qa/test-debian12-proxy-lifecycle.py
           sh -n scripts/qa/host-bundle-target-refusal.sh
