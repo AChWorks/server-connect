@@ -68,6 +68,10 @@ except Exception:
     sys.exit(1)
 ' || die "QA native route inventory ambiguous or conflicts with private QA slots"
 [[ "$(cat /proc/sys/net/ipv4/ip_forward)" == 1 ]] || die "requires existing IPv4 forwarding"
+# We move the pre-labelled veth end back to PID 1's network namespace.
+# Refuse unusual containers where PID 1 is not in our initial host netns.
+[[ "$(readlink /proc/1/ns/net)" == "$(readlink /proc/self/ns/net)" ]] ||
+  die "PID 1 is not in the host network namespace"
 [[ "$(systemctl is-active ssh 2>/dev/null || :)" == active ]] || die "SSH management service is not active"
 [[ ! -e "$work" && ! -e "/etc/netns/$namespace" ]] || die "existing trial state"
 [[ ! -e "/sys/class/net/$veth_host" && ! -e "/sys/class/net/$veth_guest" && ! -e "/sys/class/net/$tun" ]] || die "link conflict"
@@ -154,24 +158,37 @@ if [[ -f "$work/pid" ]]; then
     fi
   fi
 fi
+# A SIGKILL between starting the namespace process and writing the PID
+# receipt (or unexpected fork) must not permanently defeat independent
+# recovery. The namespace was absent at preflight and is task-owned.
+# Signal only a process found there whose argv names our private config.
+while IFS= read -r candidate; do
+  [[ "$candidate" =~ ^[1-9][0-9]*$ ]] || continue
+  [[ -r "/proc/$candidate/cmdline" && -r "/proc/$candidate/stat" ]] || continue
+  if tr '\0' ' ' < "/proc/$candidate/cmdline" | grep -Fq "$work/config.json"; then
+    candidate_tick=$(awk '{print $22}' "/proc/$candidate/stat") || continue
+    [[ "$candidate_tick" =~ ^[0-9]+$ ]] || continue
+    if [[ -r "/proc/$candidate/stat" &&
+          "$(awk '{print $22}' "/proc/$candidate/stat")" == "$candidate_tick" ]]; then
+      kill -TERM "$candidate" 2>/dev/null || :
+      for i in 1 2 3 4 5; do
+        [[ ! -e "/proc/$candidate" ]] && break
+        sleep 1
+      done
+    fi
+  fi
+done < <(ip netns pids "$namespace" 2>/dev/null || :)
 iptables -D FORWARD -i scfqah -o "$host_if" -m comment --comment "$owner" -j ACCEPT 2>/dev/null || :
 iptables -D FORWARD -i "$host_if" -o scfqah -m conntrack --ctstate RELATED,ESTABLISHED -m comment --comment "$owner" -j ACCEPT 2>/dev/null || :
 iptables -t nat -D POSTROUTING -s 172.31.249.0/30 -o "$host_if" -m comment --comment "$owner" -j MASQUERADE 2>/dev/null || :
 if [[ -e /sys/class/net/scfqah ]]; then
-  # A newly-created VETH can exist before the alias assignment succeeds.
-  # Verify the exact kernel ifindex and MAC captured immediately after add.
-  [[ -f "$work/link-identity" ]] ||
-    { echo 'REFUSED: missing link creation receipt' >&2; exit 3; }
-  read -r expected_index expected_mac < "$work/link-identity" || exit 3
-  current_alias=$(cat /sys/class/net/scfqah/ifalias)
-  if [[ "$expected_index" =~ ^[0-9]+$ &&
-        "$expected_mac" =~ ^([[:xdigit:]]{2}:){5}[[:xdigit:]]{2}$ &&
-        "$(cat /sys/class/net/scfqah/ifindex)" == "$expected_index" &&
-        "$(cat /sys/class/net/scfqah/address)" == "$expected_mac" &&
-        ( -z "$current_alias" || "$current_alias" == "$owner" ) ]]; then
+  # Both veth ends originate inside the owned namespace; the root-facing
+  # end is labelled BEFORE it moves into the host netns. There is no
+  # unlabelled root-veth creation window to recover or accidentally adopt.
+  if [[ "$(cat /sys/class/net/scfqah/ifalias)" == "$owner" ]]; then
     ip link delete scfqah || exit 3
   else
-    echo 'REFUSED: unknown/changed link ownership' >&2; exit 3
+    echo 'REFUSED: unknown/changed root veth alias' >&2; exit 3
   fi
 fi
 if ip netns list | grep -Eq '^scfieldqa([[:space:]]|$)'; then
@@ -272,7 +289,7 @@ finalize() {
   fi
   if [[ "$cleanup_ok" == yes ]]; then
     echo 'ROOT_NETWORK_RESTORED=PASS'
-    rm -f "$work/config.json" "$work/resolver-port" "$work/provider-host" "$work/provider-ips" "$work/owner" "$work/cleanup.sh" "$work/resolv.conf" "$work/underlay-interface" "$work/pid" "$work/core.log" "$work/created-resolver-parent" "$work/created-resolver-dir" "$work/link-identity" "$work/split-ip"
+    rm -f "$work/config.json" "$work/resolver-port" "$work/provider-host" "$work/provider-ips" "$work/owner" "$work/cleanup.sh" "$work/resolv.conf" "$work/underlay-interface" "$work/pid" "$work/core.log" "$work/created-resolver-parent" "$work/created-resolver-dir" "$work/split-ip"
     rmdir "$work" || rc=1
   else
     echo 'QA_FAILED_OR_UNCERTAIN; private evidence retained for manual reconciliation' >&2
@@ -294,13 +311,14 @@ fi
 echo 'GUARD_TIMER=PASS'
 
 ip netns add "$namespace"
-ip link add "$veth_host" type veth peer name "$veth_guest"
-# This receipt makes a failure before alias assignment recoverable without
-# adopting an unrecognized link that merely reuses our QA interface name.
-printf '%s %s\n' "$(cat "/sys/class/net/$veth_host/ifindex")" \
-  "$(cat "/sys/class/net/$veth_host/address")" > "$work/link-identity"
-ip link set "$veth_host" alias "$comment"
-ip link set "$veth_guest" netns "$namespace"
+# Create BOTH veth ends inside our empty, exclusively named test namespace.
+# Crashes before the alias assignment leave NO unknown root link: deleting
+# the empty namespace destroys its temporary veth pair.
+ip netns exec "$namespace" ip link add "$veth_guest" type veth peer name "$veth_host"
+ip netns exec "$namespace" ip link set "$veth_host" alias "$comment"
+ip netns exec "$namespace" ip link set "$veth_host" netns 1
+[[ "$(cat "/sys/class/net/$veth_host/ifalias")" == "$comment" ]] ||
+  die "root veth lost its required ownership label"
 ip addr add "$host_ip" dev "$veth_host"
 ip link set "$veth_host" up
 ip netns exec "$namespace" ip link set lo up
@@ -308,11 +326,14 @@ ip netns exec "$namespace" ip addr add "$guest_ip" dev "$veth_guest"
 ip netns exec "$namespace" ip link set "$veth_guest" up
 ip netns exec "$namespace" ip route add default via 172.31.249.1 dev "$veth_guest"
 if [[ ! -d /etc/netns ]]; then
-  mkdir -m 755 /etc/netns
+  # Write recovery intent BEFORE each mkdir so a crash between creation
+  # and receipt cannot leave an unowned empty directory. Cleanup removes
+  # only exact empty task-named directories/verified resolver contents.
   : > "$work/created-resolver-parent"
+  mkdir -m 755 /etc/netns
 fi
-mkdir -m 755 "/etc/netns/$namespace"
 : > "$work/created-resolver-dir"
+mkdir -m 755 "/etc/netns/$namespace"
 cp "$work/resolv.conf" "/etc/netns/$namespace/resolv.conf"
 iptables -I FORWARD 1 -i "$veth_host" -o "$host_if" -m comment --comment "$comment" -j ACCEPT
 iptables -I FORWARD 1 -i "$host_if" -o "$veth_host" -m conntrack --ctstate RELATED,ESTABLISHED -m comment --comment "$comment" -j ACCEPT
@@ -365,7 +386,7 @@ fi
 while IFS= read -r provider_ip; do
   ip netns exec "$namespace" iptables -I OUTPUT 1 -o "$veth_guest" \
     -d "$provider_ip/32" -p tcp --dport "$port" \
-    -m comment --comment "$comment-upstream" -j ACCEPT
+    -m comment --comment "$comment-upstream"
 done < "$work/provider-ips"
 ip netns exec "$namespace" "$core" run -c "$work/config.json" >"$work/core.log" 2>&1 &
 pid=$!
@@ -404,7 +425,7 @@ fi
 echo 'ISOLATED_SELECTED_TRANSPARENT_HTTPS=PASS (pinned api.ipify.org)'
 if [[ "$split_mode" == yes ]]; then
   ip netns exec "$namespace" iptables -I OUTPUT 1 -o "$veth_guest" -d "$split_ip/32" \
-    -p tcp --dport 443 -m comment --comment "$comment-direct" -j ACCEPT
+    -p tcp --dport 443 -m comment --comment "$comment-direct"
   split_trace=$(ip netns exec "$namespace" curl -q --noproxy '*' \
     --resolve "www.cloudflare.com:443:$split_ip" -fsS -4 --max-time 15 \
     https://www.cloudflare.com/cdn-cgi/trace)
@@ -417,7 +438,7 @@ if [[ "$split_mode" == yes ]]; then
     die "operator split Direct exception has no independent underlay packet proof"
   [[ "$split_actual" != "$vpn" ]] || die "split Direct destination went through selected VPN"
   ip netns exec "$namespace" iptables -D OUTPUT -o "$veth_guest" -d "$split_ip/32" \
-    -p tcp --dport 443 -m comment --comment "$comment-direct" -j ACCEPT
+    -p tcp --dport 443 -m comment --comment "$comment-direct"
   echo "EXPLICIT_PUBLIC_CIDR_DIRECT_IP=$split_actual"
   echo "EXPLICIT_DIRECT_AND_FOREIGN_VPN_SPLIT=PASS"
 fi
@@ -432,7 +453,7 @@ probe=$(ip netns exec "$namespace" curl -q --noproxy '*' \
   die "foreign pinned destination already Direct"
 ip netns exec "$namespace" iptables -I OUTPUT 1 -o "$veth_guest" \
   -d "$foreign_ip/32" -p tcp --dport 443 \
-  -m comment --comment "$comment-witness" -j ACCEPT
+  -m comment --comment "$comment-witness"
 while IFS= read -r provider_ip; do
   ip netns exec "$namespace" iptables -I OUTPUT 1 -o "$veth_guest" \
     -d "$provider_ip/32" -p tcp --dport "$port" \
@@ -464,7 +485,7 @@ while IFS= read -r provider_ip; do
 done < "$work/provider-ips"
 ip netns exec "$namespace" iptables -D OUTPUT -o "$veth_guest" \
   -d "$foreign_ip/32" -p tcp --dport 443 \
-  -m comment --comment "$comment-witness" -j ACCEPT
+  -m comment --comment "$comment-witness"
 recovered=no
 for i in 1 2; do
   if resumed=$(ip netns exec "$namespace" curl -q --noproxy '*'     --resolve "api.ipify.org:443:$foreign_ip" -fsS -4 --max-time 13 https://api.ipify.org 2>/dev/null) &&

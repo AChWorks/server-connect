@@ -93,6 +93,26 @@ jobs:
               script = source.partition(marker)[2].partition("\n" + label + "\n")[0]
               ast.parse(script)
           print("FIELD_EMBEDDED_SOURCE_SYNTAX=PASS")
+          # A prior field harness matched outage by provider PORT alone.
+          # Provider TCP/443 equals the HTTPS leak probe port, so the
+          # negative check could incorrectly pass by blocking Direct too.
+          # Enforce narrowly scoped outage and observation-only witnesses.
+          logical = source.replace("\\\n", " ")
+          lines = logical.splitlines()
+          outage = [line for line in lines if
+                    'iptables -I OUTPUT' in line and
+                    '--comment "$comment-outage"' in line]
+          assert len(outage) == 1, "unexpected selected outage rule"
+          assert '-d "$provider_ip/32"' in outage[0], "outage destination not scoped"
+          assert '--dport "$port"' in outage[0], "outage provider port not scoped"
+          assert '-j DROP' in outage[0], "outage does not interrupt selected provider"
+          for witness in ('upstream', 'direct', 'witness'):
+              rules = [line for line in lines if
+                       'iptables -I OUTPUT' in line and
+                       '--comment "$comment-' + witness + '"' in line]
+              assert len(rules) == 1, "missing/duplicated underlay observer: " + witness
+              assert '-j ' not in rules[0], "observer modifies packet fate: " + witness
+          print("FIELD_NARROW_OUTAGE_AND_NONTERMINAL_WITNESSES=PASS")
           PYQA
           set +e
           bash scripts/qa/field-selected-tun-netns.sh > build/ci/field-noargs.log 2>&1
