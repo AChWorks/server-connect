@@ -132,7 +132,7 @@ class VMForeignReplyWitnessTests(unittest.TestCase):
                 self.assertEqual(rejected.wfile.getvalue(), b"")
 
     def test_http_client_binds_peers_preserves_socket_and_refuses_false_success(self):
-        def simulate(remote=w.ROOT_IP, local=w.PEER_IP, status=200, store="no-store",
+        def simulate(remote=w.ROOT_IP, local=w.PEER_IP, remote_port=19124, status=200, store="no-store",
                      false_body=False, new_socket=False, close_socket=False, version=11,
                      will_close=False):
             holder = {}
@@ -140,7 +140,7 @@ class VMForeignReplyWitnessTests(unittest.TestCase):
                 def __init__(self):
                     self.real = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 def fileno(self): return self.real.fileno()
-                def getpeername(self): return (remote, 19124)
+                def getpeername(self): return (remote, remote_port)
                 def getsockname(self): return (local, 30001)
                 def close(self): self.real.close()
             class Response:
@@ -155,7 +155,8 @@ class VMForeignReplyWitnessTests(unittest.TestCase):
                         token = "a"*32 if token != "a"*32 else "b"*32
                     return ("SCQA_HTTP1 "+token+" "+w.PEER_IP+"\n").encode()
             class Connection:
-                def __init__(self, *_args, **_kwargs):
+                def __init__(self, _host, port, **_kwargs):
+                    self.port = port
                     self.sock = FakeSocket()
                     holder["instance"] = self
                     self.old = None
@@ -176,7 +177,7 @@ class VMForeignReplyWitnessTests(unittest.TestCase):
                         self.old.close()
                     if self.sock is not None:
                         self.sock.close()
-            success = (remote == w.ROOT_IP and local == w.PEER_IP and status == 200 and
+            success = (remote == w.ROOT_IP and local == w.PEER_IP and remote_port == 19124 and status == 200 and
                        store == "no-store" and not false_body and not new_socket and
                        not close_socket and version == 11 and not will_close)
             with patch.object(w.http.client, "HTTPConnection", Connection):
@@ -192,6 +193,7 @@ class VMForeignReplyWitnessTests(unittest.TestCase):
                 self.assertTrue(holder["instance"].closed)
         simulate()
         simulate(remote="198.51.100.99")
+        simulate(remote_port=19011)
         simulate(local="198.51.100.99")
         simulate(status=302)
         simulate(store="public")
@@ -210,7 +212,7 @@ class VMForeignReplyWitnessTests(unittest.TestCase):
             def getsockname(self): return (w.PEER_IP, 30001)
             def close(self): self.real.close()
         class Connection:
-            def __init__(self): self.sock = Socket()
+            def __init__(self): self.sock, self.port = Socket(), 19124
             def request(self, _method, path, headers): self.path = path
             def getresponse(self):
                 class R:
@@ -281,6 +283,7 @@ class VMForeignReplyWitnessTests(unittest.TestCase):
     def test_pinned_ssh_host_no_proxy_and_safe_key_permissions(self):
         args = w.ssh_command(Path("/tmp/qa-key"), Path("/tmp/qa-known"), 19123, "print('ok')")
         self.assertEqual(args[0], "/usr/bin/ssh")
+        self.assertEqual(args[args.index("-b")+1], w.PEER_IP)
         self.assertIn("StrictHostKeyChecking=yes", args)
         self.assertIn("ControlMaster=no", args)
         self.assertIn("ProxyCommand=none", args)

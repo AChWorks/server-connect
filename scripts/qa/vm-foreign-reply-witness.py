@@ -79,7 +79,7 @@ def require_key_files(private_key, known_hosts):
 
 def ssh_command(key, known_hosts, port, remote):
     return [
-        "/usr/bin/ssh", "-F", "/dev/null", "-T", "-i", str(key),
+        "/usr/bin/ssh", "-F", "/dev/null", "-T", "-b", PEER_IP, "-i", str(key),
         "-p", str(port), "-o", "BatchMode=yes", "-o", "IdentitiesOnly=yes",
         "-o", "ConnectTimeout=4", "-o", "ConnectionAttempts=1",
         "-o", "PasswordAuthentication=no", "-o", "KbdInteractiveAuthentication=no",
@@ -200,7 +200,7 @@ def verified_http_socket(connection):
         result = os.fstat(sock.fileno())
     except OSError as exc:
         raise WitnessError("http_socket_identity_unavailable") from exc
-    if (not stat.S_ISSOCK(result.st_mode) or peer[0] != ROOT_IP or
+    if (not stat.S_ISSOCK(result.st_mode) or peer != (ROOT_IP, connection.port) or
             local[0] != PEER_IP or local[1] < 1):
         raise WitnessError("http_socket_not_on_ingress_peer")
     return (result.st_ino, local[1], peer[1])
