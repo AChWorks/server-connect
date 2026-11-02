@@ -72,6 +72,22 @@ jobs:
           # Linux tests now FAIL rather than SKIP on missing/unsafe systemctl.
           go test ./internal/sc -run '^(TestSystemctlCommandIgnoresPATHShadow|TestSystemctlCommandPinsNativeAndSanitizesEnvironment)$' -count=1 -v
           sh -n bundle/install.sh scripts/package.sh scripts/bootstrap-online.sh
+          # This privileged field harness is only for explicitly approved
+          # disposable hosts, never run its real netns/TUN path in CI.
+          bash -n scripts/qa/field-selected-tun-netns.sh
+          set +e
+          bash scripts/qa/field-selected-tun-netns.sh > build/ci/field-noargs.log 2>&1
+          field_rc=$?
+          bash scripts/qa/field-selected-tun-netns.sh \
+            "qa-intentional-wrong-$(hostname)" 8.8.8.8 eth0 1.1.1.1 8.8.4.4 \
+            --split-exception > build/ci/field-wronghost.log 2>&1
+          field_host_rc=$?
+          set -e
+          test "$field_rc" -eq 2
+          test "$field_host_rc" -eq 2
+          grep -Fq 'REFUSED: usage:' build/ci/field-noargs.log
+          grep -Fq 'REFUSED: wrong host' build/ci/field-wronghost.log
+          echo 'FIELD_NETNS_EARLY_REFUSAL=PASS (no root networking operations)'
           python3 scripts/qa/test-package-targets.py
           PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/qa/test-debian12-proxy-lifecycle.py
           sh -n scripts/qa/host-bundle-target-refusal.sh
