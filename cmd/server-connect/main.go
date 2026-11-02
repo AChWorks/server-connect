@@ -555,6 +555,22 @@ func run(j bool, m *sc.Manager, args []string) int {
 		}
 		result, err := m.DiagnosePath(*via, urls)
 		return output(j, result, err)
+	case "smart-tun-host-check":
+		opts := flag.NewFlagSet(name, flag.ContinueOnError)
+		opts.SetOutput(io.Discard)
+		endpoint := opts.String("endpoint-ip", "", "literal operator-pinned IPv4 for the selected VLESS endpoint")
+		peer := opts.String("management-peer", "", "literal management peer used only for read-only route inspection")
+		underlay := opts.String("underlay-if", "", "expected current underlay interface")
+		resolver := opts.String("dns-resolver", "", "explicit literal IPv4 resolver, required when selected endpoint is a hostname")
+		resolverPort := opts.Int("dns-port", 53, "explicit DNS resolver port")
+		if e := opts.Parse(args); e != nil || len(opts.Args()) != 0 {
+			return output(j, nil, sc.Fault("invalid_arguments", "invalid selected Smart TUN host check options"))
+		}
+		report, err := m.InspectSelectedSmartTUNHost(*endpoint, *peer, *underlay, *resolver, *resolverPort)
+		if report.Mode == "" {
+			return output(j, nil, err)
+		}
+		return output(j, report, err)
 	case "host-preflight":
 		opts := flag.NewFlagSet(name, flag.ContinueOnError)
 		opts.SetOutput(io.Discard)
@@ -702,6 +718,10 @@ Commands:
                               Two to four distinct hosts; diagnostic only
   exec -- curl -I https://example.org
   apt -- apt-get update        Strict opt-in APT via trusted native binary
+  smart-tun-host-check --endpoint-ip IP --management-peer IP --underlay-if NAME
+                       [--dns-resolver IP --dns-port 53]
+                              Read-only selected VLESS hostname/DNS, TCP, routes and
+                              native nft observation; never admits host-wide Apply
   host-preflight [--endpoint IP] [--management-peer IP] [--with-nftables]
                               Observe routes/rules and optionally native nftables;
                               no activation or firewall ownership
@@ -782,6 +802,11 @@ Combined -U/--update package operations are unsupported; run an explicit
 strict update first. Neither mode routes unrelated host
 traffic globally. Path diagnostics never fall back to Direct, do not echo
 targets in results, and do not establish tunnel health or start recovery.
+Selected Smart TUN host check binds a literal diagnostic IP to the selected
+saved VLESS endpoint, requiring an explicit interface-bound DNS resolver
+when the endpoint is a hostname. Success means only that the diagnostic ran;
+see reasons and activation_ready=false even when all observed paths work.
+It never changes routes, services, firewall, DNS or profile settings.
 Host preflight is observational: a route lookup does not
 prove connectivity, safety, routing ownership or readiness to activate TUN.
 The --with-nftables option adds a privacy-preserving read-only firewall

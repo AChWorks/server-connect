@@ -42,6 +42,32 @@ TUN admission and does not make the project production-ready.
 
 For operator inspection, `server-connect --json mode-overview` (or menu option **18 Mode Overview**) reports the **desired** mode, the observed Proxy Only service state and whether the experimental Smart Routing trial blocks an ordinary Direct claim. It exposes three mode choices but explicitly marks general-host Smart Routing as **unavailable**: neither an inactive Proxy Only service nor an experimental journal proves baseline Direct routes, selected VPN egress or safe production TUN. `not_run` is retained for real path evidence until measured separately; a guard/service error remains a nonzero, structured failure. This diagnostic may initialize private manager state/locks, as the existing `status` command does, but never changes host routing.
 
+### Selected-profile host readiness (read-only)
+
+The development CLI `smart-tun-host-check` combines existing read-only
+selected VLESS profile, explicit pinned-endpoint DNS, interface-bound TCP,
+management/endpoint route and native nftables observations. Supply the
+**actual selected endpoint's independently chosen IPv4 pin**, the current
+management peer and expected underlay interface; when that selected endpoint
+uses a hostname, explicitly provide a DNS resolver:
+
+```console
+server-connect --json smart-tun-host-check --endpoint-ip PINNED_PUBLIC_IPV4 --management-peer MANAGEMENT_PEER_IPV4 --underlay-if ens3 --dns-resolver RESOLVER_IPV4
+```
+
+Omit `--dns-resolver` for a selected literal-IPv4 endpoint. A hostname
+resolution mismatch or wrong resolver interface stops the subsequent
+selected-endpoint TCP probe; no arbitrary DNS answer is substituted.
+Results expose only stage outcomes and fixed reason codes, not selected
+credentials or hostname. A successful command exit means **the diagnostic ran**,
+not that Smart Routing can be enabled. The report always has
+`activation_ready=false` and `general_host_admitted=false`; no system
+routes, rules, nftables, resolver settings, service units or profile state
+are changed. This is deliberately **not** general-host admission, a durable
+network reservation, authenticated VLESS health, fresh SSH/foreign-reply
+protection, or an independent Activation/Runtime Guard. Keep experimental
+native Apply restricted to its existing admitted QA fixtures.
+
 ### Saved Smart Routing rules (not activated)
 
 Use the same CLI and **19 Routing Rules** interactive menu to store explicit routing exceptions without changing Linux routes, DNS, nftables, or TUN. This private, versioned operator configuration does **not** prove selected VPN reachability or general-host Smart Routing admission. `smart-routing-rules list` returns `saved_not_applied`, `activation_ready=false` and `general_host_admitted=false` even when rules have been saved.
