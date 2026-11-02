@@ -19,6 +19,23 @@ CLEANUP = SOURCE.partition(PREFIX)[2].partition("\nCLEANUP\n")[0]
 assert CLEANUP.startswith("#!/usr/bin/env bash\n")
 assert "QA_SCOPED_CLEANUP_VERIFIED=PASS" in CLEANUP
 
+# Regress the exact real-host failure seen after successful independent
+# cleanup: ip netns list returns an empty string, which is VALID, not UNKNOWN.
+parser_marker = "valid_netns_listing() {\n"
+assert SOURCE.count(parser_marker) == 1
+parser_body = SOURCE.partition(parser_marker)[2].partition("\n}\n")[0]
+parser_script = parser_marker + parser_body + "\n}\n"
+for example in ("", "scf0123456789abcdef", "scf0123456789abcdef (id: 0)",
+                "qa1 (id: 4)\nqa2"):
+    result = subprocess.run(["/usr/bin/bash", "-c",
+                             parser_script + '\nvalid_netns_listing "$1"', "qa", example])
+    assert result.returncode == 0, ("valid namespace listing rejected", repr(example))
+for example in ("broken namespace name", "qa (id: xyz)", "qa\nmalformed ?"):
+    result = subprocess.run(["/usr/bin/bash", "-c",
+                             parser_script + '\nvalid_netns_listing "$1"', "qa", example])
+    assert result.returncode != 0, ("malformed namespace listing accepted", repr(example))
+print("PARENT_EMPTY_AND_MALFORMED_NAMESPACE_LIST_VALIDATION=PASS")
+
 MOCK = r'''#!/usr/bin/python3
 import json, os, pathlib, sys
 name=pathlib.Path(sys.argv[0]).name

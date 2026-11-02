@@ -23,6 +23,16 @@ guest_ip=172.31.249.2/30
 host_ip=172.31.249.1/30
 die() { echo "REFUSED: $*" >&2; exit 2; }
 need() { "$@" >/dev/null 2>&1 || die "preflight failed: $*"; }
+# Host preflight and parent post-cleanup use the same empty-safe listing
+# parser; an empty namespace inventory is a legitimate successful result.
+valid_netns_listing() {
+  local entry
+  while IFS= read -r entry; do
+    [[ -z "$entry" ]] && continue
+    [[ "$entry" =~ ^[a-zA-Z0-9_.-]+([[:space:]]+\(id:[[:space:]]*[0-9]+\))?$ ]] ||
+      return 1
+  done <<< "$1"
+}
 [[ "$#" -eq 5 || "$#" -eq 6 ]] || die "usage: root bash field-selected-tun-netns.sh EXPECTED_HOSTNAME EXPECTED_IPV4 UNDERLAY_INTERFACE DNS_PRIMARY_IPV4 DNS_SECONDARY_IPV4 [--split-exception]"
 expected_host=$1
 expected_ip=$2
@@ -83,10 +93,7 @@ except Exception:
 [[ ! -L /etc/netns && ( ! -e /etc/netns || -d /etc/netns ) ]] || die "resolver parent is not a regular directory"
 [[ ! -e "/sys/class/net/$veth_host" && ! -e "/sys/class/net/$veth_guest" && ! -e "/sys/class/net/$tun" ]] || die "link conflict"
 existing_ns=$(ip netns list) || die "cannot inspect network namespaces"
-while IFS= read -r entry; do
-  [[ -z "$entry" || "$entry" =~ ^[a-zA-Z0-9_.-]+([[:space:]]+\(id:[[:space:]]*[0-9]+\))?$ ]] ||
-    die "malformed preflight namespace inventory"
-done <<< "$existing_ns"
+valid_netns_listing "$existing_ns" || die "malformed preflight namespace inventory"
 if printf '%s\n' "$existing_ns" | grep -E "^$namespace([[:space:]]|$)" >/dev/null; then
   die "namespace conflict"
 fi
@@ -374,12 +381,8 @@ finalize() {
   cleanup_ok=yes
   bash "$work/cleanup.sh" || cleanup_ok=no
   post_namespaces=$(ip netns list) || { echo 'ROOT_NAMESPACE_DISCOVERY_FAILED=FAIL'; cleanup_ok=no; post_namespaces=''; }
-  # The parent finalizer also rejects malformed (but successful) listing output.
-  if ! printf '%s\n' "$post_namespaces" | python3 -c '
-import re,sys
-lines=sys.stdin.read().splitlines()
-sys.exit(0 if all(re.fullmatch(r"[a-zA-Z0-9_.-]+(?: \(id: [0-9]+\))?", x) for x in lines) else 1)
-'; then
+  # Unlike a line-fed Python splitlines parser, this accepts no namespaces.
+  if ! valid_netns_listing "$post_namespaces"; then
     echo 'ROOT_NAMESPACE_FORMAT_UNKNOWN=FAIL' >&2
     cleanup_ok=no
   fi
