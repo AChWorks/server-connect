@@ -412,7 +412,7 @@ vpn=$(ip netns exec "$namespace" curl -q --noproxy '*' \
 [[ "$vpn" != "$expected_ip" && "$vpn" != "$direct" &&
    "$vpn" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "possible direct leak or malformed VPN exit"
 echo "ISOLATED_TUN_VPN_IP=$vpn"
-upstream_packets=$(ip netns exec "$namespace" iptables -vxnL OUTPUT |
+upstream_packets=$(ip netns exec "$namespace" iptables -vxnL OUTPUT --line-numbers |
   awk -v label="$comment-upstream" 'index($0,label)>0 {sum+=$2} END {print sum+0}')
 [[ "$upstream_packets" =~ ^[0-9]+$ && "$upstream_packets" -gt 0 ]] ||
   die "no independent selected-provider underlay packet witness"
@@ -465,11 +465,11 @@ if outage_response=$(ip netns exec "$namespace" curl -q --noproxy '*' \
   echo "VPN_UPSTREAM_OUTAGE_FAILED_TO_BLOCK=$outage_response" >&2
   exit 1
 fi
-blocked=$(ip netns exec "$namespace" iptables -vxnL OUTPUT |
+blocked=$(ip netns exec "$namespace" iptables -vxnL OUTPUT --line-numbers |
   awk -v label="$comment-outage" 'index($0,label)>0 {sum+=$2} END {print sum+0}')
 [[ "$blocked" =~ ^[0-9]+$ && "$blocked" -gt 0 ]] ||
   die "no selected-provider outage-block packet witness"
-witness=$(ip netns exec "$namespace" iptables -vxnL OUTPUT |
+witness=$(ip netns exec "$namespace" iptables -vxnL OUTPUT --line-numbers |
   awk -v label="$comment-witness" 'index($0,label)>0 {sum+=$2} END {print sum+0}')
 [[ "$witness" =~ ^[0-9]+$ && "$witness" -eq 0 ]] ||
   die "foreign Direct-underlay leak counter nonzero/unknown"
