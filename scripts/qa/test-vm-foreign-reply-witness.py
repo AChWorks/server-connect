@@ -8,6 +8,7 @@ changed by this unit test.
 import contextlib
 import importlib.util
 import io
+import json
 from pathlib import Path
 import os
 import secrets
@@ -259,6 +260,50 @@ class VMForeignReplyWitnessTests(unittest.TestCase):
                     w.http_request(connection, identity)
             finally:
                 connection.close()
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=2)
+                self.assertFalse(thread.is_alive())
+
+    def test_full_staged_client_roundtrip_over_same_real_http_socket(self):
+        # Exercise the real multi-phase client control flow with a real
+        # concurrent HTTP server and a live local process for SSH stdin/out.
+        # OpenSSH authentication/kernel topology are intentionally separate
+        # privileged-guest acceptance obligations.
+        with patch.object(w, "ROOT_IP", "127.0.0.1"), patch.object(w, "PEER_IP", "127.0.0.1"):
+            server = w.ThreadingHTTPServer(("127.0.0.1", 0), w.Origin)
+            server.daemon_threads = True
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                output = io.StringIO()
+                ssh_port = 19123 if server.server_port != 19123 else 19122
+                with (patch.object(w, "require_key_files") as keys,
+                      patch.object(w, "ssh_command", return_value=[sys.executable, "-u", "-c", w.REMOTE_LOOP]) as ssh,
+                      patch.object(w, "ssh_socket_inode", return_value=4442) as identity,
+                      patch.object(w, "new_ssh_round") as fresh,
+                      patch.object(w, "next_phase", side_effect=["pending", "confirmed", "off"]) as transition,
+                      contextlib.redirect_stdout(output)):
+                    w.client(Path("/no-key-in-qa"), Path("/no-known-hosts-in-qa"),
+                             ssh_port, server.server_port)
+                self.assertEqual(keys.call_count, 1)
+                self.assertEqual(ssh.call_count, 1)
+                self.assertEqual(identity.call_count, 8)
+                self.assertEqual(fresh.call_count, 4)
+                self.assertEqual(transition.call_count, 3)
+                observed = output.getvalue().splitlines()
+                self.assertEqual(len(observed), 5)
+                stages = [json.loads(line) for line in observed[:-1]]
+                self.assertEqual([s["stage"] for s in stages],
+                                 ["baseline", "pending", "confirmed", "off"])
+                for stage in stages:
+                    self.assertEqual(stage["http_existing"], "pass")
+                    self.assertEqual(stage["http_fresh"], "pass")
+                    self.assertEqual(stage["ssh_existing"], "pass")
+                    self.assertEqual(stage["ssh_fresh"], "pass")
+                    self.assertEqual(stage["product_phase"], "not_observed")
+                self.assertTrue(observed[-1].startswith("VM_INGRESS_WITNESS=PASS (NOT "))
+            finally:
                 server.shutdown()
                 server.server_close()
                 thread.join(timeout=2)
