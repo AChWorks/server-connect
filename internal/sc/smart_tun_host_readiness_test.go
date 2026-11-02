@@ -57,7 +57,10 @@ func testSelectedHostReadinessProbes() (smartTUNHostReadinessProbes, *map[string
 				return HostPreflight{}, errors.New("unexpected route target")
 			}
 			return HostPreflight{Mode: "observation", ReadOnly: true,
-				Endpoint: &HostRouteLookup{}, ManagementPeer: &HostRouteLookup{}}, nil
+				Endpoint: &HostRouteLookup{Target: endpoint, Family: "ipv4",
+					KernelRoute: json.RawMessage(`[{"dst":"8.8.8.8","dev":"ens3"}]`)},
+				ManagementPeer: &HostRouteLookup{Target: peer, Family: "ipv4",
+					KernelRoute: json.RawMessage(`[{"dst":"198.51.100.7","dev":"ens3"}]`)}}, nil
 		},
 		nft: func() (HostFirewallObservation, error) {
 			calls["nft"]++
@@ -90,7 +93,7 @@ func TestSelectedHostCheckHostnamePinAndNonAdmittedReport(t *testing.T) {
 	if !report.ReadOnly || report.ActivationReady || report.GeneralHostAdmitted ||
 		report.Mode != "selected_host_readiness" || report.EndpointKind != "hostname" ||
 		report.DNS != "pinned_resolver_observed" || report.TCP != "bound_tcp_connected" ||
-		report.HostRoutes != "endpoint_and_management_observed" || report.NativeNFT != "ruleset_observed" ||
+		report.HostRoutes != "endpoint_and_management_on_expected_underlay" || report.NativeNFT != "ruleset_observed" ||
 		!hasReadinessReason(report, "general_host_admission_not_implemented") {
 		t.Fatalf("unsafe or missing readiness result: %+v", report)
 	}
@@ -223,5 +226,69 @@ func TestSelectedHostCheckProxyActivityRemainsBlocker(t *testing.T) {
 	if err != nil || !hasReadinessReason(r, "proxy_not_inactive") ||
 		r.ProxyOnly != "unavailable_or_active" || r.GeneralHostAdmitted || r.ActivationReady {
 		t.Fatalf("active Proxy Only received false readiness: %+v %v", r, err)
+	}
+}
+
+func TestSelectedHostCheckRefusesWrongOrAmbiguousKernelRoutes(t *testing.T) {
+	cases := []struct {
+		name, endpointRoute, managementRoute string
+	}{
+		{"endpoint wrong interface", `[{"dst":"8.8.8.8","dev":"docker0"}]`, `[{"dst":"198.51.100.7","dev":"ens3"}]`},
+		{"management wrong interface", `[{"dst":"8.8.8.8","dev":"ens3"}]`, `[{"dst":"198.51.100.7","dev":"docker0"}]`},
+		{"endpoint wrong target", `[{"dst":"1.1.1.1","dev":"ens3"}]`, `[{"dst":"198.51.100.7","dev":"ens3"}]`},
+		{"multiple ambiguous routes", `[{"dst":"8.8.8.8","dev":"ens3"},{"dst":"8.8.8.8","dev":"ens3"}]`, `[{"dst":"198.51.100.7","dev":"ens3"}]`},
+		{"endpoint special route kind", `[{"dst":"8.8.8.8","dev":"ens3","type":"local"}]`, `[{"dst":"198.51.100.7","dev":"ens3"}]`},
+		{"malformed route", `[{"dst":"8.8.8.8","dev":0}]`, `[{"dst":"198.51.100.7","dev":"ens3"}]`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m := testSelectedHostReadinessManager(t, "8.8.8.8")
+			p, _ := testSelectedHostReadinessProbes()
+			p.routes = func(endpoint, peer string) (HostPreflight, error) {
+				return HostPreflight{Mode: "observation_only", ReadOnly: true,
+					Endpoint:       &HostRouteLookup{Target: endpoint, Family: "ipv4", KernelRoute: json.RawMessage(tc.endpointRoute)},
+					ManagementPeer: &HostRouteLookup{Target: peer, Family: "ipv4", KernelRoute: json.RawMessage(tc.managementRoute)}}, nil
+			}
+			r, err := m.inspectSelectedSmartTUNHostWith("8.8.8.8", "198.51.100.7", "ens3", "", 53, p)
+			if err != nil || r.HostRoutes != "unavailable_or_wrong_underlay" ||
+				!hasReadinessReason(r, "host_routes_unverified") || r.ActivationReady || r.GeneralHostAdmitted {
+				t.Fatalf("untrusted route accepted: %+v err=%v", r, err)
+			}
+		})
+	}
+}
+
+func TestSelectedHostCheckProfileChangedDuringObservations(t *testing.T) {
+	for _, kind := range []string{"selection", "outbound"} {
+		t.Run(kind, func(t *testing.T) {
+			m := testSelectedHostReadinessManager(t, "8.8.8.8")
+			p, _ := testSelectedHostReadinessProbes()
+			p.nft = func() (HostFirewallObservation, error) {
+				if kind == "selection" {
+					if err := m.save(State{Version: 1, Desired: "direct", Selected: "fedcba9876543210", Port: DefaultPort}); err != nil {
+						t.Fatal(err)
+					}
+				} else {
+					profilePath := filepath.Join(m.Dir, "profiles", "0123456789abcdef.json")
+					data, err := os.ReadFile(profilePath)
+					if err != nil {
+						t.Fatal(err)
+					}
+					altered := strings.Replace(string(data), `"server_port":443`, `"server_port":8443`, 1)
+					if altered == string(data) {
+						t.Fatal("profile fixture was not changed")
+					}
+					if err := os.WriteFile(profilePath, []byte(altered), 0600); err != nil {
+						t.Fatal(err)
+					}
+				}
+				return HostFirewallObservation{Observed: true}, nil
+			}
+			r, err := m.inspectSelectedSmartTUNHostWith("8.8.8.8", "198.51.100.7", "ens3", "", 53, p)
+			if err != nil || !hasReadinessReason(r, "selected_profile_changed_during_diagnostic") ||
+				r.ActivationReady || r.GeneralHostAdmitted {
+				t.Fatalf("selection drift presented as current evidence: %+v, %v", r, err)
+			}
+		})
 	}
 }

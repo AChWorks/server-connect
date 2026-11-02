@@ -58,8 +58,12 @@ server-connect --json smart-tun-host-check --endpoint-ip PINNED_PUBLIC_IPV4 --ma
 Omit `--dns-resolver` for a selected literal-IPv4 endpoint. A hostname
 resolution mismatch or wrong resolver interface stops the subsequent
 selected-endpoint TCP probe; no arbitrary DNS answer is substituted.
-Results expose only stage outcomes and fixed reason codes, not selected
-credentials or hostname. A successful command exit means **the diagnostic ran**,
+Endpoint and management-peer route observations must select the expected
+underlay interface; wrong, ambiguous or malformed kernel routes are reported
+as unverified. The selected profile is read again after network observations
+to detect concurrent selection/outbound drift; this is not a lock or durable
+reservation. Results expose only stage outcomes and fixed reason codes,
+not selected credentials or hostname. A successful command exit means **the diagnostic ran**,
 not that Smart Routing can be enabled. The report always has
 `activation_ready=false` and `general_host_admitted=false`; no system
 routes, rules, nftables, resolver settings, service units or profile state

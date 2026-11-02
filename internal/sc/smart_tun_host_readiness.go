@@ -1,6 +1,7 @@
 package sc
 
 import (
+	"bytes"
 	"encoding/json"
 	"net/netip"
 )
@@ -69,6 +70,32 @@ func selectedSmartTUNHostEndpoint(profile Profile, pinned netip.Addr) (kind, hos
 	return "hostname", hostname, outbound.ServerPort, nil
 }
 
+// A route lookup is useful only when it is for the exact requested address
+// and actually selects the operator's expected underlay. Its existence
+// alone cannot prove that an SSH/hosting reply survives future interception.
+func selectedHostRouteOnUnderlay(lookup *HostRouteLookup, ip netip.Addr, underlay string) bool {
+	if lookup == nil || lookup.Target != ip.String() {
+		return false
+	}
+	family := "ipv4"
+	if ip.Is6() {
+		family = "ipv6"
+	}
+	if lookup.Family != family {
+		return false
+	}
+	var rows []struct {
+		Dst  string `json:"dst"`
+		Dev  string `json:"dev"`
+		Type string `json:"type"`
+	}
+	if json.Unmarshal(lookup.KernelRoute, &rows) != nil || len(rows) != 1 {
+		return false
+	}
+	return rows[0].Dst == ip.String() && rows[0].Dev == underlay &&
+		(rows[0].Type == "" || rows[0].Type == "unicast")
+}
+
 func (m *Manager) InspectSelectedSmartTUNHost(pinnedIP, managementPeer, underlayInterface, resolverIP string, resolverPort int) (SmartTUNHostReadiness, error) {
 	return m.inspectSelectedSmartTUNHostWith(pinnedIP, managementPeer, underlayInterface, resolverIP, resolverPort,
 		defaultSmartTUNHostReadinessProbes())
@@ -127,7 +154,7 @@ func (m *Manager) inspectSelectedSmartTUNHostWith(pinnedIP, managementPeer, unde
 		return result, nil
 	}
 	result.SelectedTransport, result.EndpointKind = "vless", kind
-	if (kind == "hostname" && resolverIP == "") || (kind == "ipv4" && resolverIP != "") {
+	if (kind == "hostname" && resolverIP == "") || (kind == "ipv4" && (resolverIP != "" || resolverPort != 53)) {
 		return SmartTUNHostReadiness{}, Fault("invalid_arguments", "hostname requires an explicit resolver; literal endpoint requires none")
 	}
 	if p.proxy == nil || p.dns == nil || p.tcp == nil || p.routes == nil || p.nft == nil {
@@ -165,10 +192,11 @@ func (m *Manager) inspectSelectedSmartTUNHostWith(pinnedIP, managementPeer, unde
 	}
 	network, networkErr := p.routes(ip.String(), peer.String())
 	if networkErr == nil && network.Mode != "" && network.ReadOnly && !network.ActivationReady &&
-		network.Endpoint != nil && network.ManagementPeer != nil {
-		result.HostRoutes = "endpoint_and_management_observed"
+		selectedHostRouteOnUnderlay(network.Endpoint, ip, underlayInterface) &&
+		selectedHostRouteOnUnderlay(network.ManagementPeer, peer, underlayInterface) {
+		result.HostRoutes = "endpoint_and_management_on_expected_underlay"
 	} else {
-		result.HostRoutes = "unavailable"
+		result.HostRoutes = "unavailable_or_wrong_underlay"
 		add("host_routes_unverified")
 	}
 	firewall, nftErr := p.nft()
@@ -177,6 +205,16 @@ func (m *Manager) inspectSelectedSmartTUNHostWith(pinnedIP, managementPeer, unde
 	} else {
 		result.NativeNFT = "unavailable"
 		add("native_nft_unavailable")
+	}
+	// A profile selection or outbound may change during multiple non-atomic
+	// network observations. Refuse to present stale evidence as observations
+	// of the CURRENT selected profile. This is not an atomic reservation.
+	current, currentErr := m.load()
+	if currentErr != nil || current != state {
+		add("selected_profile_changed_during_diagnostic")
+	} else if selectedNow, selectedErr := m.profile(current.Selected); selectedErr != nil ||
+		!bytes.Equal(selectedNow.Outbound, profile.Outbound) {
+		add("selected_profile_changed_during_diagnostic")
 	}
 	// This diagnostic cannot authenticate the SSH session, reserve nftables
 	// ownership or establish an independent health/recovery guard. Do not
