@@ -89,6 +89,42 @@ class VMForeignReplyWitnessTests(unittest.TestCase):
                 if pipe:
                     pipe.close()
 
+    def test_initial_ssh_socket_race_waits_only_for_real_first_connection(self):
+        process = subprocess.Popen(
+            [sys.executable, "-u", "-c", w.REMOTE_LOOP],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, bufsize=0,
+        )
+        try:
+            missing = w.WitnessError("ssh_transport_identity_missing")
+            with (patch.object(w, "ssh_socket_inode", side_effect=[missing, missing, 4442, 4442]) as probe,
+                  patch.object(w.time, "sleep") as delay):
+                self.assertEqual(w.original_ssh_round(process, 19123, None), 4442)
+                self.assertEqual(probe.call_count, 4)
+                self.assertEqual(delay.call_count, 2)
+            # Once a baseline transport is known, a missing socket must
+            # immediately fail rather than wait and accidentally accept a new one.
+            with patch.object(w, "ssh_socket_inode", side_effect=missing) as probe:
+                with self.assertRaisesRegex(w.WitnessError, "ssh_transport_identity_missing"):
+                    w.original_ssh_round(process, 19123, 4442)
+                self.assertEqual(probe.call_count, 1)
+            with patch.object(w, "ssh_socket_inode", side_effect=w.WitnessError("ssh_transport_identity_ambiguous")) as probe:
+                with self.assertRaisesRegex(w.WitnessError, "ssh_transport_identity_ambiguous"):
+                    w.original_ssh_round(process, 19123, None)
+                self.assertEqual(probe.call_count, 1)
+            with (patch.object(w, "ssh_socket_inode", side_effect=missing),
+                  patch.object(w.time, "monotonic", side_effect=[10.0, 16.5]),
+                  patch.object(w.time, "sleep")):
+                with self.assertRaisesRegex(w.WitnessError, "original_ssh_connection_timeout"):
+                    w.original_ssh_round(process, 19123, None)
+        finally:
+            if process.poll() is None:
+                process.terminate()
+                try: process.wait(timeout=2)
+                except subprocess.TimeoutExpired: process.kill(); process.wait(timeout=2)
+            for pipe in (process.stdin, process.stdout, process.stderr):
+                if pipe: pipe.close()
+
     def test_replayed_or_malformed_remote_command_is_rejected(self):
         good = secrets.token_hex(16)
         ok = subprocess.run([sys.executable, "-u", "-c", w.REMOTE_LOOP],

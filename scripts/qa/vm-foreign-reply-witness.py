@@ -136,8 +136,10 @@ def find_ssh_inode(proc_tcp, owned_inodes, port):
             continue
         if matches_port and matches_src and matches_dst and valid_local_port and inode in owned_inodes:
             matches.add(inode)
-    if len(matches) != 1:
-        raise WitnessError("ssh_transport_identity_missing_or_ambiguous")
+    if not matches:
+        raise WitnessError("ssh_transport_identity_missing")
+    if len(matches) > 1:
+        raise WitnessError("ssh_transport_identity_ambiguous")
     return next(iter(matches))
 
 
@@ -158,10 +160,30 @@ def ssh_socket_inode(pid, port):
     return find_ssh_inode(text, owned, port)
 
 
+def wait_for_initial_ssh_socket(process, port, seconds=6):
+    # Popen returns before the real OpenSSH TCP socket necessarily exists.
+    # Retry only initial *absence*, never ambiguity, read failures or changes
+    # to an already witnessed established transport.
+    deadline = time.monotonic() + seconds
+    while True:
+        if process.poll() is not None:
+            raise WitnessError("original_ssh_exited")
+        try:
+            return ssh_socket_inode(process.pid, port)
+        except WitnessError as exc:
+            if str(exc) != "ssh_transport_identity_missing":
+                raise
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise WitnessError("original_ssh_connection_timeout")
+        time.sleep(min(0.05, remaining))
+
+
 def original_ssh_round(process, port, original_inode):
     if process.poll() is not None:
         raise WitnessError("original_ssh_exited")
-    before = ssh_socket_inode(process.pid, port)
+    before = (wait_for_initial_ssh_socket(process, port) if original_inode is None
+              else ssh_socket_inode(process.pid, port))
     if original_inode is not None and before != original_inode:
         raise WitnessError("original_ssh_socket_changed")
     token = secrets.token_hex(16)
