@@ -129,6 +129,72 @@ func TestUnderlayActualLoopbackTCPBoundAndNonMutating(t *testing.T) {
 	}
 }
 
+// An unexpected kernel route must fail before a TCP SYN reaches a listener.
+func TestSelectedUnderlayTCPWrongInterfaceNoConnect(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("requires Linux route identity")
+	}
+	if _, err := os.Stat(nativeIPPath); err != nil {
+		t.Skip("native iproute2 unavailable")
+	}
+	listener, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	port := listener.Addr().(*net.TCPAddr).Port
+	report, err := inspectUnderlayTCPOnDevice("127.0.0.1", port, "ens3")
+	if ErrorCode(err) != "underlay_policy_unsupported" ||
+		report.Outcome != "wrong_underlay_interface" || report.SocketConnected || report.InterfaceBound {
+		t.Fatalf("TCP probe attempted wrong interface: %+v err=%v", report, err)
+	}
+	tcpListener := listener.(*net.TCPListener)
+	if err := tcpListener.SetDeadline(time.Now().Add(120 * time.Millisecond)); err != nil {
+		t.Fatal(err)
+	}
+	if conn, err := tcpListener.Accept(); err == nil {
+		_ = conn.Close()
+		t.Fatal("unexpected TCP connection reached listener")
+	} else if nerr, ok := err.(net.Error); !ok || !nerr.Timeout() {
+		t.Fatalf("unexpected listener error: %v", err)
+	}
+	if err := tcpListener.SetDeadline(time.Time{}); err != nil {
+		t.Fatal(err)
+	}
+	positive, err := inspectUnderlayTCPOnDevice("127.0.0.1", port, "lo")
+	if err != nil || positive.RouteDevice != "lo" || !positive.SocketConnected || !positive.InterfaceBound {
+		t.Fatalf("matching underlay refused actual TCP: %+v err=%v", positive, err)
+	}
+	conn, err := tcpListener.Accept()
+	if err != nil {
+		t.Fatalf("matching-underlay probe not accepted: %v", err)
+	}
+	_ = conn.Close()
+}
+
+func TestSelectedUnderlayFlowRouteGuardChangingOrAmbiguous(t *testing.T) {
+	base := underlayRoute{Dst: "198.51.100.8", Device: "ens3", Kind: "unicast", Gateway: "192.0.2.1", Source: "192.0.2.3", Table: json.RawMessage("100")}
+	if err := verifyExpectedFlowBeforeDial("ens3", base, base); err != nil {
+		t.Fatalf("matching route rejected: %v", err)
+	}
+	for _, tc := range []struct {
+		name  string
+		route underlayRoute
+	}{
+		{"unexpected interface", underlayRoute{Dst: base.Dst, Device: "tun0", Kind: base.Kind, Gateway: base.Gateway, Source: base.Source, Table: base.Table}},
+		{"gateway drift", underlayRoute{Dst: base.Dst, Device: base.Device, Kind: base.Kind, Gateway: "192.0.2.2", Source: base.Source, Table: base.Table}},
+		{"table drift", underlayRoute{Dst: base.Dst, Device: base.Device, Kind: base.Kind, Gateway: base.Gateway, Source: base.Source, Table: json.RawMessage("101")}},
+		{"non-unicast route", underlayRoute{Dst: base.Dst, Device: base.Device, Kind: "local", Gateway: base.Gateway, Source: base.Source, Table: base.Table}},
+		{"missing interface", underlayRoute{Dst: base.Dst, Device: "", Kind: base.Kind, Gateway: base.Gateway, Source: base.Source, Table: base.Table}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if ErrorCode(verifyExpectedFlowBeforeDial("ens3", base, tc.route)) != "underlay_policy_unsupported" {
+				t.Fatal("changed or wrong kernel route was not blocked before dialing")
+			}
+		})
+	}
+}
+
 func TestUnderlayClosedPortReportsFailureWithPathEvidence(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("Linux iproute2-specific diagnostic")

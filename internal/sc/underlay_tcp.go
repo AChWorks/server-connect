@@ -191,6 +191,25 @@ func tcpFlowRoute(addr netip.Addr, port, uid int) (underlayRoute, error) {
 	return route, nil
 }
 
+// verifyExpectedFlowBeforeDial is the selected-host safety boundary. A
+// route disagreement is rejected before any socket can issue a SYN or DNS
+// query. Standalone probes do not supply this additional constraint.
+func verifyExpectedFlowBeforeDial(expected string, initial, current underlayRoute) error {
+	if expected == "" {
+		return nil
+	}
+	validKind := func(kind string) bool {
+		return kind == "" || kind == "unicast" || (expected == "lo" && kind == "local")
+	}
+	if !smartTUNDeviceName.MatchString(expected) ||
+		initial.Device != expected || current.Device != expected ||
+		!validKind(initial.Kind) || !validKind(current.Kind) ||
+		!sameUnderlayRoute(initial, current) {
+		return Fault("underlay_policy_unsupported", "flow route does not match the required stable underlay interface")
+	}
+	return nil
+}
+
 // validateUnderlayTCPArgs runs before any native tool, hostname resolution or
 // socket attempt. The optional DNS consistency mode shares this boundary.
 func validateUnderlayTCPArgs(endpointIP string, port int) (netip.Addr, error) {
@@ -241,6 +260,13 @@ func interfaceBoundTCPControl(device string, bound *atomic.Bool) func(string, st
 // SO_BINDTODEVICE fails closed if the current route interface cannot be bound.
 // Even successful TCP evidence MUST NOT authorize tunnel activation.
 func InspectUnderlayTCP(endpointIP string, port int) (UnderlayTCPReport, error) {
+	return inspectUnderlayTCPOnDevice(endpointIP, port, "")
+}
+
+// inspectUnderlayTCPOnDevice retains the public standalone probe's behavior,
+// but constrains the selected-host probe to a verified operator-specified
+// device before creating its TCP connection. There is no unbound fallback.
+func inspectUnderlayTCPOnDevice(endpointIP string, port int, expectedDevice string) (UnderlayTCPReport, error) {
 	ip, err := validateUnderlayTCPArgs(endpointIP, port)
 	if err != nil {
 		return UnderlayTCPReport{}, err
@@ -269,16 +295,40 @@ func InspectUnderlayTCP(endpointIP string, port int) (UnderlayTCPReport, error) 
 		return report, err
 	}
 	report.RouteDevice, report.RouteGateway, report.RouteSource = before.Device, before.Gateway, before.Source
+	if err := verifyExpectedFlowBeforeDial(expectedDevice, before, before); err != nil {
+		report.Outcome = "wrong_underlay_interface"
+		return report, err
+	}
 
 	// The dialer does not consult HTTP(S)_PROXY or DNS. It binds the exact
 	// kernel-reported interface before connect, never falling back to an
 	// ordinary unbound socket if binding is denied.
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	var bound atomic.Bool
+	var bound, preDialRejected atomic.Bool
+	control := interfaceBoundTCPControl(before.Device, &bound)
+	if expectedDevice != "" {
+		control = func(network, address string, raw syscall.RawConn) error {
+			current, routeErr := tcpFlowRoute(ip, port, uid)
+			if routeErr != nil {
+				preDialRejected.Store(true)
+				return routeErr
+			}
+			if err := verifyExpectedFlowBeforeDial(expectedDevice, before, current); err != nil {
+				preDialRejected.Store(true)
+				return err
+			}
+			currentPolicy, policyErr := inspectTCPPolicyRules(ip)
+			if policyErr != nil || !bytes.Equal(policyBefore, currentPolicy) {
+				preDialRejected.Store(true)
+				return Fault("underlay_policy_unsupported", "TCP flow policy changed before dialing")
+			}
+			return interfaceBoundTCPControl(expectedDevice, &bound)(network, address, raw)
+		}
+	}
 	dialer := net.Dialer{
 		Timeout: 3 * time.Second,
-		Control: interfaceBoundTCPControl(before.Device, &bound),
+		Control: control,
 	}
 	start := time.Now()
 	conn, dialErr := dialer.DialContext(ctx, "tcp", net.JoinHostPort(ip.String(), strconv.Itoa(port)))
@@ -322,6 +372,10 @@ func InspectUnderlayTCP(endpointIP string, port int) (UnderlayTCPReport, error) 
 		return report, Fault("underlay_unavailable", "TCP flow route/policy or observed socket source changed or became unavailable during probe")
 	}
 	report.RouteStable = true
+	if preDialRejected.Load() {
+		report.Outcome = "route_changed_before_dial"
+		return report, Fault("underlay_policy_unsupported", "TCP flow changed before the selected-host probe could connect")
+	}
 	if dialErr != nil {
 		return report, Fault("underlay_unreachable", "interface-bound TCP probe failed; inspect outcome and endpoint transport")
 	}

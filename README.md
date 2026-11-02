@@ -58,6 +58,13 @@ server-connect --json smart-tun-host-check --endpoint-ip PINNED_PUBLIC_IPV4 --ma
 Omit `--dns-resolver` for a selected literal-IPv4 endpoint. A hostname
 resolution mismatch or wrong resolver interface stops the subsequent
 selected-endpoint TCP probe; no arbitrary DNS answer is substituted.
+Before sending DNS queries or a TCP SYN, each flow-qualified probe enforces
+the expected underlay interface; a mismatch or changed route/policy cannot
+trigger an unbound fallback. Only plain VLESS TCP and explicitly supported
+TCP-based WebSocket, HTTPUpgrade and HTTP transports receive TCP-stage evidence.
+QUIC/UDP, unknown transports and active alternate dial-path selectors are
+reported unsupported without a misleading TCP probe. These observations
+do not prove authenticated selected transport health or future route stability.
 Endpoint and management-peer route observations must select the expected
 underlay interface; wrong, ambiguous or malformed kernel routes are reported
 as unverified. The selected profile is read again after network observations
