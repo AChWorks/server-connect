@@ -154,7 +154,17 @@ jobs:
           PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/qa/test-activation-boot-guard.py
           # Run selected-kernel RPDB acceptance AFTER native iproute2 is installed.
           # Restricted runners may SKIP unshare; missing iproute2 is not acceptable here.
-          go test ./internal/sc -run '^(TestPreflight|TestUnderlay|TestHostDrift|TestSelectivePolicyKernelRoutingInPrivateNamespace)' -count=1 -v
+          # The selected-host wrong-underlay tests must NOT silently SKIP:
+          # their local DNS and TCP listeners prove no wrong-device traffic
+          # and a positive expected-device path through real Linux sockets.
+          go test ./internal/sc -run '^(TestPreflight|TestUnderlay|TestSelectedUnderlay|TestHostDrift|TestSelectivePolicyKernelRoutingInPrivateNamespace)' -count=1 -v | tee build/ci/native-route-tests.log
+          for name in TestSelectedUnderlayDNSWrongInterfaceNoQuery TestSelectedUnderlayTCPWrongInterfaceNoConnect; do
+            if ! grep -Eq "^--- PASS: ${name} \\(" build/ci/native-route-tests.log; then
+              echo "Required native selected-underlay test did not PASS: ${name}" >&2
+              exit 1
+            fi
+          done
+          echo 'SELECTED_UNDERLAY_NATIVE_NONSKIP=PASS'
           go test ./cmd/server-connect -run '^(TestHostDriftCLI|TestHostDriftMenu)' -count=1 -v
           # Journal checks are non-networking: exercise descriptor identity,
           # strict JSON, crash/restart semantics and nonblocking FIFO rejection.
