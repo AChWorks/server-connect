@@ -66,6 +66,7 @@ except Exception:
     sys.exit(1)
 ' || die "QA native route inventory ambiguous or conflicts with private QA slots"
 [[ "$(cat /proc/sys/net/ipv4/ip_forward)" == 1 ]] || die "requires existing IPv4 forwarding"
+[[ "$(systemctl is-active ssh 2>/dev/null || :)" == active ]] || die "SSH management service is not active"
 [[ ! -e "$work" && ! -e "/etc/netns/$namespace" ]] || die "existing trial state"
 [[ ! -e "/sys/class/net/$veth_host" && ! -e "/sys/class/net/$veth_guest" && ! -e "/sys/class/net/$tun" ]] || die "link conflict"
 existing_ns=$(ip netns list) || die "cannot inspect network namespaces"
@@ -101,7 +102,7 @@ pre_guard_cleanup() {
   trap - EXIT
   # The guarded finalizer replaces this trap before systemd-run can be
   # invoked. Therefore no future watchdog can reference these files.
-  rm -f "$work/config.json" "$work/resolver-port" "$work/owner" \
+  rm -f "$work/config.json" "$work/resolver-port" "$work/provider-host" "$work/owner" \
         "$work/cleanup.sh" "$work/resolv.conf" "$work/underlay-interface" "$work/split-ip"
   rmdir "$work" 2>/dev/null || echo 'PRIVATE_PREARM_STATE_RETAINED'
   exit "$rc"
@@ -131,12 +132,24 @@ if [[ ! -f "$work/owner" ]] ||
    ! grep -Fq "boot=$(cat /proc/sys/kernel/random/boot_id)" "$work/owner"; then
   echo 'REFUSED: missing exact QA cleanup ownership' >&2; exit 2
 fi
+# Check PID identity AND its kernel start tick before signaling; a recycled PID
+# must never be treated as a task-owned sing-box process.
 if [[ -f "$work/pid" ]]; then
-  pid=$(cat "$work/pid")
-  if [[ "$pid" =~ ^[1-9][0-9]*$ && -r "/proc/$pid/cmdline" ]] &&
+  read -r pid start_tick < "$work/pid" || exit 3
+  if [[ "$pid" =~ ^[1-9][0-9]*$ && "$start_tick" =~ ^[0-9]+$ ]] &&
+     [[ -r "/proc/$pid/stat" && -r "/proc/$pid/cmdline" ]] &&
+     [[ "$(awk '{print $22}' "/proc/$pid/stat")" == "$start_tick" ]] &&
      tr '\0' ' ' < "/proc/$pid/cmdline" | grep -Fq "$work/config.json"; then
     kill -TERM "$pid" 2>/dev/null || :
-    for i in 1 2 3 4 5; do [[ ! -e "/proc/$pid" ]] && break; sleep 1; done
+    for i in 1 2 3 4 5; do
+      [[ ! -d "/proc/$pid" ]] && break
+      sleep 1
+    done
+    if [[ -r "/proc/$pid/stat" ]] &&
+       [[ "$(awk '{print $22}' "/proc/$pid/stat")" == "$start_tick" ]] &&
+       tr '\0' ' ' < "/proc/$pid/cmdline" | grep -Fq "$work/config.json"; then
+      kill -KILL "$pid" 2>/dev/null || :
+    fi
   fi
 fi
 iptables -D FORWARD -i scfqah -o "$host_if" -m comment --comment "$owner" -j ACCEPT 2>/dev/null || :
@@ -177,6 +190,7 @@ profile=json.loads((pathlib.Path('/var/lib/server-connect/profiles')/(state['sel
 out=profile['outbound']
 if isinstance(out,str):out=json.loads(out)
 assert out['tag']=='upstream' and out['type']=='vless' and isinstance(out['server_port'],int)
+assert isinstance(out.get('server'),str) and 1 <= len(out['server']) <= 253
 # The selected VPN endpoint remains private; only the isolated namespace is
 # affected by the direct/bypass rule and autonomous TUN interception.
 rules=[{'ip_cidr':['172.31.249.0/30'],'action':'route','outbound':'direct'}]
@@ -196,6 +210,7 @@ cfg={'log':{'level':'warn'},
 'rules':rules,'final':'upstream'}}
 p=w/'config.json';p.write_text(json.dumps(cfg));p.chmod(0o600)
 (w/'resolver-port').write_text(str(out['server_port']))
+(w/'provider-host').write_text(out['server'])
 PY
 "$core" check -c "$work/config.json" >/dev/null || die "real selected profile TUN config invalid"
 printf 'nameserver %s\nnameserver %s\n' "$resolver_ip" "$secondary_resolver" > "$work/resolv.conf"
@@ -206,38 +221,59 @@ finalize() {
   echo 'CLEANUP START'
   # Keep the independent timer armed until exact native restoration is
   # verified; a signal/failure during cleanup must not lose its recovery path.
-  bash "$work/cleanup.sh" || rc=1
+  cleanup_ok=yes
+  bash "$work/cleanup.sh" || cleanup_ok=no
   if [[ -e /sys/class/net/$veth_host ]] ||
      ip netns list | grep -Eq "^$namespace([[:space:]]|$)" ||
      [[ -e "/etc/netns/$namespace/resolv.conf" ]] ||
      { [[ -f "$work/created-resolver-parent" ]] && [[ -d /etc/netns ]]; }; then
     echo 'CLEANUP_CONFLICT=FAIL; evidence preserved' >&2
-    rc=1
+    cleanup_ok=no
   fi
-  [[ "$baseline_routes" == "$(ip -4 route show table all | sha256sum | cut -d' ' -f1)" ]] || { echo 'ROOT_ROUTES_CHANGED=FAIL'; rc=1; }
-  [[ "$baseline_rpdb" == "$(ip -4 rule show | sha256sum | cut -d' ' -f1)" ]] || { echo 'ROOT_RPDB_CHANGED=FAIL'; rc=1; }
-  [[ "$baseline_filter" == "$(iptables -t filter -S | sha256sum | cut -d' ' -f1)" ]] || { echo 'ROOT_FILTER_CHANGED=FAIL'; rc=1; }
-  [[ "$baseline_nat" == "$(iptables -t nat -S | sha256sum | cut -d' ' -f1)" ]] || { echo 'ROOT_NAT_CHANGED=FAIL'; rc=1; }
-  [[ "$boot" == "$(cat /proc/sys/kernel/random/boot_id)" ]] || { echo 'ROOT_BOOT_CHANGED=FAIL'; rc=1; }
-  if [[ "$rc" -eq 0 ]]; then
-    systemctl stop "$watch.timer" >/dev/null 2>&1 || rc=1
+  [[ "$baseline_routes" == "$(ip -4 route show table all | sha256sum | cut -d' ' -f1)" ]] || { echo 'ROOT_ROUTES_CHANGED=FAIL'; cleanup_ok=no; }
+  [[ "$baseline_rpdb" == "$(ip -4 rule show | sha256sum | cut -d' ' -f1)" ]] || { echo 'ROOT_RPDB_CHANGED=FAIL'; cleanup_ok=no; }
+  [[ "$baseline_filter" == "$(iptables -t filter -S | sha256sum | cut -d' ' -f1)" ]] || { echo 'ROOT_FILTER_CHANGED=FAIL'; cleanup_ok=no; }
+  [[ "$baseline_nat" == "$(iptables -t nat -S | sha256sum | cut -d' ' -f1)" ]] || { echo 'ROOT_NAT_CHANGED=FAIL'; cleanup_ok=no; }
+  [[ "$boot" == "$(cat /proc/sys/kernel/random/boot_id)" ]] || { echo 'ROOT_BOOT_CHANGED=FAIL'; cleanup_ok=no; }
+  [[ "$(systemctl is-active ssh 2>/dev/null || :)" == active ]] || { echo 'HOST_SSH_INACTIVE=FAIL'; cleanup_ok=no; }
+  # Even when a packet-path assertion fails, a verified complete native
+  # rollback must stop its still-pending watchdog and release private secrets.
+  # A failed/ambiguous rollback retains both watchdog and private evidence.
+  if [[ "$cleanup_ok" == yes ]]; then
+    timer_state=$(systemctl show "$watch.timer" -p LoadState --value 2>/dev/null || echo unknown)
+    if [[ "$timer_state" != not-found ]]; then
+      service_exec=$(systemctl show "$watch.service" -p ExecStart --value 2>/dev/null || :)
+      service_state=$(systemctl show "$watch.service" -p ActiveState --value 2>/dev/null || echo unknown)
+      if [[ "$service_exec" != *"$work/cleanup.sh"* ]] ||
+         [[ "$service_state" == active || "$service_state" == activating ]] ||
+         ! systemctl stop "$watch.timer" >/dev/null 2>&1 ||
+         [[ "$(systemctl is-active "$watch.timer" 2>/dev/null || :)" == active ]]; then
+        echo 'WATCHDOG_DISARM_UNVERIFIED=FAIL; evidence retained' >&2
+        cleanup_ok=no
+      fi
+    fi
   fi
-  if [[ "$rc" -eq 0 ]]; then
+  if [[ "$cleanup_ok" == yes ]]; then
     echo 'ROOT_NETWORK_RESTORED=PASS'
-    rm -f "$work/config.json" "$work/resolver-port" "$work/owner" "$work/cleanup.sh" "$work/resolv.conf" "$work/underlay-interface" "$work/pid" "$work/core.log" "$work/created-resolver-parent" "$work/split-ip"
+    rm -f "$work/config.json" "$work/resolver-port" "$work/provider-host" "$work/provider-ips" "$work/owner" "$work/cleanup.sh" "$work/resolv.conf" "$work/underlay-interface" "$work/pid" "$work/core.log" "$work/created-resolver-parent" "$work/split-ip"
     rmdir "$work" || rc=1
   else
-    echo 'QA_FAILED_OR_UNCERTAIN; private evidence retained for manual reconciliation'
+    echo 'QA_FAILED_OR_UNCERTAIN; private evidence retained for manual reconciliation' >&2
+    rc=1
   fi
   exit "$rc"
 }
 trap finalize EXIT
 
 # Independent, prearmed recovery in case the SSH test process is interrupted.
-systemd-run --quiet --collect --unit="$watch" --on-active=150s \
-  --timer-property=AccuracySec=1s /usr/bin/bash "$work/cleanup.sh" ||
-  die "watchdog creation failed or has ambiguous outcome"
-[[ "$(systemctl is-active "$watch.timer")" == active ]] || die "watchdog timer unavailable"
+if ! systemd-run --quiet --collect --unit="$watch" --on-active=360s \
+  --timer-property=AccuracySec=1s /usr/bin/bash "$work/cleanup.sh"; then
+  echo 'WATCHDOG_ARM_RETURNED_FAILURE; inspecting live unit identity' >&2
+fi
+[[ "$(systemctl is-active "$watch.timer" 2>/dev/null || :)" == active ]] ||
+  die "watchdog timer not independently active"
+[[ "$(systemctl show "$watch.service" -p ExecStart --value 2>/dev/null || :)" == *"$work/cleanup.sh"* ]] ||
+  die "watchdog service command identity mismatch"
 echo 'GUARD_TIMER=PASS'
 
 ip netns add "$namespace"
@@ -266,6 +302,24 @@ echo 'NETWORK_NAMESPACE=READY'
 foreign_ip=$(ip netns exec "$namespace" getent ahostsv4 api.ipify.org | awk 'NR==1 {print $1}')
 [[ "$foreign_ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "cannot resolve test destination before TUN"
 echo 'DIRECT_PRE_TUN_DNS=PASS'
+# Resolve only the real selected provider's IPv4 endpoint(s), in this
+# namespace, before TUN. Port-only outage rules are invalid: many VLESS
+# transports use TCP/443, exactly like the foreign HTTPS leak probe.
+provider_host=$(cat "$work/provider-host")
+provider_answers=$(ip netns exec "$namespace" getent ahostsv4 "$provider_host") ||
+  die "cannot resolve the selected upstream from this namespace"
+printf '%s\n' "$provider_answers" | awk '{print $1}' | sort -u > "$work/provider-ips"
+python3 - "$work/provider-ips" "$foreign_ip" <<'PYPROVIDER'
+import ipaddress, pathlib, sys
+items=pathlib.Path(sys.argv[1]).read_text().splitlines()
+assert 1 <= len(items) <= 8, "selected upstream IPv4 set absent or too broad"
+assert all(ipaddress.IPv4Address(i).is_global for i in items)
+assert sys.argv[2] not in items, "foreign leak witness overlaps provider"
+PYPROVIDER
+port=$(cat "$work/resolver-port")
+[[ "$port" =~ ^[1-9][0-9]{0,4}$ && "$port" -ge 1 && "$port" -le 65535 ]] ||
+  die "invalid selected remote port"
+echo "SELECTED_UPSTREAM_IPV4_COUNT=$(wc -l < "$work/provider-ips")"
 direct=$(ip netns exec "$namespace" curl -q --noproxy '*' \
   --resolve "api.ipify.org:443:$foreign_ip" -sS -4 --max-time 15 https://api.ipify.org)
 echo "ISOLATED_DIRECT_IP=$direct"
@@ -280,11 +334,22 @@ if [[ "$split_mode" == yes ]]; then
   split_direct=$(printf '%s\n' "$split_direct_trace" | sed -n 's/^ip=//p')
   [[ "$split_direct" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "split Direct baseline invalid"
   echo "SPLIT_EXCEPTION_PRE_TUN_DIRECT_IP=$split_direct"
+  ! grep -Fxq "$split_ip" "$work/provider-ips" ||
+    die "split Direct probe overlaps selected provider IPv4"
 fi
 
+# A pre-armed independent underlay counter must witness the selected
+# upstream, not merely infer VPN transit from a reported exit address.
+while IFS= read -r provider_ip; do
+  ip netns exec "$namespace" iptables -I OUTPUT 1 -o "$veth_guest" \
+    -d "$provider_ip/32" -p tcp --dport "$port" \
+    -m comment --comment "$comment-upstream" -j ACCEPT
+done < "$work/provider-ips"
 ip netns exec "$namespace" "$core" run -c "$work/config.json" >"$work/core.log" 2>&1 &
 pid=$!
-echo "$pid" > "$work/pid"
+start_tick=$(awk '{print $22}' "/proc/$pid/stat") || die "cannot identify selected sing-box process"
+[[ "$start_tick" =~ ^[0-9]+$ ]] || die "invalid sing-box process start identity"
+printf '%s %s\n' "$pid" "$start_tick" > "$work/pid"
 ready=no
 for i in $(seq 1 12); do
   if ip netns exec "$namespace" ip link show dev "$tun" >/dev/null 2>&1; then ready=yes; break; fi
@@ -304,6 +369,11 @@ vpn=$(ip netns exec "$namespace" curl -q --noproxy '*' \
 [[ "$vpn" != "$expected_ip" && "$vpn" != "$direct" &&
    "$vpn" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "possible direct leak or malformed VPN exit"
 echo "ISOLATED_TUN_VPN_IP=$vpn"
+upstream_packets=$(ip netns exec "$namespace" iptables -vxnL OUTPUT |
+  awk -v label="$comment-upstream" 'index($0,label)>0 {sum+=$2} END {print sum+0}')
+[[ "$upstream_packets" =~ ^[0-9]+$ && "$upstream_packets" -gt 0 ]] ||
+  die "no independent selected-provider underlay packet witness"
+echo "SELECTED_UPSTREAM_UNDERLAY_PACKETS=$upstream_packets"
 if [[ "$split_mode" != yes ]]; then
   ip netns exec "$namespace" curl -q --noproxy '*' -sS -4 --max-time 15 \
     https://www.cloudflare.com/cdn-cgi/trace |
@@ -330,29 +400,49 @@ if [[ "$split_mode" == yes ]]; then
   echo "EXPLICIT_DIRECT_AND_FOREIGN_VPN_SPLIT=PASS"
 fi
 
-# Negative proof: while the TUN is still running, block its selected remote
-# transport only inside this namespace. Pin the foreign HTTPS destination so
-# resolver changes cannot disguise a direct leak. A separate no-op ACCEPT
-# counter catches any direct underlay packet to that exact public destination.
-port=$(cat "$work/resolver-port")
-[[ "$port" =~ ^[1-9][0-9]{0,4}$ && "$port" -ge 1 && "$port" -le 65535 ]] || die "invalid selected remote port"
-probe=$(ip netns exec "$namespace" curl -q --noproxy '*'   --resolve "api.ipify.org:443:$foreign_ip" -sS -4 --max-time 12 https://api.ipify.org)
-[[ "$probe" != "$expected_ip" && "$probe" != "$direct" ]] || die "foreign pinned destination already Direct"
-ip netns exec "$namespace" iptables -I OUTPUT 1 -o "$veth_guest" -d "$foreign_ip/32"   -p tcp --dport 443 -m comment --comment "$comment-witness" -j ACCEPT
-ip netns exec "$namespace" iptables -I OUTPUT 2 -o "$veth_guest"   -p tcp --dport "$port" -m comment --comment "$comment-outage" -j DROP
+# Negative proof: block ONLY the selected provider's actual IPv4
+# destination(s) AND transport port. A blanket --dport 443 DROP would
+# also block foreign HTTPS Direct leaks, manufacturing a false PASS.
+# An independent foreign-Destination OUTPUT counter MUST remain zero.
+probe=$(ip netns exec "$namespace" curl -q --noproxy '*' \
+  --resolve "api.ipify.org:443:$foreign_ip" -sS -4 --max-time 12 https://api.ipify.org)
+[[ "$probe" != "$expected_ip" && "$probe" != "$direct" ]] ||
+  die "foreign pinned destination already Direct"
+ip netns exec "$namespace" iptables -I OUTPUT 1 -o "$veth_guest" \
+  -d "$foreign_ip/32" -p tcp --dport 443 \
+  -m comment --comment "$comment-witness" -j ACCEPT
+while IFS= read -r provider_ip; do
+  ip netns exec "$namespace" iptables -I OUTPUT 1 -o "$veth_guest" \
+    -d "$provider_ip/32" -p tcp --dport "$port" \
+    -m comment --comment "$comment-outage" -j DROP
+done < "$work/provider-ips"
 outage_response=''
-if outage_response=$(ip netns exec "$namespace" curl -q --noproxy '*'   --resolve "api.ipify.org:443:$foreign_ip" -fsS -4 --max-time 9 https://api.ipify.org 2>/dev/null); then
+if outage_response=$(ip netns exec "$namespace" curl -q --noproxy '*' \
+  --resolve "api.ipify.org:443:$foreign_ip" -fsS -4 --max-time 9 https://api.ipify.org 2>/dev/null); then
   echo "VPN_UPSTREAM_OUTAGE_FAILED_TO_BLOCK=$outage_response" >&2
   exit 1
 fi
-witness=$(ip netns exec "$namespace" iptables -vxnL OUTPUT --line-numbers |
-  awk -v label="$comment-witness" 'index($0,label)>0 {print $2}')
-[[ "$witness" =~ ^[0-9]+$ && "$witness" -eq 0 ]] || die "foreign Direct-underlay leak counter nonzero/unknown"
+blocked=$(ip netns exec "$namespace" iptables -vxnL OUTPUT |
+  awk -v label="$comment-outage" 'index($0,label)>0 {sum+=$2} END {print sum+0}')
+[[ "$blocked" =~ ^[0-9]+$ && "$blocked" -gt 0 ]] ||
+  die "no selected-provider outage-block packet witness"
+witness=$(ip netns exec "$namespace" iptables -vxnL OUTPUT |
+  awk -v label="$comment-witness" 'index($0,label)>0 {sum+=$2} END {print sum+0}')
+[[ "$witness" =~ ^[0-9]+$ && "$witness" -eq 0 ]] ||
+  die "foreign Direct-underlay leak counter nonzero/unknown"
 [[ -e "/var/run/netns/$namespace" ]] || die "namespace disappeared during outage"
-ip netns exec "$namespace" ip link show "$tun" >/dev/null || die "TUN disappeared during outage"
+ip netns exec "$namespace" ip link show "$tun" >/dev/null ||
+  die "TUN disappeared during outage"
+echo "SELECTED_PROVIDER_OUTAGE_BLOCKED_PACKETS=$blocked"
 echo 'VPN_REQUIRED_OUTAGE_NO_DIRECT_UNDERLAY=PASS'
-ip netns exec "$namespace" iptables -D OUTPUT -o "$veth_guest"   -p tcp --dport "$port" -m comment --comment "$comment-outage" -j DROP
-ip netns exec "$namespace" iptables -D OUTPUT -o "$veth_guest" -d "$foreign_ip/32"   -p tcp --dport 443 -m comment --comment "$comment-witness" -j ACCEPT
+while IFS= read -r provider_ip; do
+  ip netns exec "$namespace" iptables -D OUTPUT -o "$veth_guest" \
+    -d "$provider_ip/32" -p tcp --dport "$port" \
+    -m comment --comment "$comment-outage" -j DROP
+done < "$work/provider-ips"
+ip netns exec "$namespace" iptables -D OUTPUT -o "$veth_guest" \
+  -d "$foreign_ip/32" -p tcp --dport 443 \
+  -m comment --comment "$comment-witness" -j ACCEPT
 recovered=no
 for i in 1 2; do
   if resumed=$(ip netns exec "$namespace" curl -q --noproxy '*'     --resolve "api.ipify.org:443:$foreign_ip" -fsS -4 --max-time 13 https://api.ipify.org 2>/dev/null) &&
