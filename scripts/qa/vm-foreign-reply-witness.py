@@ -14,6 +14,8 @@ uncached HTTP are checked independently at each stage. No public IP claim.
 """
 
 import argparse
+from contextlib import contextmanager
+import hashlib
 import http.client
 import json
 import os
@@ -25,6 +27,7 @@ import select
 import shlex
 import socket
 import subprocess
+import tempfile
 import sys
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -58,23 +61,95 @@ def require_guest(in_peer):
         version = re.search(r'^VERSION_ID="?13"?$', release, re.M) is not None
         ns = os.stat("/run/netns/" + NAMESPACE)
         here = os.stat("/proc/self/ns/net")
-        same_ns = (ns.st_dev, ns.st_ino) == (here.st_dev, here.st_ino)
+        root = os.stat("/proc/1/ns/net")
+        current_id = (here.st_dev, here.st_ino)
+        peer_id = (ns.st_dev, ns.st_ino)
+        root_id = (root.st_dev, root.st_ino)
     except (OSError, ValueError) as exc:
         raise WitnessError("vm_identity_unavailable") from exc
     if not (guest and debian and version and vendor == "QEMU"):
         raise WitnessError("not_exact_debian13_qemu_guest")
-    if same_ns != in_peer:
-        raise WitnessError("incorrect_named_network_namespace")
+    # Root and peer must be distinct. A third namespace is neither root
+    # nor the named peer, even if it can bind the literal TEST-NET address.
+    if root_id == peer_id:
+        raise WitnessError("root_and_peer_network_namespace_collide")
+    if in_peer:
+        if current_id != peer_id:
+            raise WitnessError("incorrect_named_network_namespace")
+    elif current_id != root_id:
+        raise WitnessError("not_vm_root_network_namespace")
     if Path("/.dockerenv").exists():
         raise WitnessError("docker_guest_not_admitted")
 
 
+def _file_identity(st):
+    return (st.st_dev, st.st_ino, st.st_uid, st.st_mode, st.st_size,
+            st.st_mtime_ns, st.st_ctime_ns)
+
+
+def read_trusted_known_hosts(path):
+    """Read a locally owned pin without following a swapped final symlink."""
+    if not path.is_absolute():
+        raise WitnessError("ssh_host_pin_path_invalid")
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK)
+        with os.fdopen(fd, "rb") as source:
+            before = os.fstat(source.fileno())
+            if (not stat.S_ISREG(before.st_mode) or before.st_uid not in (0, os.geteuid()) or
+                    before.st_mode & 0o022 or not 0 < before.st_size <= 65536):
+                raise WitnessError("ssh_host_pin_ownership_or_permissions_unsafe")
+            content = source.read(65537)
+            after = os.fstat(source.fileno())
+        current = path.lstat()
+    except OSError as exc:
+        raise WitnessError("ssh_host_pin_unavailable") from exc
+    if (_file_identity(before) != _file_identity(after) or
+            _file_identity(before) != _file_identity(current) or
+            len(content) != before.st_size):
+        raise WitnessError("ssh_host_pin_changed_during_read")
+    return (_file_identity(before), hashlib.sha256(content).digest()), content
+
+
 def require_key_files(private_key, known_hosts):
-    for path in (private_key, known_hosts):
-        if not path.is_absolute() or path.is_symlink() or not path.is_file():
-            raise WitnessError("ssh_identity_file_invalid")
-    if private_key.stat().st_mode & 0o077:
+    if not private_key.is_absolute() or private_key.is_symlink() or not private_key.is_file():
+        raise WitnessError("ssh_identity_file_invalid")
+    info = private_key.stat()
+    if info.st_mode & 0o077:
         raise WitnessError("private_ssh_key_permissions_unsafe")
+    if info.st_uid not in (0, os.geteuid()):
+        raise WitnessError("private_ssh_key_owner_untrusted")
+    read_trusted_known_hosts(known_hosts)
+
+
+def assert_pinned_hosts(source, snapshot, identity):
+    observed, data = read_trusted_known_hosts(source)
+    frozen, bytes_on_disk = read_trusted_known_hosts(snapshot)
+    source_identity, snapshot_identity = identity
+    if observed != source_identity or frozen != snapshot_identity or data != bytes_on_disk:
+        raise WitnessError("ssh_host_pin_changed")
+
+
+@contextmanager
+def pinned_host_file(source):
+    """OpenSSH receives a private immutable-byte copy, never the mutable source.
+
+    The original path and snapshot are revalidated before and after every
+    fresh connection. A source path swap cannot change OpenSSH's trust set.
+    """
+    identity, data = read_trusted_known_hosts(source)
+    with tempfile.TemporaryDirectory(prefix="scqa-host-pin-") as location:
+        snapshot = Path(location) / "known_hosts"
+        fd = os.open(snapshot, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "wb") as target:
+            target.write(data)
+            target.flush()
+            os.fchmod(target.fileno(), 0o400)
+        snapshot_identity, snapshot_data = read_trusted_known_hosts(snapshot)
+        if snapshot_data != data:
+            raise WitnessError("ssh_host_pin_snapshot_invalid")
+        paired_identity = (identity, snapshot_identity)
+        assert_pinned_hosts(source, snapshot, paired_identity)
+        yield snapshot, paired_identity
 
 
 def ssh_command(key, known_hosts, port, remote):
@@ -290,12 +365,29 @@ def phase_allowed(previous, next_phase):
     }.get(previous, set())
 
 
-def next_phase(previous):
+def next_phase(previous, seconds=120):
     print("VM_INGRESS_WAIT_AFTER=" + previous, flush=True)
-    ready, _, _ = select.select([sys.stdin], [], [], 120)
-    if not ready:
-        raise WitnessError("operator_phase_timeout")
-    label = sys.stdin.readline().strip()
+    deadline = time.monotonic() + seconds
+    fd = sys.stdin.fileno()
+    line = bytearray()
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0 or not select.select([fd], [], [], remaining)[0]:
+            raise WitnessError("operator_phase_timeout")
+        # Read one byte at a time: never let a buffered readline() escape the
+        # deadline after partial pipe/TTY input. Labels are shorter than 24.
+        part = os.read(fd, 1)
+        if not part:
+            raise WitnessError("operator_phase_unexpected_eof")
+        if part == b"\n":
+            break
+        if len(line) >= 24:
+            raise WitnessError("operator_phase_label_too_long")
+        line.extend(part)
+    try:
+        label = line.decode("ascii").removesuffix("\r")
+    except UnicodeDecodeError as exc:
+        raise WitnessError("operator_phase_invalid_encoding") from exc
     if not phase_allowed(previous, label):
         raise WitnessError("operator_phase_out_of_order")
     return label
@@ -305,13 +397,18 @@ def client(key, known_hosts, ssh_port, http_port):
     if ssh_port == http_port or not (1024 <= ssh_port <= 65535 and 1024 <= http_port <= 65535):
         raise WitnessError("invalid_test_listener_ports")
     require_key_files(key, known_hosts)
+    with pinned_host_file(known_hosts) as (snapshot, identity):
+        _client_with_trusted_pin(key, known_hosts, snapshot, identity, ssh_port, http_port)
+
+
+def _client_with_trusted_pin(key, known_hosts, snapshot, identity, ssh_port, http_port):
     persistent_http = http.client.HTTPConnection(ROOT_IP, http_port, timeout=4)
     try:
         persistent_http.connect()
         # Verify the original peer route BEFORE the first guarded Apply.
         http_identity = verified_http_socket(persistent_http)
         try:
-            original = subprocess.Popen(ssh_command(key, known_hosts, ssh_port, REMOTE_LOOP),
+            original = subprocess.Popen(ssh_command(key, snapshot, ssh_port, REMOTE_LOOP),
                                         stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                         stderr=subprocess.DEVNULL, bufsize=0)
         except OSError as exc:
@@ -320,11 +417,14 @@ def client(key, known_hosts, ssh_port, http_port):
             ssh_inode = None
             stage = "baseline"
             while True:
+                assert_pinned_hosts(known_hosts, snapshot, identity)
                 ssh_inode = original_ssh_round(original, ssh_port, ssh_inode)
                 # An existing HTTP keepalive must survive every phase without
                 # HTTPConnection silently dialing a replacement socket.
                 http_request(persistent_http, http_identity)
-                new_ssh_round(key, known_hosts, ssh_port)
+                assert_pinned_hosts(known_hosts, snapshot, identity)
+                new_ssh_round(key, snapshot, ssh_port)
+                assert_pinned_hosts(known_hosts, snapshot, identity)
                 new_http_identity = http_round(http_port)
                 if new_http_identity == http_identity:
                     raise WitnessError("new_http_reused_original_socket")

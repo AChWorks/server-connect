@@ -11,6 +11,8 @@ import io
 import json
 from pathlib import Path
 import os
+import time
+from types import SimpleNamespace
 import secrets
 import socket
 import subprocess
@@ -314,15 +316,18 @@ class VMForeignReplyWitnessTests(unittest.TestCase):
             try:
                 output = io.StringIO()
                 ssh_port = 19123 if server.server_port != 19123 else 19122
-                with (patch.object(w, "require_key_files") as keys,
-                      patch.object(w, "ssh_command", return_value=[sys.executable, "-u", "-c", w.REMOTE_LOOP]) as ssh,
-                      patch.object(w, "ssh_socket_inode", return_value=4442) as identity,
-                      patch.object(w, "new_ssh_round") as fresh,
-                      patch.object(w, "next_phase", side_effect=["pending", "confirmed", "off"]) as transition,
-                      contextlib.redirect_stdout(output)):
-                    w.client(Path("/no-key-in-qa"), Path("/no-known-hosts-in-qa"),
-                             ssh_port, server.server_port)
-                self.assertEqual(keys.call_count, 1)
+                with tempfile.TemporaryDirectory() as temp:
+                    key, known = Path(temp)/"key", Path(temp)/"known_hosts"
+                    key.write_text("synthetic-key")
+                    known.write_text("[127.0.0.1]:19123 ssh-ed25519 synthetic-public-key\n")
+                    key.chmod(0o600)
+                    known.chmod(0o600)
+                    with (patch.object(w, "ssh_command", return_value=[sys.executable, "-u", "-c", w.REMOTE_LOOP]) as ssh,
+                          patch.object(w, "ssh_socket_inode", return_value=4442) as identity,
+                          patch.object(w, "new_ssh_round") as fresh,
+                          patch.object(w, "next_phase", side_effect=["pending", "confirmed", "off"]) as transition,
+                          contextlib.redirect_stdout(output)):
+                        w.client(key, known, ssh_port, server.server_port)
                 self.assertEqual(ssh.call_count, 1)
                 self.assertEqual(identity.call_count, 8)
                 self.assertEqual(fresh.call_count, 4)
@@ -352,14 +357,41 @@ class VMForeignReplyWitnessTests(unittest.TestCase):
         for p in ("baseline", "pending", "confirmed", "degraded", "off", "x"):
             for n in ("baseline", "pending", "confirmed", "degraded", "off", "x"):
                 self.assertEqual(w.phase_allowed(p, n), (p,n) in allowed)
-        with contextlib.redirect_stdout(io.StringIO()):
-            with patch.object(w.select, "select", return_value=([],[],[])):
-                with self.assertRaisesRegex(w.WitnessError, "operator_phase_timeout"):
-                    w.next_phase("baseline")
-            with patch.object(w.select, "select", return_value=([1],[],[])):
-                with patch.object(sys, "stdin", io.StringIO("off\n")):
-                    with self.assertRaisesRegex(w.WitnessError, "operator_phase_out_of_order"):
-                        w.next_phase("baseline")
+        def operator_input(data, *, close=False, seconds=0.06):
+            read_fd, write_fd = os.pipe()
+            try:
+                if data:
+                    os.write(write_fd, data)
+                if close:
+                    os.close(write_fd)
+                    write_fd = -1
+                with os.fdopen(read_fd, "r") as input_stream:
+                    with (patch.object(w.sys, "stdin", input_stream),
+                          contextlib.redirect_stdout(io.StringIO())):
+                        return w.next_phase("baseline", seconds=seconds)
+            finally:
+                if write_fd >= 0:
+                    os.close(write_fd)
+        self.assertEqual(operator_input(b"pending\n"), "pending")
+        self.assertEqual(operator_input(b"pending\r\n"), "pending")
+        for payload, close, reason in [
+            (b"", False, "operator_phase_timeout"),
+            (b"pending", False, "operator_phase_timeout"),
+            (b"pending", True, "operator_phase_unexpected_eof"),
+            (b"", True, "operator_phase_unexpected_eof"),
+            (b"off\n", False, "operator_phase_out_of_order"),
+            (b"p"*25, False, "operator_phase_label_too_long"),
+            (b"pen\xffding\n", False, "operator_phase_invalid_encoding"),
+            (b"pending\n", False, None),
+        ]:
+            if reason is None:
+                continue
+            with self.subTest(payload=payload, close=close):
+                began = time.monotonic()
+                with self.assertRaisesRegex(w.WitnessError, reason):
+                    operator_input(payload, close=close)
+                self.assertLess(time.monotonic() - began, 1.5,
+                                "partial operator input escaped the deadline")
 
     def test_pinned_ssh_host_no_proxy_and_safe_key_permissions(self):
         args = w.ssh_command(Path("/tmp/qa-key"), Path("/tmp/qa-known"), 19123, "print('ok')")
@@ -387,6 +419,201 @@ class VMForeignReplyWitnessTests(unittest.TestCase):
             key.symlink_to(known)
             with self.assertRaises(w.WitnessError):
                 w.require_key_files(key, known)
+
+    def test_vm_root_and_peer_namespace_admission_refuses_third_namespace(self):
+        # Mock only the attested metadata and namespace *identity*, never call
+        # unshare/setns or change any host network namespace in source CI.
+        root = (4, 401)
+        peer = (4, 402)
+        third = (4, 403)
+        def validate(here, in_peer, named=peer):
+            def fake_stat(path):
+                value = ({"/run/netns/scqa-foreign": named,
+                          "/proc/1/ns/net": root,
+                          "/proc/self/ns/net": here})[path]
+                return SimpleNamespace(st_dev=value[0], st_ino=value[1])
+            def read_text(path, *_a, **_k):
+                if str(path) == "/etc/os-release":
+                    return 'ID=debian\nVERSION_ID="13"\n'
+                if str(path) == "/sys/class/dmi/id/sys_vendor":
+                    return "QEMU"
+                raise AssertionError("Unexpected identity source")
+            with (patch.object(w.os, "stat", side_effect=fake_stat),
+                  patch.object(w.os, "uname", return_value=SimpleNamespace(nodename="sc-qa-vm-us01")),
+                  patch.object(w.Path, "read_text", read_text),
+                  patch.object(w.Path, "exists", return_value=False)):
+                w.require_guest(in_peer)
+        validate(root, False)
+        validate(peer, True)
+        for current, peer_mode, reason in (
+            (third, False, "not_vm_root_network_namespace"),
+            (third, True, "incorrect_named_network_namespace"),
+            (root, True, "incorrect_named_network_namespace"),
+            (peer, False, "not_vm_root_network_namespace"),
+        ):
+            with self.subTest(current=current, peer_mode=peer_mode):
+                with self.assertRaisesRegex(w.WitnessError, reason):
+                    validate(current, peer_mode)
+        with self.assertRaisesRegex(w.WitnessError,
+                                    "root_and_peer_network_namespace_collide"):
+            validate(root, False, named=root)
+
+    def test_known_hosts_pin_ownership_permissions_and_mutation_refusals(self):
+        with tempfile.TemporaryDirectory() as d:
+            key, host = Path(d)/"key", Path(d)/"known_hosts"
+            key.write_text("test-private")
+            key.chmod(0o600)
+            first = "[198.51.100.1]:19123 ssh-ed25519 FIRSTKEY\n"
+            second = "[198.51.100.1]:19123 ssh-ed25519 CHANGEDKEY\n"
+            host.write_text(first)
+            host.chmod(0o600)
+            w.require_key_files(key, host)
+            with w.pinned_host_file(host) as (snapshot, identity):
+                self.assertEqual(snapshot.read_text(), first)
+                self.assertEqual(snapshot.stat().st_mode & 0o777, 0o400)
+                w.assert_pinned_hosts(host, snapshot, identity)
+                host.write_text(second)
+                with self.assertRaisesRegex(w.WitnessError, "ssh_host_pin_changed"):
+                    w.assert_pinned_hosts(host, snapshot, identity)
+                self.assertEqual(snapshot.read_text(), first)
+            host.write_text(first)
+            with w.pinned_host_file(host) as (snapshot, identity):
+                # Replacing the inode with IDENTICAL bytes must still fail.
+                changed = Path(d)/"other"
+                changed.write_text(first)
+                changed.chmod(0o600)
+                os.replace(changed, host)
+                with self.assertRaisesRegex(w.WitnessError, "ssh_host_pin_changed"):
+                    w.assert_pinned_hosts(host, snapshot, identity)
+            with w.pinned_host_file(host) as (snapshot, identity):
+                host.rename(Path(d)/"old-host")
+                host.symlink_to(Path(d)/"old-host")
+                with self.assertRaises(w.WitnessError):
+                    w.assert_pinned_hosts(host, snapshot, identity)
+            host.unlink()
+            (Path(d)/"old-host").rename(host)
+            with w.pinned_host_file(host) as (snapshot, identity):
+                # The private OpenSSH file is also pinned to its own inode.
+                replacement = Path(d)/"snapshot-replacement"
+                replacement.write_text(first)
+                replacement.chmod(0o400)
+                os.replace(replacement, snapshot)
+                with self.assertRaisesRegex(w.WitnessError, "ssh_host_pin_changed"):
+                    w.assert_pinned_hosts(host, snapshot, identity)
+            with w.pinned_host_file(host) as (snapshot, identity):
+                snapshot.chmod(0o600)
+                snapshot.write_text(second)
+                with self.assertRaisesRegex(w.WitnessError, "ssh_host_pin_changed"):
+                    w.assert_pinned_hosts(host, snapshot, identity)
+            for mode in (0o666, 0o620):
+                host.chmod(mode)
+                with self.assertRaisesRegex(w.WitnessError, "ssh_host_pin_ownership_or_permissions_unsafe"):
+                    w.require_key_files(key, host)
+            host.chmod(0o600)
+            # Nonregular or pipe-backed trust files must be refused without
+            # blocking on an absent FIFO writer.
+            fifo = Path(d)/"named-pipe"
+            os.mkfifo(fifo, 0o600)
+            with self.assertRaisesRegex(w.WitnessError,
+                                        "ssh_host_pin_ownership_or_permissions_unsafe"):
+                w.require_key_files(key, fifo)
+            native_fstat = os.fstat
+            def foreign_owner(fd):
+                st = native_fstat(fd)
+                return SimpleNamespace(st_mode=st.st_mode, st_uid=987654)
+            with patch.object(w.os, "fstat", side_effect=foreign_owner):
+                with self.assertRaisesRegex(w.WitnessError, "ssh_host_pin_ownership_or_permissions_unsafe"):
+                    w.require_key_files(key, host)
+
+    def test_changed_host_pin_during_fresh_ssh_refuses_stage_and_reaps_original(self):
+        # A successful SSH subprocess is not sufficient if the source trust
+        # file changed during that connection. The witness must fail closed.
+        with (patch.object(w, "ROOT_IP", "127.0.0.1"),
+              patch.object(w, "PEER_IP", "127.0.0.1"),
+              tempfile.TemporaryDirectory() as d):
+            key, host = Path(d)/"key", Path(d)/"known_hosts"
+            key.write_text("test-private")
+            key.chmod(0o600)
+            host.write_text("[127.0.0.1]:19123 ssh-ed25519 first-key\n")
+            host.chmod(0o600)
+            server = w.ThreadingHTTPServer(("127.0.0.1", 0), w.Origin)
+            server.daemon_threads = True
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            children = []
+            real_popen = subprocess.Popen
+            def tracked_popen(*args, **kwargs):
+                child = real_popen(*args, **kwargs)
+                children.append(child)
+                return child
+            def changed_during_auth(_key, _frozen_pin, _port):
+                host.write_text("[127.0.0.1]:19123 ssh-ed25519 changed-key\n")
+            try:
+                with (patch.object(w, "ssh_command", return_value=[sys.executable, "-u", "-c", w.REMOTE_LOOP]),
+                      patch.object(w, "ssh_socket_inode", return_value=4442),
+                      patch.object(w, "new_ssh_round", side_effect=changed_during_auth),
+                      patch.object(w.subprocess, "Popen", side_effect=tracked_popen),
+                      contextlib.redirect_stdout(io.StringIO()) as output):
+                    with self.assertRaisesRegex(w.WitnessError, "ssh_host_pin_changed"):
+                        w.client(key, host, 19123, server.server_port)
+                self.assertNotIn("VM_INGRESS_WITNESS=PASS", output.getvalue())
+                self.assertEqual(len(children), 1)
+                self.assertIsNotNone(children[0].poll())
+                self.assertTrue(children[0].stdin.closed)
+                self.assertTrue(children[0].stdout.closed)
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=2)
+                self.assertFalse(thread.is_alive())
+
+    def test_partial_stage_input_forces_client_cleanup(self):
+        # Full client control flow, real HTTP/1.1 and a real persistent
+        # subprocess; only SSH transport and fresh auth are simulated.
+        with (patch.object(w, "ROOT_IP", "127.0.0.1"),
+              patch.object(w, "PEER_IP", "127.0.0.1"),
+              tempfile.TemporaryDirectory() as d):
+            key, known = Path(d)/"key", Path(d)/"known"
+            key.write_text("synthetic")
+            known.write_text("[127.0.0.1]:19123 ssh-ed25519 synthetic\n")
+            key.chmod(0o600)
+            known.chmod(0o600)
+            server = w.ThreadingHTTPServer(("127.0.0.1", 0), w.Origin)
+            server.daemon_threads = True
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            read_fd, write_fd = os.pipe()
+            subprocesses = []
+            real_popen = subprocess.Popen
+            real_next_phase = w.next_phase
+            def tracked_popen(*args, **kwargs):
+                child = real_popen(*args, **kwargs)
+                subprocesses.append(child)
+                return child
+            try:
+                os.write(write_fd, b"pen")  # no newline; writer remains open
+                with os.fdopen(read_fd, "r") as input_stream:
+                    with (patch.object(w.sys, "stdin", input_stream),
+                          patch.object(w, "ssh_command", return_value=[sys.executable, "-u", "-c", w.REMOTE_LOOP]),
+                          patch.object(w, "ssh_socket_inode", return_value=4442),
+                          patch.object(w, "new_ssh_round"),
+                          patch.object(w.subprocess, "Popen", side_effect=tracked_popen),
+                          patch.object(w, "next_phase", side_effect=lambda prev: real_next_phase(prev, seconds=0.12)),
+                          contextlib.redirect_stdout(io.StringIO())):
+                        began = time.monotonic()
+                        with self.assertRaisesRegex(w.WitnessError, "operator_phase_timeout"):
+                            w.client(key, known, 19123, server.server_port)
+                        self.assertLess(time.monotonic() - began, 5)
+                self.assertEqual(len(subprocesses), 1)
+                self.assertIsNotNone(subprocesses[0].poll())
+                self.assertTrue(subprocesses[0].stdin.closed)
+                self.assertTrue(subprocesses[0].stdout.closed)
+            finally:
+                os.close(write_fd)
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=2)
+                self.assertFalse(thread.is_alive())
 
     def test_not_on_exact_guest_refuses_without_changes(self):
         result = subprocess.run([sys.executable, "-B", str(MODULE), "origin", "--http-port", "19124"],
