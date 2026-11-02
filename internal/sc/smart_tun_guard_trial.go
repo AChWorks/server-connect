@@ -693,6 +693,11 @@ func (m *Manager) admitSmartTUNTrialLocked(store *activationJournalDir, opts Sma
 	if err != nil {
 		return smartTUNTrialAdmission{}, err
 	}
+	if opts.DNSResolverIPv4 != "" {
+		if err := nativeTUNVMResolverPreflight(opts); err != nil {
+			return smartTUNTrialAdmission{}, err
+		}
+	}
 	native, err := nativeTUNAdmission(opts, host)
 	if err != nil {
 		return smartTUNTrialAdmission{}, err
@@ -710,6 +715,7 @@ func smartTUNTrialFixturePolicySupported(opts SmartTUNCandidateOptions) bool {
 		len(opts.ProtectedCIDRs) != 1 || opts.ProtectedCIDRs[0] != "10.254.72.0/30" ||
 		opts.TunnelIPv4 != "172.31.99.1/30" ||
 		len(opts.Exceptions) != 0 || len(opts.DomainExceptions) != 0 ||
+		opts.DNSResolverIPv4 != "" ||
 		opts.TunnelInterface != "sctunqa0" || opts.UnderlayInterface != "scqaedge0" ||
 		len(opts.ProtectedIPv6CIDRs) != 0 {
 		return false
@@ -755,12 +761,18 @@ func (m *Manager) beginSmartTUNTrial(opts SmartTUNCandidateOptions, managementPe
 	if qaKillPoint != "" && qaKillPoint != "after-journal" && qaKillPoint != "after-start" && !nativeTUNQAKillValid(qaKillPoint, true) && !(health != nil && qaKillPoint == "after-supervised-ready") {
 		return SmartTUNTrialReceipt{}, Fault("invalid_arguments", "unsupported disposable TUN SIGKILL boundary")
 	}
+	if qaKillPoint == "after-native-dns-effect" && opts.DNSResolverIPv4 == "" {
+		return SmartTUNTrialReceipt{}, Fault("invalid_arguments", "DNS fault injection requires opted-in VM DNS")
+	}
 	if m.Dir != DefaultDir || m.Core != DefaultCore ||
 		deadlineSeconds < 4 || deadlineSeconds > 600 {
 		return SmartTUNTrialReceipt{}, Fault("trial_unsupported", "installed paths and deadline 4-600s required")
 	}
 	if err := nativeTrialApplyPlatform(); err != nil {
 		return SmartTUNTrialReceipt{}, err
+	}
+	if opts.DNSResolverIPv4 != "" && health == nil {
+		return SmartTUNTrialReceipt{}, Fault("trial_unsupported", "owned-link DNS requires supervised VM trial")
 	}
 	if !smartTUNTrialFixturePolicySupported(opts) && !smartTUNVMPolicySupported(opts) {
 		return SmartTUNTrialReceipt{}, Fault("trial_unsupported", "unsupported disposable native TUN policy")
@@ -975,6 +987,11 @@ func (m *Manager) beginSmartTUNTrial(opts SmartTUNCandidateOptions, managementPe
 		watch.close()
 		if err := nativeTUNApplyPolicy(store, &record, qaKillPoint); err != nil {
 			return err
+		}
+		if record.Native.DNSResolverIPv4 != "" {
+			if err := nativeTUNVMApplyResolver(store, &record, qaKillPoint); err != nil {
+				return err
+			}
 		}
 		if err := nativeTUNVerifyPending(record); err != nil {
 			return err

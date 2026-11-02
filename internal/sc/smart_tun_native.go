@@ -50,14 +50,19 @@ type smartTUNNativeNFTIdentity struct {
 // Every field is comparable, including the fixed family slots. Do not add a
 // map/slice or compare Native pointers when refreshing an atomic journal inode.
 type smartTUNNativeLedger struct {
-	Version         int                           `json:"version"`
-	NamespaceDev    uint64                        `json:"namespace_dev"`
-	NamespaceIno    uint64                        `json:"namespace_ino"`
-	UnderlayIndex   int                           `json:"underlay_index"`
-	LinkIndex       int                           `json:"link_index"`
-	LinkStage       string                        `json:"link_stage"`
-	LinkSHA256      string                        `json:"link_sha256"`
-	AddressSHA256   string                        `json:"address_sha256"`
+	Version       int    `json:"version"`
+	NamespaceDev  uint64 `json:"namespace_dev"`
+	NamespaceIno  uint64 `json:"namespace_ino"`
+	UnderlayIndex int    `json:"underlay_index"`
+	LinkIndex     int    `json:"link_index"`
+	LinkStage     string `json:"link_stage"`
+	LinkSHA256    string `json:"link_sha256"`
+	AddressSHA256 string `json:"address_sha256"`
+	// Optional journaled resolver configuration lives ONLY on our TUN
+	// ifindex. No existing uplink DNS owner is rewritten or reverted.
+	DNSResolverIPv4 string                        `json:"dns_resolver_ipv4,omitempty"`
+	DNSStage        string                        `json:"dns_stage,omitempty"`
+	DNSSHA256       string                        `json:"dns_sha256,omitempty"`
 	IPv4            smartTUNNativeFamily          `json:"ipv4"`
 	IPv6            smartTUNNativeFamily          `json:"ipv6"`
 	NFTName         string                        `json:"nft_name"`
@@ -110,6 +115,35 @@ func validateSmartTUNNative(record smartTUNTrialJournal) error {
 		n.NFTName != "scnt_"+record.OperationID || n.IPv4.Address != "172.31.99.1/30" || n.IPv4.Table != nativeTUNTable4 ||
 		(n.IPv6.Address != "" && n.IPv6.Address != "fd73:99::1/64") || n.IPv6.Table != nativeTUNTable6 || !nativeObjectValid(n.NFT) {
 		return bad()
+	}
+	if n.DNSResolverIPv4 == "" {
+		if n.DNSStage != "" || n.DNSSHA256 != "" {
+			return bad()
+		}
+	} else {
+		if record.TunnelInterface != smartTUNVMInterface || record.UnderlayInterface != smartTUNVMUnderlay {
+			return bad()
+		}
+		if _, approved := smartTUNVMApprovedDNSResolver(n.DNSResolverIPv4); !approved {
+			return bad()
+		}
+		switch n.DNSStage {
+		case "planned", "effect_possible":
+			if n.DNSSHA256 != "" {
+				return bad()
+			}
+		case "observed":
+			if !journalHex64.MatchString(n.DNSSHA256) {
+				return bad()
+			}
+		case "removed":
+			// A link might never have reached the resolver effect or receipt.
+			if n.DNSSHA256 != "" && !journalHex64.MatchString(n.DNSSHA256) {
+				return bad()
+			}
+		default:
+			return bad()
+		}
 	}
 	if n.LinkIndex < 0 || n.LinkIndex == n.UnderlayIndex || n.LinkIndex == 1 {
 		return bad()
@@ -196,7 +230,7 @@ func validateSmartTUNNative(record smartTUNTrialJournal) error {
 		return bad()
 	}
 	if record.Phase == "trial_pending" {
-		if n.StopReason != "" || n.LinkStage == "removed" || n.NFT.Stage == "remove_requested" || n.NFT.Stage == "removed" {
+		if n.StopReason != "" || n.LinkStage == "removed" || n.DNSStage == "removed" || n.NFT.Stage == "remove_requested" || n.NFT.Stage == "removed" {
 			return bad()
 		}
 		for _, f := range []smartTUNNativeFamily{n.IPv4, n.IPv6} {
@@ -226,6 +260,9 @@ func validateSmartTUNNative(record smartTUNTrialJournal) error {
 		if n.LinkStage != "removed" || n.NFT.Stage != "removed" {
 			return bad()
 		}
+		if n.DNSResolverIPv4 != "" && n.DNSStage != "removed" {
+			return bad()
+		}
 		for _, f := range []smartTUNNativeFamily{n.IPv4, n.IPv6} {
 			if f.Address != "" && (f.Rule.Stage != "removed" || f.Route.Stage != "removed" || f.Fallback.Stage != "removed") {
 				return bad()
@@ -239,11 +276,20 @@ func validateSmartTUNNative(record smartTUNTrialJournal) error {
 // fields from becoming privileged deletion authority after decoding.
 func strictSmartTUNNativeJSON(raw json.RawMessage) error {
 	keys := map[string]bool{"version": true, "namespace_dev": true, "namespace_ino": true, "underlay_index": true, "link_index": true, "link_stage": true, "link_sha256": true, "address_sha256": true, "ipv4": true, "ipv6": true, "nft_name": true, "nft_handle": true, "nft": true, "nft_count": true, "nft_objects": true, "stop_reason": true, "startup_verified": true}
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(raw, &fields) != nil {
+		return activationJournalError("native TUN fields unavailable")
+	}
+	if _, present := fields["dns_resolver_ipv4"]; present {
+		keys["dns_resolver_ipv4"] = true
+		keys["dns_stage"] = true
+		if _, hasDigest := fields["dns_sha256"]; hasDigest {
+			keys["dns_sha256"] = true
+		}
+	}
 	if err := requireExactJournalKeys(raw, keys); err != nil {
 		return err
 	}
-	var fields map[string]json.RawMessage
-	_ = json.Unmarshal(raw, &fields)
 	for _, value := range fields {
 		if bytes.Equal(bytes.TrimSpace(value), []byte("null")) {
 			return activationJournalError("null native TUN member")

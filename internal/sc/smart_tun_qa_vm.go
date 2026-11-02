@@ -26,6 +26,20 @@ const (
 	smartTUNVMIngressNamespace = "scqa-foreign"
 )
 
+// Global-unicast is not proof of Internet reachability: special-use ranges
+// and the guest's local TEST-NET ingress can pass that lexical check.
+// Explicitly allow only these QA resolvers, consistently for the policy,
+// saved policy and native journal. This is NOT a VPN/DNS egress proof.
+func smartTUNVMApprovedDNSResolver(value string) (netip.Addr, bool) {
+	switch value {
+	case "1.1.1.1", "9.9.9.9":
+		ip, err := netip.ParseAddr(value)
+		return ip, err == nil && ip.Is4() && ip.String() == value
+	default:
+		return netip.Addr{}, false
+	}
+}
+
 func smartTUNVMPolicySupported(o SmartTUNCandidateOptions) bool {
 	if o.TunnelInterface != smartTUNVMInterface || o.UnderlayInterface != smartTUNVMUnderlay ||
 		o.TunnelIPv4 != "172.31.99.1/30" || o.TunnelIPv6 != "" ||
@@ -35,6 +49,21 @@ func smartTUNVMPolicySupported(o SmartTUNCandidateOptions) bool {
 		len(o.IPv6Exceptions) != 0 || len(o.DomainExceptions) != 0 ||
 		len(o.Exceptions) > 8 {
 		return false
+	}
+	// A VPN DNS server is an explicit VM-only policy: never let it be
+	// loopback/private/underlay, the protected HTTPS witness, a domestic
+	// Direct target, or an operator-selected Direct exception.
+	if o.DNSResolverIPv4 != "" {
+		resolver, approved := smartTUNVMApprovedDNSResolver(o.DNSResolverIPv4)
+		if !approved || resolver.String() == "1.0.0.1" || resolver.String() == "5.22.0.10" {
+			return false
+		}
+		for _, r := range o.Exceptions {
+			prefix, err := canonicalRoutePrefix(r.CIDR)
+			if err != nil || (r.Via == "direct" && prefix.Contains(resolver)) {
+				return false
+			}
+		}
 	}
 	// User-selected explicit IPv4 exceptions are supported inside the compiler's
 	// bounded, disjoint public-CIDR policy; no unstated domain authority is added.

@@ -108,6 +108,34 @@ Core socket marks are injected into the narrowly supported native profile so
 the outer VPN and core Direct outbounds use the underlay without recursion.
 The existing Proxy Only profile-import behavior is unchanged.
 
+**Experimental DNS ownership (exact supervised Debian13 QEMU guest only):** an
+explicit allowlisted IPv4 resolver (currently only `1.1.1.1` or `9.9.9.9`)
+may be attached as a route-only `~.` domain to the *product-owned* TUN link
+through `resolvectl`, with a durable effect intent
+before mutation, exact link-index/readback receipts and the same pinned journal
+lock as native network mutators. The existing `ens3`/global resolver is never
+modified. The independent Guard must verify the receipted link setting during
+pending supervision and refuse a foreign/resolver mismatch during cleanup;
+removing the precisely owned TUN also removes its link-scoped DNS state. This
+optional QA setting does **not** enable sing-box DNS hijack or constitute
+trusted DNS/IP correlation, geographic domain policy, full DNS health
+verification or general-host DNS support. Unsupported systemd-resolved/link
+identity or resolver states are refused before a new guarded operation.
+A bounded disposable-only `--qa-kill-at after-native-dns-effect` SIGKILL
+boundary tests recovery after the first DNS setter but before the routing
+`~.` domain is installed. At `effect_possible`, only no DNS/no domain,
+expected DNS/no domain, and expected DNS/`~.` can authorize owned cleanup.
+A route-only `~.` without the expected DNS is foreign or ambiguous and must
+retain the journal and recovery evidence rather than silently remove the link.
+An executor failure can make
+`guard_scheduled=false` and report `guard_unavailable` even while the
+systemd Timer remains armed; this field represents verified effective Guard
+readiness, not the Timer's raw `ActiveState`. After an exact guest-only
+foreign-resolver collision is resolved and all owned network resources are
+observed absent, use `smart-tun-trial-reconcile-idle-guard` to reset an
+independently proven idle failed recovery service. Never discard the journal
+or force-clean an unknown owner merely to get a green status.
+
 Native OUTPUT capture and a separate POSTROUTING containment chain classify
 the same protected paths. OUTPUT route hooks can change the packet's route
 while later OUTPUT hooks still observe the initial output interface. The guard
