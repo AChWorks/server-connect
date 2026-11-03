@@ -694,7 +694,9 @@ Commands:
   smart-routing-rules remove-source --source ID --sha256 HEX
   smart-routing-rules preview --tunnel-if NAME --underlay-if NAME --tunnel-ipv4 CIDR
                               --domestic-cidr CIDR [--protected-cidr CIDR...]
+                              [--endpoint-pin-ipv4 PUBLIC_IP] (named VLESS TCP only)
                               Compiles saved rules with selected native VLESS profile;
+                              explicit pins do not prove DNS or underlay reachability;
                               no core execution, route inspection or activation
                              Offline saved settings ONLY, no TUN activation
                               Local service state is not foreign VPN path proof;

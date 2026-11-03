@@ -86,6 +86,7 @@ func runSmartRoutingRules(jsonMode bool, m *sc.Manager, args []string) int {
 		underlay := opts.String("underlay-if", "", "candidate underlay interface")
 		tunnelIPv4 := opts.String("tunnel-ipv4", "", "private candidate TUN CIDR")
 		tunnelIPv6 := opts.String("tunnel-ipv6", "", "optional private IPv6 candidate TUN CIDR")
+		endpointPin := opts.String("endpoint-pin-ipv4", "", "operator IPv4 dial pin for compile-only named VLESS preview; not DNS evidence")
 		var domestic, protected, domesticIPv6, protectedIPv6 destinationFlags
 		opts.Var(&domestic, "domestic-cidr", "explicit non-geographic IPv4 policy input")
 		opts.Var(&protected, "protected-cidr", "explicit protected IPv4 host path")
@@ -95,12 +96,24 @@ func runSmartRoutingRules(jsonMode bool, m *sc.Manager, args []string) int {
 			*underlay == "" || *tunnelIPv4 == "" || len(domestic) == 0 {
 			return output(jsonMode, nil, routingOptionsError())
 		}
-		preview, err := m.PreviewSmartRoutingRules(sc.SmartTUNCandidateOptions{
+		// Visit distinguishes a genuinely omitted optional pin from an
+		// explicitly supplied empty value, which must never fall back to
+		// the legacy unpinned preview.
+		pinSupplied := false
+		opts.Visit(func(f *flag.Flag) {
+			if f.Name == "endpoint-pin-ipv4" {
+				pinSupplied = true
+			}
+		})
+		if pinSupplied && *endpointPin == "" {
+			return output(jsonMode, nil, routingOptionsError())
+		}
+		preview, err := m.PreviewSmartRoutingRulesPinned(sc.SmartTUNCandidateOptions{
 			TunnelInterface: *tunnel, UnderlayInterface: *underlay,
 			TunnelIPv4: *tunnelIPv4, TunnelIPv6: *tunnelIPv6,
 			DomesticCIDRs: domestic, ProtectedCIDRs: protected,
 			DomesticIPv6CIDRs: domesticIPv6, ProtectedIPv6CIDRs: protectedIPv6,
-		})
+		}, *endpointPin)
 		return output(jsonMode, preview, err)
 	case "import":
 		opts := flag.NewFlagSet(action, flag.ContinueOnError)
