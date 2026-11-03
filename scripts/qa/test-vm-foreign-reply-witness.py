@@ -329,6 +329,9 @@ class VMForeignReplyWitnessTests(unittest.TestCase):
                           contextlib.redirect_stdout(output)):
                         w.client(key, known, ssh_port, server.server_port)
                 self.assertEqual(ssh.call_count, 1)
+                frozen_key = ssh.call_args.args[0]
+                self.assertNotEqual(frozen_key, key)
+                self.assertFalse(frozen_key.exists(), "cleanup removes the frozen SSH key")
                 self.assertEqual(identity.call_count, 8)
                 self.assertEqual(fresh.call_count, 4)
                 self.assertEqual(transition.call_count, 3)
@@ -402,6 +405,8 @@ class VMForeignReplyWitnessTests(unittest.TestCase):
         self.assertIn("ProxyCommand=none", args)
         self.assertIn("ProxyJump=none", args)
         self.assertIn("BatchMode=yes", args)
+        self.assertIn("IdentityAgent=none", args)
+        self.assertIn("PreferredAuthentications=publickey", args)
         self.assertIn("GlobalKnownHostsFile=/dev/null", args)
         self.assertNotIn("-A", args)
         self.assertEqual(args[-2], "scqa@"+w.ROOT_IP)
@@ -523,7 +528,7 @@ class VMForeignReplyWitnessTests(unittest.TestCase):
                 return SimpleNamespace(st_mode=st.st_mode, st_uid=987654)
             with patch.object(w.os, "fstat", side_effect=foreign_owner):
                 with self.assertRaisesRegex(w.WitnessError, "ssh_host_pin_ownership_or_permissions_unsafe"):
-                    w.require_key_files(key, host)
+                    w.read_trusted_known_hosts(host)
 
     def test_changed_host_pin_during_fresh_ssh_refuses_stage_and_reaps_original(self):
         # A successful SSH subprocess is not sufficient if the source trust
@@ -566,6 +571,135 @@ class VMForeignReplyWitnessTests(unittest.TestCase):
                 server.server_close()
                 thread.join(timeout=2)
                 self.assertFalse(thread.is_alive())
+
+    def test_private_key_freeze_confidentiality_and_source_identity(self):
+        with tempfile.TemporaryDirectory() as d:
+            key = Path(d)/"private_key"
+            key.write_bytes(b"test-private")
+            key.chmod(0o600)
+            with w.pinned_private_key_file(key) as (snapshot, identity):
+                self.assertNotEqual(key, snapshot)
+                self.assertEqual(snapshot.read_bytes(), key.read_bytes())
+                self.assertEqual(snapshot.stat().st_mode & 0o777, 0o600)
+                self.assertEqual(snapshot.parent.stat().st_mode & 0o777, 0o700)
+                w.assert_pinned_private_key(key, snapshot, identity)
+                key.write_bytes(b"another-key")
+                with self.assertRaisesRegex(w.WitnessError, "ssh_private_key_changed"):
+                    w.assert_pinned_private_key(key, snapshot, identity)
+                self.assertEqual(snapshot.read_bytes(), b"test-private")
+            self.assertFalse(snapshot.exists(), "the private snapshot must not persist")
+
+            key.write_bytes(b"test-private")
+            key.chmod(0o600)
+            with w.pinned_private_key_file(key) as (snapshot, identity):
+                same_bytes = Path(d)/"same"
+                same_bytes.write_bytes(key.read_bytes())
+                same_bytes.chmod(0o600)
+                os.replace(same_bytes, key)
+                with self.assertRaisesRegex(w.WitnessError, "ssh_private_key_changed"):
+                    w.assert_pinned_private_key(key, snapshot, identity)
+            with w.pinned_private_key_file(key) as (snapshot, identity):
+                replacement = Path(d)/"swap_snapshot"
+                replacement.write_bytes(key.read_bytes())
+                replacement.chmod(0o600)
+                os.replace(replacement, snapshot)
+                with self.assertRaisesRegex(w.WitnessError, "ssh_private_key_changed"):
+                    w.assert_pinned_private_key(key, snapshot, identity)
+            with w.pinned_private_key_file(key) as (snapshot, identity):
+                snapshot.write_bytes(b"corrupted")
+                with self.assertRaises(w.WitnessError):
+                    w.assert_pinned_private_key(key, snapshot, identity)
+            for mode in (0o644, 0o640, 0o622):
+                with self.subTest(mode=mode):
+                    key.chmod(mode)
+                    with self.assertRaisesRegex(w.WitnessError,
+                                                "ssh_private_key_ownership_or_permissions_unsafe"):
+                        w.read_trusted_private_key(key)
+            key.chmod(0o600)
+            native_fstat = os.fstat
+
+            def impersonated_owner(fd):
+                st = native_fstat(fd)
+                return SimpleNamespace(st_mode=st.st_mode, st_uid=987654)
+
+            with patch.object(w.os, "fstat", side_effect=impersonated_owner):
+                with self.assertRaisesRegex(w.WitnessError,
+                                            "ssh_private_key_ownership_or_permissions_unsafe"):
+                    w.read_trusted_private_key(key)
+            key.unlink()
+            key.symlink_to(Path(d)/"target")
+            with self.assertRaisesRegex(w.WitnessError, "ssh_identity_file_invalid"):
+                w.read_trusted_private_key(key)
+            key.unlink()
+            fifo = Path(d)/"fifo"
+            os.mkfifo(fifo, 0o600)
+            with self.assertRaisesRegex(w.WitnessError,
+                                        "ssh_private_key_ownership_or_permissions_unsafe"):
+                w.read_trusted_private_key(fifo)
+            key.write_bytes(b"")
+            key.chmod(0o600)
+            with self.assertRaisesRegex(w.WitnessError,
+                                        "ssh_private_key_ownership_or_permissions_unsafe"):
+                w.read_trusted_private_key(key)
+
+    def test_private_key_swap_during_fresh_auth_fails_and_reaps_original(self):
+        # A different SSH identity can also authenticate on the fixture.
+        # Never credit its success to the baseline key or leave the original
+        # transport open after source-key drift, even for identical bytes.
+        for swap_kind in ("in_place", "same_bytes_new_inode"):
+            with (self.subTest(swap_kind=swap_kind),
+                  patch.object(w, "ROOT_IP", "127.0.0.1"),
+                  patch.object(w, "PEER_IP", "127.0.0.1"),
+                  tempfile.TemporaryDirectory() as d):
+                key, known = Path(d)/"key", Path(d)/"known_hosts"
+                key.write_text("test-private")
+                key.chmod(0o600)
+                known.write_text("[127.0.0.1]:19123 ssh-ed25519 first-key\n")
+                known.chmod(0o600)
+                server = w.ThreadingHTTPServer(("127.0.0.1", 0), w.Origin)
+                server.daemon_threads = True
+                thread = threading.Thread(target=server.serve_forever, daemon=True)
+                thread.start()
+                children = []
+                real_popen = subprocess.Popen
+
+                def tracked_popen(*args, **kwargs):
+                    child = real_popen(*args, **kwargs)
+                    children.append(child)
+                    return child
+
+                def changed_during_auth(snapshot_key, _known, _port):
+                    # Every SSH invocation must consume the pinned private
+                    # snapshot, not the mutable original source path.
+                    self.assertNotEqual(snapshot_key, key)
+                    self.assertEqual(snapshot_key.read_text(), "test-private")
+                    if swap_kind == "in_place":
+                        key.write_text("second-private")
+                    else:
+                        replacement = Path(d)/"replacement"
+                        replacement.write_text("test-private")
+                        replacement.chmod(0o600)
+                        os.replace(replacement, key)
+
+                try:
+                    with (patch.object(w, "ssh_command",
+                                       return_value=[sys.executable, "-u", "-c", w.REMOTE_LOOP]),
+                          patch.object(w, "ssh_socket_inode", return_value=4442),
+                          patch.object(w, "new_ssh_round", side_effect=changed_during_auth),
+                          patch.object(w.subprocess, "Popen", side_effect=tracked_popen),
+                          contextlib.redirect_stdout(io.StringIO()) as output):
+                        with self.assertRaisesRegex(w.WitnessError, "ssh_private_key_changed"):
+                            w.client(key, known, 19123, server.server_port)
+                    self.assertNotIn("VM_INGRESS_WITNESS=PASS", output.getvalue())
+                    self.assertEqual(len(children), 1)
+                    self.assertIsNotNone(children[0].poll())
+                    self.assertTrue(children[0].stdin.closed)
+                    self.assertTrue(children[0].stdout.closed)
+                finally:
+                    server.shutdown()
+                    server.server_close()
+                    thread.join(timeout=2)
+                    self.assertFalse(thread.is_alive())
 
     def test_partial_stage_input_forces_client_cleanup(self):
         # Full client control flow, real HTTP/1.1 and a real persistent
