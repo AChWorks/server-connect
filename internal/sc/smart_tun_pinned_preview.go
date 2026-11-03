@@ -62,6 +62,17 @@ func projectPinnedVLESSNativePreview(profile Profile, rawPin string) (Profile, e
 			// identity. Require the selected profile's explicit server_name.
 			return refused()
 		}
+		// A nonempty, unpadded string is not necessarily a valid TLS identity.
+		// Reuse the strict DNS-name grammar, while separately admitting plain
+		// IP identities (never scoped IPv6 or IPv4-mapped IPv6). Keep the
+		// original value unchanged; no inferred SNI or normalization.
+		if address, parseErr := netip.ParseAddr(serverName); parseErr == nil {
+			if address.Zone() != "" || address.Is4In6() {
+				return refused()
+			}
+		} else if _, nameErr := validateEndpointHostname(serverName); nameErr != nil {
+			return refused()
+		}
 		outbound["tls"], err = json.Marshal(tlsFields)
 		if err != nil {
 			return refused()

@@ -20,6 +20,9 @@ func pinnedPreviewNamedProfile(tlsObject string) Profile {
 func TestPinnedVLESSNativePreviewKeepsOriginalAndTLSIdentity(t *testing.T) {
 	for _, tc := range []struct{ name, tls, expectedName string }{
 		{"explicit TLS name", `{"enabled":true,"server_name":"front.example.net","alpn":["h2"]}`, "front.example.net"},
+		{"mixed-case DNS identity", `{"enabled":true,"server_name":"Front.Example.Net"}`, "Front.Example.Net"},
+		{"IPv4 TLS identity", `{"enabled":true,"server_name":"198.51.100.42"}`, "198.51.100.42"},
+		{"IPv6 TLS identity", `{"enabled":true,"server_name":"2001:db8::42"}`, "2001:db8::42"},
 		{"raw TCP", "", ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -49,8 +52,12 @@ func TestPinnedVLESSNativePreviewKeepsOriginalAndTLSIdentity(t *testing.T) {
 				outbound.TLS.ServerName != tc.expectedName {
 				t.Fatalf("unsafe dial projection or TLS name drift: %+v", outbound)
 			}
-			if tc.tls != "" && (len(outbound.TLS.ALPN) != 1 || outbound.TLS.ALPN[0] != "h2") {
-				t.Fatalf("TLS ALPN unexpectedly changed: %+v", outbound)
+			if strings.Contains(tc.tls, `"alpn"`) {
+				if len(outbound.TLS.ALPN) != 1 || outbound.TLS.ALPN[0] != "h2" {
+					t.Fatalf("TLS ALPN unexpectedly changed: %+v", outbound)
+				}
+			} else if len(outbound.TLS.ALPN) != 0 {
+				t.Fatalf("TLS ALPN was invented during projection: %+v", outbound)
 			}
 			_, opts := smartTUNFixture()
 			if _, err := smartTUNNativeConfig(profile, opts); err == nil {
@@ -71,6 +78,39 @@ func TestPinnedVLESSNativePreviewKeepsOriginalAndTLSIdentity(t *testing.T) {
 			again, err := projectPinnedVLESSNativePreview(profile, "8.8.8.8")
 			if err != nil || !bytes.Equal(projected.Outbound, again.Outbound) {
 				t.Fatal("pinned projection was not deterministic")
+			}
+		})
+	}
+}
+
+// These values are nonempty and unpadded, yet are not admissible TLS host
+// identities. In particular, Go's JSON parser accepts escaped NUL/control
+// characters, and trimming does not detect embedded whitespace.
+func TestPinnedVLESSNativePreviewRejectsMalformedTLSIdentityWithoutMutation(t *testing.T) {
+	for _, tc := range []struct{ name, jsonName string }{
+		{"embedded space", `"bad name.example"`},
+		{"embedded NUL", `"bad\u0000name.example"`},
+		{"embedded tab", `"bad\tname.example"`},
+		{"embedded newline", `"bad\nname.example"`},
+		{"leading hyphen", `"-bad.example.net"`},
+		{"trailing hyphen", `"bad-.example.net"`},
+		{"empty label", `"bad..example.net"`},
+		{"single label", `"localhost"`},
+		{"oversized label", `"` + strings.Repeat("a", 64) + `.example.net"`},
+		{"oversized hostname", `"` + strings.Repeat("a.", 128) + `example.net"`},
+		{"non-ASCII label", `"é.example.net"`},
+		{"scoped IPv6 identity", `"fe80::1%eth0"`},
+		{"IPv4-mapped IPv6 identity", `"::ffff:192.0.2.1"`},
+		{"malformed IPv6 identity", `"2001:db8:::1"`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			profile := pinnedPreviewNamedProfile(`{"enabled":true,"server_name":` + tc.jsonName + `}`)
+			before := append([]byte(nil), profile.Outbound...)
+			if _, err := projectPinnedVLESSNativePreview(profile, "8.8.8.8"); err == nil {
+				t.Fatalf("invalid TLS server_name %s admitted", tc.name)
+			}
+			if !bytes.Equal(before, profile.Outbound) {
+				t.Fatal("rejected TLS identity mutated selected profile")
 			}
 		})
 	}

@@ -96,6 +96,18 @@ func runSmartRoutingRules(jsonMode bool, m *sc.Manager, args []string) int {
 			*underlay == "" || *tunnelIPv4 == "" || len(domestic) == 0 {
 			return output(jsonMode, nil, routingOptionsError())
 		}
+		// Visit distinguishes a genuinely omitted optional pin from an
+		// explicitly supplied empty value, which must never fall back to
+		// the legacy unpinned preview.
+		pinSupplied := false
+		opts.Visit(func(f *flag.Flag) {
+			if f.Name == "endpoint-pin-ipv4" {
+				pinSupplied = true
+			}
+		})
+		if pinSupplied && *endpointPin == "" {
+			return output(jsonMode, nil, routingOptionsError())
+		}
 		preview, err := m.PreviewSmartRoutingRulesPinned(sc.SmartTUNCandidateOptions{
 			TunnelInterface: *tunnel, UnderlayInterface: *underlay,
 			TunnelIPv4: *tunnelIPv4, TunnelIPv6: *tunnelIPv6,

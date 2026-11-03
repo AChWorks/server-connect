@@ -259,6 +259,12 @@ func TestRoutingRulesCLINamedVLESSPinnedPreviewRemainsUnverified(t *testing.T) {
 			t.Fatalf("invalid endpoint pin %q accepted: %+v", pin, reply)
 		}
 	}
+	for _, emptyPin := range [][]string{{"--endpoint-pin-ipv4="}, {"--endpoint-pin-ipv4", ""}} {
+		trialArgs := append(append([]string{}, args...), emptyPin...)
+		if rc, reply, _ := captureRulesCommand(t, m, trialArgs...); rc == 0 || reply["ok"] != false {
+			t.Fatalf("explicitly empty named endpoint pin accepted: %+v", reply)
+		}
+	}
 	args = append(args, "--endpoint-pin-ipv4", "8.8.8.8")
 	rc, reply, stderr := captureRulesCommand(t, m, args...)
 	if rc != 0 || stderr != "" || reply["ok"] != true {
@@ -293,6 +299,85 @@ func TestRoutingRulesCLINamedVLESSPinnedPreviewRemainsUnverified(t *testing.T) {
 		if strings.Contains(string(jsonOut), secret) {
 			t.Fatalf("preview leaked selected data %q", secret)
 		}
+	}
+}
+
+func TestRoutingRulesCLIRejectsMalformedTLSIdentityWithoutSavedStateMutation(t *testing.T) {
+	for _, tc := range []struct{ name, rawName string }{
+		{"embedded space", `"bad name.example"`},
+		{"embedded NUL", `"bad\u0000name.example"`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := rulesCLIManager(t)
+			if _, err := m.AddSmartRoutingRule(sc.SmartRoutingRule{Type: "cidr", Value: "1.1.1.0/24", Via: "direct"}); err != nil {
+				t.Fatal(err)
+			}
+			p, err := sc.ValidateSource([]byte("vless://c2902f3a-1c25-41ef-a8dc-760b483aa247@node.example.org:443?type=tcp&security=none#Named"), "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			var outbound map[string]json.RawMessage
+			if err := json.Unmarshal(p.Outbound, &outbound); err != nil {
+				t.Fatal(err)
+			}
+			outbound["tls"] = json.RawMessage(`{"enabled":true,"server_name":` + tc.rawName + `}`)
+			p.Outbound, err = json.Marshal(outbound)
+			if err != nil {
+				t.Fatal(err)
+			}
+			encoded, err := json.Marshal(p)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Mkdir(filepath.Join(m.Dir, "profiles"), 0700); err != nil {
+				t.Fatal(err)
+			}
+			profilePath := filepath.Join(m.Dir, "profiles", p.ID+".json")
+			if err := os.WriteFile(profilePath, encoded, 0600); err != nil {
+				t.Fatal(err)
+			}
+			if err := m.Select(p.ID); err != nil {
+				t.Fatal(err)
+			}
+			rulePath := filepath.Join(m.Dir, "smart-routing-rules.json")
+			statePath := filepath.Join(m.Dir, "state.json")
+			rulesBefore, err := os.ReadFile(rulePath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			stateBefore, err := os.ReadFile(statePath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			args := []string{"smart-routing-rules", "preview", "--tunnel-if", "sctunqa0",
+				"--underlay-if", "qaedge0", "--tunnel-ipv4", "172.31.99.1/30",
+				"--domestic-cidr", "5.22.0.0/17", "--endpoint-pin-ipv4", "8.8.8.8"}
+			rc, reply, stderr := captureRulesCommand(t, m, args...)
+			if rc == 0 || reply["ok"] != false {
+				t.Fatalf("invalid TLS identity accepted: %d %+v %s", rc, reply, stderr)
+			}
+			serialized, _ := json.Marshal(reply)
+			if strings.Contains(string(serialized)+stderr, "node.example.org") ||
+				strings.Contains(string(serialized)+stderr, "bad name.example") ||
+				strings.Contains(string(serialized)+stderr, "8.8.8.8") {
+				t.Fatal("refusal leaked endpoint or TLS identity")
+			}
+			profileAfter, err := os.ReadFile(profilePath)
+			if err != nil || !bytes.Equal(encoded, profileAfter) {
+				t.Fatal("rejected preview changed saved selected profile")
+			}
+			rulesAfter, err := os.ReadFile(rulePath)
+			if err != nil || !bytes.Equal(rulesBefore, rulesAfter) {
+				t.Fatal("rejected preview changed routing-rule bytes")
+			}
+			stateAfter, err := os.ReadFile(statePath)
+			if err != nil || !bytes.Equal(stateBefore, stateAfter) {
+				t.Fatal("rejected preview changed selected state")
+			}
+			if _, err := os.Stat(filepath.Join(m.Dir, "route-activation-journal.json")); !os.IsNotExist(err) {
+				t.Fatal("rejected preview created activation journal")
+			}
+		})
 	}
 }
 
@@ -336,6 +421,20 @@ func TestRoutingRulesCLIPreviewSelectedProfileIsCompileOnly(t *testing.T) {
 		t.Fatalf("preview failed: %d %+v %s", code, out, stderr)
 	}
 	report := ruleResult(t, out)
+	if _, present := report["endpoint_pin_evidence"]; present {
+		t.Fatal("omitted pin unexpectedly produced endpoint pin evidence")
+	}
+	for _, emptyPin := range [][]string{{"--endpoint-pin-ipv4="}, {"--endpoint-pin-ipv4", ""}} {
+		trialArgs := append(append([]string{}, args...), emptyPin...)
+		if rc, reply, _ := captureRulesCommand(t, m, trialArgs...); rc == 0 || reply["ok"] != false {
+			t.Fatalf("explicitly empty literal endpoint pin accepted: %+v", reply)
+		}
+	}
+	pinnedArgs := append(append([]string{}, args...), "--endpoint-pin-ipv4=8.8.8.8")
+	if rc, pinned, stderr := captureRulesCommand(t, m, pinnedArgs...); rc != 0 || stderr != "" ||
+		ruleResult(t, pinned)["endpoint_pin_evidence"] != "operator_supplied_unverified" {
+		t.Fatalf("valid matching literal pin did not produce explicit evidence: %+v (%d) %s", pinned, rc, stderr)
+	}
 	if report["selected_profile_id"] != profile.ID ||
 		report["rules_revision"] != float64(2) ||
 		report["rule_count"] != float64(2) ||
