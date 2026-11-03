@@ -1843,8 +1843,9 @@ echo 'INSTALLED_DISTINCT_BINARY_UPDATE=PASS (same-source QA builds)'
 bad_release=$(docker exec "$container" /bin/sh -c '
   set -eu
   cd /root/server-connect-bad-update
-  hash=$(sha256sum bin/server-connect bin/sing-box |
-    cut -d" " -f1 | sha256sum | cut -c 1-16)
+  # Installed release identity is the complete checksum manifest, including
+  # non-binary unit and source metadata, not only the two executables.
+  hash=$(sha256sum checksums.sha256 | cut -c 1-16)
   printf "releases/0.1.0-dev-%s" "$hash"
 ')
 [[ $bad_release != "$updated_link" && $bad_release != "$original_link" ]] || {
