@@ -40,7 +40,7 @@ func testSelectedHostReadinessProbes() (smartTUNHostReadinessProbes, *map[string
 				return UnderlayDNSReport{}, errors.New("unexpected probe target")
 			}
 			return UnderlayDNSReport{
-				NameMatched: true, InterfaceBound: true, RouteStable: true,
+				NameResolved: true, NameMatched: true, InterfaceBound: true, RouteStable: true,
 				ResolverRouteDevice: "ens3",
 			}, nil
 		},
@@ -137,6 +137,14 @@ func TestSelectedHostCheckTransportAndDialPathClassification(t *testing.T) {
 		{"network strategy", `"network_strategy":"fallback"`, "", true},
 		{"unknown selector value type", `"routing_mark":{}`, "", true},
 		{"explicit default selectors", `"bind_interface":"","routing_mark":0,"network_type":[]`, "tcp", false},
+		{"duplicate selected endpoint", `"server":"8.8.8.8"`, "", true},
+		{"case-ambiguous selected endpoint", `"SERVER":"8.8.8.8"`, "", true},
+		{"duplicate transport header", `"transport":{"type":"ws","headers":{"Host":"a.example","Host":"b.example"}}`, "", true},
+		{"case-aliased dial selector", `"bind_interface":"","Bind_Interface":"tun0"`, "", true},
+		{"Unicode simple-fold server collision", `"\u017ferver":"8.8.8.8"`, "", true},
+		{"Unicode simple-fold nested header collision", `"transport":{"type":"ws","headers":{"Host":"a","Ho\u017ft":"b"}}`, "", true},
+		{"Unicode simple-fold nested TLS collision", `"tls":{"server_name":"a","\u017ferver_name":"b"}`, "", true},
+		{"duplicate TLS flag", `"tls":{"enabled":false,"enabled":true}`, "", true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			m := testSelectedHostReadinessManager(t, "8.8.8.8")
@@ -216,6 +224,24 @@ func TestSelectedHostCheckDNSFailureCannotReachPinnedTCP(t *testing.T) {
 	if err != nil || r.ActivationReady || r.GeneralHostAdmitted || !hasReadinessReason(r, "endpoint_dns_unverified") ||
 		r.TCP != "not_checked" || (*calls)["tcp"] != 0 {
 		t.Fatalf("failed DNS unexpectedly authorized or dialed selected endpoint: %+v, %v, calls=%v", r, err, *calls)
+	}
+}
+
+func TestSelectedHostCheckContradictoryDNSCannotAuthorizeTCP(t *testing.T) {
+	m := testSelectedHostReadinessManager(t, "private.example.com")
+	probes, calls := testSelectedHostReadinessProbes()
+	probes.dns = func(string, string, string, int, string) (UnderlayDNSReport, error) {
+		(*calls)["dns"]++
+		// A pin cannot match a name that has not actually resolved.
+		return UnderlayDNSReport{
+			NameMatched: true, InterfaceBound: true, RouteStable: true,
+			ResolverRouteDevice: "ens3",
+		}, nil
+	}
+	report, err := m.inspectSelectedSmartTUNHostWith("8.8.8.8", "198.51.100.7", "ens3", "1.1.1.1", 53, probes)
+	if err != nil || report.DNS != "unavailable_or_wrong_underlay" || report.TCP != "not_checked" ||
+		!hasReadinessReason(report, "endpoint_dns_unverified") || (*calls)["tcp"] != 0 {
+		t.Fatalf("contradictory DNS evidence admitted TCP: %+v error=%v calls=%v", report, err, *calls)
 	}
 }
 
@@ -371,35 +397,148 @@ func TestSelectedHostCheckRefusesWrongOrAmbiguousKernelRoutes(t *testing.T) {
 }
 
 func TestSelectedHostCheckProfileChangedDuringObservations(t *testing.T) {
-	for _, kind := range []string{"selection", "outbound"} {
+	for _, kind := range []string{
+		"selection", "state_desired", "state_port", "state_missing",
+		"outbound", "profile_kind", "profile_name", "profile_created",
+		"profile_missing", "profile_corrupt",
+	} {
 		t.Run(kind, func(t *testing.T) {
 			m := testSelectedHostReadinessManager(t, "8.8.8.8")
 			p, _ := testSelectedHostReadinessProbes()
 			p.nft = func() (HostFirewallObservation, error) {
-				if kind == "selection" {
-					if err := m.save(State{Version: 1, Desired: "direct", Selected: "fedcba9876543210", Port: DefaultPort}); err != nil {
+				switch kind {
+				case "selection", "state_desired", "state_port":
+					state, err := m.load()
+					if err != nil {
 						t.Fatal(err)
 					}
-				} else {
+					switch kind {
+					case "selection":
+						state.Selected = "fedcba9876543210"
+					case "state_desired":
+						state.Desired = "proxy"
+					case "state_port":
+						state.Port++
+					}
+					if err := m.save(state); err != nil {
+						t.Fatal(err)
+					}
+				case "state_missing":
+					if err := os.Remove(filepath.Join(m.Dir, "state.json")); err != nil {
+						t.Fatal(err)
+					}
+				default:
 					profilePath := filepath.Join(m.Dir, "profiles", "0123456789abcdef.json")
 					data, err := os.ReadFile(profilePath)
 					if err != nil {
 						t.Fatal(err)
 					}
-					altered := strings.Replace(string(data), `"server_port":443`, `"server_port":8443`, 1)
-					if altered == string(data) {
-						t.Fatal("profile fixture was not changed")
-					}
-					if err := os.WriteFile(profilePath, []byte(altered), 0600); err != nil {
-						t.Fatal(err)
+					if kind == "profile_missing" {
+						if err := os.Remove(profilePath); err != nil {
+							t.Fatal(err)
+						}
+					} else if kind == "profile_corrupt" {
+						if err := os.WriteFile(profilePath, []byte("{invalid"), 0600); err != nil {
+							t.Fatal(err)
+						}
+					} else {
+						var profile Profile
+						if err := json.Unmarshal(data, &profile); err != nil {
+							t.Fatal(err)
+						}
+						switch kind {
+						case "outbound":
+							profile.Outbound = json.RawMessage(strings.Replace(string(profile.Outbound), `"server_port":443`, `"server_port":8443`, 1))
+						case "profile_kind":
+							profile.Kind = "config"
+						case "profile_name":
+							profile.Name = "another-label"
+						case "profile_created":
+							profile.Created = "changed"
+						}
+						changed, err := json.Marshal(profile)
+						if err != nil {
+							t.Fatal(err)
+						}
+						if err := os.WriteFile(profilePath, changed, 0600); err != nil {
+							t.Fatal(err)
+						}
 					}
 				}
 				return HostFirewallObservation{Observed: true}, nil
 			}
 			r, err := m.inspectSelectedSmartTUNHostWith("8.8.8.8", "198.51.100.7", "ens3", "", 53, p)
 			if err != nil || !hasReadinessReason(r, "selected_profile_changed_during_diagnostic") ||
-				r.ActivationReady || r.GeneralHostAdmitted {
+				r.ActivationReady || r.GeneralHostAdmitted ||
+				r.SelectedTransport != "" || r.EndpointKind != "" ||
+				r.DNS != "stale_selected_profile" ||
+				r.TCP != "stale_selected_profile" ||
+				r.HostRoutes != "stale_selected_profile" {
 				t.Fatalf("selection drift presented as current evidence: %+v, %v", r, err)
+			}
+			serialized, err := json.Marshal(r)
+			if err != nil || strings.Contains(string(serialized), "SECRET_UUID_12345") ||
+				strings.Contains(string(serialized), "8.8.8.8") ||
+				strings.Contains(string(serialized), "198.51.100.7") {
+				t.Fatal("stale selected-profile diagnostic leaked sensitive connection metadata")
+			}
+		})
+	}
+}
+
+// A single noncanonical spelling does not collide with a canonical member,
+// so duplicate detection alone cannot protect the struct/map comparison.
+func TestSelectedHostCheckStandaloneNoncanonicalPathKeysRefusedBeforeProbes(t *testing.T) {
+	const prefix = `{"type":"vless","server":"8.8.8.8","server_port":443,"uuid":"SECRET_UUID_12345"`
+	for _, tc := range []struct{ name, outbound string }{
+		{"standalone dial interface", prefix + `,"Bind_Interface":"tun0"}`},
+		{"standalone alternate detour", prefix + `,"Detour":"other"}`},
+		{"standalone network option", prefix + `,"Network":"tcp"}`},
+		{"noncanonical endpoint", `{"type":"vless","\u017ferver":"8.8.8.8","server_port":443,"uuid":"SECRET_UUID_12345"}`},
+		{"noncanonical endpoint port", `{"type":"vless","server":"8.8.8.8","Server_Port":443,"uuid":"SECRET_UUID_12345"}`},
+		{"noncanonical outbound type", `{"Type":"vless","server":"8.8.8.8","server_port":443,"uuid":"SECRET_UUID_12345"}`},
+		{"noncanonical transport", prefix + `,"Transport":{"type":"ws"}}`},
+		{"noncanonical transport type", prefix + `,"transport":{"Type":"ws"}}`},
+		{"noncanonical transport headers", prefix + `,"transport":{"type":"ws","Headers":{"Host":"valid.example"}}}`},
+		{"noncanonical transport path", prefix + `,"transport":{"type":"ws","Path":"/valid"}}`},
+		{"noncanonical TLS", prefix + `,"TLS":{"enabled":true}}`},
+		{"noncanonical TLS enabled", prefix + `,"tls":{"Enabled":true}}`},
+		{"noncanonical TLS SNI", prefix + `,"tls":{"enabled":true,"Server_Name":"front.example.net"}}`},
+		{"noncanonical TLS uTLS fingerprint", prefix + `,"tls":{"enabled":true,"utls":{"Fingerprint":"chrome"}}}`},
+		{"noncanonical TLS reality key", prefix + `,"tls":{"enabled":true,"reality":{"Public_Key":"key"}}}`},
+		{"noncanonical TLS ECH enabled", prefix + `,"tls":{"enabled":true,"ech":{"Enabled":true}}}`},
+		{"noncanonical TLS ALPN", prefix + `,"tls":{"enabled":true,"ALPN":["h2"]}}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := testSelectedHostReadinessManager(t, "8.8.8.8")
+			testSelectedHostOutbound(t, m, tc.outbound)
+			probes, calls := testSelectedHostReadinessProbes()
+			got, err := m.inspectSelectedSmartTUNHostWith("8.8.8.8", "198.51.100.7", "ens3", "", 53, probes)
+			if err != nil || !hasReadinessReason(got, "selected_transport_unsupported") ||
+				got.SelectedTransport != "" || got.EndpointKind != "" ||
+				got.ActivationReady || got.GeneralHostAdmitted || len(*calls) != 0 {
+				t.Fatalf("noncanonical path key reached probes or claimed support: %+v err=%v calls=%v", got, err, *calls)
+			}
+		})
+	}
+}
+
+func TestSelectedHostCheckPreservesValidHeadersAndUnrelatedFields(t *testing.T) {
+	for _, extra := range []string{
+		`"transport":{"type":"ws","headers":{"hOsT":"front.example.net","X-Token":"TOKEN"}}`,
+		`"transport":{"type":"http","host":["front.example.net"],"headers":{"X-Custom":["ok"]}}`,
+		`"tls":{"enabled":true,"server_name":"front.example.net","alpn":["h2"]}`,
+		`"tls":{"enabled":true,"utls":{"enabled":true,"fingerprint":"chrome"}}`,
+		`"unrelated_opaque_metadata":{"free_form":"ok"}`,
+	} {
+		t.Run(extra, func(t *testing.T) {
+			m := testSelectedHostReadinessManager(t, "8.8.8.8")
+			testSelectedHostOutbound(t, m,
+				`{"type":"vless","server":"8.8.8.8","server_port":443,"uuid":"SECRET_UUID_12345",`+extra+"}")
+			probes, calls := testSelectedHostReadinessProbes()
+			got, err := m.inspectSelectedSmartTUNHostWith("8.8.8.8", "198.51.100.7", "ens3", "", 53, probes)
+			if err != nil || got.TCP != "bound_tcp_connected" || (*calls)["tcp"] != 1 || got.ActivationReady {
+				t.Fatalf("valid case-sensitive metadata was wrongly blocked: %+v err=%v calls=%v", got, err, *calls)
 			}
 		})
 	}

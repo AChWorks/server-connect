@@ -478,3 +478,46 @@ func TestActivationJournalRejectsIntermediateAncestorReplacement(t *testing.T) {
 		t.Fatalf("intermediate path tamper damaged the original journal: %+v err=%v", recovered, err)
 	}
 }
+
+// encoding/json matches struct fields using Unicode SimpleFold, not ToLower.
+// The scanner must use the same equivalence recursively, retaining budgets.
+func TestRejectAmbiguousJournalJSONUnicodeSimpleFold(t *testing.T) {
+	for _, tc := range []struct{ name, raw string }{
+		{"root long s", `{"server":1,"\u017ferver":2}`},
+		{"root Kelvin", `{"K":1,"\u212a":2}`},
+		{"nested transport long s", `{"transport":{"server":1,"\u017ferver":2}}`},
+		{"nested header long s", `{"transport":{"headers":{"Host":1,"Ho\u017ft":2}}}`},
+		{"array nested Kelvin", `{"items":[{"K":1,"\u212a":2}]}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := rejectAmbiguousJournalJSON([]byte(tc.raw)); err == nil {
+				t.Fatal("Unicode SimpleFold-equivalent JSON members were accepted")
+			}
+		})
+	}
+	for _, allowed := range []string{
+		`{"server":1,"example":2}`,
+		`{"transport":{"headers":{"Host":"example"}}}`,
+		`{"items":[{"\u212a":1},{"K":2}]}`,
+	} {
+		if err := rejectAmbiguousJournalJSON([]byte(allowed)); err != nil {
+			t.Fatalf("noncolliding nested JSON falsely refused: %v", err)
+		}
+	}
+}
+
+// Keep the bounded fold key aligned with the Go decoder's Unicode
+// SimpleFold key comparison, including folds that ToLower does not share.
+func TestStrictJSONMemberKeyFoldEquivalence(t *testing.T) {
+	for _, pair := range [][2]string{
+		{"server", "Server"}, {"server", "\u017ferver"},
+		{"K", "\u212a"}, {"\u03a3", "\u03c2"}, {"\u03a3", "\u03c3"},
+		{"nested.Key", "Nested.key"}, {"\u00df", "ss"},
+		{"alpha", "beta"},
+	} {
+		got := foldStrictJSONMemberKey(pair[0]) == foldStrictJSONMemberKey(pair[1])
+		if got != strings.EqualFold(pair[0], pair[1]) {
+			t.Fatalf("JSON fold mismatch: %q / %q: %t", pair[0], pair[1], got)
+		}
+	}
+}
