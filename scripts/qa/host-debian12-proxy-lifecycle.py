@@ -759,6 +759,20 @@ class FieldRun:
         require(len(matching) == 1 and (label is None or matching[0] == label),
                 "Current release is not an exact supplied artifact")
         current = matching[0]
+        # Installed bytes, not only the two executable hashes, identify the
+        # exact candidate. Keep the publisher-authentication caveat separate.
+        recorded_checksums = trusted_file(PREFIX / target / "checksums.sha256")
+        expected_checksums = (self.bundles[current] / "checksums.sha256").read_bytes()
+        require(recorded_checksums == expected_checksums and
+                target == "releases/0.1.0-dev-" + sha(recorded_checksums)[:16],
+                "Installed full-bundle identity differs from selected QA archive")
+        for name in BUNDLE_FILES - {"checksums.sha256"}:
+            path = PREFIX / target / name
+            info = path.lstat()
+            require(stat.S_ISREG(info.st_mode) and info.st_uid == 0 and
+                    not info.st_mode & 0o022 and info.st_size <= 134217728 and
+                    file_hash(path) == self.bundle_hashes[current][name],
+                    "Installed full-bundle payload changed: " + name)
         for name in ("bin/server-connect", "bin/sing-box", "bin/libcronet.so",
                      "THIRD-PARTY-LICENSES/sing-box-LICENSE"):
             path = PREFIX / target / name

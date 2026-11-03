@@ -370,6 +370,13 @@ verify_direct_install() {
     test "$(cat /opt/server-connect/.owner)" = AChWorks/server-connect
     test -L /usr/local/bin/server-connect
     test "$(readlink /usr/local/bin/server-connect)" = /opt/server-connect/current/bin/server-connect
+    # Every installed release retains the exact original, complete bundle
+    # manifest/checksums. Only the external archive signature can prove trust.
+    test -f /opt/server-connect/current/manifest.json
+    test -f /opt/server-connect/current/checksums.sha256
+    (cd /opt/server-connect/current && sha256sum --quiet -c checksums.sha256)
+    identity=$(sha256sum /opt/server-connect/current/checksums.sha256 | cut -c 1-16)
+    test "$(readlink /opt/server-connect/current)" = "releases/0.1.0-dev-$identity"
     test "$(systemctl show server-connect.service -p LoadState --value)" = loaded
     test "$(systemctl show server-connect.service -p ActiveState --value)" = inactive
     test "$(systemctl is-enabled server-connect.service)" = disabled

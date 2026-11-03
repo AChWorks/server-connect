@@ -103,6 +103,7 @@ jobs:
           set -euo pipefail
           python3 scripts/qa/test-installed-workflow-policy.py
           python3 scripts/qa/test-package-targets.py
+          python3 -I -B scripts/qa/test-installed-release-provenance.py
           sh -n scripts/qa/host-bundle-target-refusal.sh
           sh -n scripts/qa/host-qa-assertions.sh
           sh -n scripts/qa/host-coexistence.sh
