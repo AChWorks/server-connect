@@ -220,6 +220,82 @@ func TestRoutingRulesInteractiveMenuMutationsAndRejections(t *testing.T) {
 // Test the CLI argument parser and complete JSON envelope, not only the
 // underlying Manager compiler. The fixture is an offline, synthetic profile;
 // no sing-box process or kernel route is invoked by this preview.
+
+func TestRoutingRulesCLINamedVLESSPinnedPreviewRemainsUnverified(t *testing.T) {
+	m := rulesCLIManager(t)
+	if _, err := m.AddSmartRoutingRule(sc.SmartRoutingRule{Type: "cidr", Value: "1.1.1.0/24", Via: "direct"}); err != nil {
+		t.Fatal(err)
+	}
+	profile, err := sc.ValidateSource([]byte("vless://c2902f3a-1c25-41ef-a8dc-760b483aa247@node.example.org:443?type=tcp&security=tls#Named"), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := json.Marshal(profile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(m.Dir, "profiles"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	profilePath := filepath.Join(m.Dir, "profiles", profile.ID+".json")
+	if err := os.WriteFile(profilePath, encoded, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Select(profile.ID); err != nil {
+		t.Fatal(err)
+	}
+	rulePath := filepath.Join(m.Dir, "smart-routing-rules.json")
+	beforeRules, err := os.ReadFile(rulePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	args := []string{"smart-routing-rules", "preview", "--tunnel-if", "sctunqa0", "--underlay-if", "qaedge0", "--tunnel-ipv4", "172.31.99.1/30", "--domestic-cidr", "5.22.0.0/17", "--protected-cidr", "203.0.113.42/32"}
+	if rc, reply, _ := captureRulesCommand(t, m, args...); rc == 0 || reply["ok"] != false {
+		t.Fatalf("un-pinned hostname accepted: %+v", reply)
+	}
+	for _, pin := range []string{"127.0.0.1", "192.0.2.1", "2001:db8::1", "not-an-ip"} {
+		trialArgs := append(append([]string{}, args...), "--endpoint-pin-ipv4", pin)
+		if rc, reply, _ := captureRulesCommand(t, m, trialArgs...); rc == 0 || reply["ok"] != false {
+			t.Fatalf("invalid endpoint pin %q accepted: %+v", pin, reply)
+		}
+	}
+	args = append(args, "--endpoint-pin-ipv4", "8.8.8.8")
+	rc, reply, stderr := captureRulesCommand(t, m, args...)
+	if rc != 0 || stderr != "" || reply["ok"] != true {
+		t.Fatalf("pinned preview failed: %d %+v %s", rc, reply, stderr)
+	}
+	report := ruleResult(t, reply)
+	if report["endpoint_pin_evidence"] != "operator_supplied_unverified" ||
+		report["selected_profile_id"] != profile.ID ||
+		report["validation_level"] != "native_policy_compile_only" ||
+		report["core_execution_tested"] != false ||
+		report["host_network_inspected"] != false ||
+		report["activation_ready"] != false || report["applied"] != false {
+		t.Fatalf("preview falsely claimed host/activation evidence: %+v", report)
+	}
+	if rc, again, stderr := captureRulesCommand(t, m, args...); rc != 0 || stderr != "" ||
+		ruleResult(t, again)["native_config_sha256"] != report["native_config_sha256"] {
+		t.Fatal("pinned preview not deterministic")
+	}
+	afterProfile, err := os.ReadFile(profilePath)
+	if err != nil || !bytes.Equal(encoded, afterProfile) {
+		t.Fatal("saved profile mutated")
+	}
+	afterRules, err := os.ReadFile(rulePath)
+	if err != nil || !bytes.Equal(beforeRules, afterRules) {
+		t.Fatal("saved rule registry mutated")
+	}
+	if _, err := os.Stat(filepath.Join(m.Dir, "route-activation-journal.json")); !os.IsNotExist(err) {
+		t.Fatal("preview created a routing activation journal")
+	}
+	jsonOut, _ := json.Marshal(reply)
+	for _, secret := range []string{"c2902f3a", "node.example.org", "8.8.8.8"} {
+		if strings.Contains(string(jsonOut), secret) {
+			t.Fatalf("preview leaked selected data %q", secret)
+		}
+	}
+}
+
 func TestRoutingRulesCLIPreviewSelectedProfileIsCompileOnly(t *testing.T) {
 	m := rulesCLIManager(t)
 	for _, rule := range []sc.SmartRoutingRule{

@@ -498,6 +498,7 @@ type SmartRoutingRulesPreview struct {
 	SelectedProfileID    string `json:"selected_profile_id"`
 	RuleCount            int    `json:"rule_count"`
 	NativeConfigSHA256   string `json:"native_config_sha256"`
+	EndpointPinEvidence  string `json:"endpoint_pin_evidence,omitempty"`
 	ValidationLevel      string `json:"validation_level"`
 	CoreExecutionTested  bool   `json:"core_execution_tested"`
 	HostNetworkInspected bool   `json:"host_network_inspected"`
@@ -506,6 +507,12 @@ type SmartRoutingRulesPreview struct {
 }
 
 func (m *Manager) PreviewSmartRoutingRules(opts SmartTUNCandidateOptions) (SmartRoutingRulesPreview, error) {
+	return m.PreviewSmartRoutingRulesPinned(opts, "")
+}
+
+// PreviewSmartRoutingRulesPinned only compiles a candidate; an operator pin
+// is not independently verified DNS, underlay or activation evidence.
+func (m *Manager) PreviewSmartRoutingRulesPinned(opts SmartTUNCandidateOptions, pin string) (SmartRoutingRulesPreview, error) {
 	var out SmartRoutingRulesPreview
 	if len(opts.Exceptions) != 0 || len(opts.DomainExceptions) != 0 || len(opts.IPv6Exceptions) != 0 {
 		return out, Fault("invalid_arguments", "preview policy exceptions must come only from saved, validated routing rules")
@@ -535,6 +542,12 @@ func (m *Manager) PreviewSmartRoutingRules(opts SmartTUNCandidateOptions) (Smart
 				}
 			}
 		}
+		if pin != "" {
+			profile, err = projectPinnedVLESSNativePreview(profile, pin)
+			if err != nil {
+				return Fault("routing_rules_invalid", "operator pin or selected native TCP profile is invalid")
+			}
+		}
 		cfg, err := smartTUNNativeConfig(profile, opts)
 		if err != nil {
 			return Fault("routing_rules_invalid", "native compiler rejected the selected profile, underlay or routing exceptions")
@@ -544,6 +557,9 @@ func (m *Manager) PreviewSmartRoutingRules(opts SmartTUNCandidateOptions) (Smart
 			RuleCount: len(doc.Manual), NativeConfigSHA256: hex.EncodeToString(digest[:]),
 			ValidationLevel: "native_policy_compile_only", CoreExecutionTested: false,
 			HostNetworkInspected: false, ActivationReady: false, Applied: false}
+		if pin != "" {
+			out.EndpointPinEvidence = "operator_supplied_unverified"
+		}
 		for _, v := range doc.Imports {
 			out.RuleCount += len(v.Rules)
 		}
