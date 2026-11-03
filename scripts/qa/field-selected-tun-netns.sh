@@ -33,16 +33,27 @@ valid_netns_listing() {
       return 1
   done <<< "$1"
 }
-[[ "$#" -eq 5 || "$#" -eq 6 ]] || die "usage: root bash field-selected-tun-netns.sh EXPECTED_HOSTNAME EXPECTED_IPV4 UNDERLAY_INTERFACE DNS_PRIMARY_IPV4 DNS_SECONDARY_IPV4 [--split-exception]"
+[[ "$#" -ge 5 && "$#" -le 7 ]] || die "usage: root bash field-selected-tun-netns.sh EXPECTED_HOSTNAME EXPECTED_IPV4 UNDERLAY_INTERFACE DNS_PRIMARY_IPV4 DNS_SECONDARY_IPV4 [--split-exception] [--wire-matrix]"
 expected_host=$1
 expected_ip=$2
 host_if=$3
 resolver_ip=$4
 secondary_resolver=$5
 split_mode=no
-if [[ "$#" -eq 6 ]]; then
-  [[ "$6" == --split-exception ]] || die "unknown sixth argument"
-  split_mode=yes
+wire_mode=no
+shift 5
+while [[ "$#" -gt 0 ]]; do
+  case "$1" in
+    --split-exception) [[ "$split_mode" == no ]] || die "duplicate split option"; split_mode=yes ;;
+    --wire-matrix) [[ "$wire_mode" == no ]] || die "duplicate wire option"; wire_mode=yes ;;
+    *) die "unknown QA flag" ;;
+  esac
+  shift
+done
+wire_helper="$(dirname -- "$0")/field-udp-dns-wire.py"
+if [[ "$wire_mode" == yes ]]; then
+  [[ -f "$wire_helper" && ! -L "$wire_helper" && -r "$wire_helper" ]] ||
+    die "missing trustworthy wire QA helper"
 fi
 [[ "$expected_host" =~ ^[a-zA-Z0-9][a-zA-Z0-9.-]{0,100}$ &&
    "$expected_ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ &&
@@ -519,6 +530,71 @@ if [[ "$split_mode" == yes ]]; then
     die "split Direct probe overlaps selected provider IPv4"
 fi
 
+# A direct, size-for-size baseline is mandatory before attributing any
+# large UDP failure to TUN or VLESS. Public DNS servers may drop EDNS padding
+# over their own accepted request size even without the VPN.
+wire_dns_sizes_pass=""
+wire_matrix_failed=no
+if [[ "$wire_mode" == yes ]]; then
+  ip netns exec "$namespace" iptables -I OUTPUT 1 -o "$veth_guest" \
+    -d "$resolver_ip/32" -p udp --dport 53 \
+    -m comment --comment "$comment-dns-wire"
+  for dns_size in 0 512 1000 1200 1232 1300; do
+    if ip netns exec "$namespace" python3 -B "$wire_helper" \
+      --resolver "$resolver_ip" --size "$dns_size" --timeout 5 \
+      --underlay-if "$veth_guest" --underlay-mode direct; then
+      wire_dns_sizes_pass="$wire_dns_sizes_pass $dns_size"
+      echo "DIRECT_UDP_SIZE_$dns_size=PASS"
+    else
+      echo "DIRECT_UDP_SIZE_$dns_size=UNAVAILABLE (no selected-VPN attribution)"
+    fi
+  done
+  [[ " $wire_dns_sizes_pass " == *" 0 "* ]] ||
+    die "Direct UDP positive baseline unavailable"
+  dns_direct_packets=$(ip netns exec "$namespace" iptables -vxnL OUTPUT --line-numbers |
+    awk -v label="$comment-dns-wire" 'index($0,label)>0 {sum+=$2} END {print sum+0}')
+  [[ "$dns_direct_packets" =~ ^[0-9]+$ && "$dns_direct_packets" -gt 0 ]] ||
+    die "positive-controlled Direct DNS observer did not see real UDP"
+  # A real public HTTPS object provides a bounded 512 KiB TCP payload
+  # test with independent positive Direct and negative selected-VPN witnesses.
+  bulk_ip=$(timeout 12s ip netns exec "$namespace" getent ahostsv4 speed.cloudflare.com | awk 'NR==1 {print $1}')
+  python3 - "$bulk_ip" "$work/provider-ips" <<'PYBULK'
+import ipaddress,pathlib,sys
+ip=ipaddress.IPv4Address(sys.argv[1])
+assert ip.is_global, "public bulk witness address required"
+assert sys.argv[1] not in pathlib.Path(sys.argv[2]).read_text().splitlines(), "bulk witness overlaps selected provider"
+PYBULK
+  # Different QA-only client source ports prevent late FIN/retransmit
+  # packets from the positive Direct control contaminating the VPN probe.
+  # These observer rules never modify packet fate, and are confined to
+  # the exclusively owned test namespace, not host-wide firewall policy.
+  ip netns exec "$namespace" iptables -I OUTPUT 1 -o "$veth_guest" \
+    -d "$bulk_ip/32" -p tcp --sport 48292 --dport 443 \
+    -m comment --comment "$comment-bulk-wire"
+  ip netns exec "$namespace" iptables -I OUTPUT 1 -o "$veth_guest" \
+    -d "$bulk_ip/32" -p tcp --sport 48291 --dport 443 \
+    -m comment --comment "$comment-bulk-control"
+  if direct_bulk=$(ip netns exec "$namespace" curl -q --noproxy '*' \
+    --local-port 48291-48291 \
+    --resolve "speed.cloudflare.com:443:$bulk_ip" -fsS -4 --max-time 14 \
+    'https://speed.cloudflare.com/__down?bytes=4096' | wc -c) &&
+     [[ "$direct_bulk" -eq 4096 ]]; then
+    echo 'DIRECT_HTTPS_BULK_POSITIVE_CONTROL=PASS'
+  else
+    die "Direct HTTPS bulk positive control failed"
+  fi
+  bulk_direct_packets=$(ip netns exec "$namespace" iptables -vxnL OUTPUT --line-numbers |
+    awk -v label="$comment-bulk-control" 'index($0,label)>0 {sum+=$2} END {print sum+0}')
+  [[ "$bulk_direct_packets" =~ ^[0-9]+$ && "$bulk_direct_packets" -gt 0 ]] ||
+    die "Direct bulk source-port witness did not traverse veth"
+  ip netns exec "$namespace" iptables -D OUTPUT -o "$veth_guest" \
+    -d "$bulk_ip/32" -p tcp --sport 48291 --dport 443 \
+    -m comment --comment "$comment-bulk-control"
+  # The test namespace is fresh/solely owned. Do not reset host counters.
+  ip netns exec "$namespace" iptables -Z OUTPUT
+  echo 'DIRECT_DNS_UDP_UNDERLAY_POSITIVE_CONTROL=PASS'
+fi
+
 # A pre-armed independent underlay counter must witness the selected
 # upstream, not merely infer VPN transit from a reported exit address.
 while IFS= read -r provider_ip; do
@@ -545,6 +621,32 @@ if ip netns exec "$namespace" timeout 9s getent ahostsv4 api.ipify.org >/dev/nul
   dns_during=PASS
 fi
 echo "DNS_RESOLUTION_WITH_TUN=$dns_during"
+if [[ "$wire_mode" == yes ]]; then
+  for dns_size in $wire_dns_sizes_pass; do
+    if ip netns exec "$namespace" python3 -B "$wire_helper" \
+      --resolver "$resolver_ip" --size "$dns_size" --timeout 6 \
+      --underlay-if "$veth_guest" --underlay-mode vpn; then
+      echo "SELECTED_VPN_UDP_SIZE_$dns_size=PASS"
+    else
+      wire_matrix_failed=yes
+      echo "SELECTED_VPN_UDP_SIZE_$dns_size=FAIL (Direct positive control passed)" >&2
+    fi
+  done
+  dns_veth_packets=$(ip netns exec "$namespace" iptables -vxnL OUTPUT --line-numbers |
+    awk -v label="$comment-dns-wire" 'index($0,label)>0 {sum+=$2} END {print sum+0}')
+  [[ "$dns_veth_packets" =~ ^[0-9]+$ ]] ||
+    die "supplemental DNS underlay counter unavailable"
+  # The total includes possible sing-box bootstrap DNS and getent lookups.
+  # Only the independently packet-matched random application query can
+  # prove this specific raw UDP request escaped/was contained.
+  echo "DNS_UNATTRIBUTED_UNDERLAY_PACKETS=$dns_veth_packets"
+  echo 'SELECTED_VPN_EXACT_RAW_UDP_DNS_NO_DIRECT_LEAK=PASS'
+  for dns_size in 0 512 1000 1200 1232 1300; do
+    if [[ " $wire_dns_sizes_pass " != *" $dns_size "* ]]; then
+      echo "SELECTED_VPN_UDP_SIZE_$dns_size=NOT_COMPARABLE (Direct control unavailable)"
+    fi
+  done
+fi
 vpn=$(ip netns exec "$namespace" curl -q --noproxy '*' \
   --resolve "api.ipify.org:443:$foreign_ip" -sS -4 --max-time 22 https://api.ipify.org) || die "transparent VPN HTTPS request failed"
 [[ "$vpn" != "$expected_ip" && "$vpn" != "$direct" &&
@@ -561,6 +663,23 @@ if [[ "$split_mode" != yes ]]; then
     grep -E '^(ip|loc|colo)=' || :
 fi
 echo 'ISOLATED_SELECTED_TRANSPARENT_HTTPS=PASS (pinned api.ipify.org)'
+if [[ "$wire_mode" == yes ]]; then
+  if selected_bulk=$(ip netns exec "$namespace" curl -q --noproxy '*' \
+    --local-port 48292-48292 \
+    --resolve "speed.cloudflare.com:443:$bulk_ip" -fsS -4 --max-time 35 \
+    'https://speed.cloudflare.com/__down?bytes=524288' | wc -c) &&
+     [[ "$selected_bulk" -eq 524288 ]]; then
+    echo 'SELECTED_VPN_512K_HTTPS_PAYLOAD=PASS'
+  else
+    wire_matrix_failed=yes
+    echo 'SELECTED_VPN_512K_HTTPS_PAYLOAD=FAIL' >&2
+  fi
+  bulk_veth_packets=$(ip netns exec "$namespace" iptables -vxnL OUTPUT --line-numbers |
+    awk -v label="$comment-bulk-wire" 'index($0,label)>0 {sum+=$2} END {print sum+0}')
+  [[ "$bulk_veth_packets" =~ ^[0-9]+$ && "$bulk_veth_packets" -eq 0 ]] ||
+    die "VPN-required bulk TCP escaped on Direct underlay"
+  echo 'SELECTED_VPN_BULK_NO_DIRECT_LEAK=PASS'
+fi
 if [[ "$split_mode" == yes ]]; then
   ip netns exec "$namespace" iptables -I OUTPUT 1 -o "$veth_guest" -d "$split_ip/32" \
     -p tcp --dport 443 -m comment --comment "$comment-direct"
@@ -614,6 +733,17 @@ witness=$(ip netns exec "$namespace" iptables -vxnL OUTPUT --line-numbers |
 [[ -e "/var/run/netns/$namespace" ]] || die "namespace disappeared during outage"
 ip netns exec "$namespace" ip link show "$tun" >/dev/null ||
   die "TUN disappeared during outage"
+if [[ "$wire_mode" == yes ]]; then
+  ip netns exec "$namespace" python3 -B "$wire_helper" \
+    --resolver "$resolver_ip" --size 0 --timeout 4 --expect-outage \
+    --underlay-if "$veth_guest" --underlay-mode vpn
+  dns_outage_leak=$(ip netns exec "$namespace" iptables -vxnL OUTPUT --line-numbers |
+    awk -v label="$comment-dns-wire" 'index($0,label)>0 {sum+=$2} END {print sum+0}')
+  [[ "$dns_outage_leak" =~ ^[0-9]+$ ]] ||
+    die "supplemental outage underlay counter unavailable"
+  echo "DNS_OUTAGE_UNATTRIBUTED_UNDERLAY_PACKETS=$dns_outage_leak"
+  echo 'VPN_OUTAGE_EXACT_RAW_UDP_DNS_FAIL_CLOSED=PASS'
+fi
 echo "SELECTED_PROVIDER_OUTAGE_BLOCKED_PACKETS=$blocked"
 echo 'VPN_REQUIRED_OUTAGE_NO_DIRECT_UNDERLAY=PASS'
 while IFS= read -r provider_ip; do
@@ -637,6 +767,13 @@ done
 echo "VPN_AFTER_OUTAGE_IP=$resumed"
 echo 'VPN_RECOVERED_WITHOUT_HOST_ROUTING_MUTATION=PASS'
 echo 'NOTE: QA-only isolated namespace, not general-host Smart Routing'
+if [[ "$wire_mode" == yes && "$wire_matrix_failed" == yes ]]; then
+  echo 'FIELD_WIRE_MATRIX=FAIL (one or more supported selected-path probes failed)' >&2
+  exit 1
+fi
+if [[ "$wire_mode" == yes ]]; then
+  echo 'FIELD_WIRE_MATRIX_COMPARABLE_UDP=PASS (not general-host/IPv6/PMTUD acceptance)'
+fi
 if [[ "$dns_during" != PASS ]]; then
   echo 'FIELD_DNS_ACCEPTANCE=FAIL (selected HTTPS separately proved with pinned destination)' >&2
   exit 1
