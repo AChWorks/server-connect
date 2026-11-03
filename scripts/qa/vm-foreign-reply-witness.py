@@ -452,6 +452,9 @@ def client(key, known_hosts, ssh_port, http_port):
           pinned_private_key_file(key) as (frozen_key, key_identity)):
         _client_with_trusted_pin(key, known_hosts, snapshot, identity,
                                  frozen_key, key_identity, ssh_port, http_port)
+    # A successful final stage is not a successful witness until the original
+    # SSH/HTTP resources and both private snapshots have been closed/removed.
+    print("VM_INGRESS_WITNESS=PASS (NOT independent Apply/Guard/peer-path proof)", flush=True)
 
 
 def _client_with_trusted_pin(key, known_hosts, snapshot, identity,
@@ -483,6 +486,10 @@ def _client_with_trusted_pin(key, known_hosts, snapshot, identity,
                 assert_pinned_hosts(known_hosts, snapshot, identity)
                 assert_pinned_private_key(key, frozen_key, key_identity)
                 new_http_identity = http_round(http_port)
+                # Fresh HTTP is the last potentially blocking external round.
+                # Identity drift during it must be rejected before stage output.
+                assert_pinned_hosts(known_hosts, snapshot, identity)
+                assert_pinned_private_key(key, frozen_key, key_identity)
                 if new_http_identity == http_identity:
                     raise WitnessError("new_http_reused_original_socket")
                 print(json.dumps({"stage": stage, "ssh_existing": "pass", "ssh_fresh": "pass",
@@ -491,7 +498,6 @@ def _client_with_trusted_pin(key, known_hosts, snapshot, identity,
                                   "product_phase": "not_observed",
                                   "scope": "disconnected_qa_ingress_only"}, sort_keys=True), flush=True)
                 if stage == "off":
-                    print("VM_INGRESS_WITNESS=PASS (NOT independent Apply/Guard/peer-path proof)", flush=True)
                     return
                 stage = next_phase(stage)
         finally:
