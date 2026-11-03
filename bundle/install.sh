@@ -579,7 +579,13 @@ else
   die 'staged release filesystem identity unavailable'
  [ -n "$release_stage_identity" ] || die 'staged release identity empty'
  release_created=yes
- mv -T -- "$stage" "$release"
+ # A foreign directory can appear even after the earlier absence check.
+ # GNU mv -n refuses to replace it; verify identity because -n may return
+ # success without moving anything. Both paths are on the same filesystem.
+ mv -Tn -- "$stage" "$release" ||
+  die 'candidate release publication failed'
+ [ "$(stat -c '%d:%i' "$release" 2>/dev/null || :)" = "$release_stage_identity" ] ||
+  die 'release name collision; foreign directory preserved'
  stage=''
 fi
 chmod 0755 "$release"

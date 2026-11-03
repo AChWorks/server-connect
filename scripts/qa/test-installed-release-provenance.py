@@ -133,6 +133,23 @@ class ReleasePayloadTests(unittest.TestCase):
                          "AChWorks/server-connect\n")
         self.assertEqual((release / "install.sh").stat().st_mode & 0o777, 0o755)
 
+    def test_concurrent_empty_release_directory_is_never_replaced(self):
+        suffix = hashlib.sha256(
+            (self.source / "checksums.sha256").read_bytes()).hexdigest()[:16]
+        name = "0.1.0-dev-" + suffix
+        collision = self.prefix / "releases" / name
+        collision.mkdir()
+        identity = f"{collision.stat().st_dev}:{collision.stat().st_ino}"
+        self.shell(
+            RELEASE_ASSIGNMENT[0] + '\n'
+            + 'release="$PREFIX/releases/$release_name"\n'
+            'stage=""\nrelease_created=no\n'
+            + STAGING,
+            expected=21)
+        self.assertTrue(collision.is_dir())
+        self.assertEqual(f"{collision.stat().st_dev}:{collision.stat().st_ino}", identity)
+        self.assertEqual(list(collision.iterdir()), [])
+
     def test_manifest_change_changes_release_name_even_with_same_binaries(self):
         first = self.publish()
         (self.source / "manifest.json").write_text("distinct manifest, same manager and core\n")
