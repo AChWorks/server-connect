@@ -9,7 +9,8 @@ operator, not from an independently authenticated activation observer.
 Run 'origin' in the guest root namespace; run 'client' from scqa-foreign
 via 'ip netns exec'. The operator must separately provision a test-only,
 host-key-pinned SSH listener on 198.51.100.1 and an authorized scqa key.
-The original SSH process/socket remains open across all stages; new SSH and
+The original SSH process/socket remains open across all stages using the same
+frozen private key as fresh SSH; source identity drift is fatal. New SSH and
 uncached HTTP are checked independently at each stage. No public IP claim.
 """
 
@@ -110,15 +111,64 @@ def read_trusted_known_hosts(path):
     return (_file_identity(before), hashlib.sha256(content).digest()), content
 
 
-def require_key_files(private_key, known_hosts):
-    if not private_key.is_absolute() or private_key.is_symlink() or not private_key.is_file():
+def read_trusted_private_key(path):
+    """Read a bounded owner-only key without following its final symlink."""
+    if not path.is_absolute():
         raise WitnessError("ssh_identity_file_invalid")
-    info = private_key.stat()
-    if info.st_mode & 0o077:
-        raise WitnessError("private_ssh_key_permissions_unsafe")
-    if info.st_uid not in (0, os.geteuid()):
-        raise WitnessError("private_ssh_key_owner_untrusted")
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK)
+        with os.fdopen(fd, "rb") as source:
+            before = os.fstat(source.fileno())
+            if (not stat.S_ISREG(before.st_mode) or
+                    before.st_uid not in (0, os.geteuid()) or
+                    before.st_mode & 0o077 or not 0 < before.st_size <= 65536):
+                raise WitnessError("ssh_private_key_ownership_or_permissions_unsafe")
+            content = source.read(65537)
+            after = os.fstat(source.fileno())
+        current = path.lstat()
+    except OSError as exc:
+        raise WitnessError("ssh_identity_file_invalid") from exc
+    if (_file_identity(before) != _file_identity(after) or
+            _file_identity(before) != _file_identity(current) or
+            len(content) != before.st_size):
+        raise WitnessError("ssh_private_key_changed_during_read")
+    return (_file_identity(before), hashlib.sha256(content).digest()), content
+
+
+def require_key_files(private_key, known_hosts):
+    read_trusted_private_key(private_key)
     read_trusted_known_hosts(known_hosts)
+
+
+def assert_pinned_private_key(source, snapshot, identity):
+    observed, data = read_trusted_private_key(source)
+    frozen, bytes_on_disk = read_trusted_private_key(snapshot)
+    source_identity, snapshot_identity = identity
+    if observed != source_identity or frozen != snapshot_identity or data != bytes_on_disk:
+        raise WitnessError("ssh_private_key_changed")
+
+
+@contextmanager
+def pinned_private_key_file(source):
+    """Freeze the same authenticated SSH key for original and fresh sessions.
+
+    The private copy lives only in an owner-only temporary directory and is
+    removed after the original SSH process has been reaped.
+    """
+    identity, data = read_trusted_private_key(source)
+    with tempfile.TemporaryDirectory(prefix="scqa-ssh-key-") as location:
+        snapshot = Path(location) / "private_key"
+        fd = os.open(snapshot, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "wb") as target:
+            target.write(data)
+            target.flush()
+            os.fchmod(target.fileno(), 0o600)
+        snapshot_identity, snapshot_data = read_trusted_private_key(snapshot)
+        if snapshot_data != data:
+            raise WitnessError("ssh_private_key_snapshot_invalid")
+        paired_identity = (identity, snapshot_identity)
+        assert_pinned_private_key(source, snapshot, paired_identity)
+        yield snapshot, paired_identity
 
 
 def assert_pinned_hosts(source, snapshot, identity):
@@ -156,6 +206,7 @@ def ssh_command(key, known_hosts, port, remote):
     return [
         "/usr/bin/ssh", "-F", "/dev/null", "-T", "-b", PEER_IP, "-i", str(key),
         "-p", str(port), "-o", "BatchMode=yes", "-o", "IdentitiesOnly=yes",
+        "-o", "IdentityAgent=none", "-o", "PreferredAuthentications=publickey",
         "-o", "ConnectTimeout=4", "-o", "ConnectionAttempts=1",
         "-o", "PasswordAuthentication=no", "-o", "KbdInteractiveAuthentication=no",
         "-o", "StrictHostKeyChecking=yes", "-o", "ControlMaster=no",
@@ -397,18 +448,24 @@ def client(key, known_hosts, ssh_port, http_port):
     if ssh_port == http_port or not (1024 <= ssh_port <= 65535 and 1024 <= http_port <= 65535):
         raise WitnessError("invalid_test_listener_ports")
     require_key_files(key, known_hosts)
-    with pinned_host_file(known_hosts) as (snapshot, identity):
-        _client_with_trusted_pin(key, known_hosts, snapshot, identity, ssh_port, http_port)
+    with (pinned_host_file(known_hosts) as (snapshot, identity),
+          pinned_private_key_file(key) as (frozen_key, key_identity)):
+        _client_with_trusted_pin(key, known_hosts, snapshot, identity,
+                                 frozen_key, key_identity, ssh_port, http_port)
+    # A successful final stage is not a successful witness until the original
+    # SSH/HTTP resources and both private snapshots have been closed/removed.
+    print("VM_INGRESS_WITNESS=PASS (NOT independent Apply/Guard/peer-path proof)", flush=True)
 
 
-def _client_with_trusted_pin(key, known_hosts, snapshot, identity, ssh_port, http_port):
+def _client_with_trusted_pin(key, known_hosts, snapshot, identity,
+                             frozen_key, key_identity, ssh_port, http_port):
     persistent_http = http.client.HTTPConnection(ROOT_IP, http_port, timeout=4)
     try:
         persistent_http.connect()
         # Verify the original peer route BEFORE the first guarded Apply.
         http_identity = verified_http_socket(persistent_http)
         try:
-            original = subprocess.Popen(ssh_command(key, snapshot, ssh_port, REMOTE_LOOP),
+            original = subprocess.Popen(ssh_command(frozen_key, snapshot, ssh_port, REMOTE_LOOP),
                                         stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                         stderr=subprocess.DEVNULL, bufsize=0)
         except OSError as exc:
@@ -418,14 +475,21 @@ def _client_with_trusted_pin(key, known_hosts, snapshot, identity, ssh_port, htt
             stage = "baseline"
             while True:
                 assert_pinned_hosts(known_hosts, snapshot, identity)
+                assert_pinned_private_key(key, frozen_key, key_identity)
                 ssh_inode = original_ssh_round(original, ssh_port, ssh_inode)
                 # An existing HTTP keepalive must survive every phase without
                 # HTTPConnection silently dialing a replacement socket.
                 http_request(persistent_http, http_identity)
                 assert_pinned_hosts(known_hosts, snapshot, identity)
-                new_ssh_round(key, snapshot, ssh_port)
+                assert_pinned_private_key(key, frozen_key, key_identity)
+                new_ssh_round(frozen_key, snapshot, ssh_port)
                 assert_pinned_hosts(known_hosts, snapshot, identity)
+                assert_pinned_private_key(key, frozen_key, key_identity)
                 new_http_identity = http_round(http_port)
+                # Fresh HTTP is the last potentially blocking external round.
+                # Identity drift during it must be rejected before stage output.
+                assert_pinned_hosts(known_hosts, snapshot, identity)
+                assert_pinned_private_key(key, frozen_key, key_identity)
                 if new_http_identity == http_identity:
                     raise WitnessError("new_http_reused_original_socket")
                 print(json.dumps({"stage": stage, "ssh_existing": "pass", "ssh_fresh": "pass",
@@ -434,7 +498,6 @@ def _client_with_trusted_pin(key, known_hosts, snapshot, identity, ssh_port, htt
                                   "product_phase": "not_observed",
                                   "scope": "disconnected_qa_ingress_only"}, sort_keys=True), flush=True)
                 if stage == "off":
-                    print("VM_INGRESS_WITNESS=PASS (NOT independent Apply/Guard/peer-path proof)", flush=True)
                     return
                 stage = next_phase(stage)
         finally:
