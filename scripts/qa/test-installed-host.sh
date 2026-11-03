@@ -317,7 +317,7 @@ docker exec "$container" /bin/sh -c '
       -C "/root/server-connect-$variant" \
       --strip-components=1 --no-same-owner --no-same-permissions
     (cd "/root/server-connect-$variant" &&
-      sha256sum --quiet --check checksums.sha256)
+      sha256sum --strict --quiet --check checksums.sha256)
   done
 '
 offline_before=$(network_digest)
@@ -370,6 +370,13 @@ verify_direct_install() {
     test "$(cat /opt/server-connect/.owner)" = AChWorks/server-connect
     test -L /usr/local/bin/server-connect
     test "$(readlink /usr/local/bin/server-connect)" = /opt/server-connect/current/bin/server-connect
+    # Every installed release retains the exact original, complete bundle
+    # manifest/checksums. Only the external archive signature can prove trust.
+    test -f /opt/server-connect/current/manifest.json
+    test -f /opt/server-connect/current/checksums.sha256
+    (cd /opt/server-connect/current && sha256sum --strict --quiet -c checksums.sha256)
+    identity=$(sha256sum /opt/server-connect/current/checksums.sha256 | cut -c 1-16)
+    test "$(readlink /opt/server-connect/current)" = "releases/0.1.0-dev-$identity"
     test "$(systemctl show server-connect.service -p LoadState --value)" = loaded
     test "$(systemctl show server-connect.service -p ActiveState --value)" = inactive
     test "$(systemctl is-enabled server-connect.service)" = disabled
@@ -579,7 +586,7 @@ docker exec "$container" /bin/sh -c '
   test ! -e /var/lib/server-connect
   test ! -e /usr/local/bin/server-connect
   mv /root/server-connect/bin/sing-box.qa-hidden /root/server-connect/bin/sing-box
-  (cd /root/server-connect && sha256sum --quiet --check checksums.sha256)
+  (cd /root/server-connect && sha256sum --strict --quiet --check checksums.sha256)
 '
 assert_network_unchanged missing-core "$offline_before"
 verify_host_services missing-core
@@ -1118,8 +1125,40 @@ docker exec "$container" /bin/sh -c '
   printf "SC_QA_RETAIN_PROFILE_BYTES\n" > /var/lib/server-connect/profiles/qa-retained
   chmod 0600 /var/lib/server-connect/profiles/qa-retained
 '
+# Exercise real installer compatibility with the precise PRE-PROVENANCE
+# release layout and historic SHA256(manager/core)-derived release name.
+# This is a synthetic old-layout guest receipt using actual packaged bytes,
+# not a claim of having upgraded a historical deployed public release.
+legacy_link=$(docker exec "$container" /bin/sh -c '
+ set -eu
+ existing=$(readlink /opt/server-connect/current)
+ original=/opt/server-connect/$existing
+ legacy_suffix=$(cd "$original" &&
+   sha256sum bin/server-connect bin/sing-box |
+     cut -d" " -f1 | sha256sum | cut -c 1-16)
+ legacy_link=releases/0.1.0-dev-$legacy_suffix
+ [ "$legacy_link" != "$existing" ]
+ legacy=/opt/server-connect/$legacy_link
+ [ ! -e "$legacy" ] && [ ! -L "$legacy" ]
+ install -d -m 0755 "$legacy/bin" "$legacy/THIRD-PARTY-LICENSES"
+ for path in bin/server-connect bin/sing-box bin/libcronet.so THIRD-PARTY-LICENSES/sing-box-LICENSE; do
+  mode=0644
+  case "$path" in bin/server-connect|bin/sing-box) mode=0755 ;; esac
+  install -m "$mode" "$original/$path" "$legacy/$path"
+ done
+ printf "AChWorks/server-connect\n" > "$legacy/.owner"
+ chmod 0644 "$legacy/.owner"
+ [ "$(find "$legacy" -mindepth 1 -printf . | wc -c)" -eq 7 ]
+ ln -s "$legacy_link" /opt/server-connect/.qa-legacy-current
+ mv -Tf -- /opt/server-connect/.qa-legacy-current /opt/server-connect/current
+ printf "%s\n" "$legacy_link"
+')
+[[ $legacy_link =~ ^releases/0\.1\.0-dev-[a-f0-9]{16}$ ]]
 run_offline reinstall --offline
 verify_direct_install
+[[ $(docker exec "$container" readlink /opt/server-connect/current) != "$legacy_link" ]]
+docker exec "$container" test -f "/opt/server-connect/$legacy_link/.owner"
+echo 'INSTALLED_LEGACY_TO_FULL_REINSTALL=PASS (exact historical layout/name, actual installer, private guest)'
 assert_network_unchanged reinstall "$offline_before"
 verify_host_services reinstall
 if [[ $qa_version == 13 ]]; then
@@ -1805,6 +1844,56 @@ if [[ $qa_version == 13 ]]; then docker exec "$container" /bin/sh /root/qa-wp-fp
 assert_network_unchanged proxy-core-failure "$offline_before"
 verify_host_services proxy-core-failure
 
+# R1 fail-closed proof using the REAL root installer while a real selected
+# VLESS service is active in the disconnected systemd guest. Invalid modern
+# provenance must fail before stop, unit replacement or current-link changes.
+docker exec -i "$container" /bin/sh -s <<'QA_PROVENANCE_CURRENT'
+set -eu
+systemctl is-active --quiet server-connect.service
+link=$(readlink /opt/server-connect/current)
+release=/opt/server-connect/$link
+unit_hash=$(sha256sum /etc/systemd/system/server-connect.service | cut -d" " -f1)
+mkdir -m 0700 /root/qa-provenance-original
+for file in checksums.sha256 manifest.json server-connect-smart-health.service; do
+ cp -p "$release/$file" "/root/qa-provenance-original/$file"
+done
+printf "do-not-delete-foreign\n" > /root/qa-provenance-foreign-sentinel
+for scenario in no-checksums no-manifest no-both no-both-and-tampered-service; do
+ case "$scenario" in
+  no-checksums) rm "$release/checksums.sha256" ;;
+  no-manifest) rm "$release/manifest.json" ;;
+  no-both*) rm "$release/checksums.sha256" "$release/manifest.json" ;;
+ esac
+ if [ "$scenario" = no-both-and-tampered-service ]; then
+  printf "unauthorized unit mutation\n" >> "$release/server-connect-smart-health.service"
+ fi
+ for action in --verify-only --offline --uninstall; do
+  if /bin/sh /root/server-connect/install.sh "$action" \
+      >/root/qa-provenance-refusal.log 2>&1; then
+   echo "INVALID_INSTALLED_PROVENANCE_WAS_ACCEPTED:$scenario:$action" >&2
+   exit 1
+  fi
+  grep -F "Server Connect: ERROR:" /root/qa-provenance-refusal.log >/dev/null
+  systemctl is-active --quiet server-connect.service
+  [ "$(readlink /opt/server-connect/current)" = "$link" ]
+  [ "$(sha256sum /etc/systemd/system/server-connect.service | cut -d" " -f1)" = "$unit_hash" ]
+  [ "$(cat /root/qa-provenance-foreign-sentinel)" = do-not-delete-foreign ]
+  [ "$(cat /var/lib/server-connect/profiles/qa-retained)" = SC_QA_RETAIN_PROFILE_BYTES ]
+ done
+ for file in checksums.sha256 manifest.json server-connect-smart-health.service; do
+  cp -p "/root/qa-provenance-original/$file" "$release/$file"
+ done
+ (cd "$release" && sha256sum --strict --quiet -c checksums.sha256)
+done
+rm -f /root/qa-provenance-refusal.log /root/qa-provenance-foreign-sentinel
+rm -f /root/qa-provenance-original/*
+rmdir /root/qa-provenance-original
+echo 'INSTALLED_MODERN_METADATA_DOWNGRADE_REFUSALS=PASS (4 variants x 3 actual installer actions, active VLESS and foreign state preserved)'
+QA_PROVENANCE_CURRENT
+docker exec "$container" /bin/sh /root/qa-proxy-only.sh positive
+assert_network_unchanged active-modern-provenance-refusals "$offline_before"
+verify_host_services active-modern-provenance-refusals
+
 original_link=$(docker exec "$container" readlink /opt/server-connect/current)
 original_manager=$(docker exec "$container" sha256sum \
   /opt/server-connect/current/bin/server-connect | cut -d' ' -f1)
@@ -1831,13 +1920,49 @@ assert_network_unchanged update-distinct "$offline_before"
 verify_host_services update-distinct
 echo 'INSTALLED_DISTINCT_BINARY_UPDATE=PASS (same-source QA builds)'
 
+# The previously installed modern release is no longer current. Uninstall
+# must inspect ALL owned releases and refuse a damaged one BEFORE it stops
+# the running product, even when the current release remains intact.
+docker exec -i "$container" /bin/sh -s "$original_link" <<'QA_PROVENANCE_UNINSTALL'
+set -eu
+prior=$1
+release=/opt/server-connect/$prior
+[ -f "$release/checksums.sha256" ] && [ -f "$release/manifest.json" ]
+active=$(readlink /opt/server-connect/current)
+[ "$active" != "$prior" ]
+systemctl is-active --quiet server-connect.service
+digest=$(sha256sum /etc/systemd/system/server-connect.service | cut -d" " -f1)
+cp -p "$release/checksums.sha256" /root/qa-old-provenance-checksums.saved
+cp -p "$release/manifest.json" /root/qa-old-provenance-manifest.saved
+rm "$release/checksums.sha256" "$release/manifest.json"
+if /bin/sh /root/server-connect/install.sh --uninstall \
+    >/root/qa-old-provenance-refusal.log 2>&1; then
+ echo "UNINSTALL_ACCEPTED_DAMAGED_NONCURRENT_RELEASE" >&2
+ exit 1
+fi
+grep -F "unrecognized legacy release layout" /root/qa-old-provenance-refusal.log >/dev/null
+systemctl is-active --quiet server-connect.service
+[ "$(readlink /opt/server-connect/current)" = "$active" ]
+[ "$(sha256sum /etc/systemd/system/server-connect.service | cut -d" " -f1)" = "$digest" ]
+[ "$(cat /var/lib/server-connect/profiles/qa-retained)" = SC_QA_RETAIN_PROFILE_BYTES ]
+cp -p /root/qa-old-provenance-checksums.saved "$release/checksums.sha256"
+cp -p /root/qa-old-provenance-manifest.saved "$release/manifest.json"
+(cd "$release" && sha256sum --strict --quiet -c checksums.sha256)
+rm -f /root/qa-old-provenance-checksums.saved /root/qa-old-provenance-manifest.saved \
+      /root/qa-old-provenance-refusal.log
+echo 'INSTALLED_NONCURRENT_DAMAGED_RELEASE_UNINSTALL_REFUSED=PASS (before service stop)'
+QA_PROVENANCE_UNINSTALL
+assert_network_unchanged noncurrent-modern-provenance-refusal "$offline_before"
+verify_host_services noncurrent-modern-provenance-refusal
+
 # The third binary is different and carries a deliberately broken service
 # ExecStart. It must fail after switching and restore the ACTIVE prior proxy.
 bad_release=$(docker exec "$container" /bin/sh -c '
   set -eu
   cd /root/server-connect-bad-update
-  hash=$(sha256sum bin/server-connect bin/sing-box |
-    cut -d" " -f1 | sha256sum | cut -c 1-16)
+  # Installed release identity is the complete checksum manifest, including
+  # non-binary unit and source metadata, not only the two executables.
+  hash=$(sha256sum checksums.sha256 | cut -c 1-16)
   printf "releases/0.1.0-dev-%s" "$hash"
 ')
 [[ $bad_release != "$updated_link" && $bad_release != "$original_link" ]] || {

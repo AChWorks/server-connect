@@ -57,6 +57,23 @@ docker exec "$container" /bin/sh -c '
    THIRD-PARTY-LICENSES/sing-box-LICENSE manifest.json > checksums.sha256
  sha256sum --quiet --check checksums.sha256
 '
+# The controlled fault changes unit bytes after the incoming archive was
+# staged. The complete-manifest release identity therefore changes as well.
+# Observe the actual candidate identity, never guess using the earlier name.
+real_bad_release=$(docker exec "$container" /bin/sh -c '
+  cd /root/server-connect-bad-update &&
+  printf "releases/0.1.0-dev-%s" "$(sha256sum checksums.sha256 | cut -c 1-16)"
+') || {
+ echo 'Could not verify mutated restoration-failure candidate identity' >&2;exit 1;
+}
+[[ $real_bad_release =~ ^releases/0\.1\.0-dev-[a-f0-9]{16}$ &&
+   $real_bad_release != "$previous_release" && $real_bad_release != "$bad_release" ]] || {
+ echo 'Mutated restoration-failure candidate release identity is invalid or aliased' >&2;exit 1;
+}
+# The unrevised broken-unit fixture was already removed after its separate
+# successful rollback. This mutated candidate must also start absent.
+docker exec "$container" test ! -e "/opt/server-connect/$real_bad_release"
+bad_release=$real_bad_release
 echo '=== Real restoration-failure injection in isolated systemd guest ==='
 # Only this QA candidate is launched. It must fail through systemctl start
 # AFTER it replaces the units; no source/runtime hook modifies installer logic.

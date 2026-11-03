@@ -133,6 +133,7 @@ jobs:
           # Read-only VM reply witness; unprivileged protocol/negative checks only.
           PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/qa/test-vm-foreign-reply-witness.py
           python3 scripts/qa/test-package-targets.py
+          python3 -I -B scripts/qa/test-installed-release-provenance.py
           PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/qa/test-debian12-proxy-lifecycle.py
           sh -n scripts/qa/host-bundle-target-refusal.sh
           # Disposable Debian container ONLY: exercise real unprivileged ->

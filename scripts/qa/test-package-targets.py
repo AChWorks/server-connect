@@ -116,7 +116,15 @@ printf '%s\n' 'sing-box version 1.14.3'
         body = INSTALLER.read_text()
         begin = body.index("verify_payload() {\n")
         end = body.index("\n}\n", begin) + len("\n}\n")
-        self.function = body[begin:end]
+        # Verify the real payload gate together with the helpers it calls,
+        # without invoking the privileged installer entrypoint.
+        helper_start = body.index("release_payload_files() {\n")
+        helper_end = body.index("\n}\n", helper_start) + len("\n}\n")
+        verifier_start = body.index("verify_release_payload() (\n")
+        verifier_end = body.index("\n)\n", verifier_start) + len("\n)\n")
+        self.function = (body[helper_start:helper_end] + "\n" +
+                         body[verifier_start:verifier_end] + "\n" +
+                         body[begin:end])
 
     def tearDown(self):
         self.temporary.cleanup()

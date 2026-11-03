@@ -35,6 +35,87 @@ check_root_dir() {
  [ "$((0$mode & 022))" -eq 0 ] || die "unsafe writable directory: $1"
 }
 require_root() { [ "$(id -u)" -eq 0 ] || die 'run as root with sudo'; }
+# An installed release retains the same complete, independently inspected
+# payload and checksum manifest as its input archive. This is local byte
+# integrity, never a publisher signature or a host-routing admission token.
+release_payload_files() {
+ cat <<'RELEASE_FILES'
+bin/server-connect
+bin/sing-box
+bin/libcronet.so
+server-connect.service
+server-connect-activation-recover.service
+server-connect-activation-recover.timer
+server-connect-smart-tun.service
+server-connect-smart-health.service
+server-connect-smart-health.timer
+install.sh
+THIRD-PARTY-LICENSES/sing-box-LICENSE
+manifest.json
+RELEASE_FILES
+}
+verify_release_payload() (
+ root=$1
+ check_root_dir "$root"
+ check_root_dir "$root/bin"
+ check_root_dir "$root/THIRD-PARTY-LICENSES"
+ for path in $(release_payload_files); do
+  check_root_file "$root/$path"
+ done
+ check_root_file "$root/checksums.sha256"
+ # Reject missing, duplicate, extra, reordered, or noncanonical checksum
+ # entries. sha256sum -c alone accepts omitted entries and path escapes.
+ expected=$(release_payload_files)
+ actual=$(sed -n 's/^[0-9a-f]\{64\}  //p' "$root/checksums.sha256") ||
+  die 'cannot read release checksum manifest'
+ [ "$expected" = "$actual" ] &&
+ [ "$(wc -l < "$root/checksums.sha256")" -eq 12 ] ||
+  die 'release checksum manifest does not cover the exact owned payload'
+ (cd "$root" && sha256sum --strict --quiet -c checksums.sha256) ||
+  die 'release checksum mismatch; no mutation permitted'
+)
+# A missing modern manifest is NOT evidence of a legacy release. The old
+# installer used only four payload files, a .owner marker and an ID derived
+# from the manager/core binary digests. Admit exactly that format.
+verify_installed_release() (
+ root=$1
+ name=$(basename -- "$root") || die 'installed release name unreadable'
+ case "$name" in 0.1.0-dev-*) ;; *) die 'invalid installed release name' ;; esac
+ suffix=$(printf '%s' "$name" | sed 's/^0.1.0-dev-//')
+ case "$suffix" in ''|*[!0123456789abcdef]*) die 'invalid installed release digest' ;; esac
+ [ "$(printf '%s' "$suffix" | wc -c)" -eq 16 ] ||
+  die 'invalid installed release digest length'
+ check_root_dir "$root"
+ check_root_file "$root/.owner"
+ [ "$(cat "$root/.owner")" = 'AChWorks/server-connect' ] ||
+  die 'installed release owner conflict'
+ if [ -e "$root/checksums.sha256" ] || [ -L "$root/checksums.sha256" ] ||
+    [ -e "$root/manifest.json" ] || [ -L "$root/manifest.json" ]; then
+  verify_release_payload "$root" || die 'installed release checksum conflict'
+  full_identity=$(sha256sum "$root/checksums.sha256" | cut -c 1-16) ||
+   die 'installed release checksum identity unreadable'
+  [ "$full_identity" = "$suffix" ] || die 'installed release full identity changed'
+ else
+  check_root_dir "$root/bin"
+  check_root_dir "$root/THIRD-PARTY-LICENSES"
+  for path in bin/server-connect bin/sing-box bin/libcronet.so THIRD-PARTY-LICENSES/sing-box-LICENSE; do
+   check_root_file "$root/$path"
+  done
+  # The historic release has exactly seven entries: two directories,
+  # four payload files and the owner marker. Any additional entry means
+  # it cannot be safely classified as the old format.
+  legacy_entries=$(find "$root" -mindepth 1 -printf . | wc -c) ||
+   die 'legacy release inventory unavailable'
+  [ "$legacy_entries" -eq 7 ] || die 'unrecognized legacy release layout'
+  legacy_identity=$(
+   cd "$root" &&
+   sha256sum bin/server-connect bin/sing-box |
+    cut -d' ' -f1 | sha256sum | cut -c 1-16
+  ) || die 'legacy release identity unreadable'
+  [ "$legacy_identity" = "$suffix" ] ||
+   die 'unrecognized legacy release binary identity'
+ fi
+)
 # Never canonicalize away a symlinked or replaceable source ancestor.
 # Every component is inspected from / outward, before referencing any
 # payload binary or modifying installed services. A trusted, root-owned,
@@ -59,17 +140,12 @@ check_platform() {
  [ "$(uname -m)" = x86_64 ] || die 'unsupported CPU; this candidate supports only x86_64'
  # Distro/target admission belongs to the verified manager in verify_payload,
  # after ownership/checksums; its bounded OS-identity parser never sources shell.
- need systemctl; need sha256sum; need install; need mktemp; need readlink; need cmp; need mv; need tar; need stat; need flock
+ need systemctl; need sha256sum; need install; need mktemp; need readlink; need cmp; need mv; need tar; need stat; need flock; need find; need basename
  [ -d /run/systemd/system ] || die 'systemd is not PID 1; use a supported systemd host'
 }
 verify_payload() {
- for name in bin/server-connect bin/sing-box bin/libcronet.so server-connect.service server-connect-activation-recover.service server-connect-activation-recover.timer server-connect-smart-tun.service server-connect-smart-health.service server-connect-smart-health.timer install.sh THIRD-PARTY-LICENSES/sing-box-LICENSE manifest.json; do
-  check_root_file "$SOURCE_DIR/$name"
- done
- check_root_file "$SOURCE_DIR/checksums.sha256"
- check_root_dir "$SOURCE_DIR"
  check_root_dir "$(dirname -- "$SOURCE_DIR")"
- (cd "$SOURCE_DIR" && sha256sum --quiet -c checksums.sha256) || die 'bundle checksum mismatch; no changes applied'
+ verify_release_payload "$SOURCE_DIR" >/dev/null || die 'bundle checksum mismatch; no changes applied'
  # The same installer serves both target-specific bundles. The verified
  # manager reads the actual host identity; callers cannot override its OS.
  "$SOURCE_DIR/bin/server-connect" installer-check-target --manifest "$SOURCE_DIR/manifest.json" >/dev/null ||
@@ -203,7 +279,19 @@ check_owned() {
  fi
  if [ -e "$PREFIX/current" ] || [ -L "$PREFIX/current" ]; then
   [ -L "$PREFIX/current" ] || die 'unowned current release path'
-  case "$(readlink "$PREFIX/current")" in releases/[a-zA-Z0-9._-]*) ;; *) die 'invalid current release link' ;; esac
+  existing_target=$(readlink "$PREFIX/current") ||
+   die 'installed release link unreadable'
+  case "$existing_target" in
+   releases/0.1.0-dev-*) ;;
+   *) die 'invalid current release link' ;;
+  esac
+  # Preserve the old canonical link contract: basename() alone accepts
+  # trailing slashes and parent-directory aliases, while a stored symlink
+  # must identify exactly one direct child of the owned releases directory.
+  [ "$existing_target" = "releases/$(basename -- "$existing_target")" ] ||
+   die 'noncanonical current release link'
+  check_root_dir "$PREFIX/releases"
+  verify_installed_release "$PREFIX/$existing_target"
  fi
  if [ -e "$STATE" ] || [ -L "$STATE" ]; then
   check_root_dir "$STATE"
@@ -257,12 +345,7 @@ if [ "$ACTION" = --uninstall ]; then
   for release in "$PREFIX"/releases/*; do
    [ -d "$release" ] || continue
    [ ! -L "$release" ] || die 'unsafe release symlink'
-   [ -f "$release/.owner" ] && [ ! -L "$release/.owner" ] && [ "$(cat "$release/.owner")" = 'AChWorks/server-connect' ] || die 'unowned release content; uninstall aborted'
-   check_dir "$release/bin"
-   check_dir "$release/THIRD-PARTY-LICENSES"
-   for path in bin/server-connect bin/sing-box bin/libcronet.so THIRD-PARTY-LICENSES/sing-box-LICENSE; do
-    [ -f "$release/$path" ] && [ ! -L "$release/$path" ] || die "release content modified: $path"
-   done
+   verify_installed_release "$release" || die 'installed release integrity conflict; uninstall refused'
   done
  fi
  systemctl stop server-connect.service || die 'cannot stop owned proxy; uninstall aborted'
@@ -292,7 +375,10 @@ if [ "$ACTION" = --uninstall ]; then
    [ -d "$release" ] || continue
    [ ! -L "$release" ] || die 'unsafe release symlink retained'
    [ -f "$release/.owner" ] && [ "$(cat "$release/.owner")" = 'AChWorks/server-connect' ] || die 'release ownership conflict; preserve for inspection'
-   rm -f -- "$release/bin/server-connect" "$release/bin/sing-box" "$release/bin/libcronet.so" "$release/THIRD-PARTY-LICENSES/sing-box-LICENSE" "$release/.owner"
+   for path in $(release_payload_files); do
+    rm -f -- "$release/$path" || die 'owned release removal failed'
+   done
+   rm -f -- "$release/checksums.sha256" "$release/.owner" || die 'release marker removal failed'
    rmdir "$release/bin" "$release/THIRD-PARTY-LICENSES" "$release" 2>/dev/null || say "retained modified release at $release"
   done
   rmdir "$PREFIX/releases" 2>/dev/null || true
@@ -311,7 +397,10 @@ require_guard_inactive
 # Bind the installed release identity to the verified exact binary bytes in
 # one assignment. A malformed or absent hash must not be interpreted as a
 # valid named release or proceed into service changes.
-release_name="0.1.0-dev-$(sha256sum "$SOURCE_DIR/bin/server-connect" "$SOURCE_DIR/bin/sing-box" | cut -d' ' -f1 | sha256sum | cut -c 1-16)"
+# Include the complete canonical checksummed payload in the installed
+# identity, not just the manager and core executables. Two distinct bundles
+# with identical binaries but different units/manifest must not collide.
+release_name="0.1.0-dev-$(sha256sum "$SOURCE_DIR/checksums.sha256" | cut -c 1-16)"
 release_suffix=${release_name#0.1.0-dev-}
 case "$release_suffix" in ''|*[!0123456789abcdef]*) die 'candidate binary release digest is invalid' ;; esac
 [ "${#release_suffix}" -eq 16 ] || die 'candidate binary release digest length is invalid'
@@ -329,6 +418,7 @@ fi
 prefix_created=no
 command_created=no
 release_created=no
+release_stage_identity=''
 unit_backup=''
 guard_backup=''
 stage=''
@@ -408,10 +498,23 @@ rollback_candidate() {
     [ -f "$release/.owner" ] &&
     [ "$(cat "$release/.owner")" = 'AChWorks/server-connect' ] &&
     [ "$(readlink "$PREFIX/current" 2>/dev/null)" != "releases/$release_name" ];then
-  rm -f -- "$release/bin/server-connect" "$release/bin/sing-box" "$release/bin/libcronet.so"     "$release/THIRD-PARTY-LICENSES/sing-box-LICENSE" "$release/.owner" ||
-     { say 'RECOVERY_REQUIRED: candidate release file cleanup failed';failed=yes; }
-  rmdir "$release/bin" "$release/THIRD-PARTY-LICENSES" "$release" 2>/dev/null ||
-    { say 'RECOVERY_REQUIRED: candidate release directory retained';failed=yes; }
+  # The create-intent precedes rename. If a different/foreign target appeared
+  # during that window, do not adopt its owner marker and delete its files.
+  if [ -n "$release_stage_identity" ] &&
+     [ "$(stat -c '%d:%i' "$release" 2>/dev/null || :)" = "$release_stage_identity" ] &&
+     verify_release_payload "$release" >/dev/null 2>&1 &&
+     cmp -s "$SOURCE_DIR/checksums.sha256" "$release/checksums.sha256"; then
+   for path in $(release_payload_files); do
+    rm -f -- "$release/$path" || { say 'RECOVERY_REQUIRED: candidate release payload cleanup failed';failed=yes; }
+   done
+   rm -f -- "$release/checksums.sha256" "$release/.owner" ||
+    { say 'RECOVERY_REQUIRED: candidate release marker cleanup failed';failed=yes; }
+   rmdir "$release/bin" "$release/THIRD-PARTY-LICENSES" "$release" 2>/dev/null ||
+     { say 'RECOVERY_REQUIRED: candidate release directory retained';failed=yes; }
+  else
+   say 'RECOVERY_REQUIRED: new release identity uncertain; no cleanup attempted'
+   failed=yes
+  fi
  fi
  if [ "$failed" = no ] && [ "$prefix_created" = yes ];then
   remove_backup
@@ -461,23 +564,45 @@ if [ -e "$release" ] || [ -L "$release" ];then
  [ -f "$release/.owner" ] && [ ! -L "$release/.owner" ] &&
  [ "$(cat "$release/.owner")" = 'AChWorks/server-connect' ] ||
   die 'unowned candidate release directory'
- for path in bin/server-connect bin/sing-box bin/libcronet.so THIRD-PARTY-LICENSES/sing-box-LICENSE;do
-  check_root_file "$release/$path"
+ verify_release_payload "$release" || die 'existing release integrity failed'
+ for path in $(release_payload_files); do
   cmp -s "$SOURCE_DIR/$path" "$release/$path" || die "existing release differs from candidate: $path"
  done
+ cmp -s "$SOURCE_DIR/checksums.sha256" "$release/checksums.sha256" ||
+  die 'existing release checksum manifest differs from candidate'
 else
  stage=$(mktemp -d "$PREFIX/releases/.stage.XXXXXXXX") || die 'cannot stage release'
  install -d -m 0755 "$stage/bin" "$stage/THIRD-PARTY-LICENSES"
- install -m 0755 "$SOURCE_DIR/bin/server-connect" "$stage/bin/server-connect"
- install -m 0755 "$SOURCE_DIR/bin/sing-box" "$stage/bin/sing-box"
- install -m 0644 "$SOURCE_DIR/bin/libcronet.so" "$stage/bin/libcronet.so"
- install -m 0644 "$SOURCE_DIR/THIRD-PARTY-LICENSES/sing-box-LICENSE" "$stage/THIRD-PARTY-LICENSES/sing-box-LICENSE"
+ for path in $(release_payload_files); do
+  mode=0644
+  case "$path" in bin/server-connect|bin/sing-box|install.sh) mode=0755 ;; esac
+  install -m "$mode" "$SOURCE_DIR/$path" "$stage/$path" ||
+   die 'cannot stage checked release payload'
+ done
+ install -m 0644 "$SOURCE_DIR/checksums.sha256" "$stage/checksums.sha256" ||
+  die 'cannot stage release checksum manifest'
  printf 'AChWorks/server-connect\n' > "$stage/.owner"
  chmod 0644 "$stage/.owner"
  chmod 0755 "$stage"
- mv -- "$stage" "$release"
- stage=''
+ verify_release_payload "$stage" || die 'staged release integrity failed'
+ # Mark the intended new release for rollback BEFORE publishing the final
+ # directory. A signal between a successful rename and the next statement
+ # must not orphan an unchecked release: cleanup still verifies its exact
+ # owner and refuses any current-link consumer. The dev+inode receipt
+ # distinguishes THIS renamed directory from an identical foreign candidate
+ # that raced into the release name between preflight and publication.
+ release_stage_identity=$(stat -c '%d:%i' "$stage") ||
+  die 'staged release filesystem identity unavailable'
+ [ -n "$release_stage_identity" ] || die 'staged release identity empty'
  release_created=yes
+ # A foreign directory can appear even after the earlier absence check.
+ # GNU mv -n refuses to replace it; verify identity because -n may return
+ # success without moving anything. Both paths are on the same filesystem.
+ mv -Tn -- "$stage" "$release" ||
+  die 'candidate release publication failed'
+ [ "$(stat -c '%d:%i' "$release" 2>/dev/null || :)" = "$release_stage_identity" ] ||
+  die 'release name collision; foreign directory preserved'
+ stage=''
 fi
 chmod 0755 "$release"
 if [ ! -d "$STATE/profiles" ];then install -d -m 0700 "$STATE/profiles";fi

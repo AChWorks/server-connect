@@ -41,8 +41,23 @@ The builder accepts exactly these target identities; omitting its optional targe
 
 After verifying payload ownership and checksums, the installer uses the bundled manager to bind a bounded, unambiguous manifest to the **actual** Debian version and native Linux/amd64 host. Opposite-version, missing, malformed, duplicate and unsupported targets fail before product state or service changes. This read-only check needs no Python dependency or host-version override. It is not publisher authentication or a general ABI/transport support claim. Recovery and inspection of existing native records retain their own ownership checks; the additional Debian 13 restriction applies to new trial activation.
 
+### Installed development-release audit
+
+A successful QA offline install retains the **complete checksum-covered bundle** (including `manifest.json`, `checksums.sha256`, managed service templates and original installer) in its selected `/opt/server-connect/releases/<id>/` directory. The release suffix derives from the digest of the **entire checksum manifest**, not just executable hashes: different source metadata or managed unit bytes cannot silently reuse the same installed identity. Existing pre-change development releases lack this metadata and remain supported as rollback/uninstall predecessors **only if their original binary-derived release-name digest and exact seven-entry historic owned layout match**. Absence of both modern metadata files is never, by itself, sufficient legacy evidence: an incomplete modern release with remaining unit/install files fails preflight before any service change, including on uninstall. Unrecognized or partially damaged legacy directories require controlled recovery, not implicit repair or deletion. Genuine legacy predecessors are **not** source-exact audit successes.
+
+On an authorized installed QA host, inspect without changing networking:
+
+```console
+readlink /opt/server-connect/current
+(cd /opt/server-connect/current && sha256sum --strict --quiet --check checksums.sha256)
+cat /opt/server-connect/current/manifest.json
+sha256sum /opt/server-connect/current/checksums.sha256
+```
+
+For a meaningful source/build claim, independently compare the installed checksum-manifest digest, manifest source revision/target and original pinned QA archive against the **externally recorded expected artifact identity**. A successful self-contained checksum audit proves only that the stored files agree with their local checksums: it is **not publisher authentication**, a public release signature, source reproducibility, validated network locality, production support or Smart Routing proof. Installed-host tests additionally compare package-provided identities and verify lifecycle/rollback. Corrupt checksum-bearing installed releases fail closed before reuse/uninstall; controlled recovery requires exact independently verified bytes. Private profiles and unrelated systemd/network resources are excluded from the public release snapshot.
+
 Online `--verify-only` validates acquisition, digest, archive bounds and required layout only. It neither executes the bundled manager/core/installer nor proves target installability; a layout-valid archive for another target can pass this acquisition check and must still be refused by installation.
 
-Relevant test entry points: `scripts/test_bootstrap_online.py`, `scripts/qa/test-package-targets.py`, `scripts/qa/test-online-minimal-host.sh`, `scripts/qa/test-installed-host.sh`, and `.github/workflows/installed-host-qa.yml`. The disconnected QA uses Docker/systemd and a local loopback test source; it does **not** establish official publisher authenticity, an Iranian public mirror, field-host access or a stable release. The separately authorized real-host driver and its evidence limits are described in [Acceptance](ACCEPTANCE.md#existing-tests-and-their-limits).
+Relevant test entry points: `scripts/test_bootstrap_online.py`, `scripts/qa/test-package-targets.py`, `scripts/qa/test-installed-release-provenance.py`, `scripts/qa/test-online-minimal-host.sh`, `scripts/qa/test-installed-host.sh`, and `.github/workflows/installed-host-qa.yml`. The disconnected QA uses Docker/systemd and a local loopback test source; it does **not** establish official publisher authenticity, an Iranian public mirror, field-host access or a stable release. The separately authorized real-host driver and its evidence limits are described in [Acceptance](ACCEPTANCE.md#existing-tests-and-their-limits).
 
 A release must publish reproducible per-target archive identity, signature/public-key verification procedure, tested OS/arch and upstream versions, upstream license compliance, installation commands for **all three choices**, and matching user-visible update/uninstall instructions. See [release acceptance](ACCEPTANCE.md).
