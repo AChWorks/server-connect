@@ -74,6 +74,48 @@ verify_release_payload() (
  (cd "$root" && sha256sum --strict --quiet -c checksums.sha256) ||
   die 'release checksum mismatch; no mutation permitted'
 )
+# A missing modern manifest is NOT evidence of a legacy release. The old
+# installer used only four payload files, a .owner marker and an ID derived
+# from the manager/core binary digests. Admit exactly that format.
+verify_installed_release() (
+ root=$1
+ name=$(basename -- "$root") || die 'installed release name unreadable'
+ case "$name" in 0.1.0-dev-*) ;; *) die 'invalid installed release name' ;; esac
+ suffix=$(printf '%s' "$name" | sed 's/^0.1.0-dev-//')
+ case "$suffix" in ''|*[!0123456789abcdef]*) die 'invalid installed release digest' ;; esac
+ [ "$(printf '%s' "$suffix" | wc -c)" -eq 16 ] ||
+  die 'invalid installed release digest length'
+ check_root_dir "$root"
+ check_root_file "$root/.owner"
+ [ "$(cat "$root/.owner")" = 'AChWorks/server-connect' ] ||
+  die 'installed release owner conflict'
+ if [ -e "$root/checksums.sha256" ] || [ -L "$root/checksums.sha256" ] ||
+    [ -e "$root/manifest.json" ] || [ -L "$root/manifest.json" ]; then
+  verify_release_payload "$root" || die 'installed release checksum conflict'
+  full_identity=$(sha256sum "$root/checksums.sha256" | cut -c 1-16) ||
+   die 'installed release checksum identity unreadable'
+  [ "$full_identity" = "$suffix" ] || die 'installed release full identity changed'
+ else
+  check_root_dir "$root/bin"
+  check_root_dir "$root/THIRD-PARTY-LICENSES"
+  for path in bin/server-connect bin/sing-box bin/libcronet.so THIRD-PARTY-LICENSES/sing-box-LICENSE; do
+   check_root_file "$root/$path"
+  done
+  # The historic release has exactly seven entries: two directories,
+  # four payload files and the owner marker. Any additional entry means
+  # it cannot be safely classified as the old format.
+  legacy_entries=$(find "$root" -mindepth 1 -printf . | wc -c) ||
+   die 'legacy release inventory unavailable'
+  [ "$legacy_entries" -eq 7 ] || die 'unrecognized legacy release layout'
+  legacy_identity=$(
+   cd "$root" &&
+   sha256sum bin/server-connect bin/sing-box |
+    cut -d' ' -f1 | sha256sum | cut -c 1-16
+  ) || die 'legacy release identity unreadable'
+  [ "$legacy_identity" = "$suffix" ] ||
+   die 'unrecognized legacy release binary identity'
+ fi
+)
 # Never canonicalize away a symlinked or replaceable source ancestor.
 # Every component is inspected from / outward, before referencing any
 # payload binary or modifying installed services. A trusted, root-owned,
@@ -98,7 +140,7 @@ check_platform() {
  [ "$(uname -m)" = x86_64 ] || die 'unsupported CPU; this candidate supports only x86_64'
  # Distro/target admission belongs to the verified manager in verify_payload,
  # after ownership/checksums; its bounded OS-identity parser never sources shell.
- need systemctl; need sha256sum; need install; need mktemp; need readlink; need cmp; need mv; need tar; need stat; need flock
+ need systemctl; need sha256sum; need install; need mktemp; need readlink; need cmp; need mv; need tar; need stat; need flock; need find; need basename
  [ -d /run/systemd/system ] || die 'systemd is not PID 1; use a supported systemd host'
 }
 verify_payload() {
@@ -243,28 +285,7 @@ check_owned() {
    releases/0.1.0-dev-*) ;;
    *) die 'invalid current release link' ;;
   esac
-  existing_suffix=$(printf '%s' "$existing_target" | sed 's%^releases/0.1.0-dev-%%')
-  case "$existing_suffix" in ''|*[!0123456789abcdef]*) die 'invalid installed release digest' ;; esac
-  [ "$(printf '%s' "$existing_suffix" | wc -c)" -eq 16 ] ||
-   die 'invalid installed release digest length'
-  existing_dir="$PREFIX/$existing_target"
-  check_root_dir "$existing_dir"
-  check_root_file "$existing_dir/.owner"
-  [ "$(cat "$existing_dir/.owner")" = 'AChWorks/server-connect' ] ||
-   die 'installed release owner conflict'
-  if [ -e "$existing_dir/checksums.sha256" ] || [ -L "$existing_dir/checksums.sha256" ] ||
-     [ -e "$existing_dir/manifest.json" ] || [ -L "$existing_dir/manifest.json" ]; then
-   verify_release_payload "$existing_dir" || die 'installed bundle integrity conflict'
-   existing_identity=$(sha256sum "$existing_dir/checksums.sha256" | cut -c 1-16)
-   [ "$existing_identity" = "$existing_suffix" ] ||
-    die 'installed bundle identity changed'
-  else
-   # Legacy development layout has only binaries and license; preserve it
-   # for explicit rollback/uninstall but NEVER report source-exact identity.
-   for path in bin/server-connect bin/sing-box bin/libcronet.so THIRD-PARTY-LICENSES/sing-box-LICENSE; do
-    check_root_file "$existing_dir/$path"
-   done
-  fi
+  verify_installed_release "$PREFIX/$existing_target"
  fi
  if [ -e "$STATE" ] || [ -L "$STATE" ]; then
   check_root_dir "$STATE"
@@ -318,18 +339,7 @@ if [ "$ACTION" = --uninstall ]; then
   for release in "$PREFIX"/releases/*; do
    [ -d "$release" ] || continue
    [ ! -L "$release" ] || die 'unsafe release symlink'
-   [ -f "$release/.owner" ] && [ ! -L "$release/.owner" ] && [ "$(cat "$release/.owner")" = 'AChWorks/server-connect' ] || die 'unowned release content; uninstall aborted'
-   check_dir "$release/bin"
-   check_dir "$release/THIRD-PARTY-LICENSES"
-   if [ -e "$release/checksums.sha256" ] || [ -L "$release/checksums.sha256" ] ||
-      [ -e "$release/manifest.json" ] || [ -L "$release/manifest.json" ]; then
-    verify_release_payload "$release" || die 'installed release checksum conflict; uninstall refused'
-   else
-    # Backward-compatible removal of pre-provenance development releases.
-    for path in bin/server-connect bin/sing-box bin/libcronet.so THIRD-PARTY-LICENSES/sing-box-LICENSE; do
-     check_root_file "$release/$path"
-    done
-   fi
+   verify_installed_release "$release" || die 'installed release integrity conflict; uninstall refused'
   done
  fi
  systemctl stop server-connect.service || die 'cannot stop owned proxy; uninstall aborted'

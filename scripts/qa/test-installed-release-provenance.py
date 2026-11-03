@@ -26,6 +26,8 @@ FUNCTIONS = (
     + "\n"
     + extract("verify_release_payload() (\n", "\n)\n")
     + "\n"
+    + extract("verify_installed_release() (\n", "\n)\n")
+    + "\n"
     + extract("check_owned() {\n", "\n}\n")
     + "\n"
     + extract("rollback_candidate() {\n", "\n}\n")
@@ -41,6 +43,10 @@ RELEASE_ASSIGNMENT = [line for line in INSTALLER.splitlines()
 assert len(RELEASE_ASSIGNMENT) == 1
 assert 'sha256sum "$SOURCE_DIR/checksums.sha256" | cut -c 1-16' in RELEASE_ASSIGNMENT[0]
 assert 'release_created=yes' in STAGING
+assert INSTALLER.count('verify_installed_release "$PREFIX/$existing_target"') == 1
+uninstall_section = INSTALLER.split('if [ "$ACTION" = --uninstall ]; then', 1)[1]
+assert 'verify_installed_release "$release"' in uninstall_section.split(
+    'systemctl stop server-connect.service', 1)[0]
 
 FILES = (
     "bin/server-connect",
@@ -121,6 +127,29 @@ class ReleasePayloadTests(unittest.TestCase):
     def audit(self, path, expected=0):
         return self.shell('verify_release_payload "' + str(path) + '"\n',
                           expected=expected)
+
+    def installed_audit(self, path, expected=0):
+        # Both current-link preflight and uninstall use this actual helper.
+        return self.shell('verify_installed_release "' + str(path) + '"\n',
+                          expected=expected)
+
+    def make_historic_legacy_release(self):
+        manager = self.source / "bin/server-connect"
+        core = self.source / "bin/sing-box"
+        # EXACT original release naming formula in the installer before
+        # provenance retention: SHA256 of two newline-delimited SHA256 words.
+        suffix = hashlib.sha256(
+            (hashlib.sha256(manager.read_bytes()).hexdigest() + "\n" +
+             hashlib.sha256(core.read_bytes()).hexdigest() + "\n").encode()
+        ).hexdigest()[:16]
+        release = self.prefix / "releases" / ("0.1.0-dev-" + suffix)
+        (release / "bin").mkdir(parents=True)
+        (release / "THIRD-PARTY-LICENSES").mkdir()
+        for name in ("bin/server-connect", "bin/sing-box", "bin/libcronet.so",
+                     "THIRD-PARTY-LICENSES/sing-box-LICENSE"):
+            (release / name).write_bytes((self.source / name).read_bytes())
+        (release / ".owner").write_text("AChWorks/server-connect\n")
+        return release
 
     def test_complete_bundle_retained_and_bit_identical(self):
         release = self.publish()
@@ -217,17 +246,71 @@ class ReleasePayloadTests(unittest.TestCase):
         release.rename(renamed)
         self.owned_current(renamed, expected=21)
 
-    def test_legacy_release_remains_accepted_but_partial_metadata_refused(self):
-        release = self.prefix / "releases" / ("0.1.0-dev-" + "a" * 16)
-        (release / "bin").mkdir(parents=True)
-        (release / "THIRD-PARTY-LICENSES").mkdir()
-        for name in ("bin/server-connect", "bin/sing-box", "bin/libcronet.so",
-                     "THIRD-PARTY-LICENSES/sing-box-LICENSE"):
-            (release / name).write_bytes((self.source / name).read_bytes())
-        (release / ".owner").write_text("AChWorks/server-connect\n")
+    def test_genuine_legacy_identity_and_exact_layout_remain_accepted(self):
+        release = self.make_historic_legacy_release()
         self.owned_current(release)
-        (release / "manifest.json").write_bytes((self.source / "manifest.json").read_bytes())
+        self.installed_audit(release)
+        self.assertEqual(len(list(release.rglob("*"))), 7)
+        self.assertFalse((release / "checksums.sha256").exists())
+
+    def test_legacy_partial_metadata_and_nonlegacy_additions_are_refused(self):
+        release = self.make_historic_legacy_release()
+        self.owned_current(release)
+        for path in ("manifest.json", "checksums.sha256", "install.sh",
+                     "server-connect.service", "unrelated-foreign-resource"):
+            extra = release / path
+            extra.write_bytes((self.source / "manifest.json").read_bytes())
+            self.owned_current(release, expected=21)
+            self.installed_audit(release, expected=21)
+            extra.unlink()
+            self.owned_current(release)
+
+    def test_invalid_or_modified_legacy_binary_identity_is_refused(self):
+        release = self.make_historic_legacy_release()
+        self.owned_current(release)
+        (release / "bin/server-connect").write_bytes(b"changed legacy manager")
         self.owned_current(release, expected=21)
+        self.installed_audit(release, expected=21)
+        (release / "bin/server-connect").write_bytes((self.source / "bin/server-connect").read_bytes())
+        self.owned_current(release)
+        renamed = self.prefix / "releases" / ("0.1.0-dev-" + "f" * 16)
+        release.rename(renamed)
+        self.owned_current(renamed, expected=21)
+        self.installed_audit(renamed, expected=21)
+
+    def test_missing_modern_metadata_fails_preflight_and_uninstall_audit(self):
+        release = self.publish()
+        self.owned_current(release)
+        original = {name: (release / name).read_bytes()
+                    for name in ("checksums.sha256", "manifest.json")}
+        sentinel = self.root / "unrelated-foreign-resource"
+        sentinel.write_bytes(b"keep-this-foreign-resource")
+        original_target = (self.prefix / "current").readlink()
+        manager = (release / "bin/server-connect").read_bytes()
+        for removed in (("checksums.sha256",), ("manifest.json",),
+                        ("checksums.sha256", "manifest.json")):
+            with self.subTest(removed=removed):
+                for name in removed:
+                    (release / name).unlink()
+                self.owned_current(release, expected=21)
+                self.installed_audit(release, expected=21)
+                self.assertEqual((self.prefix / "current").readlink(),
+                                 original_target)
+                self.assertEqual(sentinel.read_bytes(), b"keep-this-foreign-resource")
+                self.assertEqual((release / "bin/server-connect").read_bytes(),
+                                 manager)
+                for name in removed:
+                    (release / name).write_bytes(original[name])
+                self.owned_current(release)
+        # Same corrupt modern format, additionally corrupt one remaining
+        # required payload; legacy fallback must not revive it.
+        for name in original:
+            (release / name).unlink()
+        (release / "bin/server-connect").write_bytes(b"unauthorized change")
+        self.owned_current(release, expected=21)
+        self.installed_audit(release, expected=21)
+        self.assertEqual(sentinel.read_bytes(), b"keep-this-foreign-resource")
+        self.assertEqual((self.prefix / "current").readlink(), original_target)
 
     def test_current_symlink_escape_is_rejected(self):
         (self.prefix / ".owner").write_text("AChWorks/server-connect\n")
