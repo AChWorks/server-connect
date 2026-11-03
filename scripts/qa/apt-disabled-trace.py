@@ -29,11 +29,13 @@ class TraceFailure(ValueError):
 DISABLED = ("ftp", "rsh", "ssh", "mirror+ftp")
 DISABLED_PATH = "/usr/lib/apt/methods/false"
 
-# x86_64 Linux UAPI: nanosleep=35, getpid=39, futex=202,
-# epoll_pwait=281. These cannot create sockets, execute a helper or fork.
-# This is not permission to ignore an arbitrary unknown syscall.
+# x86_64 Linux UAPI: sched_yield=24, nanosleep=35, getpid=39,
+# futex=202, epoll_pwait=281. These scheduling/wait/query syscalls cannot
+# create sockets, execute a helper or fork. Recognition is restricted to
+# the verified x86_64 ABI and a matching terminal exit receipt; unknown
+# syscalls, missing receipts and every network/exec/fork event still fail.
 # https://github.com/torvalds/linux/tree/master/tools/arch/x86/include/uapi/asm
-VERIFIED_TERMINAL_SYSCALLS_X86_64 = frozenset({35, 39, 202, 281})
+VERIFIED_TERMINAL_SYSCALLS_X86_64 = frozenset({24, 35, 39, 202, 281})
 
 
 def verified_opaque_exit(number: int | None) -> bool:
