@@ -192,6 +192,20 @@ class ReleasePayloadTests(unittest.TestCase):
         current.symlink_to("releases/" + release.name)
         return self.shell("check_owned\n", expected=expected)
 
+    def test_unterminated_malformed_trailer_rejected_by_strict_checksum_parser(self):
+        release = self.publish()
+        checksums = release / "checksums.sha256"
+        canonical = checksums.read_bytes()
+        assert canonical.endswith(b"\n") and canonical.count(b"\n") == len(FILES)
+        # GNU sha256sum -c exits ZERO on a malformed trailing line unless
+        # --strict is used. The 12 canonical lines remain intact, so merely
+        # counting newline bytes or matching parsed filenames is insufficient.
+        checksums.write_bytes(canonical + b"malformed-end-without-newline")
+        reply = self.audit(release, expected=21)
+        self.assertIn("release checksum mismatch", reply.stderr)
+        checksums.write_bytes(canonical)
+        self.audit(release)
+
     def test_current_release_audit_and_tamper_refusal_before_lifecycle(self):
         release = self.publish()
         self.owned_current(release)

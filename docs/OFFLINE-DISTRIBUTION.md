@@ -49,7 +49,7 @@ On an authorized installed QA host, inspect without changing networking:
 
 ```console
 readlink /opt/server-connect/current
-(cd /opt/server-connect/current && sha256sum --quiet --check checksums.sha256)
+(cd /opt/server-connect/current && sha256sum --strict --quiet --check checksums.sha256)
 cat /opt/server-connect/current/manifest.json
 sha256sum /opt/server-connect/current/checksums.sha256
 ```

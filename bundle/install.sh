@@ -71,7 +71,7 @@ verify_release_payload() (
  [ "$expected" = "$actual" ] &&
  [ "$(wc -l < "$root/checksums.sha256")" -eq 12 ] ||
   die 'release checksum manifest does not cover the exact owned payload'
- (cd "$root" && sha256sum --quiet -c checksums.sha256) ||
+ (cd "$root" && sha256sum --strict --quiet -c checksums.sha256) ||
   die 'release checksum mismatch; no mutation permitted'
 )
 # Never canonicalize away a symlinked or replaceable source ancestor.

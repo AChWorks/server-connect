@@ -317,7 +317,7 @@ docker exec "$container" /bin/sh -c '
       -C "/root/server-connect-$variant" \
       --strip-components=1 --no-same-owner --no-same-permissions
     (cd "/root/server-connect-$variant" &&
-      sha256sum --quiet --check checksums.sha256)
+      sha256sum --strict --quiet --check checksums.sha256)
   done
 '
 offline_before=$(network_digest)
@@ -374,7 +374,7 @@ verify_direct_install() {
     # manifest/checksums. Only the external archive signature can prove trust.
     test -f /opt/server-connect/current/manifest.json
     test -f /opt/server-connect/current/checksums.sha256
-    (cd /opt/server-connect/current && sha256sum --quiet -c checksums.sha256)
+    (cd /opt/server-connect/current && sha256sum --strict --quiet -c checksums.sha256)
     identity=$(sha256sum /opt/server-connect/current/checksums.sha256 | cut -c 1-16)
     test "$(readlink /opt/server-connect/current)" = "releases/0.1.0-dev-$identity"
     test "$(systemctl show server-connect.service -p LoadState --value)" = loaded
@@ -586,7 +586,7 @@ docker exec "$container" /bin/sh -c '
   test ! -e /var/lib/server-connect
   test ! -e /usr/local/bin/server-connect
   mv /root/server-connect/bin/sing-box.qa-hidden /root/server-connect/bin/sing-box
-  (cd /root/server-connect && sha256sum --quiet --check checksums.sha256)
+  (cd /root/server-connect && sha256sum --strict --quiet --check checksums.sha256)
 '
 assert_network_unchanged missing-core "$offline_before"
 verify_host_services missing-core
