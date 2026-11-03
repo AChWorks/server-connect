@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"strings"
+	"unicode"
 	"unicode/utf8"
 )
 
@@ -51,9 +52,10 @@ func scanStrictJournalValue(decoder *json.Decoder, depth int, budget *int) error
 			if err != nil || !ok {
 				return activationJournalError("journal JSON object member is invalid")
 			}
-			// Case-folding is intentionally conservative for opaque
-			// kernel resource evidence as well as known schema keys.
-			folded := strings.ToLower(key)
+			// Match encoding/json struct-field case equivalence, including
+			// Unicode SimpleFold cycles (e.g. 's' and long-s). ToLower
+			// alone can leave ambiguities undetected.
+			folded := foldStrictJSONMemberKey(key)
 			if seen[folded] {
 				return activationJournalError("journal JSON contains duplicate or case-ambiguous object members")
 			}
@@ -80,6 +82,33 @@ func scanStrictJournalValue(decoder *json.Decoder, depth int, budget *int) error
 		return activationJournalError("journal JSON has unexpected structural token")
 	}
 	return nil
+}
+
+// foldStrictJSONMemberKey mirrors the key equivalence in encoding/json's
+// foldName: ASCII letters fold to upper case, and non-ASCII runes to the
+// lowest member of their unicode.SimpleFold cycle. This is linear in the
+// existing bounded input length and avoids quadratic sibling comparisons.
+func foldStrictJSONMemberKey(key string) string {
+	var out strings.Builder
+	out.Grow(len(key))
+	for _, r := range key {
+		if r < utf8.RuneSelf {
+			if r >= 'a' && r <= 'z' {
+				r -= 'a' - 'A'
+			}
+		} else {
+			for {
+				next := unicode.SimpleFold(r)
+				if next <= r {
+					r = next
+					break
+				}
+				r = next
+			}
+		}
+		out.WriteRune(r)
+	}
+	return out.String()
 }
 
 var activationJournalFields = map[string]bool{

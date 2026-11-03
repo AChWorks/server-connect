@@ -158,3 +158,23 @@ func TestPinnedVLESSNativePreviewRejectsUntrustedOrDriftingInput(t *testing.T) {
 		t.Fatal("oversized pin accepted")
 	}
 }
+
+// The host-readiness selector is shared with compile-only native projection.
+// A standalone alias must not make the in-memory preview claim a supported
+// wire identity or mutate the source profile.
+func TestPinnedVLESSNativePreviewRejectsNoncanonicalSelectedKeysWithoutMutation(t *testing.T) {
+	for _, outbound := range []string{
+		`{"type":"vless","server":"node.example.org","server_port":443,"Bind_Interface":"tun0"}`,
+		`{"type":"vless","\u017ferver":"node.example.org","server_port":443}`,
+		`{"type":"vless","server":"node.example.org","server_port":443,"tls":{"enabled":true,"Server_Name":"front.example.net"}}`,
+		`{"type":"vless","server":"node.example.org","server_port":443,"tls":{"enabled":true,"utls":{"Fingerprint":"chrome"}}}`,
+		`{"type":"vless","server":"node.example.org","server_port":443,"server":"node.example.org","\u017ferver":"other.example.org"}`,
+	} {
+		p := Profile{Outbound: json.RawMessage(outbound)}
+		before := append([]byte(nil), p.Outbound...)
+		if _, err := projectPinnedVLESSNativePreview(p, "8.8.8.8"); err == nil ||
+			!bytes.Equal(p.Outbound, before) {
+			t.Fatal("noncanonical preview input was admitted or mutated the source")
+		}
+	}
+}

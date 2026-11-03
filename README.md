@@ -62,10 +62,12 @@ Before sending DNS queries or a TCP SYN, each flow-qualified probe enforces
 the expected underlay interface; a mismatch or changed route/policy cannot
 trigger an unbound fallback. Only plain VLESS TCP and explicitly supported
 TCP-based WebSocket, HTTPUpgrade and HTTP transports receive TCP-stage evidence.
-QUIC/UDP, unknown transports, active alternate dial-path selectors and
-ambiguous/duplicate selected-profile JSON (including nested or case-aliased
-members) are rejected before DNS or socket probes. The pinned resolver stage
-requires observed name resolution as well as an exact matching result. These
+QUIC/UDP, unknown transports, active alternate dial-path selectors,
+ambiguous/duplicate selected-profile JSON (including Unicode case-folded
+collisions), and noncanonical spellings of known path-control, transport or TLS
+keys are rejected before DNS or socket probes. Opaque HTTP header names and
+unrelated imported metadata retain their permitted spelling. The pinned
+resolver stage requires observed name resolution and an exact matching result. These
 observations do not prove authenticated selected transport health or future
 route stability. Endpoint and management-peer route observations must select
 the expected underlay interface; wrong, ambiguous or malformed kernel routes

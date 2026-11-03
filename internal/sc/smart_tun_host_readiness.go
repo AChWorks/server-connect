@@ -45,12 +45,85 @@ func defaultSmartTUNHostReadinessProbes() smartTUNHostReadinessProbes {
 	}
 }
 
+// canonicalSelectedKeys rejects only case-folded aliases of known path
+// controls; unrelated imported-profile metadata remains untouched. Header
+// names are opaque HTTP data, not field aliases, and are not inspected here.
+func canonicalSelectedKeys(fields map[string]json.RawMessage, known []string) bool {
+	for key := range fields {
+		for _, canonical := range known {
+			if key != canonical && strings.EqualFold(key, canonical) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+var selectedOutboundKeys = []string{
+	"type", "tag", "server", "server_port", "uuid", "flow", "network",
+	"tls", "transport", "packet_encoding",
+	"detour", "bind_interface", "inet4_bind_address", "inet6_bind_address",
+	"routing_mark", "netns", "domain_resolver", "domain_strategy",
+	"network_strategy", "network_type", "fallback_network_type",
+	"fallback_delay", "bind_address_no_port", "tcp_multi_path",
+}
+
+var selectedTransportKeys = []string{
+	"type", "path", "host", "headers", "max_early_data",
+	"early_data_header_name", "method", "idle_timeout", "ping_timeout",
+}
+
+var selectedTLSKeys = []string{
+	"enabled", "server_name", "alpn", "insecure", "disable_sni",
+	"min_version", "max_version", "cipher_suites",
+	"certificate", "certificate_path", "certificate_public_key_sha256",
+	"client_certificate", "client_key", "client_certificate_path", "client_key_path",
+	"utls", "reality", "ech", "fragment", "fragment_fallback_delay",
+	"record_fragment", "zero_rtt_handshake", "session_resumption",
+}
+
+// A selected TLS object is not proof of a functioning TLS handshake,
+// but recognized TLS field aliases must not silently differ from the
+// native compiler's canonical field map. Known nested path selectors
+// follow the same rule; arbitrary opaque extension data is not rewritten.
+func canonicalSelectedTLS(raw json.RawMessage) bool {
+	var tls map[string]json.RawMessage
+	if json.Unmarshal(raw, &tls) != nil {
+		return false
+	}
+	if tls == nil {
+		return true
+	}
+	if !canonicalSelectedKeys(tls, selectedTLSKeys) {
+		return false
+	}
+	for name, known := range map[string][]string{
+		"utls":    {"enabled", "fingerprint"},
+		"reality": {"enabled", "public_key", "short_id"},
+		"ech":     {"enabled", "config", "config_path", "pq_signature_schemes_enabled"},
+	} {
+		if nested, ok := tls[name]; ok {
+			var object map[string]json.RawMessage
+			if json.Unmarshal(nested, &object) != nil ||
+				(object != nil && !canonicalSelectedKeys(object, known)) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
 // supportedSelectedTransport validates the selected TCP transport's known
 // sing-box 1.14 fields. Importing arbitrary outbound JSON is permitted by
 // profile storage, so recognizing a type string alone is insufficient.
 func supportedSelectedTransport(raw json.RawMessage) (string, bool) {
 	if len(raw) == 0 {
 		return "tcp", true
+	}
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(raw, &fields) != nil || fields == nil ||
+		!canonicalSelectedKeys(fields, selectedTransportKeys) {
+		return "", false
 	}
 	var t struct {
 		Type string `json:"type"`
@@ -94,10 +167,6 @@ func supportedSelectedTransport(raw json.RawMessage) (string, bool) {
 	decoder := json.NewDecoder(bytes.NewReader(raw))
 	decoder.DisallowUnknownFields()
 	if decoder.Decode(shape) != nil {
-		return "", false
-	}
-	var fields map[string]json.RawMessage
-	if json.Unmarshal(raw, &fields) != nil {
 		return "", false
 	}
 	if v, has := fields["host"]; has && t.Type == "http" && !validTransportStringList(v) {
@@ -145,14 +214,20 @@ func selectedSmartTUNHostEndpoint(profile Profile, pinned netip.Addr) (kind, hos
 	// The native compiler refuses case-folded or duplicate JSON members.
 	// A read-only TCP diagnostic must not report a clean selected dial path
 	// for the same ambiguous profile before any DNS or socket probe.
-	if rejectAmbiguousJournalJSON(profile.Outbound) != nil ||
-		json.Unmarshal(profile.Outbound, &outbound) != nil ||
-		outbound.Type != "vless" || outbound.ServerPort < 1 || outbound.ServerPort > 65535 ||
-		(outbound.Network != "" && outbound.Network != "tcp") {
+	if rejectAmbiguousJournalJSON(profile.Outbound) != nil {
 		return unsupported()
 	}
 	var fields map[string]json.RawMessage
-	if json.Unmarshal(profile.Outbound, &fields) != nil {
+	if json.Unmarshal(profile.Outbound, &fields) != nil || fields == nil ||
+		!canonicalSelectedKeys(fields, selectedOutboundKeys) {
+		return unsupported()
+	}
+	if tls, present := fields["tls"]; present && !canonicalSelectedTLS(tls) {
+		return unsupported()
+	}
+	if json.Unmarshal(profile.Outbound, &outbound) != nil ||
+		outbound.Type != "vless" || outbound.ServerPort < 1 || outbound.ServerPort > 65535 ||
+		(outbound.Network != "" && outbound.Network != "tcp") {
 		return unsupported()
 	}
 	// These sing-box Dial Fields can independently redirect, mark, bind or
