@@ -363,6 +363,18 @@ class ReleasePayloadTests(unittest.TestCase):
         self.assertTrue(release.is_dir())
         self.audit(release)
 
+    def test_noncanonical_current_release_target_is_refused(self):
+        release = self.publish()
+        (self.prefix / ".owner").write_text("AChWorks/server-connect\n")
+        current = self.prefix / "current"
+        for target in ("releases/" + release.name + "/",
+                       "releases//" + release.name,
+                       "releases/./" + release.name):
+            if current.is_symlink():
+                current.unlink()
+            current.symlink_to(target)
+            self.shell("check_owned\n", expected=21)
+
     def test_installed_service_template_tampering_is_detected(self):
         release = self.publish()
         self.owned_current(release)

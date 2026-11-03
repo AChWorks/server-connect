@@ -285,6 +285,12 @@ check_owned() {
    releases/0.1.0-dev-*) ;;
    *) die 'invalid current release link' ;;
   esac
+  # Preserve the old canonical link contract: basename() alone accepts
+  # trailing slashes and parent-directory aliases, while a stored symlink
+  # must identify exactly one direct child of the owned releases directory.
+  [ "$existing_target" = "releases/$(basename -- "$existing_target")" ] ||
+   die 'noncanonical current release link'
+  check_root_dir "$PREFIX/releases"
   verify_installed_release "$PREFIX/$existing_target"
  fi
  if [ -e "$STATE" ] || [ -L "$STATE" ]; then
