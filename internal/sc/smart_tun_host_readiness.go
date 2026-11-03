@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"net/netip"
+	"reflect"
 	"strings"
 )
 
@@ -141,7 +142,11 @@ func selectedSmartTUNHostEndpoint(profile Profile, pinned netip.Addr) (kind, hos
 	unsupported := func() (string, string, string, int, error) {
 		return "", "", "", 0, Fault("selected_transport_unsupported", "selected VLESS transport or alternate dial path is not supported by the TCP diagnostic")
 	}
-	if json.Unmarshal(profile.Outbound, &outbound) != nil ||
+	// The native compiler refuses case-folded or duplicate JSON members.
+	// A read-only TCP diagnostic must not report a clean selected dial path
+	// for the same ambiguous profile before any DNS or socket probe.
+	if rejectAmbiguousJournalJSON(profile.Outbound) != nil ||
+		json.Unmarshal(profile.Outbound, &outbound) != nil ||
 		outbound.Type != "vless" || outbound.ServerPort < 1 || outbound.ServerPort > 65535 ||
 		(outbound.Network != "" && outbound.Network != "tcp") {
 		return unsupported()
@@ -291,7 +296,8 @@ func (m *Manager) inspectSelectedSmartTUNHostWith(pinnedIP, managementPeer, unde
 		result.DNS = "literal_endpoint"
 	} else {
 		observation, dnsErr := p.dns(hostname, ip.String(), resolverIP, resolverPort, underlayInterface)
-		if dnsErr == nil && observation.NameMatched && observation.InterfaceBound && observation.RouteStable &&
+		if dnsErr == nil && observation.NameResolved && observation.NameMatched &&
+			observation.InterfaceBound && observation.RouteStable &&
 			observation.ResolverRouteDevice == underlayInterface && !observation.ActivationReady {
 			result.DNS, dnsOK = "pinned_resolver_observed", true
 		} else {
@@ -336,11 +342,20 @@ func (m *Manager) inspectSelectedSmartTUNHostWith(pinnedIP, managementPeer, unde
 	// network observations. Refuse to present stale evidence as observations
 	// of the CURRENT selected profile. This is not an atomic reservation.
 	current, currentErr := m.load()
-	if currentErr != nil || current != state {
+	profileChanged := currentErr != nil || current != state
+	if !profileChanged {
+		selectedNow, selectedErr := m.profile(current.Selected)
+		// Validate the entire saved profile identity, not only its outbound:
+		// kind/name/creation metadata also belong to the selected snapshot.
+		profileChanged = selectedErr != nil || !reflect.DeepEqual(selectedNow, profile)
+	}
+	if profileChanged {
 		add("selected_profile_changed_during_diagnostic")
-	} else if selectedNow, selectedErr := m.profile(current.Selected); selectedErr != nil ||
-		!bytes.Equal(selectedNow.Outbound, profile.Outbound) {
-		add("selected_profile_changed_during_diagnostic")
+		// The probes ran against a no-longer-current selection. Even though
+		// no admission was ever possible, positive DNS/TCP/route fields would
+		// be misleading to an operator inspecting the JSON result.
+		result.SelectedTransport, result.EndpointKind = "", ""
+		result.DNS, result.TCP, result.HostRoutes = "stale_selected_profile", "stale_selected_profile", "stale_selected_profile"
 	}
 	// This diagnostic cannot authenticate the SSH session, reserve nftables
 	// ownership or establish an independent health/recovery guard. Do not

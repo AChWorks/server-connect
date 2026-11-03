@@ -40,7 +40,7 @@ func testSelectedHostReadinessProbes() (smartTUNHostReadinessProbes, *map[string
 				return UnderlayDNSReport{}, errors.New("unexpected probe target")
 			}
 			return UnderlayDNSReport{
-				NameMatched: true, InterfaceBound: true, RouteStable: true,
+				NameResolved: true, NameMatched: true, InterfaceBound: true, RouteStable: true,
 				ResolverRouteDevice: "ens3",
 			}, nil
 		},
@@ -137,6 +137,11 @@ func TestSelectedHostCheckTransportAndDialPathClassification(t *testing.T) {
 		{"network strategy", `"network_strategy":"fallback"`, "", true},
 		{"unknown selector value type", `"routing_mark":{}`, "", true},
 		{"explicit default selectors", `"bind_interface":"","routing_mark":0,"network_type":[]`, "tcp", false},
+		{"duplicate selected endpoint", `"server":"8.8.8.8"`, "", true},
+		{"case-ambiguous selected endpoint", `"SERVER":"8.8.8.8"`, "", true},
+		{"duplicate transport header", `"transport":{"type":"ws","headers":{"Host":"a.example","Host":"b.example"}}`, "", true},
+		{"case-aliased dial selector", `"bind_interface":"","Bind_Interface":"tun0"`, "", true},
+		{"duplicate TLS flag", `"tls":{"enabled":false,"enabled":true}`, "", true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			m := testSelectedHostReadinessManager(t, "8.8.8.8")
@@ -216,6 +221,24 @@ func TestSelectedHostCheckDNSFailureCannotReachPinnedTCP(t *testing.T) {
 	if err != nil || r.ActivationReady || r.GeneralHostAdmitted || !hasReadinessReason(r, "endpoint_dns_unverified") ||
 		r.TCP != "not_checked" || (*calls)["tcp"] != 0 {
 		t.Fatalf("failed DNS unexpectedly authorized or dialed selected endpoint: %+v, %v, calls=%v", r, err, *calls)
+	}
+}
+
+func TestSelectedHostCheckContradictoryDNSCannotAuthorizeTCP(t *testing.T) {
+	m := testSelectedHostReadinessManager(t, "private.example.com")
+	probes, calls := testSelectedHostReadinessProbes()
+	probes.dns = func(string, string, string, int, string) (UnderlayDNSReport, error) {
+		(*calls)["dns"]++
+		// A pin cannot match a name that has not actually resolved.
+		return UnderlayDNSReport{
+			NameMatched: true, InterfaceBound: true, RouteStable: true,
+			ResolverRouteDevice: "ens3",
+		}, nil
+	}
+	report, err := m.inspectSelectedSmartTUNHostWith("8.8.8.8", "198.51.100.7", "ens3", "1.1.1.1", 53, probes)
+	if err != nil || report.DNS != "unavailable_or_wrong_underlay" || report.TCP != "not_checked" ||
+		!hasReadinessReason(report, "endpoint_dns_unverified") || (*calls)["tcp"] != 0 {
+		t.Fatalf("contradictory DNS evidence admitted TCP: %+v error=%v calls=%v", report, err, *calls)
 	}
 }
 
@@ -371,7 +394,7 @@ func TestSelectedHostCheckRefusesWrongOrAmbiguousKernelRoutes(t *testing.T) {
 }
 
 func TestSelectedHostCheckProfileChangedDuringObservations(t *testing.T) {
-	for _, kind := range []string{"selection", "outbound"} {
+	for _, kind := range []string{"selection", "outbound", "profile_kind"} {
 		t.Run(kind, func(t *testing.T) {
 			m := testSelectedHostReadinessManager(t, "8.8.8.8")
 			p, _ := testSelectedHostReadinessProbes()
@@ -386,7 +409,12 @@ func TestSelectedHostCheckProfileChangedDuringObservations(t *testing.T) {
 					if err != nil {
 						t.Fatal(err)
 					}
-					altered := strings.Replace(string(data), `"server_port":443`, `"server_port":8443`, 1)
+					altered := string(data)
+					if kind == "outbound" {
+						altered = strings.Replace(altered, `"server_port":443`, `"server_port":8443`, 1)
+					} else {
+						altered = strings.Replace(altered, `"kind":"vless-link"`, `"kind":"config"`, 1)
+					}
 					if altered == string(data) {
 						t.Fatal("profile fixture was not changed")
 					}
@@ -398,7 +426,11 @@ func TestSelectedHostCheckProfileChangedDuringObservations(t *testing.T) {
 			}
 			r, err := m.inspectSelectedSmartTUNHostWith("8.8.8.8", "198.51.100.7", "ens3", "", 53, p)
 			if err != nil || !hasReadinessReason(r, "selected_profile_changed_during_diagnostic") ||
-				r.ActivationReady || r.GeneralHostAdmitted {
+				r.ActivationReady || r.GeneralHostAdmitted ||
+				r.SelectedTransport != "" || r.EndpointKind != "" ||
+				r.DNS != "stale_selected_profile" ||
+				r.TCP != "stale_selected_profile" ||
+				r.HostRoutes != "stale_selected_profile" {
 				t.Fatalf("selection drift presented as current evidence: %+v, %v", r, err)
 			}
 		})
