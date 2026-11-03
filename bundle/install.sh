@@ -402,6 +402,7 @@ fi
 prefix_created=no
 command_created=no
 release_created=no
+release_stage_identity=''
 unit_backup=''
 guard_backup=''
 stage=''
@@ -483,7 +484,9 @@ rollback_candidate() {
     [ "$(readlink "$PREFIX/current" 2>/dev/null)" != "releases/$release_name" ];then
   # The create-intent precedes rename. If a different/foreign target appeared
   # during that window, do not adopt its owner marker and delete its files.
-  if verify_release_payload "$release" >/dev/null 2>&1 &&
+  if [ -n "$release_stage_identity" ] &&
+     [ "$(stat -c '%d:%i' "$release" 2>/dev/null || :)" = "$release_stage_identity" ] &&
+     verify_release_payload "$release" >/dev/null 2>&1 &&
      cmp -s "$SOURCE_DIR/checksums.sha256" "$release/checksums.sha256"; then
    for path in $(release_payload_files); do
     rm -f -- "$release/$path" || { say 'RECOVERY_REQUIRED: candidate release payload cleanup failed';failed=yes; }
@@ -569,7 +572,12 @@ else
  # Mark the intended new release for rollback BEFORE publishing the final
  # directory. A signal between a successful rename and the next statement
  # must not orphan an unchecked release: cleanup still verifies its exact
- # owner and refuses any current-link consumer.
+ # owner and refuses any current-link consumer. The dev+inode receipt
+ # distinguishes THIS renamed directory from an identical foreign candidate
+ # that raced into the release name between preflight and publication.
+ release_stage_identity=$(stat -c '%d:%i' "$stage") ||
+  die 'staged release filesystem identity unavailable'
+ [ -n "$release_stage_identity" ] || die 'staged release identity empty'
  release_created=yes
  mv -T -- "$stage" "$release"
  stage=''

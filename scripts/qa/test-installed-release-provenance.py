@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import shutil
 from pathlib import Path
 import subprocess
 import tempfile
@@ -26,6 +27,8 @@ FUNCTIONS = (
     + extract("verify_release_payload() (\n", "\n)\n")
     + "\n"
     + extract("check_owned() {\n", "\n}\n")
+    + "\n"
+    + extract("rollback_candidate() {\n", "\n}\n")
 )
 STAGING = extract(
     " stage=$(mktemp -d \"$PREFIX/releases/.stage.XXXXXXXX\") || die 'cannot stage release'\n",
@@ -58,6 +61,8 @@ check_root_file() { [ -f "$1" ] && [ ! -L "$1" ]; }
 check_root_dir() { [ -d "$1" ] && [ ! -L "$1" ]; }
 check_dir() { check_root_dir "$1"; }
 die() { printf 'QA_REFUSED:%s\\n' "$*" >&2; exit 21; }
+say() { printf 'QA_INFO:%s\\n' "$*"; }
+remove_backup() { :; }
 """
 # Mock root-ownership has no authority: the above checks exercise only
 # regular file/path and digest behavior in a private disposable directory.
@@ -197,6 +202,52 @@ class ReleasePayloadTests(unittest.TestCase):
         (self.prefix / ".owner").write_text("AChWorks/server-connect\n")
         (self.prefix / "current").symlink_to("releases/..")
         self.shell("check_owned\n", expected=21)
+
+    def rollback(self, release, stage_identity, expected_failed):
+        suffix = release.name
+        command = (
+            'release_name="' + suffix + '"\n'
+            'release="$PREFIX/releases/$release_name"\n'
+            'release_stage_identity="' + stage_identity + '"\n'
+            'release_created=yes\n'
+            'rollback_needed=no\n'
+            'unit_backup=""\n'
+            'guard_backup=""\n'
+            'previous=""\n'
+            'stage=""\n'
+            'prefix_created=no\n'
+            'failed=no\n'
+            'rollback_candidate\n'
+            '[ "$failed" = "' + expected_failed + '" ]\n'
+        )
+        return self.shell(command)
+
+    def test_interrupted_owned_publish_is_cleaned_only_by_same_inode(self):
+        release = self.publish()
+        receipt = f"{release.stat().st_dev}:{release.stat().st_ino}"
+        self.rollback(release, receipt, expected_failed="no")
+        self.assertFalse(release.exists())
+        self.assertTrue((self.source / "checksums.sha256").is_file())
+
+    def test_identical_foreign_publish_is_never_adopted_by_rollback(self):
+        release = self.publish()
+        receipt = f"{release.stat().st_dev}:{release.stat().st_ino}"
+        other = self.root / "original-renamed-away"
+        release.rename(other)
+        shutil.copytree(other, release)
+        self.audit(release)
+        self.rollback(release, receipt, expected_failed="yes")
+        self.assertTrue(release.is_dir())
+        self.assertEqual((release / "manifest.json").read_bytes(),
+                         (self.source / "manifest.json").read_bytes())
+
+    def test_active_current_symlink_blocks_publish_rollback_cleanup(self):
+        release = self.publish()
+        receipt = f"{release.stat().st_dev}:{release.stat().st_ino}"
+        self.owned_current(release)
+        self.rollback(release, receipt, expected_failed="no")
+        self.assertTrue(release.is_dir())
+        self.audit(release)
 
     def test_installed_service_template_tampering_is_detected(self):
         release = self.publish()
