@@ -556,6 +556,33 @@ refused("mixed syscall number evidence", mixed, "mixed syscall number presentati
 refused("unnumbered opaque event",
         altered(13, 'exit_group(100) = ?\n', '???( <unfinished ...>\n'),
         "opaque terminal syscall not verified")
+# A real strace failure must report ONLY its syscall number and fixed phase,
+# not raw trace lines containing argv, credentials or connection arguments.
+for sample, stage, syscall in (
+    ("[ 449] ???( <unfinished ...>\n", "unfinished", 449),
+    ("[ 449] ???() = ?\n", "instant", 449),
+):
+    try:
+        module.check_payloads(numbered_tail(
+            sample + f"[{syscall:4d}] +++ exited with 100 +++\n"))
+    except module.TraceFailure as error:
+        if str(error) != "opaque terminal syscall not verified" or (
+            module.failure_label(error) !=
+            f"opaque terminal syscall not verified; stage={stage}; syscall={syscall}"
+        ):
+            raise SystemExit("Unsafe or inaccurate opaque diagnostic")
+    else:
+        raise SystemExit("Unsafe opaque trace accepted while testing diagnostic")
+try:
+    module.check_payloads(numbered_tail(
+        "[ 202] ???( <unfinished ...>\n[ 231] +++ exited with 100 +++\n"))
+except module.TraceFailure as error:
+    if module.failure_label(error) != (
+        "opaque terminal syscall not verified; stage=terminal-receipt; syscall=231"
+    ):
+        raise SystemExit("Missing mismatched opaque exit diagnostic")
+else:
+    raise SystemExit("Unverifiable terminal receipt accepted")
 
 trace_dir = Path(sys.argv[2]) / "trace-reader-fixture"
 trace_dir.mkdir(mode=0o700)

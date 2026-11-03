@@ -16,7 +16,14 @@ import sys
 
 
 class TraceFailure(ValueError):
-    pass
+    """Rejected evidence; only bounded numeric syscall metadata may reach CI."""
+
+    def __init__(self, reason: str, *, opaque_number: int | None = None,
+                 opaque_stage: str | None = None):
+        super().__init__(reason)
+        self.opaque_number = opaque_number
+        self.opaque_stage = opaque_stage
+
 
 
 DISABLED = ("ftp", "rsh", "ssh", "mirror+ftp")
@@ -36,6 +43,25 @@ def verified_opaque_exit(number: int | None) -> bool:
 def require(condition: bool, label: str) -> None:
     if not condition:
         raise TraceFailure(label)
+
+
+def require_verified_opaque(condition: bool, number: int | None,
+                            stage: str) -> None:
+    if not condition:
+        # This is a syscall number, NEVER a raw trace line. The trace contains
+        # argv and possibly credentials; leave those strictly private.
+        raise TraceFailure("opaque terminal syscall not verified",
+                           opaque_number=number, opaque_stage=stage)
+
+
+def failure_label(error: TraceFailure) -> str:
+    # Fixed-stage and decimal-syscall metadata aid diagnosis of strace/kernel
+    # drift without exposing process arguments, environment or raw traces.
+    label = str(error)
+    if error.opaque_stage is not None:
+        number = "none" if error.opaque_number is None else str(error.opaque_number)
+        label += f"; stage={error.opaque_stage}; syscall={number}"
+    return label
 
 
 def check_payloads(payloads: dict[int, str]) -> None:
@@ -75,8 +101,9 @@ def check_payloads(payloads: dict[int, str]) -> None:
                     syscall = re.match(r"([a-z0-9_]+)\(", pending)
                     name = syscall.group(1) if syscall else "unknown"
                     if pending == "???(":
-                        require(verified_opaque_exit(number) and pending_number == number,
-                                "opaque terminal syscall not verified")
+                        require_verified_opaque(
+                            verified_opaque_exit(number) and pending_number == number,
+                            number, "terminal-receipt")
                     else:
                         # Only named synchronization/wait calls and a matching
                         # nonreturning exit_group may be interrupted at death.
@@ -96,8 +123,8 @@ def check_payloads(payloads: dict[int, str]) -> None:
             # explicitly selected futex. The syscall *number* is the proof;
             # the next record MUST be this same thread's exit receipt.
             if re.fullmatch(r"\?\?\?\(\)\s+=\s+\?", line):
-                require(not pending and verified_opaque_exit(number),
-                        "opaque terminal syscall not verified")
+                require_verified_opaque(
+                    not pending and verified_opaque_exit(number), number, "instant")
                 opaque_exit_number = number
                 continue
             if line.endswith(" <unfinished ...>"):
@@ -105,7 +132,8 @@ def check_payloads(payloads: dict[int, str]) -> None:
                 pending = line.removesuffix(" <unfinished ...>")
                 pending_number = number
                 if pending == "???(":
-                    require(verified_opaque_exit(number), "opaque terminal syscall not verified")
+                    require_verified_opaque(verified_opaque_exit(number), number,
+                                            "unfinished")
                 continue
             resumed = re.fullmatch(r"<\.\.\. ([a-z0-9_]+) resumed>(.*)", line)
             if resumed:
@@ -198,7 +226,7 @@ if __name__ == "__main__":
         require(len(sys.argv) == 2, "invalid trace-check arguments")
         check_directory(Path(sys.argv[1]))
     except (OSError, UnicodeError, TraceFailure) as error:
-        label = str(error) if isinstance(error, TraceFailure) else "unreadable process evidence"
+        label = failure_label(error) if isinstance(error, TraceFailure) else "unreadable process evidence"
         print("APT_DISABLED_TRANSPORT_TRACE=FAIL (" + label + ")", file=sys.stderr)
         sys.exit(1)
     print("APT_DISABLED_TRANSPORT_TRACE=PASS (complete process tree, owned denial, no transport helper or Internet attempt)")

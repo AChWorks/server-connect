@@ -130,6 +130,8 @@ jobs:
           # Execute the actual embedded independent cleanup under non-root
           # disposable filesystem/kernel-command fault injection (no real ip/netns).
           python3 scripts/qa/test-field-netns-recovery.py
+          # Read-only VM reply witness; unprivileged protocol/negative checks only.
+          PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/qa/test-vm-foreign-reply-witness.py
           python3 scripts/qa/test-package-targets.py
           PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/qa/test-debian12-proxy-lifecycle.py
           sh -n scripts/qa/host-bundle-target-refusal.sh
