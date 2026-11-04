@@ -1,7 +1,6 @@
 package main
 
 import (
-	"fmt"
 	"os"
 	"strings"
 
@@ -148,6 +147,6 @@ func runModeOverview(jsonMode bool, read func() (sc.Status, error)) int {
 	if output(false, report, nil) != 0 {
 		return 1
 	}
-	fmt.Fprintf(os.Stderr, "Error [%s]: %s\n", sc.ErrorCode(observationErr), observationErr)
+	operatorPrintError(os.Stderr, observationErr)
 	return 1
 }

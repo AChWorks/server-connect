@@ -590,7 +590,9 @@ func TestUnderlayTCPMenu13PreservesExistingOptions(t *testing.T) {
 		t.Fatal(err)
 	}
 	if code != 0 ||
-		!strings.Contains(string(raw), "11 Path Diagnostics  12 Selective Plan  13 Underlay TCP") ||
+		!strings.Contains(string(raw), "11 Path Diagnostics") ||
+		!strings.Contains(string(raw), "12 Selective Plan") ||
+		!strings.Contains(string(raw), "13 Underlay TCP") ||
 		!strings.Contains(string(raw), "Literal TCP endpoint IP (no DNS):") ||
 		!strings.Contains(string(raw), "Endpoint TCP port:") {
 		t.Fatalf("distinct option 13 not wired: code=%d output=%s", code, raw)
@@ -695,7 +697,10 @@ func TestUnderlayDNSMenu14RetainsOtherDiagnostics(t *testing.T) {
 		t.Fatal(err)
 	}
 	if exit != 0 ||
-		!strings.Contains(string(content), "11 Path Diagnostics  12 Selective Plan  13 Underlay TCP  14 Underlay DNS") ||
+		!strings.Contains(string(content), "11 Path Diagnostics") ||
+		!strings.Contains(string(content), "12 Selective Plan") ||
+		!strings.Contains(string(content), "13 Underlay TCP") ||
+		!strings.Contains(string(content), "14 Underlay DNS") ||
 		!strings.Contains(string(content), "Endpoint DNS hostname:") ||
 		!strings.Contains(string(content), "Pinned endpoint IP:") ||
 		!strings.Contains(string(content), "Explicit resolver IP") {
