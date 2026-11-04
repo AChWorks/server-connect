@@ -44,40 +44,111 @@ type smartTUNHostBoundaryObservations struct {
 	nftErr       error
 }
 
-// Keep one detailed classifier for preflight and eventual native admission.
-// It explicitly surfaces foreign packet-path effects without quietly
-// reclassifying opaque Docker/iptables-nft extensions as harmless.
-func generalHostForeignNFTEffects(objects []map[string]any) (int, error) {
+// Distinguish foreign owners for operator diagnosis without granting them
+// any mutation authority or weakening native Apply's fail-closed firewall
+// validation. Opaque OUTPUT conntrack targets may break hosting replies.
+type generalHostNFTProfile struct {
+	PacketEffects  int
+	OpaqueOutputCT bool
+	ForeignNAT     bool
+}
+
+type generalHostNFTChainKey struct{ Family, Table, Name string }
+
+func generalHostNFTObjectText(fields map[string]any, key string) string {
+	value, _ := fields[key].(string)
+	return value
+}
+
+func generalHostForeignNFTEffects(objects []map[string]any) (generalHostNFTProfile, error) {
+	var result generalHostNFTProfile
 	if objects == nil {
-		return 0, errors.New("nft inventory unavailable")
+		return result, errors.New("nft inventory unavailable")
 	}
-	effects := 0
+	hooks := map[generalHostNFTChainKey]string{}
 	for _, item := range objects {
 		if len(item) != 1 {
-			return 0, errors.New("ambiguous foreign nft object")
+			return result, errors.New("ambiguous foreign nft object")
 		}
+		value, isChain := item["chain"]
+		if !isChain {
+			continue
+		}
+		fields, ok := value.(map[string]any)
+		if !ok {
+			return result, errors.New("invalid foreign nft chain")
+		}
+		key := generalHostNFTChainKey{
+			Family: generalHostNFTObjectText(fields, "family"),
+			Table:  generalHostNFTObjectText(fields, "table"),
+			Name:   generalHostNFTObjectText(fields, "name"),
+		}
+		if key.Family == "" || key.Table == "" || key.Name == "" {
+			return result, errors.New("incomplete foreign nft chain identity")
+		}
+		if _, exists := hooks[key]; exists {
+			return result, errors.New("duplicate foreign nft chain")
+		}
+		hooks[key] = generalHostNFTObjectText(fields, "hook")
+	}
+	for _, item := range objects {
 		for kind, value := range item {
 			fields, ok := value.(map[string]any)
 			if !ok {
-				return 0, errors.New("invalid foreign nft object")
+				return result, errors.New("invalid foreign nft object")
 			}
 			switch kind {
 			case "flowtable":
-				effects++
+				result.PacketEffects++
 			case "rule":
+				key := generalHostNFTChainKey{
+					Family: generalHostNFTObjectText(fields, "family"),
+					Table:  generalHostNFTObjectText(fields, "table"),
+					Name:   generalHostNFTObjectText(fields, "chain"),
+				}
+				hook, present := hooks[key]
+				if !present {
+					return result, errors.New("foreign nft rule lacks a bound chain")
+				}
+				expressions, ok := fields["expr"].([]any)
+				if !ok || len(expressions) == 0 {
+					return result, errors.New("foreign nft rule expressions unavailable")
+				}
+				for _, raw := range expressions {
+					expr, ok := raw.(map[string]any)
+					if !ok || len(expr) != 1 {
+						return result, errors.New("ambiguous foreign nft expression")
+					}
+					if _, notrack := expr["notrack"]; notrack && hook == "output" {
+						result.OpaqueOutputCT = true
+					}
+					if xt, ok := expr["xt"].(map[string]any); ok {
+						if xt["type"] == "target" && xt["name"] == "CT" && hook == "output" {
+							result.OpaqueOutputCT = true
+						}
+						if xt["type"] == "target" && (xt["name"] == "MASQUERADE" ||
+							xt["name"] == "SNAT" || xt["name"] == "DNAT" || xt["name"] == "REDIRECT") {
+							result.ForeignNAT = true
+						}
+					}
+					for _, word := range []string{"masquerade", "snat", "dnat", "redirect"} {
+						if _, present := expr[word]; present {
+							result.ForeignNAT = true
+						}
+					}
+				}
 				if !nativeNFTForeignRulePassive(fields) {
-					effects++
+					result.PacketEffects++
 				}
 			case "chain":
-				// An empty base chain with a drop policy can already alter
-				// packets; there need not be any explicit rule to detect.
+				// A drop policy can change traffic even if the chain is empty.
 				if policy, present := fields["policy"]; present && policy != "accept" {
-					effects++
+					result.PacketEffects++
 				}
 			}
 		}
 	}
-	return effects, nil
+	return result, nil
 }
 
 // No address/port, profile, firewall expression or credential is ever copied
@@ -152,9 +223,15 @@ func assessSmartTUNHostBoundary(o smartTUNHostBoundaryObservations, expectedUnde
 		add("public_ipv6_without_supported_tun")
 	}
 	if o.nftErr == nil {
-		effects, err := generalHostForeignNFTEffects(o.nft)
+		risk, err := generalHostForeignNFTEffects(o.nft)
 		if err == nil {
-			if effects == 0 {
+			if risk.OpaqueOutputCT {
+				add("foreign_output_conntrack_opaque")
+			}
+			if risk.ForeignNAT {
+				add("foreign_nat_ownership_unverified")
+			}
+			if risk.PacketEffects == 0 {
 				r.ForeignNFT = "no_foreign_packet_effects_observed"
 			} else {
 				r.ForeignNFT = "foreign_packet_effects_present"

@@ -21,6 +21,14 @@ func hostBoundaryFixture() smartTUNHostBoundaryObservations {
 	}
 }
 
+func hostNFTFixture(hook string, expressions ...any) []map[string]any {
+	return []map[string]any{
+		{"table": map[string]any{"family": "ip", "name": "foreign"}},
+		{"chain": map[string]any{"family": "ip", "table": "foreign", "name": "C", "hook": hook, "type": "filter", "prio": 0, "policy": "accept"}},
+		{"rule": map[string]any{"family": "ip", "table": "foreign", "chain": "C", "expr": expressions}},
+	}
+}
+
 func TestGeneralHostBoundaryNeverAdmitsNormalOrUntrustedHost(t *testing.T) {
 	base := hostBoundaryFixture()
 	cases := []struct {
@@ -48,13 +56,13 @@ func TestGeneralHostBoundaryNeverAdmitsNormalOrUntrustedHost(t *testing.T) {
 		{"IPv6public", func(o *smartTUNHostBoundaryObservations) { o.ipv6Err = errors.New("public route") }, "public_ipv6_without_supported_tun", "ipv6_policy"},
 		{"missingNFT", func(o *smartTUNHostBoundaryObservations) { o.nftErr = errors.New("nft unavailable"); o.nft = nil }, "foreign_nft_unverified", "foreign_nft"},
 		{"DockerNAT", func(o *smartTUNHostBoundaryObservations) {
-			o.nft = []map[string]any{{"rule": map[string]any{"expr": []any{map[string]any{"masquerade": nil}}}}}
+			o.nft = hostNFTFixture("postrouting", map[string]any{"masquerade": nil})
 		}, "foreign_nft_coexistence_unverified", "foreign_nft"},
 		{"opaqueXT", func(o *smartTUNHostBoundaryObservations) {
-			o.nft = []map[string]any{{"rule": map[string]any{"expr": []any{map[string]any{"xt": map[string]any{"name": "CT", "type": "target"}}}}}}
+			o.nft = hostNFTFixture("output", map[string]any{"xt": map[string]any{"name": "CT", "type": "target"}})
 		}, "foreign_nft_coexistence_unverified", "foreign_nft"},
 		{"defaultDrop", func(o *smartTUNHostBoundaryObservations) {
-			o.nft = []map[string]any{{"chain": map[string]any{"policy": "drop", "hook": "output"}}}
+			o.nft = []map[string]any{{"chain": map[string]any{"family": "ip", "table": "foreign", "name": "C", "hook": "output", "policy": "drop"}}}
 		}, "foreign_nft_coexistence_unverified", "foreign_nft"},
 		{"flowtable", func(o *smartTUNHostBoundaryObservations) {
 			o.nft = []map[string]any{{"flowtable": map[string]any{"name": "foreign"}}}
@@ -117,29 +125,70 @@ func hasBoundaryReason(r SmartTUNHostBoundary, reason string) bool {
 }
 
 func TestGeneralHostNFTEffectsRefuseOpaqueAndMutation(t *testing.T) {
-	passive := []map[string]any{
-		{"table": map[string]any{"family": "inet", "name": "thirdparty"}},
-		{"rule": map[string]any{"expr": []any{map[string]any{"match": map[string]any{"left": "a", "right": "b", "op": "=="}}, map[string]any{"counter": map[string]any{"packets": json.Number("0"), "bytes": json.Number("0")}}, map[string]any{"accept": nil}}}},
+	passive := hostNFTFixture("output", map[string]any{"match": map[string]any{"left": "a", "right": "b", "op": "=="}}, map[string]any{"counter": map[string]any{"packets": json.Number("0"), "bytes": json.Number("0")}}, map[string]any{"accept": nil})
+	got, err := generalHostForeignNFTEffects(passive)
+	if err != nil || got != (generalHostNFTProfile{}) {
+		t.Fatalf("passive owner rejected %+v %v", got, err)
 	}
-	n, err := generalHostForeignNFTEffects(passive)
-	if err != nil || n != 0 {
-		t.Fatalf("passive owner incorrectly rejected: %d %v", n, err)
-	}
-	for _, effect := range []map[string]any{
-		{"masquerade": nil}, {"xt": map[string]any{"name": "CT", "type": "target"}},
-		{"mangle": map[string]any{"key": "mark", "value": 1}},
-		{"notrack": nil}, {"dnat": map[string]any{}},
+	for _, tc := range []struct {
+		name        string
+		hook        string
+		effect      map[string]any
+		nat, opaque bool
+	}{
+		{"native NAT", "postrouting", map[string]any{"masquerade": nil}, true, false},
+		{"opaque OUTPUT CT", "output", map[string]any{"xt": map[string]any{"name": "CT", "type": "target"}}, false, true},
+		{"opaque INPUT CT", "input", map[string]any{"xt": map[string]any{"name": "CT", "type": "target"}}, false, false},
+		{"opaque Docker NAT", "postrouting", map[string]any{"xt": map[string]any{"name": "MASQUERADE", "type": "target"}}, true, false},
+		{"mark mutation", "output", map[string]any{"mangle": map[string]any{"key": "mark", "value": 1}}, false, false},
+		{"notrack", "output", map[string]any{"notrack": nil}, false, true},
+		{"DNAT", "prerouting", map[string]any{"dnat": map[string]any{}}, true, false},
 	} {
-		input := append(append([]map[string]any{}, passive...), map[string]any{"rule": map[string]any{"expr": []any{effect}}})
-		count, e := generalHostForeignNFTEffects(input)
-		if e != nil || count != 1 {
-			t.Fatalf("foreign packet effect silently permitted: %v count=%d", effect, count)
-		}
+		t.Run(tc.name, func(t *testing.T) {
+			r, e := generalHostForeignNFTEffects(hostNFTFixture(tc.hook, tc.effect))
+			if e != nil || r.PacketEffects != 1 || r.ForeignNAT != tc.nat || r.OpaqueOutputCT != tc.opaque {
+				t.Fatalf("foreign packet effect misclassified %+v %v", r, e)
+			}
+		})
 	}
 	if _, err := generalHostForeignNFTEffects(nil); err == nil {
 		t.Fatal("absent inventory admitted")
 	}
-	if _, err := generalHostForeignNFTEffects([]map[string]any{{"table": map[string]any{}, "rule": map[string]any{}}}); err == nil {
-		t.Fatal("ambiguous inventory admitted")
+	if _, err := generalHostForeignNFTEffects([]map[string]any{{"rule": map[string]any{"family": "ip", "table": "t", "chain": "c", "expr": []any{map[string]any{"xt": map[string]any{"name": "CT", "type": "target"}}}}}}); err == nil {
+		t.Fatal("unbound chain admitted")
+	}
+}
+
+func TestGeneralHostDockerAndHostedReplyConntrackRemainBlocked(t *testing.T) {
+	o := hostBoundaryFixture()
+	docker := hostNFTFixture("postrouting", map[string]any{"match": map[string]any{"op": "==", "left": map[string]any{"payload": map[string]any{"protocol": "ip", "field": "saddr"}}, "right": map[string]any{"prefix": map[string]any{"addr": "172.17.0.0", "len": 16}}}}, map[string]any{"xt": map[string]any{"type": "target", "name": "MASQUERADE"}})
+	raw := hostNFTFixture("output", map[string]any{"match": map[string]any{"op": "==", "left": map[string]any{"payload": map[string]any{"protocol": "tcp", "field": "sport"}}, "right": 80}}, map[string]any{"xt": map[string]any{"type": "target", "name": "CT"}})
+	for _, entry := range raw {
+		for _, value := range entry {
+			if object, ok := value.(map[string]any); ok {
+				if object["name"] == "foreign" {
+					object["name"] = "foreign_raw"
+				}
+				if object["table"] == "foreign" {
+					object["table"] = "foreign_raw"
+				}
+			}
+		}
+	}
+	o.nft = append(docker, raw...)
+	result := assessSmartTUNHostBoundary(o, "ens3")
+	for _, reason := range []string{"foreign_output_conntrack_opaque", "foreign_nat_ownership_unverified", "foreign_nft_coexistence_unverified"} {
+		if !hasBoundaryReason(result, reason) {
+			t.Fatalf("missing concrete blocker %s: %+v", reason, result)
+		}
+	}
+	if result.ForeignNFT != "foreign_packet_effects_present" || result.GeneralHostAdmitted || result.ActivationReady {
+		t.Fatalf("unsupported host incorrectly admitted: %+v", result)
+	}
+	serialized, _ := json.Marshal(result)
+	for _, secret := range []string{"172.17.0.0", "MASQUERADE", "foreign_raw", "80"} {
+		if strings.Contains(string(serialized), secret) {
+			t.Fatalf("private nft metadata leaked %s", secret)
+		}
 	}
 }

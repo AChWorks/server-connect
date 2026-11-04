@@ -64,6 +64,13 @@ fresh SSH, independently verified OOB recovery, protected hosting replies,
 guarded ownership and genuine selected VPN egress are **separate mandatory
 gates**. On Debian 12 or in a Docker-owning firewall topology, it reports the
 actual compatibility blockers rather than suppressing third-party policies.
+It distinguishes an opaque `xt CT` or `notrack` operation on the **OUTPUT**
+hook from foreign SNAT/MASQUERADE ownership. Such rules can change whether
+hosted replies have ordinary conntrack direction evidence; an opaque target
+does **not** prove which CT option is set and must not be treated as safe.
+The specific reason codes are `foreign_output_conntrack_opaque` and
+`foreign_nat_ownership_unverified`. Neither code permits modifying
+Docker, panel or firewall owner rules to bypass refusal.
 
 The development CLI `smart-tun-host-check` combines existing read-only
 selected VLESS profile, explicit pinned-endpoint DNS, interface-bound TCP,
