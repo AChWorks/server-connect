@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Disposable, explicitly authorized Linux host only. Deliberately narrow /32
 # root-network-namespace TUN field trial; NOT product Smart Routing admission.
-# Foreign network resources are never flushed or adopted.
+# Foreign network resources are never flushed or adopted. Optional pinned
+# Iranian HTTPS sample is an independent Direct observation, not geo routing.
 set -Eeuo pipefail
 umask 077
 export PATH=/usr/sbin:/usr/bin:/sbin:/bin LC_ALL=C
@@ -19,10 +20,15 @@ mark=0x00530000
 ip4=''
 owner=''
 die() { echo "REFUSED: $*" >&2; exit 2; }
-[[ $# == 4 ]] || die 'usage: EXPECTED_HOSTNAME EXPECTED_PUBLIC_IPV4 UNDERLAY_INTERFACE FOREIGN_HTTPS_IPV4'
+[[ $# == 4 || $# == 6 ]] || die 'usage: EXPECTED_HOSTNAME EXPECTED_PUBLIC_IPV4 UNDERLAY_INTERFACE FOREIGN_HTTPS_IPV4 [IRAN_HTTPS_FQDN IRAN_HTTPS_IPV4]'
 expected_host=$1; expected_ip=$2; underlay=$3; foreign=$4
+domestic_host=''; domestic=''
+if [[ $# == 6 ]]; then domestic_host=$5; domestic=$6; fi
 [[ "$expected_host" =~ ^[a-zA-Z0-9][a-zA-Z0-9.-]{0,100}$ && "$expected_ip" =~ ^[0-9.]+$ &&
    "$underlay" =~ ^[a-zA-Z0-9_.-]{1,15}$ && "$foreign" =~ ^[0-9.]+$ ]] || die 'invalid host binding'
+if [[ -n "$domestic" ]]; then
+  [[ "$domestic_host" =~ ^[a-zA-Z0-9][a-zA-Z0-9.-]{0,100}$ && "$domestic" =~ ^[0-9.]+$ ]] || die 'invalid Iranian HTTPS witness'
+fi
 [[ $EUID == 0 && $(hostname) == "$expected_host" ]] || die 'wrong host/privilege'
 [[ $(. /etc/os-release; echo "$ID:$VERSION_ID") == debian:12 ]] || die 'expected disposable Debian 12'
 [[ -x $manager && -x $core && -c /dev/net/tun ]] || die 'installed manager/core/TUN required'
@@ -33,14 +39,30 @@ for unit in "$coreunit.service" "$watch.service" "$watch.timer"; do
   [[ $(systemctl show "$unit" -p LoadState --value 2>/dev/null) == not-found ]] || die "existing or unknown unit $unit"
 done
 ip -4 addr show dev "$underlay" | grep -Fq "inet $expected_ip/" || die 'underlay identity changed'
-python3 - "$expected_ip" "$foreign" <<'PY'
-import ipaddress,sys
-for ip in sys.argv[1:]:
- a=ipaddress.ip_address(ip)
+python3 - "$expected_ip" "$foreign" "$domestic_host" "$domestic" <<'PY'
+import hashlib,ipaddress,json,pathlib,socket,sys
+local,foreign,name,domestic=sys.argv[1:]
+for text in (local,foreign)+((domestic,) if domestic else ()):
+ a=ipaddress.ip_address(text)
  assert a.version == 4 and a.is_global and not a.is_private and not a.is_reserved
-assert sys.argv[1] != sys.argv[2]
+assert local != foreign and (not domestic or len({local,foreign,domestic})==3)
+if domestic:
+ p=pathlib.Path('/root/server-connect-field-iran-geo-2026-10.json')
+ assert p.is_file() and not p.is_symlink() and p.stat().st_size < 128000
+ raw=p.read_bytes()
+ assert hashlib.sha256(raw).hexdigest()=='c1d00c21ff2df3814d4f04f28fb651401a6c0afb2c9ebad35b70a878b011dc6c'
+ record=json.loads(raw)
+ assert record['country']=='IR' and record['as_of']=='2026-10-01' and record['schema_version']==1
+ assert record['prefix_sha256']=='edb8fc88cff754e9622695e03d980afec6640939cf53627f8800ac54d9170f0e'
+ assert any(ipaddress.ip_address(domestic) in ipaddress.ip_network(pfx) for pfx in record['ipv4'])
+ ips={v[4][0] for v in socket.getaddrinfo(name,443,socket.AF_INET,socket.SOCK_STREAM)}
+ assert domestic in ips, 'observed DNS does not include the pinned domestic address'
+ print('ROOT_IRAN_IP_PINNED_ESTIMATE_AND_DNS=PASS',flush=True)
 PY
 ip -4 route get "$foreign" | grep -Fq "dev $underlay" || die 'foreign baseline underlay unknown'
+if [[ -n "$domestic" ]]; then
+  ip -4 route get "$domestic" | grep -Fq "dev $underlay" || die 'Iranian witness baseline underlay unknown'
+fi
 [[ $(ip -4 rule show | grep -c -E "(^| )$priority:|lookup $table($| )" || :) == 0 ]] || die 'foreign RPDB ownership'
 [[ -z $(ip -4 route show table "$table") ]] || die 'foreign table routes present'
 [[ $(nft list tables | grep -c -E '^table inet scfhr_' || :) == 0 ]] || die 'existing task-like nft table'
@@ -55,6 +77,9 @@ done
 # No traffic can be captured before guarded nft rules are installed; a narrow
 # test IP must not already host a long-lived service/management connection.
 [[ -z $(ss -H -4tan state established | grep -F "$foreign:" || :) ]] || die 'existing foreign destination connections'
+if [[ -n "$domestic" ]]; then
+  [[ -z $(ss -H -4tan state established | grep -F "$domestic:" || :) ]] || die 'existing Iranian witness connections'
+fi
 baseline_routes=$(ip -4 route show table all | sha256sum | cut -d' ' -f1)
 baseline_rules=$(ip -4 rule show | sha256sum | cut -d' ' -f1)
 baseline_raw=$(iptables -t raw -S | sha256sum | cut -d' ' -f1)
@@ -150,16 +175,16 @@ chmod 700 "$work/recover.sh"
 # Before prearming, only private data files exist. Never touch network yet.
 prearm_cleanup() { rc=$?; trap - EXIT; rm -f "$work"/{owner,boot,baseline,recover.sh,config.json,provider-ip,provider-port,foreign-ip,direct-exit,nft.txt,nft-receipt,nft-handle}; rmdir "$work" 2>/dev/null || :; exit "$rc"; }
 trap prearm_cleanup EXIT
-python3 - "$work" "$tun" "$underlay" "$foreign" <<'PY'
+python3 - "$work" "$tun" "$underlay" "$foreign" "$domestic" <<'PY'
 import json,ipaddress,pathlib,socket,sys
-w=pathlib.Path(sys.argv[1]);tun,underlay,foreign=sys.argv[2:]
+w=pathlib.Path(sys.argv[1]);tun,underlay,foreign,domestic=sys.argv[2:]
 s=json.loads(pathlib.Path('/var/lib/server-connect/state.json').read_text())
 p=json.loads((pathlib.Path('/var/lib/server-connect/profiles')/(s['selected']+'.json')).read_text())
 out=p['outbound'];out=json.loads(out) if isinstance(out,str) else out
 assert out['tag']=='upstream' and out['type']=='vless' and 1 <= out['server_port'] <= 65535
 assert isinstance(out['server'],str) and out['server'] and out['server']!=foreign
 ips={addr[4][0] for addr in socket.getaddrinfo(out['server'],out['server_port'],socket.AF_INET,socket.SOCK_STREAM)}
-assert 0 < len(ips) <= 8 and foreign not in ips
+assert 0 < len(ips) <= 8 and foreign not in ips and (not domestic or domestic not in ips)
 for ip in ips: assert ipaddress.ip_address(ip).is_global
 out=dict(out);out['routing_mark']=0x00540000
 cfg={'log':{'level':'warn'},'inbounds':[{'type':'tun','tag':'tun-in','interface_name':tun,'address':['172.30.244.1/30'],'mtu':1400,'stack':'gvisor','auto_route':False,'auto_redirect':False,'dns_mode':'disabled'}], 'outbounds':[out,{'type':'direct','tag':'direct','routing_mark':0x00540000}],'route':{'default_interface':underlay,'final':'upstream','rules':[{'ip_cidr':['172.30.244.0/30'],'action':'route','outbound':'direct'}]}}
@@ -174,6 +199,19 @@ direct_base=$(curl -q --noproxy '*' -fsS -4 --max-time 16 --resolve "api.ipify.o
 printf '%s\n' "$direct_base" > "$work/direct-exit"
 [[ "$direct_base" == "$expected_ip" ]] || echo 'DIRECT_HOST_EGRESS_ADDRESS_DIFFERS_FROM_UNDERLAY=OBSERVED'
 echo 'DIRECT_ROOT_HOST_POSITIVE_CONTROL=PASS'
+# The HTTPS certificate is checked for the original hostname against the
+# operator's explicit DNS pin. This is a positive Direct control, not proof of
+# national ownership, a publisher signature or blanket prefix admission.
+check_domestic_https() {
+  local code
+  code=$(curl -q --noproxy '*' -sS -4 -o /dev/null -w '%{http_code}' --connect-timeout 6 --max-time 16 \
+    --resolve "$domestic_host:443:$domestic" "https://$domestic_host/") || die 'Iranian HTTPS witness failed TLS or transport'
+  [[ "$code" =~ ^[23][0-9][0-9]$ ]] || die 'Iranian HTTPS witness did not return HTTP 2xx/3xx'
+}
+if [[ -n "$domestic" ]]; then
+  check_domestic_https
+  echo 'ROOT_IRAN_DIRECT_POSITIVE_CONTROL=PASS'
+fi
 # Arm an independent durable systemd timer BEFORE the first host-network effect.
 if ! systemd-run --quiet --collect --unit="$watch" --on-active=300s --timer-property=AccuracySec=1s /usr/bin/bash "$work/recover.sh"; then
   # The creation result can be uncertain even after a reported error. Leave
@@ -227,6 +265,16 @@ add rule inet $owner capture ip daddr $foreign meta l4proto { tcp, udp } meta ma
 add rule inet $owner guard meta iif 0 ip daddr $foreign meta l4proto { tcp, udp } oifname "$tun" counter
 add rule inet $owner guard meta iif 0 ip daddr $foreign meta l4proto { tcp, udp } oifname != "$tun" counter drop
 NFT
+if [[ -n "$domestic" ]]; then
+  # A specific Iranian HTTPS /32 obtains an explicit Direct mark; it must
+  # never share the foreign capture mark or the RPDB VPN rule. The second
+  # independently hooked chain witnesses the actual physical-egress route.
+  cat >> "$work/nft.txt" <<NFT
+add chain inet $owner direct_witness { type filter hook postrouting priority -5; policy accept; }
+add rule inet $owner capture ip daddr $domestic tcp dport 443 meta mark set (meta mark & 0xff00ffff) | 0x00540000 counter
+add rule inet $owner direct_witness meta iif 0 ip daddr $domestic tcp dport 443 meta mark & 0x00ff0000 == 0x00540000 oifname "$underlay" counter
+NFT
+fi
 while IFS= read -r upstream_ip; do
   printf 'add rule inet %s observe ip daddr %s tcp dport %s counter\n' "$owner" "$upstream_ip" "$(cat "$work/provider-port")" >> "$work/nft.txt"
 done < "$work/provider-ip"
@@ -262,6 +310,14 @@ echo 'ROOT_SELECTED_UPSTREAM_PACKET_WITNESS=PASS'
 guard_packets=$(nft -j list chain inet "$owner" guard | python3 -c 'import json,sys; print(sum(int(e["counter"].get("packets",0)) for o in json.load(sys.stdin)["nftables"] if "rule" in o and not any("drop" in e for e in o["rule"].get("expr",[])) for e in o["rule"].get("expr",[]) if "counter" in e))')
 [[ "$guard_packets" =~ ^[0-9]+$ && "$guard_packets" -gt 0 ]] || die 'TUN final-egress observer saw no packet'
 echo 'ROOT_TUN_FINAL_EGRESS=PASS'
+if [[ -n "$domestic" ]]; then
+  check_domestic_https
+  direct_packets=$(nft -j list chain inet "$owner" direct_witness | python3 -c 'import json,sys;print(sum(int(e["counter"].get("packets",0)) for x in json.load(sys.stdin)["nftables"] if "rule" in x for e in x["rule"].get("expr",[]) if "counter" in e))')
+  [[ "$direct_packets" =~ ^[0-9]+$ && "$direct_packets" -gt 0 ]] || die 'marked domestic physical-underlay egress witness missing'
+  domestic_route=$(ip -4 route get "$domestic" mark 0x00540000)
+  [[ "$domestic_route" == *"dev $underlay"* && "$domestic_route" != *"dev $tun"* ]] || die 'domestic direct marked route differs from physical underlay'
+  echo 'ROOT_IRAN_PINNED_DIRECT_WHILE_VPN_ACTIVE=PASS'
+fi
 # Probe an explicitly unrelated public endpoint; its route must stay Direct.
 route=$(ip -4 route get 1.1.1.1)
 [[ "$route" == *"dev $underlay"* && "$route" != *"dev $tun"* ]] || die 'unrelated public Direct was captured'
@@ -283,3 +339,7 @@ if curl -q --noproxy '*' -fsS -4 --max-time 6 --resolve "api.ipify.org:443:$fore
 fi
 [[ $(systemctl is-active "$watch.timer" 2>/dev/null || :) == active ]] || die 'independent recovery guard vanished'
 echo 'ROOT_CORE_LOSS_NO_DIRECT_FALLBACK=PASS'
+if [[ -n "$domestic" ]]; then
+  check_domestic_https
+  echo 'ROOT_IRAN_PINNED_DIRECT_SURVIVES_VPN_CORE_LOSS=PASS'
+fi
