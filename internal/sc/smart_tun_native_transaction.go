@@ -25,6 +25,14 @@ func nativeTUNQAKillValid(point string, apply bool) bool {
 }
 
 func nativeTUNAdmission(options SmartTUNCandidateOptions, host HostPreflight) (smartTUNNativeLedger, error) {
+	// An IPv4-only capture must refuse a host that could still route public
+	// IPv6 Direct. Check the complete observed IPv6 FIB/RPDB before any
+	// native resource probing, guard bookkeeping or network mutation.
+	if options.TunnelIPv6 == "" {
+		if err := nativeIPv4OnlyIPv6Admission(host); err != nil {
+			return smartTUNNativeLedger{}, err
+		}
+	}
 	dev, ino, err := nativeTUNNamespace()
 	if err != nil {
 		return smartTUNNativeLedger{}, err
@@ -283,6 +291,14 @@ func nativeTUNVerifyPending(record smartTUNTrialJournal) error {
 		return err
 	}
 	n := record.Native
+	if n.IPv6.Address == "" {
+		// The active independent nft guard remains fail-closed for public
+		// IPv6. A new public IPv6 route is still a coverage/host-safety
+		// change, so refuse continued IPv4-only operation and recover Off.
+		if err := nativeIPv4OnlyIPv6Current(nativeIPJSON); err != nil {
+			return err
+		}
+	}
 	if n.LinkStage != "observed" || n.NFT.Stage != "observed" || n.StopReason != "" || !n.StartupVerified {
 		return nativeTUNUncertain("native activation was not completely receipted")
 	}
