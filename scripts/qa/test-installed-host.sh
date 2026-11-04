@@ -91,6 +91,9 @@ sh -n scripts/qa/host-tun-path.sh
 sh -n scripts/qa/host-product-tun-trial.sh
 sh -n scripts/qa/host-supervised-product-tun.sh
 sh -n scripts/qa/host-native-product-tun.sh
+bash -n scripts/qa/field-root-selected-tun.sh
+bash -n scripts/qa/field-notrack-inherited-mark.sh
+PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/qa/test-field-root-shell.py
 sh -n scripts/qa/host-owned-tun-boundary.sh
 sh -n scripts/qa/tun-guard-unit-lab.sh
 bash scripts/qa/test-installer-rollback-backups.sh
