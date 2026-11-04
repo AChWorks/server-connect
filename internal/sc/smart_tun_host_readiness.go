@@ -268,6 +268,8 @@ func selectedSmartTUNHostEndpoint(profile Profile, pinned netip.Addr) (kind, hos
 // A route lookup is useful only when it is for the exact requested address
 // and actually selects the operator's expected underlay. Its existence
 // alone cannot prove that an SSH/hosting reply survives future interception.
+// Reject indirect, conflicting or ambiguous native path evidence rather than
+// reporting a clean underlay from only the top-level "dev" member.
 func selectedHostRouteOnUnderlay(lookup *HostRouteLookup, ip netip.Addr, underlay string) bool {
 	if lookup == nil || lookup.Target != ip.String() {
 		return false
@@ -276,19 +278,49 @@ func selectedHostRouteOnUnderlay(lookup *HostRouteLookup, ip netip.Addr, underla
 	if ip.Is6() {
 		family = "ipv6"
 	}
-	if lookup.Family != family {
+	if lookup.Family != family || rejectAmbiguousJournalJSON(lookup.KernelRoute) != nil {
 		return false
 	}
-	var rows []struct {
-		Dst  string `json:"dst"`
-		Dev  string `json:"dev"`
-		Type string `json:"type"`
-	}
-	if json.Unmarshal(lookup.KernelRoute, &rows) != nil || len(rows) != 1 {
+	var rows []map[string]json.RawMessage
+	if json.Unmarshal(lookup.KernelRoute, &rows) != nil || len(rows) != 1 || rows[0] == nil {
 		return false
 	}
-	return rows[0].Dst == ip.String() && rows[0].Dev == underlay &&
-		(rows[0].Type == "" || rows[0].Type == "unicast")
+	row := rows[0]
+	// A kernel-resolved single underlay is a narrow observation. Do not
+	// silently discard alternate nexthops, policy-table identity, tunnels
+	// or packet transformations carried by native iproute2's JSON.
+	known := []string{"dst", "dev", "type", "table", "flags",
+		"nhid", "nexthops", "multipath", "via", "encap", "newdst"}
+	if !canonicalSelectedKeys(row, known) {
+		return false
+	}
+	for _, name := range []string{"nhid", "nexthops", "multipath", "via", "encap", "newdst"} {
+		if _, present := row[name]; present {
+			return false
+		}
+	}
+	if raw, present := row["table"]; present {
+		if string(raw) != `"main"` && string(raw) != "254" {
+			return false
+		}
+	}
+	if raw, present := row["flags"]; present {
+		var flags []string
+		if json.Unmarshal(raw, &flags) != nil || flags == nil || len(flags) != 0 {
+			return false
+		}
+	}
+	var dest, device, kind string
+	if json.Unmarshal(row["dst"], &dest) != nil ||
+		json.Unmarshal(row["dev"], &device) != nil {
+		return false
+	}
+	if raw, present := row["type"]; present {
+		if json.Unmarshal(raw, &kind) != nil || kind != "unicast" {
+			return false
+		}
+	}
+	return dest == ip.String() && device == underlay
 }
 
 func (m *Manager) InspectSelectedSmartTUNHost(pinnedIP, managementPeer, underlayInterface, resolverIP string, resolverPort int) (SmartTUNHostReadiness, error) {
