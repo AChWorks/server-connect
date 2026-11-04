@@ -3,6 +3,7 @@ package sc
 import (
 	"encoding/json"
 	"errors"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"strings"
@@ -377,6 +378,23 @@ func TestSelectedHostCheckRefusesWrongOrAmbiguousKernelRoutes(t *testing.T) {
 		{"multiple ambiguous routes", `[{"dst":"8.8.8.8","dev":"ens3"},{"dst":"8.8.8.8","dev":"ens3"}]`, `[{"dst":"198.51.100.7","dev":"ens3"}]`},
 		{"endpoint special route kind", `[{"dst":"8.8.8.8","dev":"ens3","type":"local"}]`, `[{"dst":"198.51.100.7","dev":"ens3"}]`},
 		{"malformed route", `[{"dst":"8.8.8.8","dev":0}]`, `[{"dst":"198.51.100.7","dev":"ens3"}]`},
+		{"endpoint alternate-nexthop ID", `[{"dst":"8.8.8.8","dev":"ens3","nhid":12}]`, `[{"dst":"198.51.100.7","dev":"ens3"}]`},
+		{"management multipath", `[{"dst":"8.8.8.8","dev":"ens3"}]`, `[{"dst":"198.51.100.7","dev":"ens3","nexthops":[{"dev":"docker0"}]}]`},
+		{"endpoint nested alternative", `[{"dst":"8.8.8.8","dev":"ens3","multipath":[{"dev":"docker0"}]}]`, `[{"dst":"198.51.100.7","dev":"ens3"}]`},
+		{"endpoint encapsulation", `[{"dst":"8.8.8.8","dev":"ens3","encap":{"type":"mpls","labels":[100]}}]`, `[{"dst":"198.51.100.7","dev":"ens3"}]`},
+		{"management via alternate family", `[{"dst":"8.8.8.8","dev":"ens3"}]`, `[{"dst":"198.51.100.7","dev":"ens3","via":{"family":"inet6","addr":"2001:db8::1"}}]`},
+		{"endpoint nonmain table", `[{"dst":"8.8.8.8","dev":"ens3","table":100}]`, `[{"dst":"198.51.100.7","dev":"ens3"}]`},
+		{"endpoint changed destination", `[{"dst":"8.8.8.8","dev":"ens3","newdst":"200"}]`, `[{"dst":"198.51.100.7","dev":"ens3"}]`},
+		{"endpoint unexpected flags", `[{"dst":"8.8.8.8","dev":"ens3","flags":["onlink"]}]`, `[{"dst":"198.51.100.7","dev":"ens3"}]`},
+		{"endpoint duplicate device alias", `[{"dst":"8.8.8.8","dev":"docker0","dev":"ens3"}]`, `[{"dst":"198.51.100.7","dev":"ens3"}]`},
+		{"management case-ambiguous device", `[{"dst":"8.8.8.8","dev":"ens3"}]`, `[{"dst":"198.51.100.7","Dev":"docker0","dev":"ens3"}]`},
+		{"endpoint uppercase alternate nexthop", `[{"dst":"8.8.8.8","dev":"ens3","NHID":12}]`, `[{"dst":"198.51.100.7","dev":"ens3"}]`},
+		{"management duplicate destination", `[{"dst":"8.8.8.8","dev":"ens3"}]`, `[{"dst":"198.51.100.7","dst":"198.51.100.8","dev":"ens3"}]`},
+		{"endpoint local table", `[{"dst":"8.8.8.8","dev":"ens3","table":"local"}]`, `[{"dst":"198.51.100.7","dev":"ens3"}]`},
+		{"endpoint null flags", `[{"dst":"8.8.8.8","dev":"ens3","flags":null}]`, `[{"dst":"198.51.100.7","dev":"ens3"}]`},
+		{"management null route type", `[{"dst":"8.8.8.8","dev":"ens3"}]`, `[{"dst":"198.51.100.7","dev":"ens3","type":null}]`},
+		{"management empty route type", `[{"dst":"8.8.8.8","dev":"ens3"}]`, `[{"dst":"198.51.100.7","dev":"ens3","type":""}]`},
+		{"endpoint present but null next-hop", `[{"dst":"8.8.8.8","dev":"ens3","nhid":null}]`, `[{"dst":"198.51.100.7","dev":"ens3"}]`},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -391,6 +409,29 @@ func TestSelectedHostCheckRefusesWrongOrAmbiguousKernelRoutes(t *testing.T) {
 			if err != nil || r.HostRoutes != "unavailable_or_wrong_underlay" ||
 				!hasReadinessReason(r, "host_routes_unverified") || r.ActivationReady || r.GeneralHostAdmitted {
 				t.Fatalf("untrusted route accepted: %+v err=%v", r, err)
+			}
+		})
+	}
+}
+
+func TestSelectedHostUnderlayRouteAcceptsUnambiguousNativeReplies(t *testing.T) {
+	for _, tc := range []struct {
+		name, target, family, raw string
+	}{
+		{"IPv4 minimal", "8.8.8.8", "ipv4", `[{"dst":"8.8.8.8","dev":"ens3"}]`},
+		{"IPv4 default gateway", "8.8.8.8", "ipv4", `[{"dst":"8.8.8.8","gateway":"10.0.2.2","dev":"ens3","prefsrc":"10.0.2.15","flags":[],"uid":0,"cache":[]}]`},
+		{"IPv4 explicit main table", "8.8.8.8", "ipv4", `[{"dst":"8.8.8.8","dev":"ens3","table":"main","type":"unicast"}]`},
+		{"IPv4 numeric main table", "8.8.8.8", "ipv4", `[{"dst":"8.8.8.8","dev":"ens3","table":254,"flags":[]}]`},
+		{"IPv6 native reply", "2001:4860:4860::8888", "ipv6", `[{"dst":"2001:4860:4860::8888","dev":"ens3","gateway":"fe80::1","prefsrc":"2001:db8::123","flags":[],"cache":[]}]`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ip := netip.MustParseAddr(tc.target)
+			lookup := &HostRouteLookup{Target: tc.target, Family: tc.family, KernelRoute: json.RawMessage(tc.raw)}
+			if !selectedHostRouteOnUnderlay(lookup, ip, "ens3") {
+				t.Fatalf("normal native underlay lookup rejected: %s", tc.raw)
+			}
+			if selectedHostRouteOnUnderlay(lookup, ip, "docker0") {
+				t.Fatal("wrong expected underlay accepted")
 			}
 		})
 	}
