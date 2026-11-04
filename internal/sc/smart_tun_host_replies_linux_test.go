@@ -80,3 +80,25 @@ func TestReadOnlyHostReplyNOTRACKFailClosed(t *testing.T) {
 		t.Fatalf("another socket hid malformed kernel identity: %s, %v", status, err)
 	}
 }
+
+func TestReadOnlyHostReplyLegacyRawBackendCrosscheck(t *testing.T) {
+	for _, raw := range []string{
+		"-P PREROUTING ACCEPT\n-P OUTPUT ACCEPT\n",
+		"-P OUTPUT ACCEPT\n-P PREROUTING ACCEPT\n",
+	} {
+		if !strictEmptyLegacyRawPolicy([]byte(raw)) {
+			t.Fatal("clean legacy kernel raw policy rejected")
+		}
+	}
+	for _, raw := range []string{
+		"", "-P PREROUTING ACCEPT\n-P OUTPUT ACCEPT",
+		"-P PREROUTING ACCEPT\n-P OUTPUT DROP\n",
+		"-P PREROUTING ACCEPT\n-P OUTPUT ACCEPT\n-P OUTPUT ACCEPT\n",
+		"-P PREROUTING ACCEPT\n-P OUTPUT ACCEPT\n-A OUTPUT -p tcp --sport 80 -j NOTRACK\n",
+		"-P PREROUTING ACCEPT\n-P OUTPUT ACCEPT\n-N foreign\n",
+	} {
+		if strictEmptyLegacyRawPolicy([]byte(raw)) {
+			t.Fatalf("unexpected legacy raw policy accepted: %q", raw)
+		}
+	}
+}

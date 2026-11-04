@@ -374,8 +374,9 @@ general Smart Routing.
 
 **Existing NOTRACK TCP hosting sessions:** The root-host read-only boundary may
 identify a possible established-socket match to foreign OUTPUT NOTRACK rules.
-It independently compares nft/iptables-nft policy counts and Linux inet_diag
-socket generations, without exposing socket tuples. The snapshot is not a
+It independently compares nft/iptables-nft policy counts, requires an empty
+iptables-legacy raw backend and inspects Linux inet_diag socket generations,
+without exposing socket tuples. The snapshot is not a
 reservation and remains non-atomic: socket churn, new accepted SYNs, stale
 4-tuple exceptions and source-port-only bypasses can undermine safe hosting
 replies. A disposable kernel namespace proves both accepted-socket mark

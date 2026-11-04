@@ -92,10 +92,10 @@ func classifiedExistingHostReplies(raw []byte, sockets map[uint32]smartTUNManage
 	return hostRepliesNone, nil
 }
 
-func runReadOnlyHostIptables(args ...string) ([]byte, error) {
+func runReadOnlyHostNetfilter(binary string, args ...string) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "/usr/sbin/iptables", args...)
+	cmd := exec.CommandContext(ctx, binary, args...)
 	cmd.Env = []string{"LC_ALL=C", "LANG=C", "PATH=/usr/sbin:/usr/bin:/sbin:/bin"}
 	cmd.Dir = "/"
 	cmd.WaitDelay = 250 * time.Millisecond
@@ -112,12 +112,34 @@ func observedHostRawTable() ([]byte, error) {
 	// nft JSON xt targets do not distinguish --notrack from other CT actions.
 	// iptables-legacy reads a different kernel ruleset: it cannot corroborate
 	// the nft trace, even if its textual rule count happens to match.
-	version, err := runReadOnlyHostIptables("-V")
+	version, err := runReadOnlyHostNetfilter("/usr/sbin/iptables", "-V")
 	if err != nil || !bytes.HasPrefix(version, []byte("iptables v")) ||
 		!bytes.Contains(version, []byte("(nf_tables)")) {
 		return nil, errors.New("iptables-nft backend not verified")
 	}
-	return runReadOnlyHostIptables("-t", "raw", "-S")
+	return runReadOnlyHostNetfilter("/usr/sbin/iptables", "-t", "raw", "-S")
+}
+
+// iptables-nft and iptables-legacy can coexist and inspect different packet
+// policy. An empty nft table cannot prove there is no legacy raw NOTRACK.
+// Fail closed unless the legacy backend is independently observed to have
+// exactly the default raw policies and no rules/chains whatsoever.
+func strictEmptyLegacyRawPolicy(raw []byte) bool {
+	return bytes.Equal(raw, []byte("-P PREROUTING ACCEPT\n-P OUTPUT ACCEPT\n")) ||
+		bytes.Equal(raw, []byte("-P OUTPUT ACCEPT\n-P PREROUTING ACCEPT\n"))
+}
+
+func observedEmptyLegacyRawPolicy() ([]byte, error) {
+	version, err := runReadOnlyHostNetfilter("/usr/sbin/iptables-legacy", "-V")
+	if err != nil || !bytes.HasPrefix(version, []byte("iptables v")) ||
+		!bytes.Contains(version, []byte("(legacy)")) {
+		return nil, errors.New("legacy netfilter backend unavailable")
+	}
+	raw, err := runReadOnlyHostNetfilter("/usr/sbin/iptables-legacy", "-t", "raw", "-S")
+	if err != nil || !strictEmptyLegacyRawPolicy(raw) {
+		return nil, errors.New("legacy raw owner cannot be proven inert")
+	}
+	return raw, nil
 }
 
 // Cross-check the same raw-table semantics around an authenticated kernel
@@ -129,6 +151,10 @@ func observeExistingHostReplySessions(expectedOutputXTCT int) (string, error) {
 	if err != nil {
 		return hostRepliesUnverified, err
 	}
+	beforeLegacy, err := observedEmptyLegacyRawPolicy()
+	if err != nil {
+		return hostRepliesUnverified, err
+	}
 	sockets, err := managementSockets()
 	if err != nil {
 		return hostRepliesUnverified, err
@@ -136,6 +162,10 @@ func observeExistingHostReplySessions(expectedOutputXTCT int) (string, error) {
 	after, err := observedHostRawTable()
 	if err != nil || !bytes.Equal(before, after) {
 		return hostRepliesUnverified, errors.New("host raw policy changed during socket observation")
+	}
+	afterLegacy, err := observedEmptyLegacyRawPolicy()
+	if err != nil || !bytes.Equal(beforeLegacy, afterLegacy) {
+		return hostRepliesUnverified, errors.New("legacy raw policy changed during socket observation")
 	}
 	return classifiedExistingHostReplies(before, sockets, expectedOutputXTCT)
 }
