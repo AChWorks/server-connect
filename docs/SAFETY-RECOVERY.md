@@ -372,6 +372,17 @@ support, physical power-loss recovery, permanent `ACTIVE_VERIFIED`, trusted
 Iranian routing data or DNS/domain authority. Those remain required gates for
 general Smart Routing.
 
+**Existing NOTRACK TCP hosting sessions:** The root-host read-only boundary may
+identify a possible established-socket match to foreign OUTPUT NOTRACK rules.
+It independently compares nft/iptables-nft policy counts and Linux inet_diag
+socket generations, without exposing socket tuples. The snapshot is not a
+reservation and remains non-atomic: socket churn, new accepted SYNs, stale
+4-tuple exceptions and source-port-only bypasses can undermine safe hosting
+replies. A disposable kernel namespace proves both accepted-socket mark
+inheritance and the need for exact old-session handling; it does not permit
+treating the raw-table rules as a product-owned exception. Product Apply
+must not use this read-only result as a green activation gate.
+
 #### Automatic-policy ownership limit
 
 The retained legacy automatic-policy trial and standalone compiler QA let the

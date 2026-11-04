@@ -151,6 +151,14 @@ func TestGeneralHostNFTEffectsRefuseOpaqueAndMutation(t *testing.T) {
 			}
 		})
 	}
+	output, err := generalHostForeignNFTEffects(hostNFTFixture("output", map[string]any{"xt": map[string]any{"name": "CT", "type": "target"}}))
+	if err != nil || output.OutputXTCTCount != 1 || !output.OpaqueOutputCT || output.NativeOutputNotrack {
+		t.Fatalf("kernel OUTPUT xt CT count lost: %+v %v", output, err)
+	}
+	native, err := generalHostForeignNFTEffects(hostNFTFixture("output", map[string]any{"notrack": nil}))
+	if err != nil || native.OutputXTCTCount != 0 || !native.NativeOutputNotrack || !native.OpaqueOutputCT {
+		t.Fatalf("native OUTPUT NOTRACK does not fail closed: %+v %v", native, err)
+	}
 	if _, err := generalHostForeignNFTEffects(nil); err == nil {
 		t.Fatal("absent inventory admitted")
 	}
@@ -190,5 +198,25 @@ func TestGeneralHostDockerAndHostedReplyConntrackRemainBlocked(t *testing.T) {
 		if strings.Contains(string(serialized), secret) {
 			t.Fatalf("private nft metadata leaked %s", secret)
 		}
+	}
+}
+
+func TestGeneralHostExistingUntrackedRepliesNeverAdmit(t *testing.T) {
+	for _, tc := range []struct{ label, status, reason string }{
+		{"present", hostRepliesPresent, "preexisting_untracked_hosted_reply_sessions"},
+		{"none", hostRepliesNone, ""},
+		{"unverified", hostRepliesUnverified, "untracked_hosted_reply_sessions_unverified"},
+	} {
+		t.Run(tc.label, func(t *testing.T) {
+			o := hostBoundaryFixture()
+			o.nft = hostNFTFixture("output", map[string]any{"xt": map[string]any{"type": "target", "name": "CT"}})
+			o.hostedReplySessions = tc.status
+			r := assessSmartTUNHostBoundary(o, "ens3")
+			if r.HostedReplySessions != tc.status || r.ActivationReady || r.GeneralHostAdmitted ||
+				!hasBoundaryReason(r, "foreign_output_conntrack_opaque") ||
+				(tc.reason != "" && !hasBoundaryReason(r, tc.reason)) {
+				t.Fatalf("hosted reply risk lost: %+v", r)
+			}
+		})
 	}
 }

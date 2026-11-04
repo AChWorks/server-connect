@@ -25,32 +25,37 @@ type SmartTUNHostBoundary struct {
 	IPv4Policy          string   `json:"ipv4_policy"`
 	IPv6Policy          string   `json:"ipv6_policy"`
 	ForeignNFT          string   `json:"foreign_nft"`
+	HostedReplySessions string   `json:"hosted_reply_sessions"`
 	OutOfBandRecovery   string   `json:"out_of_band_recovery"`
 	Reasons             []string `json:"reasons"`
 	Limitations         []string `json:"limitations"`
 }
 
 type smartTUNHostBoundaryObservations struct {
-	target       string
-	targetErr    error
-	sshPath      generalHostSSHPath
-	sshErr       error
-	links        json.RawMessage
-	linksErr     error
-	ipv4Rules    json.RawMessage
-	ipv4RulesErr error
-	ipv6Err      error
-	nft          []map[string]any
-	nftErr       error
+	target              string
+	targetErr           error
+	sshPath             generalHostSSHPath
+	sshErr              error
+	links               json.RawMessage
+	linksErr            error
+	ipv4Rules           json.RawMessage
+	ipv4RulesErr        error
+	ipv6Err             error
+	nft                 []map[string]any
+	nftErr              error
+	hostedReplySessions string
+	hostedReplyErr      error
 }
 
 // Distinguish foreign owners for operator diagnosis without granting them
 // any mutation authority or weakening native Apply's fail-closed firewall
 // validation. Opaque OUTPUT conntrack targets may break hosting replies.
 type generalHostNFTProfile struct {
-	PacketEffects  int
-	OpaqueOutputCT bool
-	ForeignNAT     bool
+	PacketEffects       int
+	OpaqueOutputCT      bool
+	ForeignNAT          bool
+	OutputXTCTCount     int
+	NativeOutputNotrack bool
 }
 
 type generalHostNFTChainKey struct{ Family, Table, Name string }
@@ -121,10 +126,12 @@ func generalHostForeignNFTEffects(objects []map[string]any) (generalHostNFTProfi
 					}
 					if _, notrack := expr["notrack"]; notrack && hook == "output" {
 						result.OpaqueOutputCT = true
+						result.NativeOutputNotrack = true
 					}
 					if xt, ok := expr["xt"].(map[string]any); ok {
 						if xt["type"] == "target" && xt["name"] == "CT" && hook == "output" {
 							result.OpaqueOutputCT = true
+							result.OutputXTCTCount++
 						}
 						if xt["type"] == "target" && (xt["name"] == "MASQUERADE" ||
 							xt["name"] == "SNAT" || xt["name"] == "DNAT" || xt["name"] == "REDIRECT") {
@@ -159,12 +166,13 @@ func assessSmartTUNHostBoundary(o smartTUNHostBoundaryObservations, expectedUnde
 		InstalledTarget: "unavailable", NativePlatform: "unsupported_or_unverified",
 		SSHReturnPath: "unverified", InterfaceInventory: "unverified",
 		IPv4Policy: "unverified", IPv6Policy: "unverified",
-		ForeignNFT: "unverified", OutOfBandRecovery: "not_verified",
+		ForeignNFT: "unverified", HostedReplySessions: hostRepliesUnverified, OutOfBandRecovery: "not_verified",
 		Reasons: []string{}, Limitations: []string{
 			"A fresh authenticated SSH transport is not proved by this passive kernel route observation.",
 			"An SSH session is not an independent provider-console rescue or host rollback channel.",
 			"Non-atomic kernel observations cannot reserve foreign routes, conntrack, hosting replies or firewall state.",
 			"Safe native Apply, owned-resource rollback, health supervision and selected-VPN egress still require independent evidence.",
+			"A read-only established-TCP socket inventory cannot reserve a session or protect new sockets, old socket generations or tuple reuse.",
 		},
 	}
 	add := func(code string) { r.Reasons = append(r.Reasons, code) }
@@ -227,6 +235,16 @@ func assessSmartTUNHostBoundary(o smartTUNHostBoundaryObservations, expectedUnde
 		if err == nil {
 			if risk.OpaqueOutputCT {
 				add("foreign_output_conntrack_opaque")
+				if o.hostedReplyErr == nil && o.hostedReplySessions != "" {
+					r.HostedReplySessions = o.hostedReplySessions
+				}
+				if r.HostedReplySessions == hostRepliesPresent {
+					add("preexisting_untracked_hosted_reply_sessions")
+				} else if r.HostedReplySessions == hostRepliesUnverified {
+					add("untracked_hosted_reply_sessions_unverified")
+				}
+			} else {
+				r.HostedReplySessions = hostRepliesNoXT
 			}
 			if risk.ForeignNAT {
 				add("foreign_nat_ownership_unverified")
@@ -270,6 +288,13 @@ func InspectSmartTUNHostBoundary(managementPeer, underlay string) (SmartTUNHostB
 	nftRaw, o.nftErr = nativeTUNRunNFT(nil, nil, "-n", "-j", "-a", "list", "ruleset")
 	if o.nftErr == nil {
 		o.nft, o.nftErr = nativeTUNNftObjects(nftRaw)
+		if o.nftErr == nil {
+			if risk, err := generalHostForeignNFTEffects(o.nft); err == nil && risk.OpaqueOutputCT {
+				if risk.OutputXTCTCount > 0 && !risk.NativeOutputNotrack {
+					o.hostedReplySessions, o.hostedReplyErr = observeExistingHostReplySessions(risk.OutputXTCTCount)
+				}
+			}
+		}
 	}
 	return assessSmartTUNHostBoundary(o, underlay), nil
 }

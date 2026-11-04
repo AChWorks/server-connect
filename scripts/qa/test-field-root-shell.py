@@ -6,7 +6,8 @@ import subprocess
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 PILOT = ROOT / 'scripts/qa/field-root-selected-tun.sh'
 SOCKET = ROOT / 'scripts/qa/field-notrack-inherited-mark.sh'
-for path in (PILOT, SOCKET):
+SESSION = ROOT / 'scripts/qa/field-notrack-session-preservation.sh'
+for path in (PILOT, SOCKET, SESSION):
     subprocess.run(['bash', '-n', str(path)], check=True)
 source = PILOT.read_text()
 necessary = (
@@ -35,3 +36,15 @@ command = 'set -o pipefail; ' + producer + ' | grep -Fc "table inet scfhr_test {
 check = subprocess.run(['bash', '-c', command], capture_output=True, text=True, check=True)
 assert check.stdout.strip() == '1'
 print('FIELD_ROOT_PIPEFAIL_OWNERSHIP_CHECK=PASS')
+
+# This proof must never use or mutate the root host network namespace.
+proof = SESSION.read_text()
+for required in (
+    'unshare -n /usr/bin/python3 -B -',
+    "assert os.stat('/proc/self/ns/net').st_ino != os.stat('/proc/1/ns/net').st_ino",
+    'NOTRACK_EXISTING_EXACT_SOCKET_REPLY=PASS',
+    'NOTRACK_NEW_ACCEPTED_SOCKET_REPLY=PASS',
+    'NOTRACK_UNPROTECTED_REPLY_FAIL_CLOSED=PASS',
+):
+    assert required in proof, f'isolated NOTRACK QA invariant missing: {required}'
+print('FIELD_NOTRACK_SESSION_ISOLATION_GUARD=PASS')
