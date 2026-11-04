@@ -174,8 +174,10 @@ func operatorErrorGuidance(code string) (state, next string) {
 		return "This action is not admitted for the observed host, mode or transport.", "Inspect 'server-connect mode-overview'; do not bypass host or guard checks."
 	case "service_conflict", "service_state_unavailable", "service_binary_untrusted", "guard_unavailable":
 		return "Service or guard ownership/health could not be verified.", "Inspect 'server-connect status' and the relevant systemd unit before retrying."
-	case "routing_rules_invalid", "routing_rules_conflict":
-		return "The routing rule change was refused or its saved revision changed.", "Inspect 'server-connect smart-routing-rules list' and retry with current identities."
+	case "routing_rules_invalid", "routing_rules_conflict", "routing_rules_missing":
+		return "The routing rule change was refused; the saved rule identity or revision may differ.", "Inspect 'server-connect smart-routing-rules list' and retry with current identities."
+	case "routing_rules_hash_mismatch":
+		return "The supplied rule list bytes do not match the pinned SHA-256; no import was accepted.", "Recalculate the raw file digest with 'sha256sum' and retry with an independently verified digest."
 	case "probe_http", "probe_unavailable", "core_unavailable":
 		return "The requested network path has not been proven healthy.", "Inspect 'server-connect status' and use the explicit Direct/Proxy path diagnostics."
 	default:
