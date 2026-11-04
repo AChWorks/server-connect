@@ -359,7 +359,21 @@ func observeFreshSmartTUNManagement(peer, underlay string, afterUptimeMS int64) 
 			return smartTUNManagementProof{}, err
 		}
 	} else {
-		return smartTUNManagementProof{}, managementFault("management topology is not an admitted trial")
+		// No new TUN admission is granted here. The caller still requires a
+		// separately validated journal/Guard operation; this only makes the
+		// actual host's fresh OpenSSH ownership proof topology-independent.
+		return observeFreshGeneralHostSSH(peer, underlay, afterUptimeMS)
+	}
+	return observeFreshManagementSocket(peer, localIP, afterUptimeMS)
+}
+
+// The transport witness is independent of the disconnected QA topology.
+// General-host callers must authenticate their own exact local address and
+// return path before entering this existing OpenSSH/inet_diag proof. This
+// function alone never permits TUN activation or broadens QA admission.
+func observeFreshManagementSocket(peer, localIP string, afterUptimeMS int64) (smartTUNManagementProof, error) {
+	if os.Geteuid() != 0 {
+		return smartTUNManagementProof{}, managementFault("confirmation requires privileged authenticated management")
 	}
 	before, err := managementSockets()
 	if err != nil {
