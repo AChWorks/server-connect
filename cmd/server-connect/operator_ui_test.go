@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"encoding/json"
 	"io"
 	"os"
 	"path/filepath"
@@ -172,5 +173,62 @@ func TestOperatorMenuFailedVMApplyNeverOffersConfirmation(t *testing.T) {
 				t.Fatal("refused VM trial created uninstalled product state")
 			}
 		})
+	}
+}
+
+func TestOperatorMenuConfirmedProfileRemovalUsesExistingManager(t *testing.T) {
+	const id = "0123456789abcdef"
+	stateDir := filepath.Join(t.TempDir(), "state")
+	if err := os.Mkdir(stateDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	profiles := filepath.Join(stateDir, "profiles")
+	if err := os.Mkdir(profiles, 0700); err != nil {
+		t.Fatal(err)
+	}
+	profile, err := json.Marshal(sc.Profile{
+		ID: id, Name: "ephemeral-test-profile", Kind: "vless-link",
+		Outbound: json.RawMessage(`{"type":"vless","server":"example.invalid"}`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	profilePath := filepath.Join(profiles, id+".json")
+	if err := os.WriteFile(profilePath, profile, 0600); err != nil {
+		t.Fatal(err)
+	}
+	statePath := filepath.Join(stateDir, "state.json")
+	if err := os.WriteFile(statePath, []byte(`{"version":1,"desired":"direct","selected":"`+id+`","port":20807}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	m := sc.New(stateDir, "", 0)
+	in, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.WriteString(writer, "8\n"+id+"\nREMOVE\n0\n"); err != nil {
+		t.Fatal(err)
+	}
+	writer.Close()
+	old := os.Stdin
+	os.Stdin = in
+	defer func() { os.Stdin = old; in.Close() }()
+	code, out, stderr := hostDriftCapturedOutput(t, func() int { return menu(m) })
+	if code != 0 || stderr != "" || !strings.Contains(out, "Completed:") {
+		t.Fatalf("confirmed removal failed: code=%d out=%s stderr=%s", code, out, stderr)
+	}
+	if _, err := os.Lstat(profilePath); !os.IsNotExist(err) {
+		t.Fatalf("confirmed removal retained the saved profile: %v", err)
+	}
+	data, err := os.ReadFile(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stored sc.State
+	if err := json.Unmarshal(data, &stored); err != nil {
+		t.Fatal(err)
+	}
+	if stored.Selected != "" || stored.Desired != "direct" || stored.Port != sc.DefaultPort {
+		t.Fatalf("confirmed removal changed unrelated operator state: %+v", stored)
 	}
 }
