@@ -262,3 +262,58 @@ func TestRoutingRulesNativeCompilerPreviewNoNetworkEffects(t *testing.T) {
 		t.Fatal("caller-supplied exceptions bypassed saved rules")
 	}
 }
+
+// A selected hostname/WS profile with explicit matching TLS SNI and WS Host
+// can be compiled using an in-memory numeric endpoint pin. This does not
+// authenticate DNS or grant real-host TUN Apply.
+func TestRoutingRulesPinnedWebSocketPreviewPreservesStoredProfile(t *testing.T) {
+	manager := rulesManager(t)
+	profile, _ := smartTUNFixture()
+	profile.ID = "0123456789abcdef"
+	if err := manager.withLock(func() error {
+		state := State{Version: 1, Desired: "direct", Port: manager.Port, Selected: profile.ID}
+		if err := manager.save(state); err != nil {
+			return err
+		}
+		raw, err := json.Marshal(profile)
+		if err != nil {
+			return err
+		}
+		return put(filepath.Join(manager.Dir, "profiles", profile.ID+".json"), raw)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	const ws = `{"type":"vless","tag":"upstream","server":"node.example.org","server_port":443,"uuid":"c2902f3a-1c25-41ef-a8dc-760b483aa247","tls":{"enabled":true,"server_name":"front.example.net"},"transport":{"type":"ws","path":"/private","headers":{"Host":"front.example.net"}}}`
+	testSelectedHostOutbound(t, manager, ws)
+	path := filepath.Join(manager.Dir, "profiles", "0123456789abcdef.json")
+	original, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, opts := smartTUNFixture()
+	opts.Exceptions = nil
+	good, err := manager.PreviewSmartRoutingRulesPinned(opts, "8.8.8.8")
+	if err != nil || good.EndpointPinEvidence != "operator_supplied_unverified" ||
+		good.ValidationLevel != "native_policy_compile_only" || good.Applied || good.ActivationReady ||
+		good.CoreExecutionTested || good.HostNetworkInspected || len(good.NativeConfigSHA256) != 64 {
+		t.Fatalf("selected WS preview returned false readiness or no config: %+v err=%v", good, err)
+	}
+	after, err := os.ReadFile(path)
+	if err != nil || string(after) != string(original) {
+		t.Fatal("read-only WS projection overwrote the selected profile")
+	}
+	again, err := manager.PreviewSmartRoutingRulesPinned(opts, "8.8.8.8")
+	if err != nil || !reflect.DeepEqual(good, again) {
+		t.Fatalf("WS pinned candidate unstable %+v %+v %v", good, again, err)
+	}
+	// Absent pin must not permit an unresolved hostname to enter the
+	// native sing-box compiler, and implicit WS Host cannot be guessed.
+	if _, err := manager.PreviewSmartRoutingRulesPinned(opts, ""); err == nil {
+		t.Fatal("unresolved selected endpoint accepted")
+	}
+	const implicit = `{"type":"vless","tag":"upstream","server":"node.example.org","server_port":443,"uuid":"c2902f3a-1c25-41ef-a8dc-760b483aa247","tls":{"enabled":true,"server_name":"front.example.net"},"transport":{"type":"ws","path":"/private"}}`
+	testSelectedHostOutbound(t, manager, implicit)
+	if _, err := manager.PreviewSmartRoutingRulesPinned(opts, "8.8.8.8"); err == nil {
+		t.Fatal("implicit WS Host accepted as pinned numeric endpoint")
+	}
+}

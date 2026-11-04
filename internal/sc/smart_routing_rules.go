@@ -545,7 +545,7 @@ func (m *Manager) PreviewSmartRoutingRulesPinned(opts SmartTUNCandidateOptions, 
 		if pin != "" {
 			profile, err = projectPinnedVLESSNativePreview(profile, pin)
 			if err != nil {
-				return Fault("routing_rules_invalid", "operator pin or selected native TCP profile is invalid")
+				return Fault("routing_rules_invalid", "operator pin or supported selected native VLESS transport is invalid")
 			}
 		}
 		cfg, err := smartTUNNativeConfig(profile, opts)

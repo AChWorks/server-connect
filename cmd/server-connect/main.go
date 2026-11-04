@@ -325,6 +325,16 @@ func run(j bool, m *sc.Manager, args []string) int {
 			return output(j, nil, err)
 		}
 		return output(j, check, nil)
+	case "smart-tun-host-boundary":
+		opts := flag.NewFlagSet(name, flag.ContinueOnError)
+		opts.SetOutput(io.Discard)
+		peer := opts.String("management-peer", "", "literal current SSH peer IPv4")
+		underlay := opts.String("underlay-if", "", "expected native underlay device")
+		if e := opts.Parse(args); e != nil || len(opts.Args()) != 0 {
+			return output(j, nil, sc.Fault("invalid_arguments", "host boundary requires --management-peer IPv4 --underlay-if DEVICE"))
+		}
+		result, err := sc.InspectSmartTUNHostBoundary(*peer, *underlay)
+		return output(j, result, err)
 	case "smart-tun-trial-apply":
 		opts := flag.NewFlagSet(name, flag.ContinueOnError)
 		opts.SetOutput(io.Discard)
@@ -694,7 +704,7 @@ Commands:
   smart-routing-rules remove-source --source ID --sha256 HEX
   smart-routing-rules preview --tunnel-if NAME --underlay-if NAME --tunnel-ipv4 CIDR
                               --domestic-cidr CIDR [--protected-cidr CIDR...]
-                              [--endpoint-pin-ipv4 PUBLIC_IP] (named VLESS TCP only)
+                              [--endpoint-pin-ipv4 PUBLIC_IP] (VLESS TCP or explicit TLS+WS Host)
                               Compiles saved rules with selected native VLESS profile;
                               explicit pins do not prove DNS or underlay reachability;
                               no core execution, route inspection or activation
@@ -720,6 +730,9 @@ Commands:
                               Two to four distinct hosts; diagnostic only
   exec -- curl -I https://example.org
   apt -- apt-get update        Strict opt-in APT via trusted native binary
+  smart-tun-host-boundary --management-peer IPv4 --underlay-if NAME
+                              Read-only real-host network constraints, IPv4
+                              policy, IPv6 and foreign nft risk; no Apply token
   smart-tun-host-check --endpoint-ip IP --management-peer IP --underlay-if NAME
                        [--dns-resolver IP --dns-port 53]
                               Read-only selected VLESS hostname/DNS, TCP, routes and

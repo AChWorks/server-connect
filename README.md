@@ -46,6 +46,25 @@ The interactive `server-connect menu` starts with everyday Connection, Profiles 
 
 ### Selected-profile host readiness (read-only)
 
+For a server that has no selected VPN profile yet, the separate
+`smart-tun-host-boundary` command checks the **actual Linux host** without
+installing, applying or changing network policy:
+
+```console
+sudo server-connect --json smart-tun-host-boundary --management-peer MANAGEMENT_PEER_IPV4 --underlay-if ens3
+```
+
+It reports supported native Apply target, exact IPv4 management source and
+underlay route observation, extra network interfaces, IPv4 RPDB, public-IPv6
+conflict, and foreign nftables packet-changing rules (including opaque Docker
+xtables extensions). The output intentionally includes no private addresses,
+firewall contents, selected VPN metadata or credentials. No observed
+combination sets `general_host_admitted` or `activation_ready`: authenticated
+fresh SSH, independently verified OOB recovery, protected hosting replies,
+guarded ownership and genuine selected VPN egress are **separate mandatory
+gates**. On Debian 12 or in a Docker-owning firewall topology, it reports the
+actual compatibility blockers rather than suppressing third-party policies.
+
 The development CLI `smart-tun-host-check` combines existing read-only
 selected VLESS profile, explicit pinned-endpoint DNS, interface-bound TCP,
 management/endpoint route and native nftables observations. Supply the
@@ -118,7 +137,7 @@ server-connect --json smart-routing-rules import --file /private/operator-rules.
 
 Use `--file -` for stdin with the CLI, not the menu. Source replacement requires `--replaces-sha256 CURRENT_SOURCE_HASH`, while `smart-routing-rules remove-source --source operator-list --sha256 CURRENT_SOURCE_HASH` removes one exact imported source. Invalid/special-purpose/overlapping CIDRs, dangerous broad Direct rules and unauthenticated Direct-domain exceptions are rejected. IPv6 operator inputs must fit the currently allocated 2000::/3 unicast space **and** exclude the offline IANA IPv6 special-purpose registry snapshot (2025-10-09); Go's IsGlobalUnicast alone is insufficient. Suffix rules must be **registrable names beyond** the ICANN **or PRIVATE** public suffix, including multi-label roots (co.uk, com.au, github.io). This is enforced by the pinned, locally vendored, BSD-3-Clause golang.org/x/net/publicsuffix v0.36.0 snapshot; unknown/unmanaged TLDs fail closed until deliberate policy updates. Both registries are static, explicit inputs to review/update, **not** proof that a prefix is geographic, live or actually reachable. List metadata exposes source age, SHA and staleness over 30 days: **a matching hash is not a publisher signature or proof of trusted geography**.
 
-The read-only `smart-routing-rules preview --tunnel-if TUN --underlay-if IFACE --tunnel-ipv4 PRIVATE_CIDR --domestic-cidr EXPLICIT_CIDR` compiles the saved exceptions and selected compatible profile using the existing native TUN candidate compiler. For a selected **hostname-based plain TCP VLESS** profile, pass an explicit `--endpoint-pin-ipv4 PUBLIC_IP` to compile a **temporary, in-memory** numeric dial target without changing the stored outbound. TLS requires an explicit `server_name` so certificate/SNI identity is preserved; profiles with implicit transport Host behavior, ambiguous TLS or alternate dial selectors are refused. The pin is **operator-supplied and unverified**: this is neither authenticated hostname resolution nor a verified underlay path. The output includes `endpoint_pin_evidence=operator_supplied_unverified` and a configuration hash with `native_policy_compile_only`; it does not run sing-box, inspect the real host, apply rules or verify a VPN. Actual general-host routing and independent guards remain open under Issues #2 and #3.
+The read-only `smart-routing-rules preview --tunnel-if TUN --underlay-if IFACE --tunnel-ipv4 PRIVATE_CIDR --domestic-cidr EXPLICIT_CIDR` compiles the saved exceptions and selected compatible profile using the existing native TUN candidate compiler. For a selected **hostname-based VLESS TCP** profile, pass `--endpoint-pin-ipv4 PUBLIC_IP` to compile a **temporary, in-memory** numeric dial target without changing the stored outbound. Explicit **WebSocket (WS)** is also supported only when both `tls.enabled=true` with a validated, explicit `tls.server_name` and an unambiguous canonical `transport.headers.Host` string **exactly matching that TLS identity** are already saved in the selected profile. In that case the numeric socket destination changes while the entire original TLS object and WS transport (including HTTP Host/path/headers) remain untouched. The pinned sing-box WebSocket client uses this explicit Host override rather than inferring it from the numeric dial target. Implicit/mismatched Host, TLS identity, HTTPUpgrade/HTTP, malformed or repeated/case-variant Host, ambiguous JSON and alternate dial selectors still refuse to compile. The pin is **operator-supplied and unverified**: this is neither authenticated hostname resolution nor a verified underlay path. The output includes `endpoint_pin_evidence=operator_supplied_unverified` and a configuration hash with `native_policy_compile_only`; it does not run sing-box, inspect the real host, apply rules or verify a VPN. Actual general-host routing and independent guards remain open under Issues #2 and #3.
 
 **Installed QA bundle integrity:** After local installation, `/opt/server-connect/current` points to a versioned release containing the original complete checksum-covered package, including `manifest.json` and its source revision. Run `(cd /opt/server-connect/current && sha256sum --strict --quiet --check checksums.sha256)`, then independently compare the installed checksum manifest digest and source metadata with the expected QA artifact. Older development releases without retained metadata are unverified. Self-consistency never authenticates a publisher or authorizes distribution. See [Distribution](docs/OFFLINE-DISTRIBUTION.md#installed-development-release-audit).
 

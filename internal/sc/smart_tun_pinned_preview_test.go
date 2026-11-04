@@ -178,3 +178,80 @@ func TestPinnedVLESSNativePreviewRejectsNoncanonicalSelectedKeysWithoutMutation(
 		}
 	}
 }
+
+// Hostname-to-IP pinning must preserve *both* the sing-box TLS SNI and the
+// WebSocket HTTP Host. The existing explicit Host overrides the URL host in
+// the pinned sing-box WebSocket client; none of the other transport bytes may
+// change. This is useful to the real selected WS profile on the field host,
+// but does not authenticate DNS or permit privileged general-host Apply.
+func TestPinnedVLESSWebSocketExplicitHostSurvivesNumericDial(t *testing.T) {
+	p := Profile{ID: "selected-ws-profile", Kind: "vless-link", Outbound: json.RawMessage(
+		`{"type":"vless","tag":"upstream","server":"node.example.org","server_port":443,"uuid":"c2902f3a-1c25-41ef-a8dc-760b483aa247","tls":{"enabled":true,"server_name":"front.example.net","alpn":["http/1.1"]},"transport":{"type":"ws","path":"/opaque-path","headers":{"Host":"front.example.net","X-Selected-Path":"opaque"},"max_early_data":0}}`,
+	)}
+	original := append([]byte(nil), p.Outbound...)
+	projected, err := projectPinnedVLESSNativePreview(p, "8.8.8.8")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(p.Outbound, original) || projected.ID != p.ID || projected.Kind != p.Kind {
+		t.Fatal("selected secret profile mutated or identity changed")
+	}
+	var before, after map[string]json.RawMessage
+	if json.Unmarshal(original, &before) != nil || json.Unmarshal(projected.Outbound, &after) != nil {
+		t.Fatal("pinned outbound malformed")
+	}
+	if string(after["server"]) != `"8.8.8.8"` {
+		t.Fatal("numeric socket address not projected")
+	}
+	for _, key := range []string{"type", "tag", "server_port", "uuid", "tls", "transport"} {
+		if !bytes.Equal(before[key], after[key]) {
+			t.Fatalf("explicit WS Host, TLS SNI or other identity changed: %s", key)
+		}
+	}
+	_, opts := smartTUNFixture()
+	coreConfig, err := smartTUNNativeConfig(projected, opts)
+	if err != nil {
+		t.Fatalf("native pinned WS config rejected: %v", err)
+	}
+	if core := os.Getenv("SC_TEST_SINGBOX"); core != "" {
+		if err := CheckConfig(core, t.TempDir(), coreConfig); err != nil {
+			t.Fatalf("pinned real sing-box rejected WebSocket Host preservation: %v", err)
+		}
+	}
+	again, err := projectPinnedVLESSNativePreview(p, "8.8.8.8")
+	if err != nil || !bytes.Equal(projected.Outbound, again.Outbound) {
+		t.Fatal("WS pinning is not deterministic")
+	}
+}
+
+func TestPinnedVLESSWebSocketRefusesImplicitOrAmbiguousAuthority(t *testing.T) {
+	const prefix = `{"type":"vless","tag":"upstream","server":"node.example.org","server_port":443,"uuid":"c2902f3a-1c25-41ef-a8dc-760b483aa247",`
+	const tls = `"tls":{"enabled":true,"server_name":"front.example.net"},`
+	for _, tc := range []struct{ name, suffix string }{
+		{"implicit-host", tls + `"transport":{"type":"ws","path":"/"}`},
+		{"null-headers", tls + `"transport":{"type":"ws","headers":null}`},
+		{"empty-headers", tls + `"transport":{"type":"ws","headers":{}}`},
+		{"lowercase-host", tls + `"transport":{"type":"ws","headers":{"host":"front.example.net"}}`},
+		{"duplicate-case-host", tls + `"transport":{"type":"ws","headers":{"Host":"front.example.net","hOst":"front.example.net"}}`},
+		{"duplicate-host", tls + `"transport":{"type":"ws","headers":{"Host":"front.example.net","Host":"front.example.net"}}`},
+		{"host-list", tls + `"transport":{"type":"ws","headers":{"Host":["front.example.net"]}}`},
+		{"host-mismatch", tls + `"transport":{"type":"ws","headers":{"Host":"other.example.net"}}`},
+		{"host-missing-tls", `"transport":{"type":"ws","headers":{"Host":"front.example.net"}}`},
+		{"host-implicit-tls", `"tls":{"enabled":true},"transport":{"type":"ws","headers":{"Host":"front.example.net"}}`},
+		{"httpupgrade-explicit-host", tls + `"transport":{"type":"httpupgrade","headers":{"Host":"front.example.net"}}`},
+		{"http-explicit-host", tls + `"transport":{"type":"http","host":["front.example.net"]}`},
+		{"ws-unsupported-option", tls + `"transport":{"type":"ws","headers":{"Host":"front.example.net"},"untrusted":true}`},
+		{"tls-disabled", `"tls":{"enabled":false,"server_name":"front.example.net"},"transport":{"type":"ws","headers":{"Host":"front.example.net"}}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := Profile{Outbound: json.RawMessage(prefix + tc.suffix + "}")}
+			original := append([]byte(nil), p.Outbound...)
+			if _, err := projectPinnedVLESSNativePreview(p, "8.8.8.8"); err == nil {
+				t.Fatalf("ambiguous HTTP/TLS authority permitted: %s", tc.name)
+			}
+			if !bytes.Equal(original, p.Outbound) {
+				t.Fatal("refused WS candidate mutated selected profile")
+			}
+		})
+	}
+}
