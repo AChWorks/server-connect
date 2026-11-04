@@ -534,6 +534,22 @@ case "${SC_QA_TUN_IPV6-}" in
   *) echo 'REAL_TUN_IPV6=FAIL (unsupported QA mode)' >&2; exit 2 ;;
 esac
 
+# Exclusive IPv4-only live IPv6 drift test within the disconnected QA guest.
+case "${SC_QA_TUN_IPV6_DRIFT-}" in
+  '') ;;
+  yes)
+    if [ "${SC_QA_TUN_PRODUCT_LAB-}" != yes ] ||
+       [ "${SC_QA_TUN_SUPERVISED-}" != yes ] ||
+       [ "$ipv6_trial" = yes ] ||
+       [ -n "${SC_QA_TUN_GUARD_LAB-}" ] ||
+       [ -n "${SC_QA_TUN_OUTAGE_FAULT-}" ] ||
+       [ -n "${SC_QA_TUN_CLEANUP_FAULT-}" ]; then
+      echo 'SUPERVISED_TUN_IPV6_DRIFT=FAIL (requires exclusive IPv4-only guarded guest)' >&2
+      exit 2
+    fi ;;
+  *) echo 'SUPERVISED_TUN_IPV6_DRIFT=FAIL (unsupported QA mode)' >&2; exit 2 ;;
+esac
+
 # Large-payload QA runs only in the normal disposable positive/outage guest.
 # Avoid expanding unrelated deadline, hosting and forced-cleanup regressions.
 payload_trial=no

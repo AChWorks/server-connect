@@ -1649,6 +1649,21 @@ for marker in \
 done
 assert_tun_native_cleanup installed-product-confirmed-supervision
 
+# Separate short installed IPv4-only drift operation. A public IPv6 route
+# appears only AFTER supervised TUN confirmation. The independent Guard must
+# restore product-owned Off, preserving unrelated route and Direct witness.
+echo 'REAL_TUN_LAB_STAGE=installed-supervised-ipv4only-ipv6-live-drift'
+ipv6_drift_log="$scratch/real-tun-supervised-ipv6-live-drift.log"
+docker exec -e SC_QA_TUN_PRODUCT_LAB=yes -e SC_QA_TUN_SUPERVISED=yes -e SC_QA_TUN_IPV6_DRIFT=yes \
+  "$container" /bin/sh /root/qa-host-tun-path.sh | tee "$ipv6_drift_log"
+for marker in 'DIRECT_CONTROLS' 'IPV6_DIRECT_WITNESS_POSITIVE_CONTROL' \
+  'IPV6_PUBLIC_NO_DIRECT_WHILE_ACTIVE' 'IPV6_PUBLIC_FOREIGN_ROUTE_PRESERVED' \
+  'IPV6_PUBLIC_ROUTE_GUARD_OFF' 'OFF_DIRECT_TCP_UDP_DNS' \
+  'COMPLETE_EXPERIMENTAL_ONLY'; do
+  grep -Fx "SUPERVISED_TUN_${marker}=PASS" "$ipv6_drift_log" >/dev/null
+done
+assert_tun_native_cleanup installed-supervised-ipv4only-ipv6-live-drift
+
 # The dual-stack variant repeats only real confirmation and ongoing path
 # measurement, without duplicating the full failure matrix above.
 supervised_v6_log="$scratch/real-tun-product-supervised-ipv6.log"

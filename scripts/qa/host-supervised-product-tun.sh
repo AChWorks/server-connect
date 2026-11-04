@@ -5,6 +5,7 @@
 supervised_product_tun_trial() {
   set -- --profile "$profile" --upstream-pid "$server_pid" --tls-bundle /root/qa-smart-health-tls
   if [ "$ipv6_trial" = yes ]; then set -- "$@" --ipv6; fi
+  if [ "${SC_QA_TUN_IPV6_DRIFT-}" = yes ]; then set -- "$@" --ipv6-drift; fi
   /usr/bin/python3 -I -B -u /root/qa-supervised-product-tun.py "$@"
   require_finalized
 }
