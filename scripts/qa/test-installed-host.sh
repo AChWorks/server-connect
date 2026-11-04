@@ -735,6 +735,34 @@ import subprocess
 import tempfile
 
 BIN = "/usr/local/bin/server-connect"
+# Run the actual installed menu with complete safe URLs but canceled/invalid
+# choices. The guest is disconnected; a canceled prompt must not even enter
+# dispatch, touch manager state, or start DNS/TCP/other network diagnostics.
+with tempfile.TemporaryDirectory(prefix="scqa-operator-cancel-", dir="/run") as abort_tmp:
+    cases = {
+        "diagnose-back": "11\nhttps://one.example.test/\nhttps://two.example.test/\nback\n0\n",
+        "diagnose-cancel": "11\nhttps://one.example.test/\nhttps://two.example.test/\ncancel\n0\n",
+        "diagnose-invalid": "11\nhttps://one.example.test/\nhttps://two.example.test/\n3\n0\n",
+        "diagnose-incomplete-eof": "11\nhttps://one.example.test/\nhttps://two.example.test/\n1",
+        "selective-plan-cancel": "12\n198.51.100.17\n203.0.113.22\nscqavm0\ncancel\n0\n",
+        "dns-cancel": "14\nnode.example.test\n198.51.100.17\ncancel\n0\n",
+        "tcp-optional-host-cancel": "13\n198.51.100.17\n443\nback\n0\n",
+        "rule-via-cancel": "19\n2\n1.1.1.0/24\nback\n0\n",
+        "vm-challenge-cancel": "20\n5\n0123456789abcdef\n3\ncancel\n0\n",
+    }
+    for label, request in cases.items():
+        untouched = Path(abort_tmp, label)
+        result = subprocess.run([BIN, "--state-dir", str(untouched), "menu"],
+                                input=request, text=True, capture_output=True, timeout=12)
+        assert result.returncode == 0 and not result.stderr, (
+            label, result.returncode, result.stderr)
+        assert "Canceled:" in result.stdout and "Running " not in result.stdout, (
+            label, "unexpected command dispatch", result.stdout[-500:])
+        assert not untouched.exists(), (label, "canceled menu created manager state")
+    print("INSTALLED_OPERATOR_ADVANCED_CANCEL_NO_DISPATCH=PASS "
+          f"({len(cases)} real stdin cancellations; zero command dispatch; no manager state)",
+          flush=True)
+
 with tempfile.TemporaryDirectory(prefix="scqa-operator-menu-", dir="/run") as tmp:
     state = Path(tmp, "state")
     fixture = Path(tmp, "rules.txt")

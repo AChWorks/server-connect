@@ -857,6 +857,12 @@ routing changes, authenticate DNS, or authorize tunnel activation.
 `
 
 func menu(m *sc.Manager) int {
+	return menuWithRunner(m, menuRun)
+}
+
+// Keeping dispatch explicit makes canceled prompts provably side-effect free
+// without opening test sockets or invoking installed host/network commands.
+func menuWithRunner(m *sc.Manager, dispatch func(*sc.Manager, ...string) int) int {
 	in := bufio.NewReader(os.Stdin)
 	ui := terminalPresenter(os.Stdout)
 	advanced := false
@@ -874,9 +880,9 @@ func menu(m *sc.Manager) int {
 		case "0", "q":
 			return 0
 		case "1":
-			menuRun(m, []string{"status"}...)
+			dispatch(m, []string{"status"}...)
 		case "18":
-			menuRun(m, []string{"mode-overview"}...)
+			dispatch(m, []string{"mode-overview"}...)
 		case "20":
 			advanced = true
 			fmt.Println("Smart Routing is admitted ONLY on the exact isolated QEMU Debian 13 QA guest; never production.")
@@ -887,7 +893,7 @@ func menu(m *sc.Manager) int {
 			}
 			switch strings.TrimSpace(sub) {
 			case "1":
-				menuRun(m, []string{"smart-tun-trial-status"}...)
+				dispatch(m, []string{"smart-tun-trial-status"}...)
 			case "2":
 				fmt.Print("This starts independent rollback/health guards on the isolated QA VM. Type VM-CONNECT: ")
 				ack, err := in.ReadString('\n')
@@ -895,7 +901,7 @@ func menu(m *sc.Manager) int {
 					fmt.Println("Canceled; no host change")
 					continue
 				}
-				if menuRun(m, []string{"smart-tun-trial-apply", "--supervised", "--tunnel-if", "scqavm0", "--underlay-if", "ens3", "--tunnel-ipv4", "172.31.99.1/30", "--management-peer", "10.0.2.2", "--domestic-cidr", "5.22.0.10/32", "--protected-cidr", "10.0.2.2/32", "--deadline-seconds", "180"}...) == 0 {
+				if dispatch(m, []string{"smart-tun-trial-apply", "--supervised", "--tunnel-if", "scqavm0", "--underlay-if", "ens3", "--tunnel-ipv4", "172.31.99.1/30", "--management-peer", "10.0.2.2", "--domestic-cidr", "5.22.0.10/32", "--protected-cidr", "10.0.2.2/32", "--deadline-seconds", "180"}...) == 0 {
 					fmt.Println("For confirmation open a completely NEW SSH connection, then use option 20 > 5 within the shown deadline.")
 				}
 			case "3":
@@ -905,7 +911,7 @@ func menu(m *sc.Manager) int {
 					fmt.Println("Canceled; no host change")
 					continue
 				}
-				if menuRun(m, []string{"smart-tun-trial-apply", "--saved", "--supervised", "--deadline-seconds", "180"}...) == 0 {
+				if dispatch(m, []string{"smart-tun-trial-apply", "--saved", "--supervised", "--deadline-seconds", "180"}...) == 0 {
 					fmt.Println("Open a NEW SSH connection to confirm the one-time challenge.")
 				}
 			case "4":
@@ -924,27 +930,24 @@ func menu(m *sc.Manager) int {
 					fmt.Println("Canceled; no host change")
 					continue
 				}
-				menuRun(m, []string{"smart-tun-trial-disconnect", "--operation-id", r.OperationID, "--revision", strconv.FormatUint(r.Revision, 10)}...)
+				dispatch(m, []string{"smart-tun-trial-disconnect", "--operation-id", r.OperationID, "--revision", strconv.FormatUint(r.Revision, 10)}...)
 			case "5":
 				fmt.Println("Use a freshly authenticated SSH connection, not the existing Apply session or a multiplexed channel.")
-				fmt.Print("Operation ID: ")
-				op, err := in.ReadString('\n')
-				if err != nil {
-					return 0
+				op, ok := operatorPrompt(in, "Operation ID (or cancel): ", false)
+				if !ok {
+					continue
 				}
-				fmt.Print("Revision: ")
-				revision, err := in.ReadString('\n')
-				if err != nil {
-					return 0
+				revision, ok := operatorPrompt(in, "Revision (or cancel): ", false)
+				if !ok {
+					continue
 				}
-				fmt.Print("Single-use challenge: ")
-				challenge, err := in.ReadString('\n')
-				if err != nil {
-					return 0
+				challenge, ok := operatorPrompt(in, "Single-use challenge (or cancel): ", false)
+				if !ok {
+					continue
 				}
-				menuRun(m, []string{"smart-tun-trial-confirm", "--operation-id", strings.TrimSpace(op), "--revision", strings.TrimSpace(revision), "--challenge", strings.TrimSpace(challenge)}...)
+				dispatch(m, "smart-tun-trial-confirm", "--operation-id", op, "--revision", revision, "--challenge", challenge)
 			case "6":
-				menuRun(m, []string{"smart-tun-trial-policy"}...)
+				dispatch(m, []string{"smart-tun-trial-policy"}...)
 			case "7":
 				fmt.Print("Only on the exact isolated QA VM, after confirmed Direct/off and no owned resources. This resets only stale FAILED owned Health/Recovery systemd bookkeeping. Type VM-RECONCILE-GUARD: ")
 				ack, err := in.ReadString('\n')
@@ -952,7 +955,7 @@ func menu(m *sc.Manager) int {
 					fmt.Println("Canceled; no host change")
 					continue
 				}
-				menuRun(m, []string{"smart-tun-trial-reconcile-idle-guard"}...)
+				dispatch(m, []string{"smart-tun-trial-reconcile-idle-guard"}...)
 			default:
 				fmt.Println("Unknown Smart TUN choice; no change")
 			}
@@ -964,12 +967,11 @@ func menu(m *sc.Manager) int {
 			}
 			switch strings.TrimSpace(operation) {
 			case "1":
-				menuRun(m, []string{"smart-routing-rules", "list"}...)
+				dispatch(m, []string{"smart-routing-rules", "list"}...)
 			case "2", "3", "5", "6":
-				fmt.Print("Canonical CIDR or domain value: ")
-				value, err := in.ReadString('\n')
-				if err != nil {
-					return 0
+				value, ok := operatorPrompt(in, "Canonical CIDR or domain value (or cancel): ", false)
+				if !ok {
+					continue
 				}
 				name := strings.TrimSpace(operation)
 				op := "add"
@@ -978,107 +980,106 @@ func menu(m *sc.Manager) int {
 				}
 				command := []string{"smart-routing-rules", op}
 				if name == "2" || name == "5" {
-					command = append(command, "--cidr", strings.TrimSpace(value))
+					command = append(command, "--cidr", value)
 				} else {
-					fmt.Print("Suffix match (y/N): ")
-					mode, err := in.ReadString('\n')
-					if err != nil {
-						return 0
+					mode, ok := operatorPrompt(in, "Suffix match (y/N, or cancel): ", true)
+					if !ok {
+						continue
 					}
-					command = append(command, "--domain", strings.TrimSpace(value))
-					if strings.EqualFold(strings.TrimSpace(mode), "y") {
+					if mode != "" && !strings.EqualFold(mode, "y") && !strings.EqualFold(mode, "n") {
+						fmt.Println("Canceled: choose y or n; no rule action started")
+						continue
+					}
+					command = append(command, "--domain", value)
+					if strings.EqualFold(mode, "y") {
 						command = append(command, "--suffix")
 					}
 				}
 				if op == "add" {
 					via := "vpn"
 					if name == "2" {
-						fmt.Print("Route via direct or vpn: ")
-						answer, err := in.ReadString('\n')
-						if err != nil {
-							return 0
+						answer, ok := operatorPrompt(in, "Route via direct or vpn (or cancel): ", false)
+						if !ok {
+							continue
 						}
-						via = strings.TrimSpace(answer)
+						if answer != "direct" && answer != "vpn" {
+							fmt.Println("Canceled: choose direct or vpn; no rule action started")
+							continue
+						}
+						via = answer
 					}
 					command = append(command, "--via", via)
 				}
-				menuRun(m, command...)
+				dispatch(m, command...)
 			case "4":
-				fmt.Print("Local list file path (use CLI for stdin): ")
-				file, err := in.ReadString('\n')
-				if err != nil {
-					return 0
+				file, ok := operatorPrompt(in, "Local list file path (use CLI for stdin, or cancel): ", false)
+				if !ok {
+					continue
 				}
 				if strings.TrimSpace(file) == "-" {
 					fmt.Println("Menu cannot import stdin; use server-connect smart-routing-rules import --file - instead")
 					continue
 				}
-				fmt.Print("Source label (lowercase a-z, 0-9, -, _): ")
-				source, err := in.ReadString('\n')
-				if err != nil {
-					return 0
+				source, ok := operatorPrompt(in, "Source label (lowercase a-z, 0-9, -, _, or cancel): ", false)
+				if !ok {
+					continue
 				}
-				fmt.Print("Source as-of date (YYYY-MM-DD): ")
-				date, err := in.ReadString('\n')
-				if err != nil {
-					return 0
+				date, ok := operatorPrompt(in, "Source as-of date (YYYY-MM-DD, or cancel): ", false)
+				if !ok {
+					continue
 				}
-				fmt.Print("Independently supplied SHA-256 of raw list: ")
-				digest, err := in.ReadString('\n')
-				if err != nil {
-					return 0
+				digest, ok := operatorPrompt(in, "Independently supplied SHA-256 of raw list (or cancel): ", false)
+				if !ok {
+					continue
 				}
-				fmt.Print("Expected prior source SHA-256 for replacement (blank for new): ")
-				prior, err := in.ReadString('\n')
-				if err != nil {
-					return 0
+				prior, ok := operatorPrompt(in, "Expected prior source SHA-256 for replacement (blank for new): ", true)
+				if !ok {
+					continue
 				}
 				args := []string{"smart-routing-rules", "import", "--file", strings.TrimSpace(file),
 					"--source", strings.TrimSpace(source), "--as-of", strings.TrimSpace(date), "--sha256", strings.TrimSpace(digest)}
 				if previous := strings.TrimSpace(prior); previous != "" {
 					args = append(args, "--replaces-sha256", previous)
 				}
-				menuRun(m, args...)
+				dispatch(m, args...)
 			case "7":
-				fmt.Print("Existing source label: ")
-				source, err := in.ReadString('\n')
-				if err != nil {
-					return 0
+				source, ok := operatorPrompt(in, "Existing source label (or cancel): ", false)
+				if !ok {
+					continue
 				}
-				fmt.Print("Exact current source SHA-256: ")
-				digest, err := in.ReadString('\n')
-				if err != nil {
-					return 0
+				digest, ok := operatorPrompt(in, "Exact current source SHA-256 (or cancel): ", false)
+				if !ok {
+					continue
 				}
-				menuRun(m, []string{"smart-routing-rules", "remove-source", "--source", strings.TrimSpace(source), "--sha256", strings.TrimSpace(digest)}...)
+				dispatch(m, []string{"smart-routing-rules", "remove-source", "--source", strings.TrimSpace(source), "--sha256", strings.TrimSpace(digest)}...)
 			default:
 				fmt.Println("Unknown routing rule action; no changes made")
 			}
 		case "2":
-			menuRun(m, []string{"profiles"}...)
+			dispatch(m, []string{"profiles"}...)
 		case "3":
 			path, ok := operatorPrompt(in, "Private local config file path (or cancel): ", false)
 			if !ok {
 				continue
 			}
-			menuRun(m, "import", "--file", path)
+			dispatch(m, "import", "--file", path)
 		case "4", "8":
 			id, ok := operatorPrompt(in, "Profile ID (or cancel): ", false)
 			if !ok {
 				continue
 			}
 			if choice == "4" {
-				menuRun(m, "select", id)
+				dispatch(m, "select", id)
 			} else {
 				ack, ok := operatorPrompt(in, "Remove this saved profile? Type REMOVE: ", false)
 				if !ok || ack != "REMOVE" {
 					fmt.Println("Canceled: saved profile unchanged")
 					continue
 				}
-				menuRun(m, "remove", id)
+				dispatch(m, "remove", id)
 			}
 		case "5":
-			menuRun(m, []string{"connect"}...)
+			dispatch(m, []string{"connect"}...)
 		case "6":
 			url, ok := operatorPrompt(in, "Test URL (https://..., or cancel): ", false)
 			if !ok {
@@ -1093,91 +1094,104 @@ func menu(m *sc.Manager) int {
 			if path == "2" {
 				via = "direct"
 			}
-			menuRun(m, "probe", "--via", via, "--url", url)
+			dispatch(m, "probe", "--via", via, "--url", url)
 		case "7":
-			menuRun(m, []string{"disconnect"}...)
+			dispatch(m, []string{"disconnect"}...)
 		case "10":
 			advanced = true
-			menuRun(m, []string{"host-preflight"}...)
+			dispatch(m, []string{"host-preflight"}...)
 		case "17":
 			advanced = true
-			menuRun(m, []string{"host-preflight", "--with-nftables"}...)
+			dispatch(m, []string{"host-preflight", "--with-nftables"}...)
 		case "11":
 			advanced = true
-			fmt.Print("First independent HTTP(S) target: ")
-			first, _ := in.ReadString('\n')
-			fmt.Print("Second independent HTTP(S) target: ")
-			second, _ := in.ReadString('\n')
-			fmt.Print("Path 1=proxy, 2=direct: ")
-			selection, _ := in.ReadString('\n')
+			first, ok := operatorPrompt(in, "First independent HTTP(S) target: ", false)
+			if !ok {
+				continue
+			}
+			second, ok := operatorPrompt(in, "Second independent HTTP(S) target: ", false)
+			if !ok {
+				continue
+			}
+			selection, ok := operatorPrompt(in, "Path 1=proxy, 2=direct (or cancel): ", false)
+			if !ok || (selection != "1" && selection != "2") {
+				fmt.Println("Canceled: choose an explicit path; no network diagnostic started")
+				continue
+			}
 			via := "proxy"
-			if strings.TrimSpace(selection) == "2" {
+			if selection == "2" {
 				via = "direct"
 			}
-			menuRun(m, []string{"diagnose-path", "--via", via, "--url", strings.TrimSpace(first), "--url", strings.TrimSpace(second)}...)
+			dispatch(m, "diagnose-path", "--via", via, "--url", first, "--url", second)
 		case "12":
 			advanced = true
-			fmt.Print("Pinned VPN endpoint literal IP: ")
-			endpoint, _ := in.ReadString('\n')
-			fmt.Print("Current admin/SSH peer literal IP: ")
-			management, _ := in.ReadString('\n')
-			fmt.Print("Proposed unused TUN interface name: ")
-			tunnel, _ := in.ReadString('\n')
-			fmt.Print("Public destination CIDRs (comma-separated): ")
-			raw, _ := in.ReadString('\n')
+			endpoint, ok := operatorPrompt(in, "Pinned VPN endpoint literal IP: ", false)
+			if !ok {
+				continue
+			}
+			management, ok := operatorPrompt(in, "Current admin/SSH peer literal IP: ", false)
+			if !ok {
+				continue
+			}
+			tunnel, ok := operatorPrompt(in, "Proposed unused TUN interface name: ", false)
+			if !ok {
+				continue
+			}
+			raw, ok := operatorPrompt(in, "Public destination CIDRs (comma-separated): ", false)
+			if !ok {
+				continue
+			}
 			args := []string{"selective-plan", "--endpoint", strings.TrimSpace(endpoint),
 				"--management-peer", strings.TrimSpace(management), "--tunnel-if", strings.TrimSpace(tunnel)}
 			for _, cidr := range strings.Split(strings.TrimSpace(raw), ",") {
 				args = append(args, "--destination", strings.TrimSpace(cidr))
 			}
-			menuRun(m, args...)
+			dispatch(m, args...)
 		case "13":
 			advanced = true
-			fmt.Print("Literal TCP endpoint IP (no DNS): ")
-			address, err := in.ReadString('\n')
-			if err != nil {
-				return 0
+			address, ok := operatorPrompt(in, "Literal TCP endpoint IP (no DNS): ", false)
+			if !ok {
+				continue
 			}
-			fmt.Print("Endpoint TCP port: ")
-			rawPort, err := in.ReadString('\n')
-			if err != nil {
-				return 0
+			rawPort, ok := operatorPrompt(in, "Endpoint TCP port: ", false)
+			if !ok {
+				continue
 			}
-			fmt.Print("Optional DNS hostname to verify against pinned IP (blank to skip): ")
-			hostname, err := in.ReadString('\n')
-			if err != nil {
-				return 0
+			hostname, ok := operatorPrompt(in, "Optional DNS hostname to verify against pinned IP (blank to skip): ", true)
+			if !ok {
+				continue
 			}
 			command := []string{"underlay-tcp", "--endpoint", strings.TrimSpace(address), "--port", strings.TrimSpace(rawPort)}
 			if h := strings.TrimSpace(hostname); h != "" {
 				command = append(command, "--hostname", h)
 			}
-			menuRun(m, command...)
+			dispatch(m, command...)
 		case "14":
 			advanced = true
-			fmt.Print("Endpoint DNS hostname: ")
-			host, _ := in.ReadString('\n')
-			fmt.Print("Pinned endpoint IP: ")
-			endpoint, _ := in.ReadString('\n')
-			fmt.Print("Explicit resolver IP (DNS queries are sent to this resolver): ")
-			resolver, _ := in.ReadString('\n')
-			menuRun(m, []string{"underlay-dns", "--hostname", strings.TrimSpace(host),
+			host, ok := operatorPrompt(in, "Endpoint DNS hostname: ", false)
+			if !ok {
+				continue
+			}
+			endpoint, ok := operatorPrompt(in, "Pinned endpoint IP: ", false)
+			if !ok {
+				continue
+			}
+			resolver, ok := operatorPrompt(in, "Explicit resolver IP (DNS queries are sent to this resolver): ", false)
+			if !ok {
+				continue
+			}
+			dispatch(m, []string{"underlay-dns", "--hostname", strings.TrimSpace(host),
 				"--endpoint", strings.TrimSpace(endpoint), "--resolver", strings.TrimSpace(resolver)}...)
 		case "16":
 			advanced = true
-			menuRun(m, []string{"activation-journal-status"}...)
+			dispatch(m, []string{"activation-journal-status"}...)
 		case "15":
 			advanced = true
-			fmt.Print("Private host-preflight JSON baseline path: ")
-			path, err := in.ReadString('\n')
-			if err != nil {
-				return 0
-			}
-			if strings.TrimSpace(path) == "" {
-				fmt.Println("Canceled; no baseline supplied")
+			path, ok := operatorPrompt(in, "Private host-preflight JSON baseline path: ", false)
+			if !ok {
 				continue
 			}
-			menuRun(m, []string{"host-drift", "--baseline", strings.TrimSpace(path)}...)
+			dispatch(m, "host-drift", "--baseline", path)
 		case "9":
 			fmt.Print("APT update refreshes system package indexes using the selected proxy. Type UPDATE to confirm: ")
 			confirmation, err := in.ReadString('\n')

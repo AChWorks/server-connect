@@ -232,3 +232,89 @@ func TestOperatorMenuConfirmedProfileRemovalUsesExistingManager(t *testing.T) {
 		t.Fatalf("confirmed removal changed unrelated operator state: %+v", stored)
 	}
 }
+
+// Capturing dispatch through the same menu path proves that no command is
+// launched on cancellation. Valid diagnostic selections are checked without
+// opening real sockets or touching privileged host state.
+func TestOperatorAdvancedMenuRequiresCompleteExplicitInputs(t *testing.T) {
+	const one = "https://one.example.test/"
+	const two = "https://two.example.test/"
+	const base = "11\n" + one + "\n" + two + "\n"
+	const endpoint = "198.51.100.17"
+	const admin = "203.0.113.22"
+	const digest = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	cases := []struct {
+		name, input, want string
+	}{
+		{"diagnose-back", base + "back\n0\n", ""},
+		{"diagnose-cancel", base + "cancel\n0\n", ""},
+		{"diagnose-empty-path", base + "\n0\n", ""},
+		{"diagnose-invalid-choice", base + "3\n0\n", ""},
+		{"diagnose-nonnumeric-choice", base + "proxy\n0\n", ""},
+		{"diagnose-incomplete-path-eof", base + "1", ""},
+		{"diagnose-first-cancel", "11\ncancel\n0\n", ""},
+		{"diagnose-second-back", "11\n" + one + "\nback\n0\n", ""},
+		{"diagnose-first-incomplete-eof", "11\n" + one, ""},
+		{"diagnose-valid-proxy", base + "1\n0\n", "diagnose-path --via proxy --url " + one + " --url " + two},
+		{"diagnose-valid-direct", base + "2\n0\n", "diagnose-path --via direct --url " + one + " --url " + two},
+		{"selective-plan-cancel-last", "12\n" + endpoint + "\n" + admin + "\nscqavm0\ncancel\n0\n", ""},
+		{"selective-plan-eof", "12\n" + endpoint + "\n" + admin + "\nscqavm0\n1.1.1.0/24", ""},
+		{"selective-plan-valid", "12\n" + endpoint + "\n" + admin + "\nscqavm0\n1.1.1.0/24\n0\n", "selective-plan --endpoint " + endpoint + " --management-peer " + admin + " --tunnel-if scqavm0 --destination 1.1.1.0/24"},
+		{"dns-back-last", "14\nnode.example.test\n" + endpoint + "\nback\n0\n", ""},
+		{"dns-cancel-first", "14\ncancel\n0\n", ""},
+		{"dns-eof-middle", "14\nnode.example.test\n" + endpoint, ""},
+		{"dns-valid", "14\nnode.example.test\n" + endpoint + "\n203.0.113.53\n0\n", "underlay-dns --hostname node.example.test --endpoint " + endpoint + " --resolver 203.0.113.53"},
+		{"tcp-optional-hostname-cancel", "13\n" + endpoint + "\n443\ncancel\n0\n", ""},
+		{"tcp-optional-hostname-blank", "13\n" + endpoint + "\n443\n\n0\n", "underlay-tcp --endpoint " + endpoint + " --port 443"},
+		{"host-drift-back", "15\nback\n0\n", ""},
+		{"rules-via-cancel", "19\n2\n1.1.1.0/24\ncancel\n0\n", ""},
+		{"rules-via-invalid", "19\n2\n1.1.1.0/24\nother\n0\n", ""},
+		{"rules-suffix-back", "19\n3\nexample.org\nback\n0\n", ""},
+		{"rules-suffix-invalid", "19\n3\nexample.org\nmaybe\n0\n", ""},
+		{"rules-suffix-valid-no", "19\n3\nexample.org\nn\n0\n", "smart-routing-rules add --domain example.org --via vpn"},
+		{"rules-suffix-valid-blank", "19\n3\nexample.org\n\n0\n", "smart-routing-rules add --domain example.org --via vpn"},
+		{"rules-import-cancel-revision", "19\n4\n/tmp/rules.txt\nsource\n2026-01-01\n" + digest + "\ncancel\n0\n", ""},
+		{"rules-import-blank-revision", "19\n4\n/tmp/rules.txt\nsource\n2026-01-01\n" + digest + "\n\n0\n", "smart-routing-rules import --file /tmp/rules.txt --source source --as-of 2026-01-01 --sha256 " + digest},
+		{"rules-remove-source-eof", "19\n7\nsource\n" + digest, ""},
+		{"vm-confirm-cancel-challenge", "20\n5\n0123456789abcdef\n3\ncancel\n0\n", ""},
+		{"vm-confirm-valid", "20\n5\n0123456789abcdef\n3\nchallenge-token\n0\n", "smart-tun-trial-confirm --operation-id 0123456789abcdef --revision 3 --challenge challenge-token"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m := sc.New(filepath.Join(t.TempDir(), "uninitialized-state"), "", 0)
+			in, writer, err := os.Pipe()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := io.WriteString(writer, tc.input); err != nil {
+				t.Fatal(err)
+			}
+			if err := writer.Close(); err != nil {
+				t.Fatal(err)
+			}
+			old := os.Stdin
+			os.Stdin = in
+			defer func() { os.Stdin = old; _ = in.Close() }()
+			var calls []string
+			code, out, stderr := hostDriftCapturedOutput(t, func() int {
+				return menuWithRunner(m, func(_ *sc.Manager, args ...string) int {
+					calls = append(calls, strings.Join(args, " "))
+					return 0
+				})
+			})
+			if code != 0 || stderr != "" {
+				t.Fatalf("menu failed: code=%d stderr=%s stdout=%s", code, stderr, out)
+			}
+			if tc.want == "" {
+				if len(calls) != 0 {
+					t.Fatalf("cancellation/invalid input dispatched commands: %q", calls)
+				}
+			} else if len(calls) != 1 || calls[0] != tc.want {
+				t.Fatalf("explicit selection command mismatch: got %q, want %q; stdout=%s", calls, tc.want, out)
+			}
+			if _, err := os.Lstat(m.Dir); !os.IsNotExist(err) {
+				t.Fatalf("menu created state without a real operation: %v", err)
+			}
+		})
+	}
+}

@@ -414,7 +414,7 @@ func TestDistinctMenuOptionsAfterPathDiagnosticIntegration(t *testing.T) {
 	}
 	// Option 11 remains the previously merged diagnostic, while option 12
 	// is the new read-only selective planner. Neither accepts empty inputs.
-	lines := []string{"11", "", "", "2", "12", "", "", "", "", "0", ""}
+	lines := []string{"11", "", "12", "", "0", ""}
 	if _, err := inputWriter.Write([]byte(strings.Join(lines, "\n"))); err != nil {
 		t.Fatal(err)
 	}
@@ -677,7 +677,7 @@ func TestUnderlayDNSMenu14RetainsOtherDiagnostics(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Option 14 is invalid and does not dial or create persistent state.
-	if _, err := writer.Write([]byte("14\n\n\n\n0\n")); err != nil {
+	if _, err := writer.Write([]byte("14\ninvalid-host\n198.51.100.1\n\n0\n")); err != nil {
 		t.Fatal(err)
 	}
 	writer.Close()
