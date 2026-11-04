@@ -87,7 +87,7 @@ jobs:
           cleanup = source.partition(marker)[2].partition("\nCLEANUP\n")[0]
           assert cleanup.startswith("#!/usr/bin/env bash\n")
           subprocess.run(["bash", "-n"], input=cleanup, text=True, check=True)
-          for label in ("PYIP", "PYSPLIT", "PY", "PYPROVIDER"):
+          for label in ("PYIP", "PYSPLIT", "PY", "PYPROVIDER", "PYBULK"):
               marker = "<<'" + label + "'\n"
               assert source.count(marker) == 1, label
               script = source.partition(marker)[2].partition("\n" + label + "\n")[0]
@@ -130,6 +130,8 @@ jobs:
           # Execute the actual embedded independent cleanup under non-root
           # disposable filesystem/kernel-command fault injection (no real ip/netns).
           python3 scripts/qa/test-field-netns-recovery.py
+          # Test the bounded raw UDP DNS packet parser without host networking.
+          PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/qa/test-field-udp-dns-wire.py
           # Read-only VM reply witness; unprivileged protocol/negative checks only.
           PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/qa/test-vm-foreign-reply-witness.py
           python3 scripts/qa/test-package-targets.py
