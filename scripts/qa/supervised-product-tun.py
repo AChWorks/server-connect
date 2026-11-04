@@ -55,9 +55,18 @@ while True:
         print("WIRE_IPV6_DIRECT=packet", flush=True)
 """
 DRIFT_SEND = """
-import socket, sys
+import errno, socket, sys
 sock = socket.socket(socket.AF_INET6, socket.SOCK_DGRAM)
-sock.sendto(b"scqa-ipv6-direct-witness", (sys.argv[1], int(sys.argv[2])))
+try:
+    sock.sendto(b"scqa-ipv6-direct-witness", (sys.argv[1], int(sys.argv[2])))
+    print("IPV6_DIRECT_SEND=sent")
+except OSError as error:
+    # Linux may report EPERM directly to the sending socket when the
+    # independent native POSTROUTING nftables Guard rejects the packet.
+    # Other errors (e.g. unreachable source/route) are real fixture failures.
+    if error.errno != errno.EPERM:
+        raise
+    print("IPV6_DIRECT_SEND=blocked_eperm")
 """
 TLS_BUNDLE = Path("/root/qa-smart-health-tls")
 TLS_FILES = ("qa-root.pem", "qa-server.pem", "qa-server-key.pem", "qa-wrong-name.pem",
@@ -953,8 +962,12 @@ class Fixture:
         return len(lines)
 
     def ipv6_drift_send(self):
-        self.command(["/usr/bin/python3", "-I", "-B", "-c", DRIFT_SEND,
-                      DRIFT_IPV6_IP, str(DRIFT_PEER_PORT)], timeout=3)
+        result = self.command(["/usr/bin/python3", "-I", "-B", "-c", DRIFT_SEND,
+                               DRIFT_IPV6_IP, str(DRIFT_PEER_PORT)], timeout=3)
+        outcome = result.stdout.strip()
+        assert outcome in ("IPV6_DIRECT_SEND=sent", "IPV6_DIRECT_SEND=blocked_eperm"), (
+            "invalid public IPv6 send result")
+        return outcome
 
     def ipv6_drift_guard_off(self):
         assert not self.args.ipv6 and self.args.ipv6_drift, "invalid IPv4-only drift fixture"
@@ -976,7 +989,8 @@ class Fixture:
         # route and peer receiver actually deliver on the unguarded host.
         self.add_ipv6_drift_route()
         for _ in range(3):
-            self.ipv6_drift_send()
+            assert self.ipv6_drift_send() == "IPV6_DIRECT_SEND=sent", (
+                "Direct control was unexpectedly blocked")
             if self.ipv6_drift_packet_count():
                 break
             time.sleep(0.1)
@@ -997,7 +1011,7 @@ class Fixture:
         assert self.health()["state"] == "healthy"
         self.add_ipv6_drift_route()
         assert self.journal()["phase"] == "trial_pending", "Guard closed before boundary proof"
-        self.ipv6_drift_send()
+        self.ipv6_drift_send()  # sent-then-dropped OR immediate kernel EPERM
         assert self.journal()["phase"] == "trial_pending", "cannot attribute packet to guarded operation"
         time.sleep(0.15)
         assert self.ipv6_drift_packet_count() == direct_count, "public IPv6 escaped Direct during active TUN"

@@ -2316,6 +2316,30 @@ class IPv6DriftFixtureOwnershipTests(unittest.TestCase):
                 self.source_rows.clear()
         self.fixture.command = command
 
+    def test_sender_distinguishes_success_guard_eperm_and_other_errors(self):
+        import errno
+        import types
+        for failure, expected in (
+            (None, "IPV6_DIRECT_SEND=sent"),
+            (PermissionError(errno.EPERM, "kernel nft drop"), "IPV6_DIRECT_SEND=blocked_eperm"),
+            (OSError(errno.ENETUNREACH, "route unavailable"), None),
+        ):
+            with self.subTest(failure=str(failure)):
+                sent = Mock()
+                sent.sendto.side_effect = failure
+                fake = types.SimpleNamespace(AF_INET6=10, SOCK_DGRAM=2,
+                                             socket=Mock(return_value=sent))
+                output = io.StringIO()
+                with patch.dict(sys.modules, {"socket": fake}), patch.object(
+                        sys, "argv", ["sender", driver.DRIFT_IPV6_IP, "19555"]), contextlib.redirect_stdout(output):
+                    if expected is None:
+                        with self.assertRaises(OSError):
+                            exec(driver.DRIFT_SEND, {})
+                    else:
+                        exec(driver.DRIFT_SEND, {})
+                self.assertEqual(output.getvalue().strip(), expected or "")
+                self.assertEqual(sent.sendto.call_count, 1)
+
     def test_route_receipt_deletes_only_exact_observed_object(self):
         self.fixture.ipv6_drift_route_intent = True
         self.fixture.ipv6_drift_route_receipt = driver.exact_json(self.route)
