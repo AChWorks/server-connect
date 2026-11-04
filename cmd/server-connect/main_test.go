@@ -414,7 +414,7 @@ func TestDistinctMenuOptionsAfterPathDiagnosticIntegration(t *testing.T) {
 	}
 	// Option 11 remains the previously merged diagnostic, while option 12
 	// is the new read-only selective planner. Neither accepts empty inputs.
-	lines := []string{"11", "", "", "2", "12", "", "", "", "", "0", ""}
+	lines := []string{"11", "", "12", "", "0", ""}
 	if _, err := inputWriter.Write([]byte(strings.Join(lines, "\n"))); err != nil {
 		t.Fatal(err)
 	}
@@ -590,7 +590,9 @@ func TestUnderlayTCPMenu13PreservesExistingOptions(t *testing.T) {
 		t.Fatal(err)
 	}
 	if code != 0 ||
-		!strings.Contains(string(raw), "11 Path Diagnostics  12 Selective Plan  13 Underlay TCP") ||
+		!strings.Contains(string(raw), "11 Path Diagnostics") ||
+		!strings.Contains(string(raw), "12 Selective Plan") ||
+		!strings.Contains(string(raw), "13 Underlay TCP") ||
 		!strings.Contains(string(raw), "Literal TCP endpoint IP (no DNS):") ||
 		!strings.Contains(string(raw), "Endpoint TCP port:") {
 		t.Fatalf("distinct option 13 not wired: code=%d output=%s", code, raw)
@@ -675,7 +677,7 @@ func TestUnderlayDNSMenu14RetainsOtherDiagnostics(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Option 14 is invalid and does not dial or create persistent state.
-	if _, err := writer.Write([]byte("14\n\n\n\n0\n")); err != nil {
+	if _, err := writer.Write([]byte("14\ninvalid-host\n198.51.100.1\n\n0\n")); err != nil {
 		t.Fatal(err)
 	}
 	writer.Close()
@@ -695,7 +697,10 @@ func TestUnderlayDNSMenu14RetainsOtherDiagnostics(t *testing.T) {
 		t.Fatal(err)
 	}
 	if exit != 0 ||
-		!strings.Contains(string(content), "11 Path Diagnostics  12 Selective Plan  13 Underlay TCP  14 Underlay DNS") ||
+		!strings.Contains(string(content), "11 Path Diagnostics") ||
+		!strings.Contains(string(content), "12 Selective Plan") ||
+		!strings.Contains(string(content), "13 Underlay TCP") ||
+		!strings.Contains(string(content), "14 Underlay DNS") ||
 		!strings.Contains(string(content), "Endpoint DNS hostname:") ||
 		!strings.Contains(string(content), "Pinned endpoint IP:") ||
 		!strings.Contains(string(content), "Explicit resolver IP") {

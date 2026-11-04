@@ -113,14 +113,14 @@ classify_preflight_failure() {
         return 0
       fi
     done <<'SAFE_APT_ERRORS'
-Error: unsupported APT acquisition method installed|METHOD_INVENTORY_REFUSAL
-Error: native APT compatibility version cannot be verified|VERSION_IDENTITY_REFUSAL
-Error: trusted native APT executable path configuration not established|NATIVE_PATH_POLICY_REFUSAL
-Error: APT executable or acquisition method path differs from native Debian layout|NATIVE_PATH_POLICY_REFUSAL
-Error: APT per-method execution override is not the verified disabled policy|METHOD_OVERRIDE_REFUSAL
-Error: APT disabled acquisition method policy not established|DISABLED_METHOD_POLICY_REFUSAL
-Error: cannot verify effective APT configuration; refusing Direct fallback|EFFECTIVE_CONFIG_REFUSAL
-Error: local proxy is not active|PROXY_UNAVAILABLE
+Error [apt_untrusted_executable]: unsupported APT acquisition method installed|METHOD_INVENTORY_REFUSAL
+Error [apt_untrusted_executable]: native APT compatibility version cannot be verified|VERSION_IDENTITY_REFUSAL
+Error [apt_policy_conflict]: trusted native APT executable path configuration not established|NATIVE_PATH_POLICY_REFUSAL
+Error [apt_policy_conflict]: APT executable or acquisition method path differs from native Debian layout|NATIVE_PATH_POLICY_REFUSAL
+Error [apt_policy_conflict]: APT per-method execution override is not the verified disabled policy|METHOD_OVERRIDE_REFUSAL
+Error [apt_policy_conflict]: APT disabled acquisition method policy not established|DISABLED_METHOD_POLICY_REFUSAL
+Error [apt_policy_conflict]: cannot verify effective APT configuration; refusing Direct fallback|EFFECTIVE_CONFIG_REFUSAL
+Error [proxy_unavailable]: local proxy is not active|PROXY_UNAVAILABLE
 SAFE_APT_ERRORS
   fi
   echo 'INSTALLED_APT_FAILURE_CAUSE=UNCLASSIFIED' >&2
@@ -156,7 +156,11 @@ check_failure_cause() {
         { fail_apt "native APT origin acquisition failure not established: $phase"; return 1; }
       ;;
     core-stopped|disconnected)
-      [ "$rc" -eq 1 ] && [ "$(cat "$log_file")" = 'Error: local proxy is not active' ] ||
+      [ "$rc" -eq 1 ] &&
+        [ "$(sed -n '1p' "$log_file")" = 'Error [proxy_unavailable]: local proxy is not active' ] &&
+        [ "$(wc -l < "$log_file")" -eq 3 ] &&
+        grep -Eq '^State: [^[:cntrl:]]+$' "$log_file" &&
+        grep -Eq '^Next: [^[:cntrl:]]+$' "$log_file" ||
         { fail_apt "expected precise manager proxy-unavailable rejection: $phase"; return 1; }
       ;;
     *) fail_apt "unsupported negative phase: $phase"; return 1 ;;
@@ -279,10 +283,10 @@ base = Path(base_arg)
 work = base / "inherited-policy"
 policy = Path("/etc/apt/apt.conf.d/99server-connect-qa-inherited-policy")
 debug_error = (
-    b"Error: APT per-host proxy, auto-detection or binary policy may bypass selected route\n"
+    b"Error [apt_policy_conflict]: APT per-host proxy, auto-detection or binary policy may bypass selected route\n"
 )
 update_error = (
-    b"Error: inherited APT combined update policy is unsupported in Proxy Only\n"
+    b"Error [apt_policy_conflict]: inherited APT combined update policy is unsupported in Proxy Only\n"
 )
 
 # No credential-bearing configuration or child output is printed. The only
@@ -354,8 +358,13 @@ def run_command(label, executable, expected):
         require(result.returncode == 0, "canonical package simulation failed")
     else:
         require(
-            result.returncode == 1 and output == expected,
-            "precise inherited-policy preflight refusal missing",
+            result.returncode == 1
+            and len(output.splitlines(keepends=True)) == 3
+            and output.splitlines(keepends=True)[0] == expected
+            and output.splitlines(keepends=True)[1].startswith(b"State: ")
+            and output.splitlines(keepends=True)[2].startswith(b"Next: ")
+            and len(output) <= 512,
+            "precise inherited-policy refusal/code/action advice missing",
         )
 
 try:

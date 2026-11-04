@@ -735,6 +735,34 @@ import subprocess
 import tempfile
 
 BIN = "/usr/local/bin/server-connect"
+# Run the actual installed menu with complete safe URLs but canceled/invalid
+# choices. The guest is disconnected; a canceled prompt must not even enter
+# dispatch, touch manager state, or start DNS/TCP/other network diagnostics.
+with tempfile.TemporaryDirectory(prefix="scqa-operator-cancel-", dir="/run") as abort_tmp:
+    cases = {
+        "diagnose-back": "11\nhttps://one.example.test/\nhttps://two.example.test/\nback\n0\n",
+        "diagnose-cancel": "11\nhttps://one.example.test/\nhttps://two.example.test/\ncancel\n0\n",
+        "diagnose-invalid": "11\nhttps://one.example.test/\nhttps://two.example.test/\n3\n0\n",
+        "diagnose-incomplete-eof": "11\nhttps://one.example.test/\nhttps://two.example.test/\n1",
+        "selective-plan-cancel": "12\n198.51.100.17\n203.0.113.22\nscqavm0\ncancel\n0\n",
+        "dns-cancel": "14\nnode.example.test\n198.51.100.17\ncancel\n0\n",
+        "tcp-optional-host-cancel": "13\n198.51.100.17\n443\nback\n0\n",
+        "rule-via-cancel": "19\n2\n1.1.1.0/24\nback\n0\n",
+        "vm-challenge-cancel": "20\n5\n0123456789abcdef\n3\ncancel\n0\n",
+    }
+    for label, request in cases.items():
+        untouched = Path(abort_tmp, label)
+        result = subprocess.run([BIN, "--state-dir", str(untouched), "menu"],
+                                input=request, text=True, capture_output=True, timeout=12)
+        assert result.returncode == 0 and not result.stderr, (
+            label, result.returncode, result.stderr)
+        assert "Canceled:" in result.stdout and "Running " not in result.stdout, (
+            label, "unexpected command dispatch", result.stdout[-500:])
+        assert not untouched.exists(), (label, "canceled menu created manager state")
+    print("INSTALLED_OPERATOR_ADVANCED_CANCEL_NO_DISPATCH=PASS "
+          f"({len(cases)} real stdin cancellations; zero command dispatch; no manager state)",
+          flush=True)
+
 with tempfile.TemporaryDirectory(prefix="scqa-operator-menu-", dir="/run") as tmp:
     state = Path(tmp, "state")
     fixture = Path(tmp, "rules.txt")
@@ -762,7 +790,7 @@ with tempfile.TemporaryDirectory(prefix="scqa-operator-menu-", dir="/run") as tm
         path = state / "smart-routing-rules.json"
         return report, path.read_bytes() if path.exists() else None
 
-    def menu(label, lines, expected_rev, expected_rules, rejected=False):
+    def menu(label, lines, expected_rev, expected_rules, rejected_code=None):
         global count
         previous, original_bytes = snapshot()
         result = execute("menu", stdin="19\n" + lines + "0\n")
@@ -773,10 +801,16 @@ with tempfile.TemporaryDirectory(prefix="scqa-operator-menu-", dir="/run") as tm
             label, current)
         assert current["state"] == "saved_not_applied" and current["activation_ready"] is False
         assert current["general_host_admitted"] is False
-        if rejected:
-            assert "Error:" in result.stderr and now_bytes == original_bytes, (
-                label, result.stderr, "mutated rejected state")
-            assert current == previous, (label, "rejected operation changed rule report")
+        if rejected_code:
+            # The operator renderer must surface the real stable failure
+            # class and actionable advice. Never treat a friendly success
+            # sentence or an unclassified exception as a valid refusal.
+            assert result.stderr.startswith(f"Error [{rejected_code}]: ") and (
+                "\nState: " in result.stderr and "\nNext: " in result.stderr
+            ) and "Not completed:" in result.stdout, (
+                label, rejected_code, result.stderr, result.stdout[-400:])
+            assert now_bytes == original_bytes and current == previous, (
+                label, result.stderr, "rejected operation changed saved rule state")
         else:
             assert not result.stderr and now_bytes != original_bytes, (
                 label, result.stderr, "positive operation did not persist")
@@ -786,14 +820,14 @@ with tempfile.TemporaryDirectory(prefix="scqa-operator-menu-", dir="/run") as tm
     menu("add VPN exact domain", "3\nexample.org\nn\n", 2, 2)
     menu("add VPN suffix domain", "3\ntest.example.org\ny\n", 3, 3)
     menu("import local file", f"4\n{fixture}\nmenu-source\n2026-10-01\n{sha}\n\n", 4, 5)
-    menu("reject special IPv6", "2\n100::/64\ndirect\n", 4, 5, True)
-    menu("reject ICANN public suffix", "3\nco.uk\ny\n", 4, 5, True)
-    menu("reject PRIVATE public suffix", "3\ngithub.io\ny\n", 4, 5, True)
-    menu("reject duplicate CIDR", "2\n1.1.1.0/24\ndirect\n", 4, 5, True)
+    menu("reject special IPv6", "2\n100::/64\ndirect\n", 4, 5, "routing_rules_invalid")
+    menu("reject ICANN public suffix", "3\nco.uk\ny\n", 4, 5, "routing_rules_invalid")
+    menu("reject PRIVATE public suffix", "3\ngithub.io\ny\n", 4, 5, "routing_rules_invalid")
+    menu("reject duplicate CIDR", "2\n1.1.1.0/24\ndirect\n", 4, 5, "routing_rules_conflict")
     menu("reject import SHA mismatch",
-         f"4\n{fixture}\nbad-source\n2026-10-01\n{'0'*64}\n\n", 4, 5, True)
+         f"4\n{fixture}\nbad-source\n2026-10-01\n{'0'*64}\n\n", 4, 5, "routing_rules_hash_mismatch")
     menu("reject wrong replacement CAS",
-         f"4\n{fixture}\nmenu-source\n2026-10-02\n{sha}\n{'0'*64}\n", 4, 5, True)
+         f"4\n{fixture}\nmenu-source\n2026-10-02\n{sha}\n{'0'*64}\n", 4, 5, "routing_rules_conflict")
 
     # Same regular CLI used by operators. Import performs actual installed
     # sing-box config checking, but it never opens a VPN connection.
@@ -825,7 +859,7 @@ with tempfile.TemporaryDirectory(prefix="scqa-operator-menu-", dir="/run") as tm
 
     fixture.write_bytes(updated)
     menu("replace source", f"4\n{fixture}\nmenu-source\n2026-10-02\n{new_sha}\n{sha}\n", 5, 4)
-    menu("reject stale source removal", f"7\nmenu-source\n{sha}\n", 5, 4, True)
+    menu("reject stale source removal", f"7\nmenu-source\n{sha}\n", 5, 4, "routing_rules_conflict")
     menu("remove CIDR", "5\n1.1.1.0/24\n", 6, 3)
     menu("remove exact domain", "6\nexample.org\nn\n", 7, 2)
     menu("remove suffix domain", "6\ntest.example.org\ny\n", 8, 1)
