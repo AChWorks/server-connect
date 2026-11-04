@@ -34,6 +34,31 @@ ROOT = Path("/run/sc-qa-supervised")
 PUBLIC4 = ("8.8.8.8", "198.51.100.42")
 PUBLIC6 = ("2606:4700:8::8", "2606:4700:5::10")
 PROTOCOLS = ("tcp", "udp", "dns", "https")
+# The public IPv6 address exists ONLY inside the disconnected peer namespace.
+# It is deliberately a real global unicast destination for the IPv4-only
+# native guard, never a real Internet endpoint or supported VPN path.
+DRIFT_IPV6_IP = "2001:4860:4860::99"
+DRIFT_IPV6_CIDR = DRIFT_IPV6_IP + "/128"
+DRIFT_LOCAL_SOURCE = "fd99:4277::1"
+DRIFT_LOCAL_CIDR = DRIFT_LOCAL_SOURCE + "/128"
+DRIFT_ROUTE_METRIC = "42771"
+DRIFT_PEER_PORT = 19555
+DRIFT_RECEIVER = """
+import pathlib, socket, sys
+endpoint, port, ready = sys.argv[1], int(sys.argv[2]), pathlib.Path(sys.argv[3])
+sock = socket.socket(socket.AF_INET6, socket.SOCK_DGRAM)
+sock.bind((endpoint, port))
+ready.write_text("ready")
+while True:
+    packet, address = sock.recvfrom(256)
+    if packet == b"scqa-ipv6-direct-witness" and address[0] != endpoint:
+        print("WIRE_IPV6_DIRECT=packet", flush=True)
+"""
+DRIFT_SEND = """
+import socket, sys
+sock = socket.socket(socket.AF_INET6, socket.SOCK_DGRAM)
+sock.sendto(b"scqa-ipv6-direct-witness", (sys.argv[1], int(sys.argv[2])))
+"""
 TLS_BUNDLE = Path("/root/qa-smart-health-tls")
 TLS_FILES = ("qa-root.pem", "qa-server.pem", "qa-server-key.pem", "qa-wrong-name.pem",
              "qa-wrong-trust.pem", "qa-wrong-root.pem", "qa-expired.pem", "qa-client-auth-only.pem")
@@ -118,6 +143,13 @@ class Fixture:
         self.legacy_pause = None
         self.legacy_roles = {}
         self.applied_record = None
+        self.ipv6_drift_route_intent = False
+        self.ipv6_drift_route_receipt = None
+        self.ipv6_drift_peer_intent = False
+        self.ipv6_drift_peer_receipt = None
+        self.ipv6_drift_source_intent = False
+        self.ipv6_drift_source_receipt = None
+        self.ipv6_drift_original_native = None
 
     def command(self, argv, *, check=True, timeout=20, data=None):
         elapsed = time.monotonic() - self.started
@@ -815,6 +847,186 @@ class Fixture:
         self.command(["nft", "delete", "table", "inet", "scqasupforeign"])
         self.foreign = False
         self.foreign_snapshot = None
+
+    def ipv6_drift_route_rows(self):
+        raw = self.command(["ip", "-N", "-j", "-6", "route", "show", "table", "all"]).stdout
+        rows = json.loads(raw)
+        assert isinstance(rows, list), "unavailable IPv6 route inventory"
+        return [row for row in rows if isinstance(row, dict) and row.get("dst") in (DRIFT_IPV6_CIDR, DRIFT_IPV6_IP)]
+
+    def ipv6_drift_peer_rows(self):
+        raw = self.command(["ip", "-n", PEER, "-j", "-6", "address", "show", "dev", "scqapeer0"]).stdout
+        devices = json.loads(raw)
+        assert isinstance(devices, list) and len(devices) == 1, "peer address inventory changed"
+        rows = devices[0]["addr_info"]
+        return [row for row in rows if isinstance(row, dict) and row.get("local") == DRIFT_IPV6_IP]
+
+    def ipv6_drift_source_rows(self):
+        raw = self.command(["ip", "-j", "-6", "address", "show", "dev", "scqaedge0"]).stdout
+        devices = json.loads(raw)
+        assert isinstance(devices, list) and len(devices) == 1, "underlay address inventory changed"
+        return [row for row in devices[0]["addr_info"]
+                if isinstance(row, dict) and row.get("local") == DRIFT_LOCAL_SOURCE]
+
+    def add_ipv6_drift_source(self):
+        assert not self.ipv6_drift_source_intent and not self.ipv6_drift_source_rows(), (
+            "foreign local IPv6 source address")
+        self.ipv6_drift_source_intent = True
+        self.command(["ip", "-6", "address", "add", DRIFT_LOCAL_CIDR, "dev", "scqaedge0", "nodad"])
+        rows = self.ipv6_drift_source_rows()
+        assert len(rows) == 1 and rows[0].get("prefixlen") == 128, (
+            "private IPv6 source address not observed")
+        self.ipv6_drift_source_receipt = exact_json(rows[0])
+
+    def remove_ipv6_drift_source(self):
+        if not self.ipv6_drift_source_intent:
+            return
+        rows = self.ipv6_drift_source_rows()
+        if self.ipv6_drift_source_receipt is None:
+            assert not rows, "unreceipted local IPv6 source retained"
+        else:
+            assert len(rows) == 1 and exact_json(rows[0]) == self.ipv6_drift_source_receipt, (
+                "modified local IPv6 source retained rather than deleting it")
+            self.command(["ip", "-6", "address", "del", DRIFT_LOCAL_CIDR, "dev", "scqaedge0"])
+            assert not self.ipv6_drift_source_rows(), "local IPv6 source cleanup incomplete"
+        self.ipv6_drift_source_intent = False
+        self.ipv6_drift_source_receipt = None
+
+    def add_ipv6_drift_route(self):
+        assert not self.ipv6_drift_route_intent and not self.ipv6_drift_route_rows(), "foreign IPv6 route exists"
+        # Record intent before an executor can return success, error, or timeout
+        # after the kernel has already accepted a change.
+        self.ipv6_drift_route_intent = True
+        self.command(["ip", "-6", "route", "add", DRIFT_IPV6_CIDR, "dev", "scqaedge0",
+                      "metric", DRIFT_ROUTE_METRIC])
+        rows = self.ipv6_drift_route_rows()
+        assert len(rows) == 1, "new QA route not independently observed"
+        row = rows[0]
+        assert (row.get("dev") == "scqaedge0" and
+                row.get("metric") == int(DRIFT_ROUTE_METRIC) and
+                row.get("table", "main") == "main" and
+                not row.get("gateway") and not row.get("nhid")), "route receipt is not test-owned"
+        self.ipv6_drift_route_receipt = exact_json(row)
+
+    def remove_ipv6_drift_route(self):
+        if not self.ipv6_drift_route_intent:
+            return
+        rows = self.ipv6_drift_route_rows()
+        if self.ipv6_drift_route_receipt is None:
+            assert not rows, "ambiguous unreceipted IPv6 route retained"
+        else:
+            assert len(rows) == 1 and exact_json(rows[0]) == self.ipv6_drift_route_receipt, (
+                "changed IPv6 route retained rather than deleting foreign ownership")
+            self.command(["ip", "-6", "route", "del", DRIFT_IPV6_CIDR, "dev", "scqaedge0",
+                          "metric", DRIFT_ROUTE_METRIC])
+            assert not self.ipv6_drift_route_rows(), "owned IPv6 route cleanup incomplete"
+        self.ipv6_drift_route_intent = False
+        self.ipv6_drift_route_receipt = None
+
+    def add_ipv6_drift_peer(self):
+        assert not self.ipv6_drift_peer_intent and not self.ipv6_drift_peer_rows(), "foreign peer address"
+        self.ipv6_drift_peer_intent = True
+        self.command(["ip", "-n", PEER, "-6", "address", "add", DRIFT_IPV6_CIDR,
+                      "dev", "scqapeer0", "nodad"])
+        rows = self.ipv6_drift_peer_rows()
+        assert len(rows) == 1 and rows[0].get("prefixlen") == 128, "QA peer address unverified"
+        self.ipv6_drift_peer_receipt = exact_json(rows[0])
+
+    def remove_ipv6_drift_peer(self):
+        if not self.ipv6_drift_peer_intent:
+            return
+        rows = self.ipv6_drift_peer_rows()
+        if self.ipv6_drift_peer_receipt is None:
+            assert not rows, "unreceipted peer IPv6 address retained"
+        else:
+            assert len(rows) == 1 and exact_json(rows[0]) == self.ipv6_drift_peer_receipt, (
+                "modified peer IPv6 address retained rather than deleting it")
+            self.command(["ip", "-n", PEER, "-6", "address", "del", DRIFT_IPV6_CIDR, "dev", "scqapeer0"])
+            assert not self.ipv6_drift_peer_rows(), "peer address cleanup incomplete"
+        self.ipv6_drift_peer_intent = False
+        self.ipv6_drift_peer_receipt = None
+
+    def ipv6_drift_packet_count(self):
+        log = ROOT / "ipv6-drift-witness.log"
+        lines = log.read_text().splitlines()
+        assert all(line == "WIRE_IPV6_DIRECT=packet" for line in lines), "peer witness output changed"
+        return len(lines)
+
+    def ipv6_drift_send(self):
+        self.command(["/usr/bin/python3", "-I", "-B", "-c", DRIFT_SEND,
+                      DRIFT_IPV6_IP, str(DRIFT_PEER_PORT)], timeout=3)
+
+    def ipv6_drift_guard_off(self):
+        assert not self.args.ipv6 and self.args.ipv6_drift, "invalid IPv4-only drift fixture"
+        # A local-only ULA address provides a real routable IPv6 source
+        # without introducing a public source that admission must refuse.
+        # Keep both original and instrumented baseline to prove full cleanup.
+        self.ipv6_drift_original_native = self.baseline
+        self.add_ipv6_drift_source()
+        self.baseline = self.native()
+        self.add_ipv6_drift_peer()
+        ready = ROOT / "ipv6-drift-ready"
+        self.background(["ip", "netns", "exec", PEER, "/usr/bin/python3", "-I", "-B", "-u",
+                         "-c", DRIFT_RECEIVER, DRIFT_IPV6_IP, str(DRIFT_PEER_PORT),
+                         str(ready)], "ipv6-drift-witness")
+        self.wait(lambda: ready.is_file(), 3, "independent IPv6 witness receiver")
+        assert self.ipv6_drift_packet_count() == 0
+
+        # Explicit Direct *positive control* proves the same destination,
+        # route and peer receiver actually deliver on the unguarded host.
+        self.add_ipv6_drift_route()
+        for _ in range(3):
+            self.ipv6_drift_send()
+            if self.ipv6_drift_packet_count():
+                break
+            time.sleep(0.1)
+        self.wait(lambda: self.ipv6_drift_packet_count() > 0, 3, "IPv6 Direct positive control")
+        direct_count = self.ipv6_drift_packet_count()
+        self.remove_ipv6_drift_route()
+        assert self.native() == self.baseline, "positive-control route was not restored"
+        self.marker("IPV6_DIRECT_WITNESS_POSITIVE_CONTROL")
+
+        self.apply(50)
+        self.confirmed()
+        # Injection immediately after an observed healthy timer round avoids
+        # a race against a just-due independent poll. A separate NEXT tick
+        # must discover the drift; CLI/QA must not manually trigger recovery.
+        initial_round = self.health()["rounds"]
+        self.wait(lambda: self.health()["rounds"] > initial_round, 12,
+                  "fresh healthy independent Guard round before drift")
+        assert self.health()["state"] == "healthy"
+        self.add_ipv6_drift_route()
+        assert self.journal()["phase"] == "trial_pending", "Guard closed before boundary proof"
+        self.ipv6_drift_send()
+        assert self.journal()["phase"] == "trial_pending", "cannot attribute packet to guarded operation"
+        time.sleep(0.15)
+        assert self.ipv6_drift_packet_count() == direct_count, "public IPv6 escaped Direct during active TUN"
+        self.marker("IPV6_PUBLIC_NO_DIRECT_WHILE_ACTIVE")
+
+        # Do not invoke a recovery/status command to manufacture the result.
+        # The product's independently scheduled health/recovery oneshots must
+        # observe the NEW public IPv6 FIB route and safely finalize Off.
+        self.wait(lambda: not JOURNAL.exists(), 24, "independent IPv6 guard Off")
+        self.wait(lambda: self.show(HEALTH, "MainPID") == "0", 5, "health stopped after IPv6 conflict")
+        self.final_receipt("native_resource_conflict", 0)
+        assert self.ipv6_drift_route_receipt == exact_json(self.ipv6_drift_route_rows()[0]), (
+            "product removed or changed the unrelated test-owned IPv6 route")
+        off = self.native()
+        original_routes = json.loads(self.baseline[2])
+        observed_routes = json.loads(off[2])
+        assert len(observed_routes) == len(original_routes) + 1
+        expected_routes = [row for row in observed_routes if row.get("dst") not in (DRIFT_IPV6_CIDR, DRIFT_IPV6_IP)]
+        assert exact_json(expected_routes) == exact_json(original_routes), "foreign FIB restoration conflicted"
+        assert off[:2] == self.baseline[:2] and off[3:] == self.baseline[3:], (
+            "product-owned routes, RPDB or nftables not restored")
+        assert self.ipv6_drift_packet_count() == direct_count, "unintended IPv6 delivery during guarded recovery"
+        self.marker("IPV6_PUBLIC_FOREIGN_ROUTE_PRESERVED")
+        self.remove_ipv6_drift_route()
+        self.remove_ipv6_drift_peer()
+        self.inactive()
+        self.remove_ipv6_drift_source()
+        assert self.native() == self.ipv6_drift_original_native, "original guest IPv6 baseline not restored"
+        self.marker("IPV6_PUBLIC_ROUTE_GUARD_OFF")
 
     def reject_installer_mutation(self):
         before = {str(path): path.read_bytes() for path in UNITS.glob("server-connect*.service")}
@@ -1803,6 +2015,11 @@ class Fixture:
                 self.retire_legacy_pause(cleanup_receipt)
             if self.foreign:
                 self.remove_foreign()
+            # Only after product-owned Off: delete independently receipted QA
+            # fixtures, never adopt or remove a changed foreign kernel object.
+            self.remove_ipv6_drift_route()
+            self.remove_ipv6_drift_peer()
+            self.remove_ipv6_drift_source()
         finally:
             if self.master:
                 argv = self.ssh_arguments(True)
@@ -1859,15 +2076,20 @@ def main():
     parser.add_argument("--profile", required=True)
     parser.add_argument("--upstream-pid", required=True, type=int)
     parser.add_argument("--ipv6", action="store_true")
+    parser.add_argument("--ipv6-drift", action="store_true")
     parser.add_argument("--tls-bundle", type=Path, default=TLS_BUNDLE)
     args = parser.parse_args()
     assert re.fullmatch("[0-9a-f]{16}", args.profile) and args.upstream_pid > 1
+    assert not (args.ipv6 and args.ipv6_drift), "IPv4-only drift cannot run in dual-stack mode"
     fixture = Fixture(args)
     original_failure = False
     try:
         fixture.start()
-        fixture.confirmations_and_health()
-        if not args.ipv6:
+        if args.ipv6_drift:
+            fixture.ipv6_drift_guard_off()
+        else:
+            fixture.confirmations_and_health()
+        if not args.ipv6 and not args.ipv6_drift:
             fixture.https_exhaustion()
             fixture.expired_confirmation()
             fixture.protected_underlay_failure()

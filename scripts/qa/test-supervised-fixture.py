@@ -2288,6 +2288,88 @@ class TLSArchiveExclusionTests(unittest.TestCase):
                 self.assertEqual(result.returncode == 0, accepted, result.stderr)
 
 
+class IPv6DriftFixtureOwnershipTests(unittest.TestCase):
+    """Test-only public IPv6 fault injection must never adopt foreign state."""
+
+    def setUp(self):
+        self.fixture = driver.Fixture(argparse.Namespace(
+            profile="a" * 16, upstream_pid=2, ipv6=False, ipv6_drift=True))
+        self.route = {"dst": driver.DRIFT_IPV6_IP, "dev": "scqaedge0",
+                      "metric": int(driver.DRIFT_ROUTE_METRIC), "protocol": "boot"}
+        self.peer = {"local": driver.DRIFT_IPV6_IP, "prefixlen": 128, "scope": "global"}
+        self.source = {"local": driver.DRIFT_LOCAL_SOURCE, "prefixlen": 128, "scope": "global"}
+        self.calls = []
+        self.rows = [self.route]
+        self.peer_rows = [self.peer]
+        self.source_rows = [self.source]
+        self.fixture.ipv6_drift_route_rows = lambda: list(self.rows)
+        self.fixture.ipv6_drift_peer_rows = lambda: list(self.peer_rows)
+        self.fixture.ipv6_drift_source_rows = lambda: list(self.source_rows)
+
+        def command(argv, **_kw):
+            self.calls.append(argv)
+            if argv[:4] == ["ip", "-6", "route", "del"]:
+                self.rows.clear()
+            if argv[:5] == ["ip", "-n", driver.PEER, "-6", "address"] and argv[5] == "del":
+                self.peer_rows.clear()
+            if argv[:4] == ["ip", "-6", "address", "del"]:
+                self.source_rows.clear()
+        self.fixture.command = command
+
+    def test_route_receipt_deletes_only_exact_observed_object(self):
+        self.fixture.ipv6_drift_route_intent = True
+        self.fixture.ipv6_drift_route_receipt = driver.exact_json(self.route)
+        self.fixture.remove_ipv6_drift_route()
+        self.assertFalse(self.fixture.ipv6_drift_route_intent)
+        self.assertEqual(len(self.calls), 1)
+        self.assertFalse(self.rows)
+
+    def test_changed_or_ambiguous_route_is_retained(self):
+        for changed in (None, dict(self.route, metric=5), dict(self.route, dev="foreign0")):
+            with self.subTest(changed=changed):
+                self.calls.clear()
+                self.fixture.ipv6_drift_route_intent = True
+                self.fixture.ipv6_drift_route_receipt = (
+                    None if changed is None else driver.exact_json(self.route))
+                self.rows = [self.route if changed is None else changed]
+                with self.assertRaisesRegex(AssertionError, "retained"):
+                    self.fixture.remove_ipv6_drift_route()
+                self.assertEqual(self.calls, [])
+                self.assertTrue(self.fixture.ipv6_drift_route_intent)
+
+    def test_unreceipted_absence_clears_without_delete(self):
+        self.fixture.ipv6_drift_route_intent = True
+        self.rows = []
+        self.fixture.remove_ipv6_drift_route()
+        self.assertFalse(self.fixture.ipv6_drift_route_intent)
+        self.assertEqual(self.calls, [])
+
+    def test_peer_and_source_cleanup_refuse_changed_objects(self):
+        for kind, row, field in (("peer", self.peer, "peer_rows"),
+                                 ("source", self.source, "source_rows")):
+            with self.subTest(kind=kind):
+                self.calls.clear()
+                setattr(self.fixture, "ipv6_drift_" + kind + "_intent", True)
+                setattr(self.fixture, "ipv6_drift_" + kind + "_receipt", driver.exact_json(row))
+                setattr(self, field, [dict(row, prefixlen=64)])
+                with self.assertRaisesRegex(AssertionError, "retained"):
+                    getattr(self.fixture, "remove_ipv6_drift_" + kind)()
+                self.assertEqual(self.calls, [])
+
+    def test_peer_and_source_cleanup_delete_only_exact_object(self):
+        for kind, row, field in (("peer", self.peer, "peer_rows"),
+                                 ("source", self.source, "source_rows")):
+            with self.subTest(kind=kind):
+                self.calls.clear()
+                setattr(self.fixture, "ipv6_drift_" + kind + "_intent", True)
+                setattr(self.fixture, "ipv6_drift_" + kind + "_receipt", driver.exact_json(row))
+                setattr(self, field, [row])
+                getattr(self.fixture, "remove_ipv6_drift_" + kind)()
+                self.assertFalse(getattr(self.fixture, "ipv6_drift_" + kind + "_intent"))
+                self.assertEqual(len(self.calls), 1)
+                self.assertEqual(getattr(self, field), [])
+
+
 if __name__ == "__main__":
     result = unittest.main(exit=False).result
     if not result.wasSuccessful():
@@ -2302,5 +2384,6 @@ if __name__ == "__main__":
     print("SUPERVISED_FIXTURE_SUSTAINED_EXECUTOR_FAULT_BOUNDS=PASS")
     print("SUPERVISED_FIXTURE_HTTPS_CAUSAL_EVIDENCE=PASS")
     print("SUPERVISED_FIXTURE_LEGACY_PROJECTION_PAUSE_AND_CAS=PASS")
+    print("SUPERVISED_FIXTURE_IPV6_DRIFT_OWNERSHIP=PASS")
     print("SMART_HEALTH_QA_KEY_ARCHIVE_EXCLUSION_REGRESSIONS=PASS")
     print("SMART_HEALTH_QA_TLS_PRIVATE_STAGING_REGRESSIONS=PASS")
