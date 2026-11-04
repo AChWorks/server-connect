@@ -2316,6 +2316,33 @@ class IPv6DriftFixtureOwnershipTests(unittest.TestCase):
                 self.source_rows.clear()
         self.fixture.command = command
 
+    def test_final_baseline_restored_only_after_verified_fixture_cleanup(self):
+        fixture = self.fixture
+        original, instrumented = ["original"], ["with-temp-ipv6-source"]
+        fixture.baseline = instrumented
+        fixture.native = lambda: list(original)
+
+        with self.assertRaisesRegex(AssertionError, "missing original"):
+            fixture.finalize_ipv6_drift_baseline()
+        self.assertEqual(fixture.baseline, instrumented)
+
+        fixture.ipv6_drift_original_native = original
+        fixture.ipv6_drift_source_intent = True
+        with self.assertRaisesRegex(AssertionError, "still owns"):
+            fixture.finalize_ipv6_drift_baseline()
+        self.assertEqual(fixture.baseline, instrumented)
+
+        fixture.ipv6_drift_source_intent = False
+        fixture.native = lambda: ["unexpected-native-state"]
+        with self.assertRaisesRegex(AssertionError, "not restored"):
+            fixture.finalize_ipv6_drift_baseline()
+        self.assertEqual(fixture.baseline, instrumented)
+
+        fixture.native = lambda: list(original)
+        fixture.finalize_ipv6_drift_baseline()
+        self.assertEqual(fixture.baseline, original)
+        self.assertEqual(fixture.native(), fixture.baseline)
+
     def test_sender_distinguishes_success_guard_eperm_and_other_errors(self):
         import errno
         import types

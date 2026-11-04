@@ -969,6 +969,16 @@ class Fixture:
             "invalid public IPv6 send result")
         return outcome
 
+    def finalize_ipv6_drift_baseline(self):
+        # The source-address fixture was included in the temporary native
+        # baseline during admission. Re-arm the original baseline only after
+        # independently verified cleanup, before main() checks Off again.
+        assert self.ipv6_drift_original_native is not None, "missing original native baseline"
+        assert not (self.ipv6_drift_route_intent or self.ipv6_drift_peer_intent or
+                    self.ipv6_drift_source_intent), "IPv6 drift fixture still owns resources"
+        assert self.native() == self.ipv6_drift_original_native, "original guest IPv6 baseline not restored"
+        self.baseline = self.ipv6_drift_original_native
+
     def ipv6_drift_guard_off(self):
         assert not self.args.ipv6 and self.args.ipv6_drift, "invalid IPv4-only drift fixture"
         # A local-only ULA address provides a real routable IPv6 source
@@ -1039,7 +1049,7 @@ class Fixture:
         self.remove_ipv6_drift_peer()
         self.inactive()
         self.remove_ipv6_drift_source()
-        assert self.native() == self.ipv6_drift_original_native, "original guest IPv6 baseline not restored"
+        self.finalize_ipv6_drift_baseline()
         self.marker("IPV6_PUBLIC_ROUTE_GUARD_OFF")
 
     def reject_installer_mutation(self):
