@@ -15,8 +15,9 @@ func ipv4OnlyIPv6Host(routes, rules string) HostPreflight {
 const ipv6DefaultRules = `[{"priority":0,"src":"all","table":"local"},{"priority":32766,"src":"all","table":"main"}]`
 
 func TestIPv4OnlyNativeAdmissionRejectsUnprotectedIPv6(t *testing.T) {
-	// The Linux IPv4-only native interception/guard cannot constrain packets
-	// that the host can send over public IPv6. Refuse before guard prearm.
+	// IPv4-only TUN does not provide working public IPv6-over-VPN; refuse
+	// potential public IPv6 paths before guard prearm rather than relying on
+	// the active inet guard to drop those paths.
 	for _, tc := range []struct{ name, routes, rules string }{
 		{"global_default", `[{"dst":"default","gateway":"fe80::1","dev":"ens3","protocol":"ra","metric":1024,"flags":[],"pref":"medium"}]`, ipv6DefaultRules},
 		{"global_connected", `[{"dst":"2001:4860:4860::/64","dev":"ens3","protocol":"kernel","metric":256,"flags":[],"pref":"medium"}]`, ipv6DefaultRules},
@@ -30,6 +31,9 @@ func TestIPv4OnlyNativeAdmissionRejectsUnprotectedIPv6(t *testing.T) {
 		{"empty_explicit_table", `[{"dst":"fe80::/64","dev":"ens3","table":""}]`, ipv6DefaultRules},
 		{"bad_metric", `[{"dst":"fe80::/64","dev":"ens3","metric":-1}]`, ipv6DefaultRules},
 		{"nonempty_flags", `[{"dst":"fe80::/64","dev":"ens3","flags":["onlink"]}]`, ipv6DefaultRules},
+		{"linkdown_plus_foreign_flag", `[{"dst":"fe80::/64","dev":"ens3","flags":["linkdown","onlink"]}]`, ipv6DefaultRules},
+		{"duplicate_linkdown", `[{"dst":"fe80::/64","dev":"ens3","flags":["linkdown","linkdown"]}]`, ipv6DefaultRules},
+		{"public_route_still_rejected_when_linkdown", `[{"dst":"2001:4860::/64","dev":"ens3","flags":["linkdown"]}]`, ipv6DefaultRules},
 		{"forged_prefsrc", `[{"dst":"fe80::/64","dev":"ens3","prefsrc":"2001:4860::1"}]`, ipv6DefaultRules},
 		{"extra_selector", `[{"dst":"fe80::/64","dev":"ens3","from":"2001:4860::/32"}]`, ipv6DefaultRules},
 		{"broad_linklocal_mask", `[{"dst":"fe80::/8","dev":"ens3"}]`, ipv6DefaultRules},
@@ -65,6 +69,9 @@ func TestIPv4OnlyNativeAdmissionPreservesLocalIPv6(t *testing.T) {
 		{"ipv6_disabled", `[]`, ipv6DefaultRules},
 		{"real_linux_linklocal_only", observedKernel, ipv6DefaultRules},
 		{"private_ula", safeULA, ipv6DefaultRules},
+		{"linklocal_during_reconnect", `[{"dst":"fe80::/64","dev":"scqavm0","flags":["linkdown"]}]`, ipv6DefaultRules},
+		{"private_ula_during_reconnect", `[{"dst":"fd00:1234::/64","dev":"scqavm0","flags":["linkdown"]}]`, ipv6DefaultRules},
+		{"local_multicast_during_reconnect", `[{"type":"multicast","dst":"ff00::/8","dev":"scqavm0","table":"local","flags":["linkdown"]}]`, ipv6DefaultRules},
 		{"optional_native_default_rpdb", `[]`, `[{"priority":0,"src":"all","table":"local"},{"priority":32766,"src":"all","table":"main"},{"priority":32767,"src":"all","table":"default"}]`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -84,6 +91,7 @@ func TestIPv4OnlyNativeAdmissionRechecksLiveIPv6(t *testing.T) {
 		refuse              bool
 	}{
 		{"unchanged_loopback_and_linklocal", `[{"dst":"fe80::/64","dev":"ens3"}]`, ipv6DefaultRules, 0, false},
+		{"disconnected_tun_linklocal_during_reconnect", `[{"dst":"fe80::/64","dev":"scqavm0","flags":["linkdown"]}]`, ipv6DefaultRules, 0, false},
 		{"new_global_ra", `[{"dst":"default","dev":"ens3","gateway":"fe80::1"}]`, ipv6DefaultRules, 0, true},
 		{"new_foreign_ipv6_rule", `[]`, `[{"priority":0,"src":"all","table":"local"},{"priority":100,"src":"all","table":"99"},{"priority":32766,"src":"all","table":"main"}]`, 0, true},
 		{"route_read_failed", `[]`, ipv6DefaultRules, 1, true},

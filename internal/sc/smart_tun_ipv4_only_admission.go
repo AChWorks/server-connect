@@ -77,9 +77,13 @@ func nativeIPv4OnlyIPv6Admission(host HostPreflight) error {
 		}
 		if raw, ok := row["flags"]; ok {
 			var flags []string
-			if json.Unmarshal(raw, &flags) != nil || flags == nil || len(flags) != 0 {
+			if json.Unmarshal(raw, &flags) != nil || flags == nil ||
+				(len(flags) != 0 && (len(flags) != 1 || flags[0] != "linkdown")) {
 				return unsafe()
 			}
+			// A disconnected (but still owned) persistent TUN may leave
+			// otherwise local IPv6 routes flagged linkdown during a
+			// bounded reconnect. This is not a public Direct bypass.
 		}
 		for _, key := range []string{"type", "table"} {
 			if raw, present := row[key]; present && selectiveText(raw) == "" {
