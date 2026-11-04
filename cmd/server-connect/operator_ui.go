@@ -178,6 +178,10 @@ func operatorErrorGuidance(code string) (state, next string) {
 		return "The routing rule change was refused; the saved rule identity or revision may differ.", "Inspect 'server-connect smart-routing-rules list' and retry with current identities."
 	case "routing_rules_hash_mismatch":
 		return "The supplied rule list bytes do not match the pinned SHA-256; no import was accepted.", "Recalculate the raw file digest with 'sha256sum' and retry with an independently verified digest."
+	case "apt_policy_conflict", "apt_untrusted_executable":
+		return "Native APT executable or inherited policy could not be verified for the selected route.", "Inspect native APT settings locally; remove conflicting proxy, update or debug overrides before retrying 'server-connect apt'."
+	case "proxy_unavailable":
+		return "The local Proxy Only listener is not active; selected proxy routing is unverified.", "Inspect 'server-connect status' and connect a verified profile before retrying."
 	case "probe_http", "probe_unavailable", "core_unavailable":
 		return "The requested network path has not been proven healthy.", "Inspect 'server-connect status' and use the explicit Direct/Proxy path diagnostics."
 	default:

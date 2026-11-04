@@ -64,26 +64,28 @@ case "$SC_QA_TIMEOUT_CASE" in
       'E: Failed to fetch http://127.0.0.1:19180/sc-qa-apt/dists/qa/Release Connection refused'
     exit 100 ;;
   manager-unavailable)
-    printf '%s\n' 'Error: local proxy is not active' >&2
+    printf '%s\n' 'Error [proxy_unavailable]: local proxy is not active' \
+      'State: The local Proxy Only listener is not active; selected proxy routing is unverified.' \
+      "Next: Inspect 'server-connect status' and connect a verified profile before retrying." >&2
     exit 1 ;;
   unrelated)
     printf '%s\n' 'Error: unable to initialize manager' >&2
     exit 1 ;;
   inventory-refusal)
-    printf '%s\n' 'Error: unsupported APT acquisition method installed' \
+    printf '%s\n' 'Error [apt_untrusted_executable]: unsupported APT acquisition method installed' \
       'Private diagnostic http://qa-user:qa-secret-must-stay-private@127.0.0.1/' >&2
     exit 1 ;;
   path-refusal)
-    printf '%s\n' 'Error: trusted native APT executable path configuration not established' >&2
+    printf '%s\n' 'Error [apt_policy_conflict]: trusted native APT executable path configuration not established' >&2
     exit 1 ;;
   method-override-refusal)
-    printf '%s\n' 'Error: APT per-method execution override is not the verified disabled policy' >&2
+    printf '%s\n' 'Error [apt_policy_conflict]: APT per-method execution override is not the verified disabled policy' >&2
     exit 1 ;;
   owned-policy-refusal)
-    printf '%s\n' 'Error: APT disabled acquisition method policy not established' >&2
+    printf '%s\n' 'Error [apt_policy_conflict]: APT disabled acquisition method policy not established' >&2
     exit 1 ;;
   unclassified-secret)
-    printf '%s\n' 'Error: unsupported APT acquisition method installed http://qa-user:qa-secret-must-stay-private@127.0.0.1/' >&2
+    printf '%s\n' 'Error [apt_untrusted_executable]: unsupported APT acquisition method installed http://qa-user:qa-secret-must-stay-private@127.0.0.1/' >&2
     exit 1 ;;
   missing-evidence)
     printf '%s\n' 'W: unrelated non-acquisition error'

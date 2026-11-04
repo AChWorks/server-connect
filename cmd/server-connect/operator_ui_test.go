@@ -112,7 +112,7 @@ func TestOperatorMenuProfileRemovalAndIncompleteInputNeverMutate(t *testing.T) {
 }
 
 func TestOperatorErrorGuidanceHasConsequenceAndNextAction(t *testing.T) {
-	for _, code := range []string{"guard_pending", "unsupported_host", "service_conflict", "invalid_arguments", "routing_rules_conflict", "routing_rules_hash_mismatch", "routing_rules_missing", "operation_failed"} {
+	for _, code := range []string{"guard_pending", "unsupported_host", "service_conflict", "invalid_arguments", "routing_rules_conflict", "routing_rules_hash_mismatch", "routing_rules_missing", "apt_policy_conflict", "apt_untrusted_executable", "proxy_unavailable", "operation_failed"} {
 		state, next := operatorErrorGuidance(code)
 		if state == "" || next == "" || !(strings.Contains(next, "server-connect") || strings.Contains(next, "sha256sum")) {
 			t.Fatalf("guidance for %s lacks state or next action: %q / %q", code, state, next)
