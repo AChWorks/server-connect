@@ -895,8 +895,9 @@ func menu(m *sc.Manager) int {
 					fmt.Println("Canceled; no host change")
 					continue
 				}
-				menuRun(m, []string{"smart-tun-trial-apply", "--supervised", "--tunnel-if", "scqavm0", "--underlay-if", "ens3", "--tunnel-ipv4", "172.31.99.1/30", "--management-peer", "10.0.2.2", "--domestic-cidr", "5.22.0.10/32", "--protected-cidr", "10.0.2.2/32", "--deadline-seconds", "180"}...)
-				fmt.Println("For confirmation open a completely NEW SSH connection, then use option 20 > 5 within the shown deadline.")
+				if menuRun(m, []string{"smart-tun-trial-apply", "--supervised", "--tunnel-if", "scqavm0", "--underlay-if", "ens3", "--tunnel-ipv4", "172.31.99.1/30", "--management-peer", "10.0.2.2", "--domestic-cidr", "5.22.0.10/32", "--protected-cidr", "10.0.2.2/32", "--deadline-seconds", "180"}...) == 0 {
+					fmt.Println("For confirmation open a completely NEW SSH connection, then use option 20 > 5 within the shown deadline.")
+				}
 			case "3":
 				fmt.Print("Revalidate saved profile and rules, start an independently guarded VM trial? Type VM-RECONNECT: ")
 				ack, err := in.ReadString('\n')
@@ -904,8 +905,9 @@ func menu(m *sc.Manager) int {
 					fmt.Println("Canceled; no host change")
 					continue
 				}
-				menuRun(m, []string{"smart-tun-trial-apply", "--saved", "--supervised", "--deadline-seconds", "180"}...)
-				fmt.Println("Open a NEW SSH connection to confirm the one-time challenge.")
+				if menuRun(m, []string{"smart-tun-trial-apply", "--saved", "--supervised", "--deadline-seconds", "180"}...) == 0 {
+					fmt.Println("Open a NEW SSH connection to confirm the one-time challenge.")
+				}
 			case "4":
 				r, err := m.InspectSmartTUNTrial()
 				if err != nil {

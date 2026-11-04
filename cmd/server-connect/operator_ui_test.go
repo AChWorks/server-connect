@@ -142,3 +142,35 @@ func TestOperatorPromptRequiresCompleteInput(t *testing.T) {
 		}
 	}
 }
+
+// A refused VM-only Apply must not direct the operator to confirm an operation
+// that never started. This is an unprivileged, state-less refusal test; it
+// never exercises a real host TUN, systemd unit or network route.
+func TestOperatorMenuFailedVMApplyNeverOffersConfirmation(t *testing.T) {
+	for _, tc := range []struct{ name, input, successAdvice string }{
+		{"first-apply", "20\n2\nVM-CONNECT\n0\n", "For confirmation open a completely NEW SSH connection"},
+		{"saved-reapply", "20\n3\nVM-RECONNECT\n0\n", "Open a NEW SSH connection to confirm the one-time challenge"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := sc.New(filepath.Join(t.TempDir(), "uninstalled-state"), "", 0)
+			in, wr, err := os.Pipe()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := io.WriteString(wr, tc.input); err != nil {
+				t.Fatal(err)
+			}
+			wr.Close()
+			old := os.Stdin
+			os.Stdin = in
+			defer func() { os.Stdin = old; in.Close() }()
+			code, out, stderr := hostDriftCapturedOutput(t, func() int { return menu(m) })
+			if code != 0 || !strings.Contains(out, "Not completed:") || !strings.Contains(stderr, "Error [") || strings.Contains(out, tc.successAdvice) {
+				t.Fatalf("refused trial implied successful Apply: code=%d out=%s err=%s", code, out, stderr)
+			}
+			if _, err := os.Lstat(m.Dir); !os.IsNotExist(err) {
+				t.Fatal("refused VM trial created uninstalled product state")
+			}
+		})
+	}
+}
