@@ -271,10 +271,11 @@ func TestHostCaptureGateOneJournalAndOwnedOffNative(t *testing.T) {
 		// A previous 0->1 sysctl operation has no old-boot CAS authority.
 		unowned := progress
 		unowned.Ingress.SysctlBefore = 0
+		expectedRefused := unowned
 		if code := refusedRecoveryCode(&unowned); code != "host_ingress_unverified" {
 			return fmt.Errorf("old-boot sysctl write acquired restoration authority: %s", code)
 		}
-		if unowned != progress {
+		if unowned != expectedRefused {
 			return errors.New("refused old-boot sysctl recovery mutated memory")
 		}
 
