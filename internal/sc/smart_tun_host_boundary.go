@@ -26,6 +26,7 @@ type SmartTUNHostBoundary struct {
 	IPv6Policy          string   `json:"ipv6_policy"`
 	ForeignNFT          string   `json:"foreign_nft"`
 	HostedReplySessions string   `json:"hosted_reply_sessions"`
+	TCPMarkInheritance  string   `json:"tcp_mark_inheritance"`
 	OutOfBandRecovery   string   `json:"out_of_band_recovery"`
 	Reasons             []string `json:"reasons"`
 	Limitations         []string `json:"limitations"`
@@ -45,6 +46,10 @@ type smartTUNHostBoundaryObservations struct {
 	nftErr              error
 	hostedReplySessions string
 	hostedReplyErr      error
+	markBefore          int
+	markBeforeErr       error
+	markAfter           int
+	markAfterErr        error
 }
 
 // Distinguish foreign owners for operator diagnosis without granting them
@@ -166,7 +171,8 @@ func assessSmartTUNHostBoundary(o smartTUNHostBoundaryObservations, expectedUnde
 		InstalledTarget: "unavailable", NativePlatform: "unsupported_or_unverified",
 		SSHReturnPath: "unverified", InterfaceInventory: "unverified",
 		IPv4Policy: "unverified", IPv6Policy: "unverified",
-		ForeignNFT: "unverified", HostedReplySessions: hostRepliesUnverified, OutOfBandRecovery: "not_verified",
+		ForeignNFT: "unverified", HostedReplySessions: hostRepliesUnverified,
+		TCPMarkInheritance: "unverified", OutOfBandRecovery: "not_verified",
 		Reasons: []string{}, Limitations: []string{
 			"A fresh authenticated SSH transport is not proved by this passive kernel route observation.",
 			"An SSH session is not an independent provider-console rescue or host rollback channel.",
@@ -176,6 +182,24 @@ func assessSmartTUNHostBoundary(o smartTUNHostBoundaryObservations, expectedUnde
 		},
 	}
 	add := func(code string) { r.Reasons = append(r.Reasons, code) }
+	// A shared host's tcp_fwmark_accept is not a CAS-owned resource. The
+	// general-host ingress stage may use only an already-enabled setting.
+	// Reobserve it after other slow, non-atomic kernel probes: even a transient
+	// 1->0->1 remains beyond the authority of this diagnostic to accept.
+	switch {
+	case o.markBeforeErr != nil || o.markAfterErr != nil ||
+		(o.markBefore != 0 && o.markBefore != 1) ||
+		(o.markAfter != 0 && o.markAfter != 1):
+		add("tcp_fwmark_accept_unverified")
+	case o.markBefore != o.markAfter:
+		r.TCPMarkInheritance = "changed_during_observation"
+		add("tcp_fwmark_accept_changed_during_observation")
+	case o.markBefore == 0:
+		r.TCPMarkInheritance = "disabled_operator_prerequisite"
+		add("tcp_fwmark_accept_preexisting_enabled_required")
+	default:
+		r.TCPMarkInheritance = "enabled_observed_only"
+	}
 	if o.targetErr == nil && o.target != "" {
 		r.InstalledTarget = o.target
 		if o.target == "debian-13-amd64" {
@@ -283,6 +307,7 @@ func InspectSmartTUNHostBoundary(managementPeer, underlay string) (SmartTUNHostB
 		return SmartTUNHostBoundary{}, Fault("invalid_arguments", "host boundary needs privileged read-only kernel inspection")
 	}
 	o := smartTUNHostBoundaryObservations{}
+	o.markBefore, o.markBeforeErr = readHostIngressSysctl()
 	o.target, o.targetErr = currentInstallerHostTarget()
 	o.sshPath, o.sshErr = observeGeneralHostSSHPath(managementPeer, underlay)
 	o.links, o.linksErr = nativeIPJSON("-j", "link", "show")
@@ -300,5 +325,6 @@ func InspectSmartTUNHostBoundary(managementPeer, underlay string) (SmartTUNHostB
 			}
 		}
 	}
+	o.markAfter, o.markAfterErr = readHostIngressSysctl()
 	return assessSmartTUNHostBoundary(o, underlay), nil
 }

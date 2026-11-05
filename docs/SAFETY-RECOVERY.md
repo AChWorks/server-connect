@@ -42,6 +42,17 @@ bypass an unresolved operation. A later full general-host operation needs a
 **different, complete** lifecycle and effect ledger before this admission is
 expanded.
 
+`smart-tun-host-boundary` also reads the shared `tcp_fwmark_accept` value
+before and after its other read-only observations. The
+`tcp_mark_inheritance` result distinguishes `enabled_observed_only`,
+`disabled_operator_prerequisite`, `changed_during_observation`, and
+`unverified`. A disabled value is a concrete operator-owned prerequisite,
+**not** permission for the manager to write or restore a global sysctl.
+If an operator independently provisions that prerequisite, it remains
+outside Server Connect ownership and must be assessed under the
+operator's own change/rollback procedures. Even two observed enabled
+values are neither an atomic reservation nor general-host admission.
+
 ### Disposable v4 guarded TUN trial (not production acceptance)
 
 The installed experimental v4 journal never reaches `ACTIVE_VERIFIED`.

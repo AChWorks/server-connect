@@ -12,7 +12,8 @@ import (
 
 func hostBoundaryFixture() smartTUNHostBoundaryObservations {
 	return smartTUNHostBoundaryObservations{
-		target: "debian-13-amd64",
+		target:     "debian-13-amd64",
+		markBefore: 1, markAfter: 1,
 		sshPath: generalHostSSHPath{Interface: "ens3", Index: 2,
 			Local: netip.MustParseAddr("10.20.30.40"), Peer: netip.MustParseAddr("8.8.8.8")},
 		links:     json.RawMessage(`[{"ifindex":1,"ifname":"lo"},{"ifindex":2,"ifname":"ens3"}]`),
@@ -217,6 +218,40 @@ func TestGeneralHostExistingUntrackedRepliesNeverAdmit(t *testing.T) {
 				!hasBoundaryReason(r, "untracked_reply_socket_generation_not_reserved") ||
 				(tc.reason != "" && !hasBoundaryReason(r, tc.reason)) {
 				t.Fatalf("hosted reply risk lost: %+v", r)
+			}
+		})
+	}
+}
+
+// The shared sysctl is an operator-owned host prerequisite, never an
+// implicitly acquired mutation right. Non-atomic observation cannot issue a
+// stable activation receipt even if both endpoint values happen to be 1.
+func TestGeneralHostBoundaryMarkInheritanceIsReadOnlyAndFailClosed(t *testing.T) {
+	cases := []struct {
+		name                string
+		before, after       int
+		beforeErr, afterErr error
+		state, reason       string
+	}{
+		{"preenabled", 1, 1, nil, nil, "enabled_observed_only", ""},
+		{"disabled", 0, 0, nil, nil, "disabled_operator_prerequisite", "tcp_fwmark_accept_preexisting_enabled_required"},
+		{"disabled_to_enabled", 0, 1, nil, nil, "changed_during_observation", "tcp_fwmark_accept_changed_during_observation"},
+		{"enabled_to_disabled", 1, 0, nil, nil, "changed_during_observation", "tcp_fwmark_accept_changed_during_observation"},
+		{"read_before_failed", 0, 1, errors.New("read failed"), nil, "unverified", "tcp_fwmark_accept_unverified"},
+		{"read_after_failed", 1, 0, nil, errors.New("read failed"), "unverified", "tcp_fwmark_accept_unverified"},
+		{"unexpected_kernel_value", 2, 2, nil, nil, "unverified", "tcp_fwmark_accept_unverified"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			o := hostBoundaryFixture()
+			o.markBefore, o.markAfter = tc.before, tc.after
+			o.markBeforeErr, o.markAfterErr = tc.beforeErr, tc.afterErr
+			r := assessSmartTUNHostBoundary(o, "ens3")
+			if !r.ReadOnly || r.ActivationReady || r.GeneralHostAdmitted ||
+				r.TCPMarkInheritance != tc.state ||
+				!hasBoundaryReason(r, "general_host_admission_not_implemented") ||
+				(tc.reason != "" && !hasBoundaryReason(r, tc.reason)) {
+				t.Fatalf("shared sysctl ownership misreported: %+v", r)
 			}
 		})
 	}
