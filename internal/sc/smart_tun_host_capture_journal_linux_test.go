@@ -133,3 +133,40 @@ func TestHostCaptureParentProgressCASAndRecoverySelectionShareLock(t *testing.T)
 		t.Fatalf("legacy QA fault not refused for v6: %v", err)
 	}
 }
+
+// The nonprivileged unit case verifies that a recognized v6 preparation
+// cannot be abandoned before Off, even when its identity matches. Native
+// tests separately prove exact terminal clearance against the actual kernel.
+func TestHostCapturePreparationClearRejectsPendingAndWrongIdentity(t *testing.T) {
+	m := New(privateJournalTempDir(t), DefaultCore, DefaultPort)
+	record := hostCaptureJournalExample()
+	id := record.Progress.Ingress.OperationID
+	err := m.withActivationJournalLock(syscall.Fsync, func(store *activationJournalDir) error {
+		if err := writeHostCaptureJournal(store, record, nil); err != nil {
+			return err
+		}
+		for _, tc := range []struct {
+			id   string
+			code string
+		}{
+			{"short", "invalid_arguments"},
+			{strings.Repeat("f", 32), "activation_journal_conflict"},
+			{id, "activation_journal_conflict"},
+		} {
+			if code := ErrorCode(clearRecoveredHostCapturePreparationLocked(store, tc.id)); code != tc.code {
+				t.Fatalf("clear(%s) = %s, want %s", tc.id, code, tc.code)
+			}
+			got, _, err := loadHostCaptureJournal(store)
+			if err != nil || got != record {
+				t.Fatalf("refused clearance modified parent: %v", err)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code := ErrorCode(m.ClearRecoveredHostCapturePreparation(id)); code != "invalid_arguments" {
+		t.Fatalf("test-local directory used installed-only clearance: %s", code)
+	}
+}

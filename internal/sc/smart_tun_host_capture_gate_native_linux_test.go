@@ -138,6 +138,10 @@ func TestHostCaptureGateOneJournalAndOwnedOffNative(t *testing.T) {
 			return fmt.Errorf("gate did not persist both exact owned prerequisites: %v", err)
 		}
 		fmt.Println("HOST_CAPTURE_COMMON_JOURNAL_STAGED_AND_BARRIER_CLOSED=PASS")
+		if code := ErrorCode(clearRecoveredHostCapturePreparationLocked(store, progress.Ingress.OperationID)); code != "activation_journal_conflict" {
+			return fmt.Errorf("pending host capture clearance was accepted: %s", code)
+		}
+		fmt.Println("HOST_CAPTURE_PENDING_CLEAR_REFUSES=PASS")
 		// Replaying a completed barrier cannot mint another synchronization
 		// receipt or acquire an arbitrary overlapping ingress mark.
 		if err := runHostCaptureGateLocked(store, &progress, guard, persist); err == nil {
@@ -332,6 +336,55 @@ func TestHostCaptureGateOneJournalAndOwnedOffNative(t *testing.T) {
 		}
 		progress, record = finalRecord.Progress, finalRecord
 		fmt.Println("HOST_CAPTURE_OLD_BOOT_NO_FOREIGN_MUTATION_AND_OWNED_OFF=PASS")
+		if code := ErrorCode(m.InstallerCheckGuardClear()); code != "guard_pending" {
+			return fmt.Errorf("installer abandoned recovered but uncleared v6 parent: %s", code)
+		}
+		if code := ErrorCode(clearRecoveredHostCapturePreparationLocked(store, strings.Repeat("f", 32))); code != "activation_journal_conflict" {
+			return fmt.Errorf("nonmatching host capture ID cleared another operation: %s", code)
+		}
+		if code := ErrorCode(clearRecoveredHostCapturePreparationLocked(store, "bad")); code != "invalid_arguments" {
+			return fmt.Errorf("malformed host capture clearance ID admitted: %s", code)
+		}
+
+		// A returned "recovered" phase alone never grants unlink authority:
+		// foreign same-name interfaces, nft tables and scalar drift all block.
+		foreignName = "scin_" + progress.Ingress.OperationID
+		ingressNativeCommand(t, "/usr/sbin/ip", "link", "add", progress.Barrier.Name, "type", "dummy")
+		if code := ErrorCode(clearRecoveredHostCapturePreparationLocked(store, progress.Ingress.OperationID)); code != "host_ingress_unverified" {
+			return fmt.Errorf("foreign helper interface did not block v6 clear: %s", code)
+		}
+		ingressNativeCommand(t, "/usr/sbin/ip", "link", "del", progress.Barrier.Name)
+		ingressNativeCommand(t, "/usr/sbin/nft", "add", "table", "inet", foreignName)
+		if code := ErrorCode(clearRecoveredHostCapturePreparationLocked(store, progress.Ingress.OperationID)); code != "host_ingress_unverified" {
+			return fmt.Errorf("foreign nft name did not block v6 clear: %s", code)
+		}
+		if observed, err := observeHostIngressNFT(progress.Ingress); err != nil || !observed.Present {
+			return errors.New("refused clearance modified a foreign same-name nft table")
+		}
+		ingressNativeCommand(t, "/usr/sbin/nft", "delete", "table", "inet", foreignName)
+		ingressNativeCommand(t, "/usr/sbin/sysctl", "-q", "-w", "net.ipv4.tcp_fwmark_accept=0")
+		if code := ErrorCode(clearRecoveredHostCapturePreparationLocked(store, progress.Ingress.OperationID)); code != "host_ingress_unverified" {
+			return fmt.Errorf("foreign sysctl change did not block v6 clear: %s", code)
+		}
+		ingressNativeCommand(t, "/usr/sbin/sysctl", "-q", "-w", "net.ipv4.tcp_fwmark_accept=1")
+		if retained, _, err := get(); err != nil || retained != record {
+			return errors.New("refused v6 clearance discarded durable parent")
+		}
+		fmt.Println("HOST_CAPTURE_CLEAR_FOREIGN_COLLISIONS_REFUSE=PASS")
+
+		if err := clearRecoveredHostCapturePreparationLocked(store, progress.Ingress.OperationID); err != nil {
+			return fmt.Errorf("exact recovered old-boot parent did not clear: %w", err)
+		}
+		if _, _, err := get(); !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("successful v6 clear still retained activation parent: %v", err)
+		}
+		if code := ErrorCode(clearRecoveredHostCapturePreparationLocked(store, progress.Ingress.OperationID)); code != "activation_journal_conflict" {
+			return fmt.Errorf("cleared host capture parent replay was accepted: %s", code)
+		}
+		if err := m.InstallerCheckGuardClear(); err != nil {
+			return fmt.Errorf("installer still blocked after verified v6 clear: %w", err)
+		}
+		fmt.Println("HOST_CAPTURE_RECOVERED_OLD_BOOT_EXACT_TERMINAL_CLEAR=PASS")
 		return nil
 	})
 	if err != nil {
@@ -385,6 +438,23 @@ func TestHostCaptureGateOneJournalAndOwnedOffNative(t *testing.T) {
 		t.Fatal(err)
 	}
 	fmt.Println("HOST_CAPTURE_REAL_SIGKILL_INDEPENDENT_DISPATCH_OWNED_OFF=PASS")
+	err = crashed.withActivationJournalLock(syscall.Fsync, func(store *activationJournalDir) error {
+		record, _, err := loadHostCaptureJournal(store)
+		if err != nil {
+			return err
+		}
+		if err := clearRecoveredHostCapturePreparationLocked(store, record.Progress.Ingress.OperationID); err != nil {
+			return err
+		}
+		if _, _, err := store.readJournal(); !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("crash recovered journal not removed: %v", err)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fmt.Println("HOST_CAPTURE_REAL_SIGKILL_RECOVERED_TERMINAL_CLEAR=PASS")
 	if after := routesAndRules(); after != baseline {
 		t.Fatal("host capture gate modified foreign route/rule state")
 	}

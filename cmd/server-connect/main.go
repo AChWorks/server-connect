@@ -462,6 +462,15 @@ func run(j bool, m *sc.Manager, args []string) int {
 		}
 		result, err := m.InspectSmartTUNTrial()
 		return output(j, result, err)
+	case "host-capture-preparation-clear":
+		opts := flag.NewFlagSet(name, flag.ContinueOnError)
+		opts.SetOutput(io.Discard)
+		id := opts.String("operation-id", "", "exact recovered host capture preparation operation ID")
+		if e := opts.Parse(args); e != nil || len(opts.Args()) != 0 {
+			return output(j, nil, sc.Fault("invalid_arguments", "invalid host capture clearance options"))
+		}
+		err := m.ClearRecoveredHostCapturePreparation(*id)
+		return output(j, map[string]any{"operation_id": *id, "cleared": err == nil}, err)
 	case "smart-tun-trial-clear":
 		opts := flag.NewFlagSet(name, flag.ContinueOnError)
 		opts.SetOutput(io.Discard)

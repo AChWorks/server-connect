@@ -1087,6 +1087,9 @@ func (m *Manager) InstallerCheckGuardClear() error {
 	if _, err := decodeTrialJournal(raw); err == nil {
 		return Fault("guard_pending", "clear the exact recovered rule trial before update or uninstall")
 	}
+	if _, err := decodeHostCaptureJournal(raw); err == nil {
+		return Fault("guard_pending", "clear the exact recovered host capture preparation before update or uninstall")
+	}
 	if err := strictActivationJournalJSON(raw); err != nil {
 		return Fault("activation_journal_invalid", "unsupported activation journal blocks installer")
 	}

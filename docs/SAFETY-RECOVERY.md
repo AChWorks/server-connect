@@ -23,6 +23,25 @@
 
 **Beware historical naming:** the developer's `selective-stage-intent` may report `prepared`, but its private **unarmed, non-atomic** journal is **not** the guarded `PREPARED` state above. QA-only v2 RPDB-rule and v3 loopback-route trials also do not create a real TUN or production Activation Guard. Their limits and reproducible tests are recorded in [ACCEPTANCE.md](ACCEPTANCE.md).
 
+### Experimental v6 host-capture preparation (not Smart Routing Apply)
+
+The v6 `host_capture_preparation_v1` journal owns only a preexisting mark-inheritance
+precondition, one uniquely identified ingress nft table and a transient TUN
+kernel-grace barrier. It does **not** own a working sing-box core, traffic TUN,
+FIB/RPDB capture, DNS policy or Runtime Guard; an observed v6 barrier never
+permits general-host Apply. Independent Recovery retains this exact journal after
+verified owned Off. A valid v6 record blocks update/uninstall and new activation
+until terminal clearance. Only on the installed host, as root, the explicitly
+requested `server-connect host-capture-preparation-clear --operation-id <exact-id>`
+can remove the recovered journal. It rechecks the same complete durable record,
+boot/namespace ownership (when still on the same boot), absence of the helper
+and ingress table and unchanged preexisting `tcp_fwmark_accept=1`, then removes
+only the CAS-matched journal. Pending/ambiguous records and foreign collisions
+refuse without modifying their effects. Never manually unlink the journal to
+bypass an unresolved operation. A later full general-host operation needs a
+**different, complete** lifecycle and effect ledger before this admission is
+expanded.
+
 ### Disposable v4 guarded TUN trial (not production acceptance)
 
 The installed experimental v4 journal never reaches `ACTIVE_VERIFIED`.

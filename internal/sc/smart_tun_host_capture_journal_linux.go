@@ -4,9 +4,12 @@ package sc
 
 import (
 	"bytes"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"io"
+	"os"
+	"syscall"
 )
 
 // This is the first durable, independently selectable parent for the two
@@ -181,4 +184,103 @@ func hostCaptureJournalPersist(store *activationJournalDir, current *hostCapture
 		*current = updated
 		return nil
 	}
+}
+
+// verifyHostCapturePreparationOff checks that a recovered v6 operation has
+// no native effect left. The v6 schema owns ONLY preexisting mark inheritance,
+// one exact ingress nft table and the short-lived barrier interface. Do not
+// reuse this clearance for a later general-host journal with TUN/FIB/RPDB
+// effects. A prior boot's namespace or nft handle is never delete authority.
+func verifyHostCapturePreparationOff(record hostCaptureJournal) error {
+	if err := validateHostCaptureJournal(record); err != nil {
+		return err
+	}
+	if record.Progress.Ingress.Phase != "recovered" ||
+		record.Progress.Ingress.SysctlStage != "removed" ||
+		record.Progress.Ingress.NFTStage != "removed" {
+		return Fault("activation_journal_conflict", "host capture preparation is not durably recovered")
+	}
+	boot, err := trialBootIdentity()
+	if err != nil {
+		return err
+	}
+	if boot == record.Progress.Ingress.BootID {
+		// On the same boot a different netns could still contain the
+		// original effect, even if this namespace observes its absence.
+		if err := hostIngressNamespace(record.Progress.Ingress); err != nil {
+			return err
+		}
+	}
+	if err := verifyHostNetworkBarrierReleased(record.Progress.Barrier); err != nil {
+		return err
+	}
+	observed, err := observeHostIngressNFT(record.Progress.Ingress)
+	if err != nil {
+		return err
+	}
+	if observed.Present {
+		return ingressFault("host capture ingress name is occupied or retained")
+	}
+	value, err := readHostIngressSysctl()
+	if err != nil {
+		return err
+	}
+	if value != record.Progress.Ingress.SysctlBefore {
+		return ingressFault("preexisting host mark inheritance changed")
+	}
+	return nil
+}
+
+// clearRecoveredHostCapturePreparationLocked is the only terminal v6
+// clearance. Hold the same uninterrupted activation lock as independent
+// Recovery, require the exact operation ID and fsynced recovered state, and
+// reobserve the kernel before deleting the CAS-matched parent. This is
+// journal-only cleanup: it never modifies nft, sysctls, links or routes.
+func clearRecoveredHostCapturePreparationLocked(store *activationJournalDir, operationID string) error {
+	if store == nil || !journalHex32.MatchString(operationID) {
+		return Fault("invalid_arguments", "exact host capture preparation operation required")
+	}
+	if err := store.ensureLockIdentity(); err != nil {
+		return err
+	}
+	record, identity, err := loadHostCaptureJournal(store)
+	if errors.Is(err, os.ErrNotExist) {
+		return Fault("activation_journal_conflict", "host capture preparation is absent")
+	}
+	if err != nil {
+		return err
+	}
+	if subtle.ConstantTimeCompare([]byte(record.Progress.Ingress.OperationID), []byte(operationID)) != 1 {
+		return Fault("activation_journal_conflict", "host capture preparation operation does not match")
+	}
+	if err := verifyHostCapturePreparationOff(record); err != nil {
+		return err
+	}
+	// A second independent read prevents a changed complete parent or
+	// inode from being silently cleared after a long native observation.
+	latest, latestIdentity, err := loadHostCaptureJournal(store)
+	if err != nil {
+		return err
+	}
+	if latest != record || latestIdentity != identity {
+		return Fault("activation_journal_conflict", "host capture parent changed during clearance")
+	}
+	if err := verifyHostCapturePreparationOff(latest); err != nil {
+		return err
+	}
+	return store.removeJournal(identity)
+}
+
+// ClearRecoveredHostCapturePreparation is an explicit installed-only
+// recovery terminal; it does not create or admit general-host Smart TUN.
+func (m *Manager) ClearRecoveredHostCapturePreparation(operationID string) error {
+	if m.Dir != DefaultDir || !journalHex32.MatchString(operationID) {
+		return Fault("invalid_arguments", "installed exact host capture operation required")
+	}
+	if os.Geteuid() != 0 {
+		return Fault("ownership_required", "root required to clear host capture preparation")
+	}
+	return m.withActivationJournalLock(syscall.Fsync, func(store *activationJournalDir) error {
+		return clearRecoveredHostCapturePreparationLocked(store, operationID)
+	})
 }
