@@ -389,6 +389,34 @@ independently guarded, race-safe generation-aware mechanism with owned
 rollback, or refuse hosts with unsupported NOTRACK reply handling.
 Product Apply must not use this read-only result as a green activation gate.
 
+**Explored alternative — staged drain, NOT an implemented Apply path:** A
+separate, root-host-safe `scripts/qa/field-notrack-drain-transition.sh`
+runs only in a fresh disposable network namespace. It first enables
+`tcp_fwmark_accept=1`, then marks inbound SYNs before foreign raw NOTRACK,
+while normal host routing is still untouched. Earlier accepted sockets keep
+their old mark, and must continue their old Direct replies while the caller
+**refuses** capture. Only after all non-inherited, generation-identified
+old sockets have drained can capture/egress Guard be staged: a new connection
+reusing an old identical four-tuple now has a new socket cookie and
+inherited bypass mark, with no stale tuple exception. The kernel's
+`INET_DIAG_MARK` attribute (CAP_NET_ADMIN only) corroborates socket mark,
+cookie and inode. An independently marked listener's own `SO_MARK` overrides
+`tcp_fwmark_accept`; that case must be **refused**. An unmarked accepted
+socket following deliberate sysctl drift must fail the final-egress Guard,
+not route Direct. [Kernel tcp_fwmark_accept semantics](https://www.kernel.org/doc/html/latest/networking/ip-sysctl.html)
+and [inet_diag mark UAPI](https://github.com/torvalds/linux/blob/master/include/uapi/linux/inet_diag.h)
+are primary implementation references.
+
+This is a **feasibility proof only**: real admission still needs an
+independent *pre-activation* Guard, durable journaling and exact-owned
+rollback of the temporary sysctl + nft SYN-mark stage, complete/atomic
+generation+mark observations (including SYN backlog/closing sockets),
+fresh verification that all new accepted sockets actually inherit their
+marks, timeout/refusal for never-draining legacy sessions, foreign NFT/NAT
+ownership validation, and host reply acceptance after activation and
+reboot/crash recovery. A reader must not treat `no unmarked socket
+at snapshot` as atomic authorization. No production host policy is mutated.
+
 #### Automatic-policy ownership limit
 
 The retained legacy automatic-policy trial and standalone compiler QA let the

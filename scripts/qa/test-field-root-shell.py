@@ -10,7 +10,8 @@ ROOT = pathlib.Path(__file__).resolve().parents[2]
 PILOT = ROOT / 'scripts/qa/field-root-selected-tun.sh'
 SOCKET = ROOT / 'scripts/qa/field-notrack-inherited-mark.sh'
 SESSION = ROOT / 'scripts/qa/field-notrack-session-preservation.sh'
-for path in (PILOT, SOCKET, SESSION):
+DRAIN = ROOT / 'scripts/qa/field-notrack-drain-transition.sh'
+for path in (PILOT, SOCKET, SESSION, DRAIN):
     subprocess.run(['bash', '-n', str(path)], check=True)
 source = PILOT.read_text()
 necessary = (
@@ -52,6 +53,27 @@ for required in (
 ):
     assert required in proof, f'isolated NOTRACK QA invariant missing: {required}'
 print('FIELD_NOTRACK_SESSION_ISOLATION_GUARD=PASS')
+
+# A generation-aware drain is only a feasibility witness until a durable
+# product guard owns the staged sysctl/rule change and real socket inspection.
+drain = DRAIN.read_text()
+assert drain.index("unshare -n /usr/bin/python3 -B -") < drain.index("nft('''")
+for required in (
+    "assert os.stat('/proc/self/ns/net').st_ino != os.stat('/proc/1/ns/net').st_ino",
+    "INET_DIAG_MARK",
+    "DRAIN_PREEXISTING_UNMARKED_REPLY_STILL_WORKS=PASS",
+    "DRAIN_KERNEL_GENERATION_AND_SOCKET_MARK_VERIFIED=PASS",
+    "DRAIN_NEW_ACCEPTED_SOCKET_INHERITED_BYPASS=PASS",
+    "DRAIN_FOREIGN_MARKED_LISTENER_MUST_BE_REFUSED=PASS",
+    "DRAIN_EARLY_CAPTURE_ADMISSION_REFUSED=PASS",
+    "DRAIN_OLD_GENERATION_QUIESCED_BEFORE_CAPTURE=PASS",
+    "DRAIN_SOCKET_GENERATION_REUSE_PROTECTED=PASS",
+    "DRAIN_SYSCTL_DRIFT_FAILS_CLOSED=PASS",
+    "DRAIN_NAMESPACE_DESTROYED_WITHOUT_ROOT_HOST_MUTATION=PASS",
+):
+    assert required in drain, f'isolated staged-drain QA invariant missing: {required}'
+assert 'old_session' not in drain and 'flush ruleset' not in drain
+print('FIELD_NOTRACK_DRAIN_INDEPENDENT_NAMESPACE_GUARD=PASS')
 
 # The optional real Iranian Direct witness is explicitly bounded to the
 # source-pinned *estimate* and does not widen the foreign VPN /32 capture.
