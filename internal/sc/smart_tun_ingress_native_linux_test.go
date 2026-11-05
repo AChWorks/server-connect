@@ -321,11 +321,19 @@ func TestHostIngressNativeStageAndIndependentRollback(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// The globally reserved SO_MARK bits must be free BEFORE staging; new
+	// inherited bypass marks created by this operation are not foreign marks.
+	if err := observeReservedHostSocketMarks(); err != nil {
+		t.Fatalf("pre-staging socket mark inventory: %v", err)
+	}
 	err = m.withActivationJournalLock(syscall.Fsync, func(store *activationJournalDir) error { return applyHostIngressStageLocked(store, &r, guard) })
 	if err != nil {
 		t.Fatal(err)
 	}
 	fmt.Println("INGRESS_KERNEL_STAGE_OWNED=PASS")
+	if code := ErrorCode(observeHostIngressKernelQuiescence(r, guard)); code != "host_ingress_drain_pending" {
+		t.Fatalf("live kernel filter omitted pre-existing unmarked generation: %s", code)
+	}
 	if code := ErrorCode(hostIngressDrainBarrier(r, guard)); code != "host_ingress_drain_pending" {
 		t.Fatalf("old unmarked socket did not refuse capture: %s", code)
 	}
@@ -341,6 +349,35 @@ func TestHostIngressNativeStageAndIndependentRollback(t *testing.T) {
 		t.Fatal(err)
 	}
 	fmt.Println("INGRESS_GENERATION_DRAIN_SNAPSHOT=PASS")
+	if err := observeHostIngressKernelQuiescence(r, guard); err != nil {
+		t.Fatalf("kernel-filtered drain after old socket closed: %v", err)
+	}
+	fmt.Println("INGRESS_KERNEL_FILTERED_QUIESCENCE=PASS")
+	listenerRaw, err := l4.SyscallConn()
+	if err != nil {
+		t.Fatal(err)
+	}
+	setListenerMark := func(mark int) {
+		t.Helper()
+		var socketErr error
+		if err := listenerRaw.Control(func(fd uintptr) {
+			socketErr = syscall.SetsockoptInt(int(fd), syscall.SOL_SOCKET, syscall.SO_MARK, mark)
+		}); err != nil || socketErr != nil {
+			t.Fatalf("listener mark operation: control=%v setsockopt=%v", err, socketErr)
+		}
+	}
+	setListenerMark(0x13572468)
+	if code := ErrorCode(observeHostIngressKernelQuiescence(r, guard)); code != "host_ingress_listener_mark" {
+		t.Fatalf("foreign listener mark was not a capture refusal: %s", code)
+	}
+	setListenerMark(0)
+	if err := observeHostIngressKernelQuiescence(r, guard); err != nil {
+		t.Fatalf("unmarked listener did not restore kernel-filtered observation: %v", err)
+	}
+	fmt.Println("INGRESS_FOREIGN_LISTENER_MARK_REFUSAL=PASS")
+	if code := ErrorCode(observeHostIngressKernelQuiescence(r, nil)); code != "guard_unavailable" {
+		t.Fatalf("unguarded kernel observation unexpectedly permitted: %s", code)
+	}
 	// A caller disconnect must not disable the independently prearmed process.
 	watchIn.Close()
 	readUntil(watchScanner, "INGRESS_INDEPENDENT_PROCESS_ROLLBACK=PASS")
