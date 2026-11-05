@@ -494,20 +494,49 @@ func (m *Manager) ImportSmartRoutingRules(source, asOf, expectedSHA, replaceSHA 
 // using the currently selected profile and saved settings. It never persists
 // an active operation, arms a guard or modifies any kernel path.
 type SmartRoutingRulesPreview struct {
-	RulesRevision        uint64 `json:"rules_revision"`
-	SelectedProfileID    string `json:"selected_profile_id"`
-	RuleCount            int    `json:"rule_count"`
-	NativeConfigSHA256   string `json:"native_config_sha256"`
-	EndpointPinEvidence  string `json:"endpoint_pin_evidence,omitempty"`
-	ValidationLevel      string `json:"validation_level"`
-	CoreExecutionTested  bool   `json:"core_execution_tested"`
-	HostNetworkInspected bool   `json:"host_network_inspected"`
-	ActivationReady      bool   `json:"activation_ready"`
-	Applied              bool   `json:"applied"`
+	RulesRevision        uint64                 `json:"rules_revision"`
+	SelectedProfileID    string                 `json:"selected_profile_id"`
+	RuleCount            int                    `json:"rule_count"`
+	NativeConfigSHA256   string                 `json:"native_config_sha256"`
+	EndpointPinEvidence  string                 `json:"endpoint_pin_evidence,omitempty"`
+	DomesticEstimate     *IranGeoSnapshotStatus `json:"domestic_estimate,omitempty"`
+	ValidationLevel      string                 `json:"validation_level"`
+	CoreExecutionTested  bool                   `json:"core_execution_tested"`
+	HostNetworkInspected bool                   `json:"host_network_inspected"`
+	ActivationReady      bool                   `json:"activation_ready"`
+	Applied              bool                   `json:"applied"`
 }
 
 func (m *Manager) PreviewSmartRoutingRules(opts SmartTUNCandidateOptions) (SmartRoutingRulesPreview, error) {
 	return m.PreviewSmartRoutingRulesPinned(opts, "")
+}
+
+// PreviewSmartRoutingRulesBundledEstimatePinned is an explicit opt-in to
+// preview the complete, source-pinned but unsigned DB-IP IR country estimate
+// with a selected real native profile. It neither saves those prefixes nor
+// promotes them to authenticated policy or host Apply.
+func (m *Manager) PreviewSmartRoutingRulesBundledEstimatePinned(opts SmartTUNCandidateOptions, pin string) (SmartRoutingRulesPreview, error) {
+	if len(opts.DomesticCIDRs) != 0 || len(opts.DomesticIPv6CIDRs) != 0 {
+		return SmartRoutingRulesPreview{}, Fault("invalid_arguments", "bundled estimate cannot be combined with caller domestic prefixes")
+	}
+	// The pinned IPv6 estimate includes many /26-/31s, exceeding the
+	// existing safety bound of /32-or-narrower Direct source prefixes.
+	// Never silently truncate, split, or loosen Direct admission to get
+	// a misleading successful dual-stack preview.
+	if opts.TunnelIPv6 != "" {
+		return SmartRoutingRulesPreview{}, Fault("routing_rules_invalid", "complete bundled IR IPv6 estimate exceeds bounded native candidate policy; IPv4-only estimate preview is supported")
+	}
+	ipv4, status, err := bundledIranGeoEstimateForPreview()
+	if err != nil {
+		return SmartRoutingRulesPreview{}, Fault("routing_rules_invalid", "bundled IR estimate is unavailable or failed validation")
+	}
+	opts.DomesticCIDRs = ipv4
+	preview, err := m.PreviewSmartRoutingRulesPinned(opts, pin)
+	if err != nil {
+		return SmartRoutingRulesPreview{}, err
+	}
+	preview.DomesticEstimate = &status
+	return preview, nil
 }
 
 // PreviewSmartRoutingRulesPinned only compiles a candidate; an operator pin

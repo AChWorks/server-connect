@@ -703,9 +703,13 @@ Commands:
                              [--replaces-sha256 HEX] for explicit source replacement
   smart-routing-rules remove-source --source ID --sha256 HEX
   smart-routing-rules preview --tunnel-if NAME --underlay-if NAME --tunnel-ipv4 CIDR
-                              --domestic-cidr CIDR [--protected-cidr CIDR...]
+                              (--domestic-cidr CIDR... | --domestic-source bundled-ir-estimate)
+                              [--protected-cidr CIDR...]
                               [--endpoint-pin-ipv4 PUBLIC_IP] (VLESS TCP or explicit TLS+WS Host)
                               Compiles saved rules with selected native VLESS profile;
+                              bundled IR data is an unsigned, possibly stale country
+                              estimate; complete bundled IPv6 exceeds safe candidate limits;
+                              NEVER authenticated Direct/Apply policy;
                               explicit pins do not prove DNS or underlay reachability;
                               no core execution, route inspection or activation
                              Offline saved settings ONLY, no TUN activation

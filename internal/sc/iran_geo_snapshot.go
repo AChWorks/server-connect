@@ -271,3 +271,22 @@ func BundledIranGeoSnapshotStatus() (IranGeoSnapshotStatus, error) {
 	}
 	return iranGeoStatus(raw, time.Now().UTC())
 }
+
+// bundledIranGeoEstimateForPreview verifies an independently pinned, offline
+// country geolocation estimate before offering it to compile-only inspection.
+// The unsigned estimate never authorizes geographic Direct or host Apply.
+func bundledIranGeoEstimateForPreview() ([]string, IranGeoSnapshotStatus, error) {
+	raw, err := iranGeoSnapshotFiles.ReadFile("data/iran-dbip-lite-2026-10.json")
+	if err != nil {
+		return nil, IranGeoSnapshotStatus{}, errors.New("embedded IR country estimate unavailable")
+	}
+	status, err := iranGeoStatus(raw, time.Now().UTC())
+	if err != nil {
+		return nil, IranGeoSnapshotStatus{}, err
+	}
+	snapshot, err := decodeIranGeoSnapshot(raw)
+	if err != nil {
+		return nil, IranGeoSnapshotStatus{}, err
+	}
+	return append([]string(nil), snapshot.IPv4...), status, nil
+}

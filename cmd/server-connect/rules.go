@@ -87,13 +87,17 @@ func runSmartRoutingRules(jsonMode bool, m *sc.Manager, args []string) int {
 		tunnelIPv4 := opts.String("tunnel-ipv4", "", "private candidate TUN CIDR")
 		tunnelIPv6 := opts.String("tunnel-ipv6", "", "optional private IPv6 candidate TUN CIDR")
 		endpointPin := opts.String("endpoint-pin-ipv4", "", "operator IPv4 dial pin for compile-only named VLESS preview; not DNS evidence")
+		domesticSource := opts.String("domestic-source", "", "bundled-ir-estimate: source-pinned unsigned country-estimate preview only")
 		var domestic, protected, domesticIPv6, protectedIPv6 destinationFlags
 		opts.Var(&domestic, "domestic-cidr", "explicit non-geographic IPv4 policy input")
 		opts.Var(&protected, "protected-cidr", "explicit protected IPv4 host path")
 		opts.Var(&domesticIPv6, "domestic-ipv6-cidr", "explicit IPv6 candidate policy input")
 		opts.Var(&protectedIPv6, "protected-ipv6-cidr", "explicit protected IPv6 host path")
 		if err := opts.Parse(args); err != nil || len(opts.Args()) != 0 || *tunnel == "" ||
-			*underlay == "" || *tunnelIPv4 == "" || len(domestic) == 0 {
+			*underlay == "" || *tunnelIPv4 == "" ||
+			(*domesticSource == "" && len(domestic) == 0) ||
+			(*domesticSource != "" && (*domesticSource != "bundled-ir-estimate" ||
+				len(domestic) != 0 || len(domesticIPv6) != 0)) {
 			return output(jsonMode, nil, routingOptionsError())
 		}
 		// Visit distinguishes a genuinely omitted optional pin from an
@@ -108,12 +112,17 @@ func runSmartRoutingRules(jsonMode bool, m *sc.Manager, args []string) int {
 		if pinSupplied && *endpointPin == "" {
 			return output(jsonMode, nil, routingOptionsError())
 		}
-		preview, err := m.PreviewSmartRoutingRulesPinned(sc.SmartTUNCandidateOptions{
+		candidate := sc.SmartTUNCandidateOptions{
 			TunnelInterface: *tunnel, UnderlayInterface: *underlay,
 			TunnelIPv4: *tunnelIPv4, TunnelIPv6: *tunnelIPv6,
 			DomesticCIDRs: domestic, ProtectedCIDRs: protected,
 			DomesticIPv6CIDRs: domesticIPv6, ProtectedIPv6CIDRs: protectedIPv6,
-		}, *endpointPin)
+		}
+		if *domesticSource == "bundled-ir-estimate" {
+			preview, err := m.PreviewSmartRoutingRulesBundledEstimatePinned(candidate, *endpointPin)
+			return output(jsonMode, preview, err)
+		}
+		preview, err := m.PreviewSmartRoutingRulesPinned(candidate, *endpointPin)
 		return output(jsonMode, preview, err)
 	case "import":
 		opts := flag.NewFlagSet(action, flag.ContinueOnError)
