@@ -18,9 +18,8 @@ import (
 // The production host transaction needs its own fully recoverable journal
 // with the native TUN ledger, runtime health and one independent guard.
 type hostCaptureNativeTestParent struct {
-	Version int                `json:"version"`
-	Ingress hostIngressStage   `json:"ingress"`
-	Barrier hostNetworkBarrier `json:"barrier"`
+	Version  int                     `json:"version"`
+	Progress hostCaptureGateProgress `json:"progress"`
 }
 
 func TestHostCaptureGateOneJournalAndOwnedOffNative(t *testing.T) {
@@ -41,11 +40,19 @@ func TestHostCaptureGateOneJournalAndOwnedOffNative(t *testing.T) {
 	ingressNativeCommand(t, "/usr/sbin/ip", "link", "set", "lo", "up")
 	ingressNativeCommand(t, "/usr/sbin/ip", "link", "add", "scgate0", "type", "veth", "peer", "name", "scgate1")
 	ingressNativeCommand(t, "/usr/sbin/ip", "link", "set", "scgate0", "up")
-	ingressNativeCommand(t, "/usr/sbin/sysctl", "-q", "-w", "net.ipv4.tcp_fwmark_accept=1")
 	for _, binary := range []string{"/usr/sbin/iptables", "/usr/sbin/ip6tables"} {
 		ingressNativeCommand(t, binary, "-t", "raw", "-A", "PREROUTING", "-p", "tcp", "--dport", "28997", "-j", "NOTRACK")
 		ingressNativeCommand(t, binary, "-t", "raw", "-A", "OUTPUT", "-p", "tcp", "--sport", "28997", "-j", "NOTRACK")
 	}
+	// An unowned 0->1 sysctl transition is prohibited on real hosts. Prove
+	// the preflight refusal before creating any activation journal or nft
+	// ingress table, then prepare the supported preenabled QA fixture.
+	ingressNativeCommand(t, "/usr/sbin/sysctl", "-q", "-w", "net.ipv4.tcp_fwmark_accept=0")
+	if _, err := newHostCaptureGateProgress("scgate0", 90); ErrorCode(err) != "host_ingress_unverified" {
+		t.Fatalf("unowned mark inheritance mutation was admitted: %v", err)
+	}
+	fmt.Println("HOST_CAPTURE_PREEXISTING_SYSCTL_REQUIRED=PASS")
+	ingressNativeCommand(t, "/usr/sbin/sysctl", "-q", "-w", "net.ipv4.tcp_fwmark_accept=1")
 	routesAndRules := func() string {
 		var out []string
 		for _, family := range []string{"-4", "-6"} {
@@ -61,16 +68,16 @@ func TestHostCaptureGateOneJournalAndOwnedOffNative(t *testing.T) {
 	}
 	baseline := routesAndRules()
 	rawBaseline := ingressNativeCommand(t, "/usr/sbin/nft", "-j", "list", "ruleset")
-	ingress, barrier, err := newHostCaptureGatePair("scgate0", 90)
+	progress, err := newHostCaptureGateProgress("scgate0", 90)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if ingress.SysctlBefore != 1 {
+	if progress.Ingress.SysctlBefore != 1 {
 		t.Fatal("fixture did not start with preenabled mark inheritance")
 	}
 	m := New(privateJournalTempDir(t), DefaultCore, DefaultPort)
 	err = m.withActivationJournalLock(syscall.Fsync, func(store *activationJournalDir) error {
-		initial := hostCaptureNativeTestParent{Version: 600, Ingress: ingress, Barrier: barrier}
+		initial := hostCaptureNativeTestParent{Version: 600, Progress: progress}
 		raw, err := json.Marshal(initial)
 		if err != nil {
 			return err
@@ -87,7 +94,7 @@ func TestHostCaptureGateOneJournalAndOwnedOffNative(t *testing.T) {
 			if err = json.Unmarshal(raw, &saved); err != nil {
 				return saved, id, err
 			}
-			if saved.Version != 600 || validateHostCaptureGatePair(saved.Ingress, saved.Barrier) != nil {
+			if saved.Version != 600 || validateHostCaptureGatePair(saved.Progress.Ingress, saved.Progress.Barrier) != nil {
 				return saved, id, errors.New("enclosing test journal identity changed")
 			}
 			return saved, id, nil
@@ -99,46 +106,53 @@ func TestHostCaptureGateOneJournalAndOwnedOffNative(t *testing.T) {
 			}
 			return store.writeJournal(append(raw, '\n'), &id)
 		}
-		persistIngress := func(previous *hostIngressStage, next hostIngressStage) error {
+		// ONE parent CAS callback stores the entire ingress+barrier state.
+		// Independent per-resource journals cannot be supplied to the gate.
+		persist := func(previous, next hostCaptureGateProgress) error {
 			saved, id, err := get()
 			if err != nil {
 				return err
 			}
-			// The first call acknowledges an already durably created parent;
-			// subsequent calls must CAS against exact previous ingress bytes.
-			if previous == nil {
-				if saved.Ingress != next || saved.Barrier != barrier {
-					return errors.New("ingress insertion changed parent")
-				}
-			} else if saved.Ingress != *previous || saved.Barrier != barrier {
-				return errors.New("ingress progress attempted against changed parent")
+			if saved.Progress != previous {
+				return errors.New("enclosing operation changed before progress CAS")
 			}
-			saved.Ingress = next
+			saved.Progress = next
 			return save(saved, id)
 		}
-		persistBarrier := func(previous, next hostNetworkBarrier) error {
-			saved, id, err := get()
-			if err != nil {
-				return err
+		// A failed durable intent MUST NOT permit the first kernel effect.
+		// Retrying is allowed only because the exact pending parent is
+		// unchanged and no effect has yet been attempted.
+		durabilityFault := errors.New("synthetic enclosing journal fsync failure")
+		failIntent := func(previous, next hostCaptureGateProgress) error {
+			if previous.Ingress.SysctlStage == "planned" && next.Ingress.SysctlStage == "effect_possible" {
+				return durabilityFault
 			}
-			if saved.Ingress != ingress || saved.Barrier != previous {
-				return errors.New("barrier progress attempted against changed parent")
-			}
-			saved.Barrier = next
-			return save(saved, id)
+			return persist(previous, next)
 		}
-		if err := runHostCaptureGateLocked(store, &ingress, &barrier, guard, persistIngress, persistBarrier); err != nil {
+		if err := runHostCaptureGateLocked(store, &progress, guard, failIntent); !errors.Is(err, durabilityFault) {
+			return fmt.Errorf("unacknowledged parent write did not stop staging: %v", err)
+		}
+		uncommitted, _, err := get()
+		if err != nil || uncommitted.Progress != progress ||
+			progress.Ingress.SysctlStage != "planned" || progress.Ingress.NFTStage != "planned" {
+			return errors.New("failed durable intent advanced ingress parent")
+		}
+		if observed, err := observeHostIngressNFT(progress.Ingress); err != nil || observed.Present {
+			return errors.New("unacknowledged ingress intent created nft effects")
+		}
+		fmt.Println("HOST_CAPTURE_FAILED_INTENT_HAS_NO_KERNEL_EFFECT=PASS")
+		if err := runHostCaptureGateLocked(store, &progress, guard, persist); err != nil {
 			return err
 		}
 		saved, _, err := get()
-		if err != nil || saved.Ingress != ingress || saved.Barrier != barrier || barrier.Stage != "closed" ||
-			ingress.NFTStage != "observed" || ingress.Phase != "pending" {
+		if err != nil || saved.Progress != progress || progress.Barrier.Stage != "closed" ||
+			progress.Ingress.NFTStage != "observed" || progress.Ingress.Phase != "pending" {
 			return fmt.Errorf("gate did not persist both exact owned prerequisites: %v", err)
 		}
 		fmt.Println("HOST_CAPTURE_COMMON_JOURNAL_STAGED_AND_BARRIER_CLOSED=PASS")
 		// Replaying a completed barrier cannot mint another synchronization
 		// receipt or acquire an arbitrary overlapping ingress mark.
-		if err := runHostCaptureGateLocked(store, &ingress, &barrier, guard, persistIngress, persistBarrier); err == nil {
+		if err := runHostCaptureGateLocked(store, &progress, guard, persist); err == nil {
 			return errors.New("completed gate was replayed")
 		}
 		replayed, _, err := get()
@@ -148,15 +162,16 @@ func TestHostCaptureGateOneJournalAndOwnedOffNative(t *testing.T) {
 		// The parent still owns only the ingress stage. The independent
 		// recovery adapter can release that exact stage while preserving
 		// foreign raw rules and the preexisting inherited-mark sysctl.
-		recovered, err := recoverHostIngressStageWithPersistLocked(store, &ingress, true, persistIngress)
-		if err != nil || !recovered.RecoveryVerified || ingress.Phase != "recovered" {
+		recovered, err := recoverHostIngressStageWithPersistLocked(store, &progress.Ingress, true,
+			hostCaptureIngressPersistence(&progress, persist))
+		if err != nil || !recovered.RecoveryVerified || progress.Ingress.Phase != "recovered" {
 			return fmt.Errorf("owned ingress recovery not verified: %v", err)
 		}
-		if err := verifyHostNetworkBarrierReleased(barrier); err != nil {
+		if err := verifyHostNetworkBarrierReleased(progress.Barrier); err != nil {
 			return err
 		}
 		off, _, err := get()
-		if err != nil || off.Ingress != ingress || off.Barrier != barrier {
+		if err != nil || off.Progress != progress {
 			return errors.New("owned recovery not durably recorded in same operation")
 		}
 		fmt.Println("HOST_CAPTURE_COMMON_JOURNAL_OWNED_OFF=PASS")
