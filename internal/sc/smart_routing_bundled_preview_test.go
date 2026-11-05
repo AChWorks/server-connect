@@ -84,6 +84,14 @@ func TestBundledIREstimatePreviewCompilesCompletePinnedNativePolicy(t *testing.T
 			if preview.NativeConfigSHA256 != hex.EncodeToString(checksum[:]) {
 				t.Fatal("preview did not compile the exact complete pinned dataset")
 			}
+			// CI provides the pinned real sing-box 1.14.3 executable; run
+			// its actual parser against all 2,024 prefixes, not only our
+			// own JSON compiler. No TUN creation or host Apply occurs.
+			if core := os.Getenv("SC_TEST_SINGBOX"); core != "" {
+				if err := CheckConfig(core, t.TempDir(), config); err != nil {
+					t.Fatalf("real pinned sing-box rejected full bundled IPv4 native preview: %v", err)
+				}
+			}
 			repeated, err := m.PreviewSmartRoutingRulesBundledEstimatePinned(candidate, "")
 			if err != nil || !reflect.DeepEqual(preview, repeated) {
 				t.Fatalf("same input was not deterministic: %+v %+v %v", preview, repeated, err)
