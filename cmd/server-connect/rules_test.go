@@ -194,12 +194,12 @@ func TestRoutingRulesInteractiveMenuMutationsAndRejections(t *testing.T) {
 		}
 	}
 	check("add CIDR", "2\n1.1.1.0/24\ndirect\n", 1, 1, false)
-	check("add exact VPN domain", "3\nexample.org\nn\n", 2, 2, false)
-	check("add suffix VPN domain", "3\ntest.example.org\ny\n", 3, 3, false)
+	check("add exact VPN domain", "3\nexample.org\nn\nvpn\n", 2, 2, false)
+	check("add suffix VPN domain", "3\ntest.example.org\ny\nvpn\n", 3, 3, false)
 	check("import", "4\n"+file+"\nmenu-source\n2026-10-01\n"+sha+"\n\n", 4, 4, false)
 	check("reject special IPv6", "2\n100::/64\ndirect\n", 4, 4, true)
-	check("reject whole ICANN suffix", "3\nco.uk\ny\n", 4, 4, true)
-	check("reject whole PRIVATE suffix", "3\ngithub.io\ny\n", 4, 4, true)
+	check("reject whole ICANN suffix", "3\nco.uk\ny\nvpn\n", 4, 4, true)
+	check("reject whole PRIVATE suffix", "3\ngithub.io\ny\nvpn\n", 4, 4, true)
 	check("reject duplicate", "2\n1.1.1.0/24\ndirect\n", 4, 4, true)
 	check("reject wrong import hash", "4\n"+file+"\nbad-source\n2026-10-01\n"+strings.Repeat("0", 64)+"\n\n", 4, 4, true)
 	check("reject wrong source CAS", "4\n"+file+"\nmenu-source\n2026-10-02\n"+sha+"\n"+strings.Repeat("0", 64)+"\n", 4, 4, true)
@@ -212,6 +212,12 @@ func TestRoutingRulesInteractiveMenuMutationsAndRejections(t *testing.T) {
 	check("remove exact domain", "6\nexample.org\nn\n", 7, 2, false)
 	check("remove suffix domain", "6\ntest.example.org\ny\n", 8, 1, false)
 	check("remove imported source", "7\nmenu-source\n"+newSHA+"\n", 9, 0, false)
+	check("add exact Direct domain", "3\nexample.org\nn\ndirect\n", 10, 1, false)
+	stored, err := m.InspectSmartRoutingRules()
+	if err != nil || len(stored.Rules) != 1 || stored.Rules[0].Via != "direct" || stored.ActivationReady || stored.GeneralHostAdmitted {
+		t.Fatalf("menu Direct domain was not saved without applying: %+v %v", stored, err)
+	}
+	check("remove Direct domain", "6\nexample.org\nn\n", 11, 0, false)
 	if stdout, stderr := invoke("19\n1\n0\n"); stderr != "" || !strings.Contains(stdout, "saved_not_applied") || !strings.Contains(stdout, "\"activation_ready\": false") {
 		t.Fatalf("menu list lost saved-not-applied status: %s %s", stdout, stderr)
 	}

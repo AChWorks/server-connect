@@ -697,7 +697,7 @@ Commands:
   mode-overview              Read-only Direct / Proxy Only / Smart Routing availability
   smart-routing-rules list   Inspect saved-only operator Direct/VPN exceptions
   smart-routing-rules add --cidr CIDR --via direct|vpn
-  smart-routing-rules add --domain NAME [--suffix] --via vpn
+  smart-routing-rules add --domain NAME [--suffix] --via direct|vpn
   smart-routing-rules remove --cidr CIDR | --domain NAME [--suffix]
   smart-routing-rules import --source ID --as-of YYYY-MM-DD --sha256 HEX --file FILE|-
                              [--replaces-sha256 HEX] for explicit source replacement
@@ -977,7 +977,7 @@ func menuWithRunner(m *sc.Manager, dispatch func(*sc.Manager, ...string) int) in
 				fmt.Println("Unknown Smart TUN choice; no change")
 			}
 		case "19":
-			fmt.Print("Routing Rules: 1 List  2 Add CIDR  3 Add VPN Domain  4 Import List  5 Remove CIDR  6 Remove Domain  7 Remove Source: ")
+			fmt.Print("Routing Rules: 1 List  2 Add CIDR  3 Add Domain  4 Import List  5 Remove CIDR  6 Remove Domain  7 Remove Source: ")
 			operation, err := in.ReadString('\n')
 			if err != nil {
 				return 0
@@ -1013,17 +1013,13 @@ func menuWithRunner(m *sc.Manager, dispatch func(*sc.Manager, ...string) int) in
 					}
 				}
 				if op == "add" {
-					via := "vpn"
-					if name == "2" {
-						answer, ok := operatorPrompt(in, "Route via direct or vpn (or cancel): ", false)
-						if !ok {
-							continue
-						}
-						if answer != "direct" && answer != "vpn" {
-							fmt.Println("Canceled: choose direct or vpn; no rule action started")
-							continue
-						}
-						via = answer
+					via, ok := operatorPrompt(in, "Route via direct or vpn (or cancel): ", false)
+					if !ok {
+						continue
+					}
+					if via != "direct" && via != "vpn" {
+						fmt.Println("Canceled: choose direct or vpn; no rule action started")
+						continue
 					}
 					command = append(command, "--via", via)
 				}

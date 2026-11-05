@@ -738,15 +738,17 @@ r=json.load(sys.stdin)
 assert r["ok"] is True and r["data"]["revision"]==2
 assert len(r["data"]["rules"])==2
 '
+# Domain Direct is valid with operation-owned DNS/FakeIP correlation.
+# A contradictory rule for the same exact domain must remain a conflict.
 if docker exec "$container" /usr/local/bin/server-connect --state-dir "$rules_dir" --json \
-  smart-routing-rules add --domain example.org --via direct >"$scratch/operator-direct-domain-refusal.json"; then
-  echo "INSTALLED_OPERATOR_ROUTING_RULES=FAIL (unauthenticated domain Direct accepted)" >&2
+  smart-routing-rules add --domain example.org --via direct >"$scratch/operator-direct-domain-conflict.json"; then
+  echo "INSTALLED_OPERATOR_ROUTING_RULES=FAIL (opposite-via domain accepted)" >&2
   exit 1
 fi
-python3 - "$scratch/operator-direct-domain-refusal.json" <<'PYRULESNEG'
+python3 - "$scratch/operator-direct-domain-conflict.json" <<'PYRULESNEG'
 import json,sys
 r=json.load(open(sys.argv[1]))
-assert r["ok"] is False and r["error"]["code"]=="routing_rules_invalid"
+assert r["ok"] is False and r["error"]["code"]=="routing_rules_conflict"
 PYRULESNEG
 rules_blob='cidr vpn 9.9.9.9/32'
 rules_sha=$(printf '%s\n' "$rules_blob" | sha256sum | cut -d ' ' -f1)
@@ -893,12 +895,12 @@ with tempfile.TemporaryDirectory(prefix="scqa-operator-menu-", dir="/run") as tm
         count += 1
 
     menu("add CIDR", "2\n1.1.1.0/24\ndirect\n", 1, 1)
-    menu("add VPN exact domain", "3\nexample.org\nn\n", 2, 2)
-    menu("add VPN suffix domain", "3\ntest.example.org\ny\n", 3, 3)
+    menu("add VPN exact domain", "3\nexample.org\nn\nvpn\n", 2, 2)
+    menu("add VPN suffix domain", "3\ntest.example.org\ny\nvpn\n", 3, 3)
     menu("import local file", f"4\n{fixture}\nmenu-source\n2026-10-01\n{sha}\n\n", 4, 5)
     menu("reject special IPv6", "2\n100::/64\ndirect\n", 4, 5, "routing_rules_invalid")
-    menu("reject ICANN public suffix", "3\nco.uk\ny\n", 4, 5, "routing_rules_invalid")
-    menu("reject PRIVATE public suffix", "3\ngithub.io\ny\n", 4, 5, "routing_rules_invalid")
+    menu("reject ICANN public suffix", "3\nco.uk\ny\nvpn\n", 4, 5, "routing_rules_invalid")
+    menu("reject PRIVATE public suffix", "3\ngithub.io\ny\nvpn\n", 4, 5, "routing_rules_invalid")
     menu("reject duplicate CIDR", "2\n1.1.1.0/24\ndirect\n", 4, 5, "routing_rules_conflict")
     menu("reject import SHA mismatch",
          f"4\n{fixture}\nbad-source\n2026-10-01\n{'0'*64}\n\n", 4, 5, "routing_rules_hash_mismatch")
@@ -946,15 +948,17 @@ with tempfile.TemporaryDirectory(prefix="scqa-operator-menu-", dir="/run") as tm
     final = cli("smart-routing-rules", "list")["data"]
     assert final["revision"] == 9 and final["rules"] == [] and final["imports"] == []
     assert final["state"] == "saved_not_applied" and final["activation_ready"] is False
-    # The menu offers VPN-only domain entry; an explicitly attempted
-    # Direct-domain CLI is separately rejected by the same validated store.
-    direct = cli("smart-routing-rules", "add", "--domain", "example.org",
-                 "--via", "direct", ok=False)
-    assert direct["error"]["code"] == "routing_rules_invalid"
-    assert cli("smart-routing-rules", "list")["data"] == final
+    # The real menu must implement the same explicitly selected Direct/VPN
+    # domain rules as CLI; neither a saved setting nor preview starts routing.
+    menu("add Direct exact domain", "3\nexample.org\nn\ndirect\n", 10, 1)
+    direct = cli("smart-routing-rules", "list")["data"]
+    assert direct["rules"][0]["via"] == "direct"
+    assert direct["state"] == "saved_not_applied" and direct["activation_ready"] is False
+    menu("remove Direct exact domain", "6\nexample.org\nn\n", 11, 0)
+    assert cli("smart-routing-rules", "list")["data"]["rules"] == []
     print(f"INSTALLED_OPERATOR_MENU_MUTATIONS_AND_REFUSALS=PASS "
           f"({count} positive/negative real stdin menu flows, byte/revision CAS, "
-          "Direct-domain refusal, cleanup)", flush=True)
+          "Direct/VPN domain parity, cleanup)", flush=True)
 PYROUTINGMENU
 assert_network_unchanged installed-rules-menu-r2 "$offline_before"
 verify_host_services installed-rules-menu-r2
