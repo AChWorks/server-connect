@@ -17,6 +17,13 @@ import socket
 import struct
 import subprocess
 
+def tcp_stat(name):
+    lines = open("/proc/net/netstat").read().splitlines()
+    for i, line in enumerate(lines[:-1]):
+        if line.startswith("TcpExt:") and name in line.split():
+            return int(dict(zip(line.split()[1:], lines[i+1].split()[1:]))[name])
+    raise AssertionError("missing kernel TCP counter: " + name)
+
 assert os.geteuid() == 0, 'must be root in disposable namespace'
 assert os.stat('/proc/self/ns/net').st_ino != os.stat('/proc/1/ns/net').st_ino, 'root namespace refused'
 
@@ -87,6 +94,10 @@ def kernel_socket_marks():
         diag.close()
     raise AssertionError('kernel TCP dump did not complete')
 
+# Docker may disable IPv6 in its enclosing fixture. Enable it ONLY inside
+# this independently checked namespace before testing the IPv6 cookie path.
+run('/usr/sbin/sysctl', '-q', '-w', 'net.ipv6.conf.all.disable_ipv6=0',
+    'net.ipv6.conf.default.disable_ipv6=0', 'net.ipv6.conf.lo.disable_ipv6=0')
 run('/usr/sbin/ip', 'link', 'set', 'lo', 'up')
 run('/usr/sbin/sysctl', '-q', '-w', 'net.ipv4.tcp_fwmark_accept=0')
 nft('''
@@ -125,12 +136,15 @@ old_client, old_accepted, old_client_port = new_session()
 assert old_accepted.getsockopt(socket.SOL_SOCKET, socket.SO_MARK) == 0
 run('/usr/sbin/sysctl', '-q', '-w', 'net.ipv4.tcp_fwmark_accept=1')
 nft('''
-add rule inet sc_drain_qa syn iifname "lo" tcp dport 28993 tcp flags & (syn | ack) == syn meta mark set (meta mark & 0xff00ffff) | 0x00540000
+add rule inet sc_drain_qa syn iifname "lo" tcp dport 28993 meta mark set (meta mark & 0xff00ffff) | 0x00540000
 ''')
 assert old_accepted.getsockopt(socket.SOL_SOCKET, socket.SO_MARK) == 0
 exchange(old_client, old_accepted, b'old-before-apply')
 print('DRAIN_PREEXISTING_UNMARKED_REPLY_STILL_WORKS=PASS', flush=True)
 
+# Mark every incoming TCP packet on the scoped service, including the final
+# cookie ACK. A SYN-only marker loses inheritance with tcp_syncookies=2.
+# This is an ingress mark, NEVER a source-port-based OUTPUT exemption.
 # All newly accepted sockets have the bypass mark in their socket identity,
 # independent of their future four-tuple and service source port.
 new_client, new_accepted, _ = new_session()
@@ -147,7 +161,7 @@ print('DRAIN_NEW_ACCEPTED_SOCKET_INHERITED_BYPASS=PASS', flush=True)
 # tcp_fwmark_accept. The real product must detect/refuse that foreign owner,
 # never assume every post-transition connection inherited our bypass mark.
 nft('''
-add rule inet sc_drain_qa syn iifname "lo" tcp dport 28994 tcp flags & (syn | ack) == syn meta mark set 0x00540000
+add rule inet sc_drain_qa syn iifname "lo" tcp dport 28994 meta mark set 0x00540000
 add rule inet sc_drain_qa foreign_in iifname "lo" tcp dport 28994 notrack
 add rule inet sc_drain_qa foreign_out oifname "lo" tcp sport 28994 notrack
 ''')
@@ -198,6 +212,113 @@ exchange(reused_client, reused_accepted, b'new-same-four-tuple')
 assert packets('capture') == 0 and packets('guard') == 0
 print('DRAIN_SOCKET_GENERATION_REUSE_PROTECTED=PASS', flush=True)
 
+# SYN cookies reconstruct the request from the final ACK, not retained SYN
+# state. Prove the production design requirement on the real kernel with
+# cookies forced and independently counted, for IPv4 AND IPv6. A SYN-only
+# marker is a counterexample; the corrected ingress rule covers cookie ACKs.
+run('/usr/sbin/sysctl', '-q', '-w', 'net.ipv4.tcp_syncookies=2')
+for family, address, label in ((socket.AF_INET, '127.0.0.1', 'IPV4'),
+                               (socket.AF_INET6, '::1', 'IPV6')):
+    for syn_only, port in ((True, 28995), (False, 28996)):
+        flags = 'tcp flags & (syn | ack) == syn ' if syn_only else ''
+        nft(f'''
+add rule inet sc_drain_qa syn iifname "lo" tcp dport {port} {flags}meta mark set (meta mark & 0xff00ffff) | 0x00540000
+add rule inet sc_drain_qa foreign_in iifname "lo" tcp dport {port} notrack
+add rule inet sc_drain_qa foreign_out oifname "lo" tcp sport {port} notrack
+''')
+        listener = socket.socket(family, socket.SOCK_STREAM)
+        listener.settimeout(2)
+        listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        if family == socket.AF_INET6:
+            listener.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
+        listener.bind((address, port))
+        listener.listen(8)
+        sent, received = tcp_stat('SyncookiesSent'), tcp_stat('SyncookiesRecv')
+        client = socket.socket(family, socket.SOCK_STREAM)
+        client.settimeout(1.2)
+        client.connect((address, port))
+        accepted, _ = listener.accept()
+        accepted.settimeout(1.2)
+        assert tcp_stat('SyncookiesSent') > sent and tcp_stat('SyncookiesRecv') > received, 'not a cookie handshake'
+        expected = 0 if syn_only else 0x00540000
+        assert accepted.getsockopt(socket.SOL_SOCKET, socket.SO_MARK) == expected, 'cookie mark evidence changed'
+        # Positive baseline before capture distinguishes a real lost reply
+        # from an unsupported address family, kernel cookie or dead listener.
+        exchange(client, accepted, b'cookie-direct-control')
+        chain = 'cookie_' + label.lower() + ('_syn' if syn_only else '_ack')
+        nft(f'''
+add chain inet sc_drain_qa {chain} {{ type filter hook postrouting priority 10; policy accept; }}
+add rule inet sc_drain_qa {chain} meta iif 0 tcp sport {port} meta mark & 0x00ff0000 != 0x00540000 counter drop
+''')
+        if syn_only:
+            accepted.sendall(b'cookie-unprotected-reply')
+            try:
+                leaked = client.recv(len(b'cookie-unprotected-reply'))
+            except socket.timeout:
+                leaked = None
+            assert leaked != b'cookie-unprotected-reply' and packets(chain) > 0, 'negative cookie control did not drop'
+            print('DRAIN_' + label + '_SYN_ONLY_COOKIE_REPLY_LOSS=REPRODUCED', flush=True)
+        else:
+            exchange(client, accepted, b'cookie-ack-protected-reply')
+            assert packets(chain) == 0, 'cookie ACK protected socket hit guard'
+            print('DRAIN_' + label + '_COOKIE_ACK_REPLY_PROTECTED=PASS', flush=True)
+        # Remove only this fixture chain's rule after its observation. No
+        # shared table is flushed and no root-namespace object exists here.
+        nft('flush chain inet sc_drain_qa ' + chain)
+        client.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack('ii', 1, 0))
+        accepted.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack('ii', 1, 0))
+        accepted.close()
+        client.close()
+        listener.close()
+
+# The corrected main marker also retains generation safety for an accepted
+# cookie socket while the original capture/guard are already active.
+sent, received = tcp_stat('SyncookiesSent'), tcp_stat('SyncookiesRecv')
+cookie_client, cookie_accepted, _ = new_session()
+assert tcp_stat('SyncookiesSent') > sent and tcp_stat('SyncookiesRecv') > received
+assert cookie_accepted.getsockopt(socket.SOL_SOCKET, socket.SO_MARK) == 0x00540000
+exchange(cookie_client, cookie_accepted, b'cookie-after-capture')
+assert packets('capture') == 0 and packets('guard') == 0
+print('DRAIN_COOKIE_ACCEPTED_AFTER_CAPTURE=PASS', flush=True)
+cookie_client.close()
+cookie_accepted.close()
+
+# The inbound marker also sees return packets for a host-origin socket
+# deliberately bound to the hosted source port. Those packets MUST NOT
+# retroactively grant its active socket a passive-server bypass mark.
+# Positively control this connection without our capture, then restore the
+# guard and prove its new outbound payload is dropped, not exempt by port.
+nft('flush chain inet sc_drain_qa capture\nflush chain inet sc_drain_qa guard')
+remote_listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+remote_listener.settimeout(2)
+remote_listener.bind(('127.0.0.3', 28997))
+remote_listener.listen(1)
+bound_client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+bound_client.settimeout(1.2)
+bound_client.bind(('127.0.0.2', 28993))
+bound_client.connect(remote_listener.getsockname())
+remote_accepted, _ = remote_listener.accept()
+remote_accepted.settimeout(1.2)
+assert bound_client.getsockopt(socket.SOL_SOCKET, socket.SO_MARK) == 0
+bound_client.sendall(b'outbound-control')
+assert remote_accepted.recv(len(b'outbound-control')) == b'outbound-control'
+remote_accepted.sendall(b'reply-control')
+assert bound_client.recv(len(b'reply-control')) == b'reply-control'
+assert bound_client.getsockopt(socket.SOL_SOCKET, socket.SO_MARK) == 0, 'return packet granted active socket a bypass'
+nft('''
+add rule inet sc_drain_qa capture oifname "lo" tcp sport 28993 meta mark & 0x00ff0000 != 0x00540000 counter meta mark set (meta mark & 0xff00ffff) | 0x00530000
+add rule inet sc_drain_qa guard meta iif 0 tcp sport 28993 meta mark & 0x00ff0000 == 0x00530000 counter drop
+''')
+bound_client.sendall(b'outbound-must-not-bypass')
+try:
+    leaked = remote_accepted.recv(len(b'outbound-must-not-bypass'))
+except socket.timeout:
+    leaked = None
+assert leaked != b'outbound-must-not-bypass' and packets('capture') > 0 and packets('guard') > 0
+print('DRAIN_HOST_ORIGIN_SERVICE_SOURCE_PORT_FAILS_CLOSED=PASS', flush=True)
+for item in (bound_client, remote_accepted, remote_listener):
+    item.close()
+
 # Negative: if sysctl drifts OFF, a newly accepted socket lacks a mark.
 # Temporarily remove only test-owned guard while admitting that handshake;
 # then restore capture and final guard before any protected payload.
@@ -220,5 +341,5 @@ print('DRAIN_SYSCTL_DRIFT_FAILS_CLOSED=PASS', flush=True)
 for s in (new_client, new_accepted, reused_client, reused_accepted,
           bad_client, bad_accepted, server):
     s.close()
-print('DRAIN_NAMESPACE_DESTROYED_WITHOUT_ROOT_HOST_MUTATION=PASS', flush=True)
 PY
+echo 'DRAIN_NAMESPACE_DESTROYED_WITHOUT_ROOT_HOST_MUTATION=PASS'

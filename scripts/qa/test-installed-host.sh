@@ -263,6 +263,35 @@ docker exec "$container" /bin/sh -c '
 '
 
 docker cp "$root/scripts/qa/host-qa-assertions.sh" "$container:/root/qa-host-assertions.sh"
+# This is a real-kernel test, not merely bash/AST validation. It runs on
+# BOTH installed Debian lanes, only in another disposable namespace inside
+# the already disconnected guest. Never run this body on the CI runner.
+notrack_network_before=$(network_digest)
+notrack_nft_before=$(docker exec "$container" /usr/sbin/nft -s list ruleset)
+notrack_sysctl_before=$(docker exec "$container" /usr/sbin/sysctl -n net.ipv4.tcp_fwmark_accept net.ipv4.tcp_syncookies)
+docker cp "$root/scripts/qa/field-notrack-drain-transition.sh" "$container:/root/qa-notrack-drain.sh"
+notrack_log="$scratch/notrack-drain.log"
+docker exec "$container" /usr/bin/timeout --kill-after=3s 45s \
+  /bin/bash /root/qa-notrack-drain.sh | tee "$notrack_log"
+for marker in \
+  PREEXISTING_UNMARKED_REPLY_STILL_WORKS KERNEL_GENERATION_AND_SOCKET_MARK_VERIFIED \
+  NEW_ACCEPTED_SOCKET_INHERITED_BYPASS FOREIGN_MARKED_LISTENER_MUST_BE_REFUSED \
+  EARLY_CAPTURE_ADMISSION_REFUSED OLD_GENERATION_QUIESCED_BEFORE_CAPTURE \
+  SOCKET_GENERATION_REUSE_PROTECTED IPV4_COOKIE_ACK_REPLY_PROTECTED \
+  IPV6_COOKIE_ACK_REPLY_PROTECTED COOKIE_ACCEPTED_AFTER_CAPTURE \
+  HOST_ORIGIN_SERVICE_SOURCE_PORT_FAILS_CLOSED SYSCTL_DRIFT_FAILS_CLOSED \
+  NAMESPACE_DESTROYED_WITHOUT_ROOT_HOST_MUTATION; do
+  grep -Fx "DRAIN_${marker}=PASS" "$notrack_log" >/dev/null
+done
+for family in IPV4 IPV6; do
+  grep -Fx "DRAIN_${family}_SYN_ONLY_COOKIE_REPLY_LOSS=REPRODUCED" "$notrack_log" >/dev/null
+done
+assert_network_unchanged notrack-drain "$notrack_network_before"
+notrack_nft_after=$(docker exec "$container" /usr/sbin/nft -s list ruleset)
+notrack_sysctl_after=$(docker exec "$container" /usr/sbin/sysctl -n net.ipv4.tcp_fwmark_accept net.ipv4.tcp_syncookies)
+[[ $notrack_nft_after == "$notrack_nft_before" && $notrack_sysctl_after == "$notrack_sysctl_before" ]]
+docker exec "$container" /bin/rm -- /root/qa-notrack-drain.sh
+echo NOTRACK_DRAIN_OUTER_GUEST_POLICY_UNCHANGED=PASS
 if [[ $qa_version == 13 ]]; then
 docker cp "$root/scripts/qa/host-native-product-tun.sh" "$container:/root/qa-native-product-tun.sh"
 

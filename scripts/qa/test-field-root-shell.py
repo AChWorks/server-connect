@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Unprivileged regression for the root-host field QA's two shell hazards."""
+import ast
 import hashlib
 import ipaddress
 import json
@@ -57,6 +58,9 @@ print('FIELD_NOTRACK_SESSION_ISOLATION_GUARD=PASS')
 # A generation-aware drain is only a feasibility witness until a durable
 # product guard owns the staged sysctl/rule change and real socket inspection.
 drain = DRAIN.read_text()
+# bash -n does not parse the actual Python executed after unshare.
+assert drain.count("<<'PY'\n") == 1
+ast.parse(drain.split("<<'PY'\n", 1)[1].rsplit('\nPY\n', 1)[0])
 assert drain.index("unshare -n /usr/bin/python3 -B -") < drain.index("nft('''")
 for required in (
     "assert os.stat('/proc/self/ns/net').st_ino != os.stat('/proc/1/ns/net').st_ino",
@@ -68,6 +72,10 @@ for required in (
     "DRAIN_EARLY_CAPTURE_ADMISSION_REFUSED=PASS",
     "DRAIN_OLD_GENERATION_QUIESCED_BEFORE_CAPTURE=PASS",
     "DRAIN_SOCKET_GENERATION_REUSE_PROTECTED=PASS",
+    "DRAIN_COOKIE_ACCEPTED_AFTER_CAPTURE=PASS",
+    "net.ipv4.tcp_syncookies=2",
+    "tcp_stat('SyncookiesSent') > sent and tcp_stat('SyncookiesRecv') > received",
+    "DRAIN_HOST_ORIGIN_SERVICE_SOURCE_PORT_FAILS_CLOSED=PASS",
     "DRAIN_SYSCTL_DRIFT_FAILS_CLOSED=PASS",
     "DRAIN_NAMESPACE_DESTROYED_WITHOUT_ROOT_HOST_MUTATION=PASS",
 ):

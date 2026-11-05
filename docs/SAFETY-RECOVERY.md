@@ -392,7 +392,8 @@ Product Apply must not use this read-only result as a green activation gate.
 **Explored alternative — staged drain, NOT an implemented Apply path:** A
 separate, root-host-safe `scripts/qa/field-notrack-drain-transition.sh`
 runs only in a fresh disposable network namespace. It first enables
-`tcp_fwmark_accept=1`, then marks inbound SYNs before foreign raw NOTRACK,
+`tcp_fwmark_accept=1`, then marks scoped inbound TCP packets before foreign
+raw NOTRACK,
 while normal host routing is still untouched. Earlier accepted sockets keep
 their old mark, and must continue their old Direct replies while the caller
 **refuses** capture. Only after all non-inherited, generation-identified
@@ -407,9 +408,22 @@ not route Direct. [Kernel tcp_fwmark_accept semantics](https://www.kernel.org/do
 and [inet_diag mark UAPI](https://github.com/torvalds/linux/blob/master/include/uapi/linux/inet_diag.h)
 are primary implementation references.
 
+**SYN-only marking is insufficient:** when SYN cookies reconstruct a request
+from the final ACK, the kernel takes its inherited mark from that ACK. The
+staged rule must cover that packet as well as the SYN. The namespace probe
+forces and independently counts `tcp_syncookies=2` handshakes for IPv4 and
+IPv6: SYN-only marking produces an unmarked accepted socket and dropped
+reply, while the corrected scoped inbound-TCP marker protects its reply,
+including a cookie connection accepted after capture. Do not disable SYN
+cookies as a workaround. See the kernel's
+[cookie request reconstruction](https://github.com/torvalds/linux/blob/v6.1/net/ipv4/syncookies.c)
+and [request mark selection](https://github.com/torvalds/linux/blob/v6.1/include/net/inet_sock.h).
+This correction does not eliminate the preexisting request/accept-backlog,
+concurrent-listener or atomic drain-barrier requirements below.
+
 This is a **feasibility proof only**: real admission still needs an
 independent *pre-activation* Guard, durable journaling and exact-owned
-rollback of the temporary sysctl + nft SYN-mark stage, complete/atomic
+rollback of the temporary sysctl + nft ingress-mark stage, complete/atomic
 generation+mark observations (including SYN backlog/closing sockets),
 fresh verification that all new accepted sockets actually inherit their
 marks, timeout/refusal for never-draining legacy sessions, foreign NFT/NAT
