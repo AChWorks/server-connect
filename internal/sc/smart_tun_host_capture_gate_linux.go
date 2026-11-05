@@ -13,8 +13,8 @@ package sc
 // Two independent journal writers are deliberately not accepted.
 
 type hostCaptureGateProgress struct {
-	Ingress hostIngressStage
-	Barrier hostNetworkBarrier
+	Ingress hostIngressStage   `json:"ingress"`
+	Barrier hostNetworkBarrier `json:"barrier"`
 }
 
 type hostCaptureGatePersist func(previous, next hostCaptureGateProgress) error

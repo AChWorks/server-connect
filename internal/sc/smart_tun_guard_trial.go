@@ -606,6 +606,13 @@ func (m *Manager) pendingSmartTUNTrial() (string, error) {
 		}
 		return "host_ingress_" + record.Phase, nil
 	}
+	if marker.Version == hostCaptureJournalVersion {
+		record, err := decodeHostCaptureJournal(data)
+		if err != nil {
+			return "", err
+		}
+		return "host_capture_" + record.Progress.Ingress.Phase, nil
+	}
 	if marker.Version != smartTUNTrialVersion {
 		return "", nil // legacy journal protection remains with its original API
 	}

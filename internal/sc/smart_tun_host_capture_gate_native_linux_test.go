@@ -3,7 +3,6 @@
 package sc
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -13,16 +12,9 @@ import (
 	"testing"
 )
 
-// This intentionally uses a test-only journal discriminator. It must not be
-// dispatched by the installed recovery service: native QA is executed only in
-// a disposable isolated netns, and no general-host Apply entrypoint exists.
-// The production host transaction needs its own fully recoverable journal
-// with the native TUN ledger, runtime health and one independent guard.
-type hostCaptureNativeTestParent struct {
-	Version  int                     `json:"version"`
-	Progress hostCaptureGateProgress `json:"progress"`
-}
-
+// Native QA uses the SAME strict v6 journal and full-parent CAS as the
+// installed independent recovery dispatcher, never a permissive test-only
+// JSON parent. The fixture itself still has no generic-host TUN Apply API.
 func TestHostCaptureGateOneJournalAndOwnedOffNative(t *testing.T) {
 	if os.Getenv("SC_TEST_HOST_CAPTURE_GATE_NATIVE") != "isolated-netns" {
 		t.Skip("NOT_RUN: explicit isolated network namespace required")
@@ -102,48 +94,17 @@ func TestHostCaptureGateOneJournalAndOwnedOffNative(t *testing.T) {
 	}
 	m := New(privateJournalTempDir(t), DefaultCore, DefaultPort)
 	err = m.withActivationJournalLock(syscall.Fsync, func(store *activationJournalDir) error {
-		initial := hostCaptureNativeTestParent{Version: 600, Progress: progress}
-		raw, err := json.Marshal(initial)
-		if err != nil {
+		record := hostCaptureJournal{Version: hostCaptureJournalVersion, Intent: hostCaptureJournalIntent, Progress: progress}
+		if err := writeHostCaptureJournal(store, record, nil); err != nil {
 			return err
 		}
-		if err := store.writeJournal(append(raw, '\n'), nil); err != nil {
-			return err
+		get := func() (hostCaptureJournal, activationJournalFileIdentity, error) {
+			return loadHostCaptureJournal(store)
 		}
-		get := func() (hostCaptureNativeTestParent, activationJournalFileIdentity, error) {
-			var saved hostCaptureNativeTestParent
-			raw, id, err := store.readJournal()
-			if err != nil {
-				return saved, id, err
-			}
-			if err = json.Unmarshal(raw, &saved); err != nil {
-				return saved, id, err
-			}
-			if saved.Version != 600 || validateHostCaptureGatePair(saved.Progress.Ingress, saved.Progress.Barrier) != nil {
-				return saved, id, errors.New("enclosing test journal identity changed")
-			}
-			return saved, id, nil
+		save := func(saved hostCaptureJournal, id activationJournalFileIdentity) error {
+			return writeHostCaptureJournal(store, saved, &id)
 		}
-		save := func(saved hostCaptureNativeTestParent, id activationJournalFileIdentity) error {
-			raw, err := json.Marshal(saved)
-			if err != nil {
-				return err
-			}
-			return store.writeJournal(append(raw, '\n'), &id)
-		}
-		// ONE parent CAS callback stores the entire ingress+barrier state.
-		// Independent per-resource journals cannot be supplied to the gate.
-		persist := func(previous, next hostCaptureGateProgress) error {
-			saved, id, err := get()
-			if err != nil {
-				return err
-			}
-			if saved.Progress != previous {
-				return errors.New("enclosing operation changed before progress CAS")
-			}
-			saved.Progress = next
-			return save(saved, id)
-		}
+		persist := hostCaptureJournalPersist(store, &record)
 		// A failed durable intent MUST NOT permit the first kernel effect.
 		// Retrying is allowed only because the exact pending parent is
 		// unchanged and no effect has yet been attempted.
@@ -213,10 +174,11 @@ func TestHostCaptureGateOneJournalAndOwnedOffNative(t *testing.T) {
 		if err != nil || prior.Progress != progress || progress.Ingress.Phase != "recovered" {
 			return errors.New("prior capture gate is not verified Off")
 		}
-		if err := save(hostCaptureNativeTestParent{Version: 600, Progress: replacement}, priorID); err != nil {
+		if err := save(hostCaptureJournal{Version: hostCaptureJournalVersion, Intent: hostCaptureJournalIntent, Progress: replacement}, priorID); err != nil {
 			return err
 		}
 		progress = replacement
+		record = hostCaptureJournal{Version: hostCaptureJournalVersion, Intent: hostCaptureJournalIntent, Progress: replacement}
 		closeReceiptFault := errors.New("synthetic final-FD receipt fsync failure")
 		faultReached := false
 		failAfterBarrierClose := func(previous, next hostCaptureGateProgress) error {
@@ -245,7 +207,16 @@ func TestHostCaptureGateOneJournalAndOwnedOffNative(t *testing.T) {
 			return errors.New("interrupted barrier was replayed as fresh capture")
 		}
 		// The recovery helper must never upgrade create_possible into
-		// closed. Exact owned ingress removal is the only permitted effect.
+		// closed. Decode the independently selected full parent as if the
+		// initiating process had died, then release only its exact owned
+		// ingress with the installed CAS adapter.
+		selected, err := selectTrialRecoveryLocked(store, "", "")
+		if err != nil || selected.version != hostCaptureJournalVersion || selected.capture.Progress != progress {
+			return fmt.Errorf("installed independent recovery selection lost exact operation: %v", err)
+		}
+		record = selected.capture
+		progress = record.Progress
+		persist = hostCaptureJournalPersist(store, &record)
 		recovered, err = recoverHostCaptureGateLocked(store, &progress, persist)
 		if err != nil || !recovered.RecoveryVerified || progress.Ingress.Phase != "recovered" ||
 			progress.Barrier.Stage != "create_possible" {
@@ -284,10 +255,11 @@ func TestHostCaptureGateOneJournalAndOwnedOffNative(t *testing.T) {
 		if err != nil || prior.Progress != progress || progress.Ingress.Phase != "recovered" {
 			return errors.New("cannot enter old-boot QA without verified prior Off")
 		}
-		if err := save(hostCaptureNativeTestParent{Version: 600, Progress: oldBoot}, priorID); err != nil {
+		if err := save(hostCaptureJournal{Version: hostCaptureJournalVersion, Intent: hostCaptureJournalIntent, Progress: oldBoot}, priorID); err != nil {
 			return err
 		}
 		progress = oldBoot
+		record = hostCaptureJournal{Version: hostCaptureJournalVersion, Intent: hostCaptureJournalIntent, Progress: oldBoot}
 
 		refusedRecoveryCode := func(value *hostCaptureGateProgress) string {
 			_, err := recoverHostCaptureGateLocked(store, value, persist)
