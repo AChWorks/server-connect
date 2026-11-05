@@ -314,6 +314,36 @@ native_nft_after=$(docker exec "$container" /usr/sbin/nft -j list ruleset)
   echo 'NATIVE_NFT_CAS_INDEPENDENT_CLEANUP=FAIL (nftables drift)' >&2
   exit 1
 }
+# The native socket filter and ephemeral final-FD grace barrier need real
+# kernel semantics, not merely mocked netlink bytes. A fresh secondary
+# namespace inside the already disconnected guest preserves its networking,
+# foreign services and all runner resources. Explicit opt-ins are scoped to
+# these two bounded tests only; the guest's PID 1 netns must differ.
+native_host_barrier_log="$scratch/native-host-barrier.log"
+docker exec "$container" /usr/bin/unshare --net /bin/sh -c '
+  set -eu
+  test "$(readlink /proc/self/ns/net)" != "$(readlink /proc/1/ns/net)"
+  /sbin/ip link set lo up
+  SC_TEST_HOST_BARRIER_NATIVE=isolated-netns \
+    SC_TEST_HOST_SOCKET_BARRIER_NATIVE=isolated-netns \
+    /root/qa-native-nft-cas-test \
+      -test.run="^(TestHostNetworkBarrierNativeLifetime|TestHostSocketBarrierNativeFilterSemantics)$" \
+      -test.v -test.timeout=90s
+' | tee "$native_host_barrier_log"
+for marker in \
+  HOST_BARRIER_FINAL_FD_RELEASE_AND_OWNED_ABSENCE \
+  HOST_BARRIER_DUAL_STACK_FIB_RPDB_PRESERVED \
+  HOST_SOCKET_BARRIER_REAL_KERNEL_MARK_FILTER; do
+  grep -F "$marker=PASS" "$native_host_barrier_log" >/dev/null
+done
+assert_network_unchanged native-host-barrier "$native_nft_network_before"
+native_host_barrier_nft_after=$(docker exec "$container" /usr/sbin/nft -j list ruleset)
+[[ $native_host_barrier_nft_after == "$native_nft_before" ]] || {
+  echo 'NATIVE_HOST_BARRIER_GUEST_NFT_DRIFT=FAIL' >&2
+  exit 1
+}
+echo NATIVE_HOST_BARRIER_OUTER_GUEST_POLICY_UNCHANGED=PASS
+
 docker exec "$container" /bin/rm -- /root/qa-native-nft-cas-test
 echo NATIVE_NFT_CAS_INDEPENDENT_CLEANUP=PASS
 mutator_log="$scratch/native-mutator-lifetime.log"

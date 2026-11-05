@@ -27,11 +27,7 @@ func requireHostIngressNative(t *testing.T) {
 	if os.Getenv("SC_TEST_HOST_INGRESS_NATIVE") != "isolated-netns" {
 		t.Skip("NOT_RUN: explicit isolated-netns ingress QA required")
 	}
-	self, e1 := os.Stat("/proc/self/ns/net")
-	host, e2 := os.Stat("/proc/1/ns/net")
-	if os.Geteuid() != 0 || e1 != nil || e2 != nil || os.SameFile(self, host) {
-		t.Fatal("root host namespace refused")
-	}
+	requireNativeQANetworkNamespace(t)
 }
 func ingressNativeCommand(t *testing.T, name string, args ...string) string {
 	t.Helper()

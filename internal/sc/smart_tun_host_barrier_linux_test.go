@@ -70,11 +70,7 @@ func TestHostNetworkBarrierNativeLifetime(t *testing.T) {
 	if os.Getenv("SC_TEST_HOST_BARRIER_NATIVE") != "isolated-netns" {
 		t.Skip("NOT_RUN: explicit fresh isolated namespace required")
 	}
-	self, e1 := os.Stat("/proc/self/ns/net")
-	root, e2 := os.Stat("/proc/1/ns/net")
-	if os.Geteuid() != 0 || e1 != nil || e2 != nil || os.SameFile(self, root) {
-		t.Fatal("root host namespace refused")
-	}
+	self := requireNativeQANetworkNamespace(t)
 	guard := func() error {
 		now, err := os.Stat("/proc/self/ns/net")
 		if err != nil || !os.SameFile(now, self) {

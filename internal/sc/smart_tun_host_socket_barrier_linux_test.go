@@ -5,9 +5,71 @@ package sc
 import (
 	"encoding/binary"
 	"errors"
+	"net"
+	"os"
 	"syscall"
 	"testing"
+	"time"
 )
+
+func TestHostSocketBarrierNativeFilterSemantics(t *testing.T) {
+	if os.Getenv("SC_TEST_HOST_SOCKET_BARRIER_NATIVE") != "isolated-netns" {
+		t.Skip("NOT_RUN: explicit isolated network namespace required")
+	}
+	requireNativeQANetworkNamespace(t)
+	// The caller must bring up lo inside its *own* disposable namespace.
+	listener, err := net.ListenTCP("tcp4", &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	port := uint16(listener.Addr().(*net.TCPAddr).Port)
+	ports := map[uint16]bool{port: true}
+	setMark := func(raw syscall.RawConn, mark int) {
+		t.Helper()
+		var setErr error
+		if err := raw.Control(func(fd uintptr) {
+			setErr = syscall.SetsockoptInt(int(fd), syscall.SOL_SOCKET, syscall.SO_MARK, mark)
+		}); err != nil || setErr != nil {
+			t.Fatalf("set socket mark %d: control=%v setter=%v", mark, err, setErr)
+		}
+	}
+	listenerRaw, err := listener.SyscallConn()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := observeForeignMarkedListeners(ports); err != nil {
+		t.Fatalf("unmarked listener must pass exact mark filter: %v", err)
+	}
+	setMark(listenerRaw, 0x00112233)
+	if code := ErrorCode(observeForeignMarkedListeners(ports)); code != "host_ingress_listener_mark" {
+		t.Fatalf("foreign marked listener was not detected: %s", code)
+	}
+	setMark(listenerRaw, 0)
+
+	client, err := net.DialTimeout("tcp4", listener.Addr().String(), 2*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	server, err := listener.AcceptTCP()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer server.Close()
+	if code := ErrorCode(observeUnmarkedHostIngress(ports)); code != "host_ingress_drain_pending" {
+		t.Fatalf("unmarked accepted generation was not detected: %s", code)
+	}
+	serverRaw, err := server.SyscallConn()
+	if err != nil {
+		t.Fatal(err)
+	}
+	setMark(serverRaw, int(nativeTUNBypassMark))
+	if err := observeUnmarkedHostIngress(ports); err != nil {
+		t.Fatalf("bypass marked accepted generation was not excluded: %v", err)
+	}
+	t.Log("HOST_SOCKET_BARRIER_REAL_KERNEL_MARK_FILTER=PASS")
+}
 
 func barrierQuery() hostSocketBarrierQuery {
 	return hostSocketBarrierQuery{legacy: true, protocol: syscall.IPPROTO_TCP, states: hostReplyTCPStates, port: 28993,
