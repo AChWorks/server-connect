@@ -83,6 +83,12 @@ func validateHostIngressStage(r hostIngressStage) error {
 	default:
 		return activationJournalError("invalid ingress nft progress")
 	}
+	if (r.NFTStage == "effect_possible" || r.NFTStage == "observed" || r.NFTStage == "remove_requested") && r.SysctlStage != "observed" {
+		return activationJournalError("ingress table progress precedes verified inheritance")
+	}
+	if r.SysctlStage == "removed" && r.NFTStage != "removed" {
+		return activationJournalError("ingress sysctl cleanup precedes table removal")
+	}
 	if r.Phase == "recovered" && (r.SysctlStage != "removed" || r.NFTStage != "removed") {
 		return activationJournalError("unrestored ingress transaction claims recovery")
 	}
@@ -137,15 +143,55 @@ func writeHostIngressStage(store *activationJournalDir, r hostIngressStage, old 
 	}
 	return store.writeJournal(append(raw, '\n'), old)
 }
-func advanceHostIngressStage(store *activationJournalDir, current *hostIngressStage, next hostIngressStage) error {
-	observed, id, err := loadHostIngressStage(store)
-	if err != nil {
+
+// hostIngressPersist atomically records this stage in its enclosing operation
+// journal while the manager lock is held. previous is nil only for creation;
+// otherwise the callback must compare the complete old stage and enclosing
+// operation identity before replacing the complete enclosing journal. It must
+// not return success before durable storage. No callback may reacquire the lock.
+type hostIngressPersist func(previous *hostIngressStage, next hostIngressStage) error
+
+// The standalone v5 journal is retained for the bounded ingress prototype.
+// General-host/native integration supplies its own enclosing-journal callback.
+func hostIngressJournalPersist(store *activationJournalDir) hostIngressPersist {
+	return func(previous *hostIngressStage, next hostIngressStage) error {
+		if err := store.ensureLockIdentity(); err != nil {
+			return err
+		}
+		if previous == nil {
+			return writeHostIngressStage(store, next, nil)
+		}
+		observed, id, err := loadHostIngressStage(store)
+		if err != nil {
+			return err
+		}
+		if observed != *previous {
+			return Fault("activation_journal_conflict", "host ingress operation changed while locked")
+		}
+		return writeHostIngressStage(store, next, &id)
+	}
+}
+
+func persistHostIngressStage(persist hostIngressPersist, previous *hostIngressStage, next hostIngressStage) error {
+	if persist == nil {
+		return activationJournalError("ingress enclosing-journal persistence is required")
+	}
+	if err := validateHostIngressStage(next); err != nil {
 		return err
 	}
-	if observed != *current {
-		return Fault("activation_journal_conflict", "host ingress operation changed while locked")
+	if previous != nil {
+		// Pass a copy: an unsuccessful callback cannot change the caller's
+		// last durably acknowledged state through its comparison argument.
+		old := *previous
+		return persist(&old, next)
 	}
-	if err := writeHostIngressStage(store, next, &id); err != nil {
+	return persist(nil, next)
+}
+func advanceHostIngressStage(persist hostIngressPersist, current *hostIngressStage, next hostIngressStage) error {
+	if current == nil {
+		return activationJournalError("missing ingress progress record")
+	}
+	if err := persistHostIngressStage(persist, current, next); err != nil {
 		return err
 	}
 	*current = next
@@ -247,6 +293,8 @@ func hostIngressRawSnapshot() (map[uint16]bool, string, error) {
 }
 
 func hostIngressNFTObjects(r hostIngressStage) []map[string]any {
+	// nft canonicalizes (mark & mask) | bits by setting ORed bits in the
+	// AND mask too. Emit that same exact form before hashing ownership.
 	name := "scin_" + r.OperationID
 	meta := func(key string) any { return map[string]any{"meta": map[string]any{"key": key}} }
 	match := func(left, right any) any {
@@ -258,9 +306,9 @@ func hostIngressNFTObjects(r hostIngressStage) []map[string]any {
 		{"rule": map[string]any{"family": "inet", "table": name, "chain": "ingress", "comment": "server-connect:" + r.OperationID, "expr": []any{
 			match(meta("iifname"), r.Underlay),
 			match(meta("l4proto"), "tcp"),
-			match(map[string]any{"fib": map[string]any{"result": "type", "flags": []string{"daddr"}}}, "local"),
+			match(map[string]any{"fib": map[string]any{"result": "type", "flags": []string{"daddr"}}}, 2), // RTN_LOCAL; nft -n renders the route type numerically
 			match(map[string]any{"&": []any{meta("mark"), nativeTUNMarkMask}}, 0),
-			map[string]any{"mangle": map[string]any{"key": meta("mark"), "value": map[string]any{"|": []any{map[string]any{"&": []any{meta("mark"), uint32(0xff00ffff)}}, nativeTUNBypassMark}}}},
+			map[string]any{"mangle": map[string]any{"key": meta("mark"), "value": map[string]any{"|": []any{map[string]any{"&": []any{meta("mark"), uint32(0xff00ffff) | nativeTUNBypassMark}}, nativeTUNBypassMark}}}},
 		}}},
 	}
 }
@@ -299,10 +347,16 @@ func observeHostIngressNFT(r hostIngressStage) (hostIngressNFTObservation, error
 	return hostIngressNFTObservation{}, ingressFault("nft staging observation changed repeatedly")
 }
 func hostIngressNFTFromRows(r hostIngressStage, objects []map[string]any, generation uint32) (hostIngressNFTObservation, error) {
+	if generation == 0 || objects == nil {
+		return hostIngressNFTObservation{}, ingressFault("ingress nft generation or object inventory absent")
+	}
 	var selected []map[string]any
 	var handle uint64
 	name := "scin_" + r.OperationID
 	for _, item := range objects {
+		if len(item) != 1 {
+			return hostIngressNFTObservation{}, ingressFault("ambiguous ingress nft object")
+		}
 		for kind, raw := range item {
 			fields, ok := raw.(map[string]any)
 			if !ok {
@@ -346,10 +400,35 @@ func hostIngressNFTFromRows(r hostIngressStage, objects []map[string]any, genera
 	return hostIngressNFTObservation{Present: true, Handle: handle, SHA256: actual, Generation: generation, Matches: semantic == expected}, nil
 }
 
-// Must run under the manager lock AFTER independent prearm, with no other
-// activation journal. A failed write/effect keeps its durable journal and
-// never falls through to capture. No source-port/tuple route is installed.
+// The standalone prototype wrapper does not expose a public Apply API.
 func applyHostIngressStageLocked(store *activationJournalDir, r *hostIngressStage, guard func() error) error {
+	return applyHostIngressStageWithPersistLocked(store, r, guard, hostIngressJournalPersist(store))
+}
+
+// Must run under the manager lock AFTER independent prearm. The callback owns
+// the sole enclosing activation journal. A failed write/effect retains recovery
+// evidence and never authorizes capture. No tuple/source-port route is installed.
+// General-host callers must require SysctlBefore == 1: Linux supplies no scalar
+// generation/CAS ownership, so the 0->1 write path is isolated prototype QA only.
+func applyHostIngressStageWithPersistLocked(store *activationJournalDir, r *hostIngressStage, guard func() error, persist hostIngressPersist) error {
+	if persist == nil {
+		return activationJournalError("ingress enclosing-journal persistence is required")
+	}
+	if err := store.ensureLockIdentity(); err != nil {
+		return err
+	}
+	if r == nil {
+		return activationJournalError("missing ingress staging record")
+	}
+	if err := validateHostIngressStage(*r); err != nil {
+		return err
+	}
+	if r.Phase != "pending" || r.SysctlStage != "planned" || r.NFTStage != "planned" {
+		return activationJournalError("ingress Apply requires a fresh planned transaction")
+	}
+	if err := hostIngressBeforeDeadline(*r); err != nil {
+		return err
+	}
 	if guard == nil {
 		return Fault("guard_unavailable", "independent ingress recovery is required")
 	}
@@ -383,15 +462,18 @@ func applyHostIngressStageLocked(store *activationJournalDir, r *hostIngressStag
 	if observed.Present {
 		return ingressFault("ingress operation table is occupied")
 	}
-	if err := writeHostIngressStage(store, *r, nil); err != nil {
+	if err := persistHostIngressStage(persist, nil, *r); err != nil {
 		return err
 	}
 	next := *r
 	next.SysctlStage = "effect_possible"
-	if err := advanceHostIngressStage(store, r, next); err != nil {
+	if err := advanceHostIngressStage(persist, r, next); err != nil {
 		return err
 	}
 	if err := guard(); err != nil {
+		return err
+	}
+	if err := hostIngressBeforeDeadline(*r); err != nil {
 		return err
 	}
 	if before == 0 {
@@ -399,17 +481,24 @@ func applyHostIngressStageLocked(store *activationJournalDir, r *hostIngressStag
 			return err
 		}
 	}
+	current, err := readHostIngressSysctl()
+	if err != nil || current != 1 {
+		return ingressFault("ingress inheritance changed before acknowledgement")
+	}
 	next = *r
 	next.SysctlStage = "observed"
-	if err := advanceHostIngressStage(store, r, next); err != nil {
+	if err := advanceHostIngressStage(persist, r, next); err != nil {
 		return err
 	}
 	next = *r
 	next.NFTStage = "effect_possible"
-	if err := advanceHostIngressStage(store, r, next); err != nil {
+	if err := advanceHostIngressStage(persist, r, next); err != nil {
 		return err
 	}
 	if err := guard(); err != nil {
+		return err
+	}
+	if err := hostIngressBeforeDeadline(*r); err != nil {
 		return err
 	}
 	// All TCP packets to local destinations are marked. SYN-only marking
@@ -437,7 +526,7 @@ func applyHostIngressStageLocked(store *activationJournalDir, r *hostIngressStag
 	next.NFTStage = "observed"
 	next.NFTHandle = observed.Handle
 	next.NFTSHA256 = observed.SHA256
-	if err := advanceHostIngressStage(store, r, next); err != nil {
+	if err := advanceHostIngressStage(persist, r, next); err != nil {
 		return err
 	}
 	if err := guard(); err != nil {
@@ -446,6 +535,12 @@ func applyHostIngressStageLocked(store *activationJournalDir, r *hostIngressStag
 	return hostIngressStageIntact(*r)
 }
 func hostIngressStageIntact(r hostIngressStage) error {
+	if err := validateHostIngressStage(r); err != nil {
+		return err
+	}
+	if err := hostIngressBeforeDeadline(r); err != nil {
+		return err
+	}
 	if r.Phase != "pending" || r.SysctlStage != "observed" || r.NFTStage != "observed" {
 		return ingressFault("ingress staging is incomplete")
 	}
@@ -476,8 +571,12 @@ func hostIngressStageIntact(r hostIngressStage) error {
 	if !observed.Present || !observed.Matches || observed.Handle != r.NFTHandle || observed.SHA256 != r.NFTSHA256 {
 		return ingressFault("ingress table ownership changed")
 	}
-	return nil
+	return hostIngressBeforeDeadline(r)
 }
+
+// This bounded two-sided snapshot does not establish packet quiescence or
+// atomic socket absence. General-host capture additionally needs an independent
+// kernel grace barrier and a kernel-filtered unsafe-socket absence proof.
 func hostIngressDrainBarrier(r hostIngressStage, guard func() error) error {
 	if guard == nil {
 		return Fault("guard_unavailable", "independent ingress recovery is required")
@@ -512,10 +611,59 @@ func hostIngressDrainBarrier(r hostIngressStage, guard func() error) error {
 	if hash != after || hash != r.RawSHA256 {
 		return ingressFault("raw policy changed around ingress barrier")
 	}
+	return hostIngressBeforeDeadline(r)
+}
+
+func hostIngressBeforeDeadline(r hostIngressStage) error {
+	uptime, err := trialUptime()
+	if err != nil {
+		return err
+	}
+	if uptime >= r.Deadline {
+		return Fault("host_ingress_expired", "ingress staging deadline expired; capture remains refused")
+	}
 	return nil
 }
 
+// Only an acknowledged owned 0->1 effect may authorize a 1->0 restoration.
+// Planned, unacknowledged, already removed or preexisting-1 values never
+// acquire authority over a later foreign sysctl write. An observed value is not
+// a Linux scalar generation/CAS: the mutating path remains isolated QA only.
+func hostIngressRestoreSysctl(stage string, before, current int) (bool, error) {
+	if (before != 0 && before != 1) || (current != 0 && current != 1) {
+		return false, ingressFault("unverified ingress sysctl value")
+	}
+	switch stage {
+	case "planned", "effect_possible", "observed", "removed":
+	default:
+		return false, activationJournalError("unknown ingress sysctl recovery stage")
+	}
+	if current == before {
+		return false, nil
+	}
+	if stage == "observed" && before == 0 && current == 1 {
+		return true, nil
+	}
+	return false, ingressFault("unowned or unacknowledged sysctl value retained")
+}
+
 func recoverHostIngressStageLocked(store *activationJournalDir, r *hostIngressStage, force bool) (HostIngressStageReceipt, error) {
+	return recoverHostIngressStageWithPersistLocked(store, r, force, hostIngressJournalPersist(store))
+}
+
+func recoverHostIngressStageWithPersistLocked(store *activationJournalDir, r *hostIngressStage, force bool, persist hostIngressPersist) (HostIngressStageReceipt, error) {
+	if persist == nil {
+		return HostIngressStageReceipt{}, activationJournalError("ingress enclosing-journal persistence is required")
+	}
+	if err := store.ensureLockIdentity(); err != nil {
+		return HostIngressStageReceipt{}, err
+	}
+	if r == nil {
+		return HostIngressStageReceipt{}, activationJournalError("missing ingress recovery record")
+	}
+	if err := validateHostIngressStage(*r); err != nil {
+		return HostIngressStageReceipt{}, err
+	}
 	receipt := HostIngressStageReceipt{OperationID: r.OperationID, Phase: r.Phase, Drain: "not_run"}
 	boot, err := trialBootIdentity()
 	if err != nil {
@@ -540,7 +688,7 @@ func recoverHostIngressStageLocked(store *activationJournalDir, r *hostIngressSt
 	if r.Phase != "recovered" {
 		next := *r
 		next.Phase = "stop_requested"
-		if err := advanceHostIngressStage(store, r, next); err != nil {
+		if err := advanceHostIngressStage(persist, r, next); err != nil {
 			return receipt, err
 		}
 		for attempts := 0; attempts < 3; attempts++ {
@@ -551,7 +699,7 @@ func recoverHostIngressStageLocked(store *activationJournalDir, r *hostIngressSt
 			if !observed.Present {
 				next = *r
 				next.NFTStage = "removed"
-				if err := advanceHostIngressStage(store, r, next); err != nil {
+				if err := advanceHostIngressStage(persist, r, next); err != nil {
 					return receipt, err
 				}
 				break
@@ -562,7 +710,7 @@ func recoverHostIngressStageLocked(store *activationJournalDir, r *hostIngressSt
 			}
 			next = *r
 			next.NFTStage = "remove_requested"
-			if err := advanceHostIngressStage(store, r, next); err != nil {
+			if err := advanceHostIngressStage(persist, r, next); err != nil {
 				return receipt, err
 			}
 			err = nativeNFTDeleteTableCAS(observed.Handle, observed.Generation)
@@ -581,7 +729,7 @@ func recoverHostIngressStageLocked(store *activationJournalDir, r *hostIngressSt
 			}
 			next = *r
 			next.NFTStage = "removed"
-			if err := advanceHostIngressStage(store, r, next); err != nil {
+			if err := advanceHostIngressStage(persist, r, next); err != nil {
 				return receipt, err
 			}
 			break
@@ -593,26 +741,20 @@ func recoverHostIngressStageLocked(store *activationJournalDir, r *hostIngressSt
 		if err != nil {
 			return receipt, err
 		}
-		// A planned write never authorizes restoring a foreign sysctl.
-		if r.SysctlStage == "planned" {
-			if current != r.SysctlBefore {
-				return receipt, ingressFault("foreign sysctl changed before any owned effect")
-			}
-		} else if current != r.SysctlBefore {
-			if r.SysctlStage == "effect_possible" {
-				return receipt, ingressFault("unacknowledged sysctl effect cannot authorize restoration")
-			}
-			if current != 1 {
-				return receipt, ingressFault("foreign sysctl value retained")
-			}
+		restore, err := hostIngressRestoreSysctl(r.SysctlStage, r.SysctlBefore, current)
+		if err != nil {
+			return receipt, err
+		}
+		if restore {
 			if err := writeHostIngressSysctl(store, *r, r.SysctlBefore); err != nil {
 				return receipt, err
 			}
 		}
+
 		next = *r
 		next.SysctlStage = "removed"
 		next.Phase = "recovered"
-		if err := advanceHostIngressStage(store, r, next); err != nil {
+		if err := advanceHostIngressStage(persist, r, next); err != nil {
 			return receipt, err
 		}
 	}

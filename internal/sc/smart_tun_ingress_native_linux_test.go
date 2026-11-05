@@ -4,6 +4,8 @@ package sc
 
 import (
 	"bufio"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -79,6 +81,7 @@ func TestHostIngressNativePeerHelper(t *testing.T) {
 			ingressNativeCommand(t, "/usr/sbin/ip", "link", "set", "lo", "up")
 			ingressNativeCommand(t, "/usr/sbin/ip", "addr", "add", "192.0.2.2/30", "dev", "scinp0")
 			ingressNativeCommand(t, "/usr/sbin/ip", "-6", "addr", "add", "fd73:71::2/64", "dev", "scinp0", "nodad")
+			ingressNativeCommand(t, "/usr/sbin/ip", "link", "set", "scinp0", "addrgenmode", "none")
 			ingressNativeCommand(t, "/usr/sbin/ip", "link", "set", "scinp0", "up")
 			fmt.Println("INGRESS_PEER_READY")
 		case "4", "6":
@@ -150,15 +153,58 @@ func TestHostIngressNativeWatchdogHelper(t *testing.T) {
 }
 func TestHostIngressNativeStageAndIndependentRollback(t *testing.T) {
 	requireHostIngressNative(t)
-	links := ingressNativeCommand(t, "/usr/sbin/ip", "-j", "link", "show")
+	links := ingressNativeCommand(t, "/usr/sbin/ip", "-d", "-j", "link", "show")
 	rows, err := selectiveRows([]byte(links))
-	if err != nil || len(rows) != 1 || selectiveText(rows[0]["ifname"]) != "lo" {
-		t.Fatal("fresh loopback-only namespace required")
+	if err != nil || len(rows) == 0 {
+		t.Fatal("fresh namespace inventory unavailable")
+	}
+	seenLoopback := false
+	for _, row := range rows {
+		name := selectiveText(row["ifname"])
+		if name == "lo" {
+			seenLoopback = true
+			continue
+		}
+		// Loading GRE modules on the outer runner creates inert fallback
+		// devices in *each new* namespace. Verify their exact kind and
+		// quiescence; never remove them or broaden root-namespace admission.
+		kinds := map[string]string{"gre0": "gre", "gretap0": "gretap", "erspan0": "erspan"}
+		var info struct {
+			Kind string `json:"info_kind"`
+		}
+		var flags []string
+		if json.Unmarshal(row["linkinfo"], &info) != nil || kinds[name] == "" || info.Kind != kinds[name] ||
+			selectiveText(row["operstate"]) != "DOWN" || json.Unmarshal(row["flags"], &flags) != nil {
+			t.Fatal("unexpected device in fresh isolated namespace")
+		}
+		for _, flag := range flags {
+			if flag == "UP" || flag == "LOWER_UP" {
+				t.Fatal("active fallback device refused")
+			}
+		}
+		var addresses []map[string]json.RawMessage
+		raw := ingressNativeCommand(t, "/usr/sbin/ip", "-j", "addr", "show", "dev", name)
+		if json.Unmarshal([]byte(raw), &addresses) != nil || len(addresses) != 1 {
+			t.Fatal("fallback address inventory unavailable")
+		}
+		var configured []json.RawMessage
+		if json.Unmarshal(addresses[0]["addr_info"], &configured) != nil || len(configured) != 0 {
+			t.Fatal("configured fallback device refused")
+		}
+		for _, family := range []string{"-4", "-6"} {
+			if strings.TrimSpace(ingressNativeCommand(t, "/usr/sbin/ip", family, "route", "show", "table", "all", "dev", name)) != "" {
+				t.Fatal("routed fallback device refused")
+			}
+		}
+	}
+	if !seenLoopback {
+		t.Fatal("loopback missing from fresh namespace")
 	}
 	ingressNativeCommand(t, "/usr/sbin/ip", "link", "set", "lo", "up")
 	ingressNativeCommand(t, "/usr/sbin/ip", "link", "add", "scing0", "type", "veth", "peer", "name", "scinp0")
 	ingressNativeCommand(t, "/usr/sbin/ip", "addr", "add", "192.0.2.1/30", "dev", "scing0")
 	ingressNativeCommand(t, "/usr/sbin/ip", "-6", "addr", "add", "fd73:71::1/64", "dev", "scing0", "nodad")
+	ingressNativeCommand(t, "/usr/sbin/ip", "link", "set", "scing0", "addrgenmode", "none")
 	ingressNativeCommand(t, "/usr/sbin/ip", "link", "set", "scing0", "up")
 	ingressNativeCommand(t, "/usr/sbin/sysctl", "-q", "-w", "net.ipv4.tcp_fwmark_accept=0", "net.ipv4.tcp_syncookies=2")
 	for _, binary := range []string{"/usr/sbin/iptables", "/usr/sbin/ip6tables"} {
@@ -169,8 +215,7 @@ func TestHostIngressNativeStageAndIndependentRollback(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	routesBefore := ingressNativeCommand(t, "/usr/sbin/ip", "-j", "route", "show", "table", "all")
-	rulesBefore := ingressNativeCommand(t, "/usr/sbin/ip", "-j", "rule", "show")
+
 	peer := exec.Command(os.Args[0], "-test.run=^TestHostIngressNativePeerHelper$", "-test.v")
 	peer.Env = append(os.Environ(), "SC_TEST_INGRESS_ROLE=peer")
 	peer.SysProcAttr = &syscall.SysProcAttr{Cloneflags: syscall.CLONE_NEWNET, Pdeathsig: syscall.SIGKILL}
@@ -245,6 +290,17 @@ func TestHostIngressNativeStageAndIndependentRollback(t *testing.T) {
 	if ingressNativeSocketMark(t, old) != 0 {
 		t.Fatal("old socket unexpectedly marked")
 	}
+	// Take the baseline only after the peer VETH is configured and live.
+	// Its initial linkdown->up transition is fixture setup, not stage mutation.
+	routeRulesSnapshot := func() string {
+		var parts []string
+		for _, family := range []string{"-4", "-6"} {
+			parts = append(parts, ingressNativeCommand(t, "/usr/sbin/ip", family, "-j", "route", "show", "table", "all"))
+			parts = append(parts, ingressNativeCommand(t, "/usr/sbin/ip", family, "-j", "rule", "show"))
+		}
+		return strings.Join(parts, "\x00")
+	}
+	routesBefore := routeRulesSnapshot()
 	dir := privateJournalTempDir(t)
 	m := New(dir, DefaultCore, DefaultPort)
 	watchdog := exec.Command(os.Args[0], "-test.run=^TestHostIngressNativeWatchdogHelper$", "-test.v")
@@ -288,7 +344,7 @@ func TestHostIngressNativeStageAndIndependentRollback(t *testing.T) {
 	if err := hostIngressDrainBarrier(r, guard); err != nil {
 		t.Fatal(err)
 	}
-	fmt.Println("INGRESS_GENERATION_DRAIN_BARRIER=PASS")
+	fmt.Println("INGRESS_GENERATION_DRAIN_SNAPSHOT=PASS")
 	// A caller disconnect must not disable the independently prearmed process.
 	watchIn.Close()
 	readUntil(watchScanner, "INGRESS_INDEPENDENT_PROCESS_ROLLBACK=PASS")
@@ -307,8 +363,208 @@ func TestHostIngressNativeStageAndIndependentRollback(t *testing.T) {
 	if err != nil || observed.Present {
 		t.Fatalf("owned nft remains: %+v %v", observed, err)
 	}
-	if routesBefore != ingressNativeCommand(t, "/usr/sbin/ip", "-j", "route", "show", "table", "all") || rulesBefore != ingressNativeCommand(t, "/usr/sbin/ip", "-j", "rule", "show") {
-		t.Fatal("stage modified FIB/RPDB")
+	if routesBefore != routeRulesSnapshot() {
+		t.Log("FIB/RPDB before:", routesBefore)
+		t.Log("FIB/RPDB after:", routeRulesSnapshot())
+		t.Fatal("stage modified IPv4/IPv6 FIB/RPDB")
 	}
 	fmt.Println("INGRESS_FOREIGN_RAW_FIB_RPDB_PRESERVED=PASS")
+
+	// These deterministic fault seams exercise kernel preservation, not guard
+	// admission. The positive above separately proves a prearmed independent
+	// process. Each negative owns a fresh private journal and known fixture
+	// objects; explicit test cleanup is not product rollback evidence.
+	runNegative := func(t *testing.T, body func(*Manager, *hostIngressStage)) {
+		ingressNativeCommand(t, "/usr/sbin/sysctl", "-q", "-w", "net.ipv4.tcp_fwmark_accept=0")
+		stage, err := newHostIngressStage("scing0", 60)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() {
+			observed, err := observeHostIngressNFT(stage)
+			if err != nil {
+				t.Errorf("negative fixture cleanup inventory: %v", err)
+			} else if observed.Present {
+				ingressNativeCommand(t, "/usr/sbin/nft", "delete", "table", "inet", "scin_"+stage.OperationID)
+			}
+			ingressNativeCommand(t, "/usr/sbin/sysctl", "-q", "-w", "net.ipv4.tcp_fwmark_accept=0")
+		})
+		body(New(privateJournalTempDir(t), DefaultCore, DefaultPort), &stage)
+	}
+	testGuard := func() error { return nil }
+	apply := func(t *testing.T, m *Manager, stage *hostIngressStage) {
+		t.Helper()
+		if err := m.withActivationJournalLock(syscall.Fsync, func(store *activationJournalDir) error {
+			return applyHostIngressStageLocked(store, stage, testGuard)
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	recover := func(m *Manager, stage *hostIngressStage) error {
+		return m.withActivationJournalLock(syscall.Fsync, func(store *activationJournalDir) error {
+			_, err := recoverHostIngressStageLocked(store, stage, true)
+			return err
+		})
+	}
+	t.Run("expired-before-effect", func(t *testing.T) {
+		runNegative(t, func(m *Manager, stage *hostIngressStage) {
+			stage.Deadline, _ = trialUptime()
+			err := m.withActivationJournalLock(syscall.Fsync, func(store *activationJournalDir) error {
+				return applyHostIngressStageLocked(store, stage, func() error {
+					t.Fatal("expired stage reached guard")
+					return nil
+				})
+			})
+			got, sysctlErr := readHostIngressSysctl()
+			observed, nftErr := observeHostIngressNFT(*stage)
+			if ErrorCode(err) != "host_ingress_expired" || sysctlErr != nil || nftErr != nil || got != 0 || observed.Present {
+				t.Fatalf("expired effect: %v sysctl=%d/%v nft=%+v/%v", err, got, sysctlErr, observed, nftErr)
+			}
+		})
+	})
+	t.Run("foreign-child-retained", func(t *testing.T) {
+		runNegative(t, func(m *Manager, stage *hostIngressStage) {
+			apply(t, m, stage)
+			ingressNativeCommand(t, "/usr/sbin/nft", "add", "chain", "inet", "scin_"+stage.OperationID, "foreign")
+			before, err := observeHostIngressNFT(*stage)
+			if err != nil || before.Matches {
+				t.Fatalf("foreign child absent: %+v %v", before, err)
+			}
+			if err := recover(m, stage); err == nil {
+				t.Fatal("foreign child authorized product deletion")
+			}
+			after, err := observeHostIngressNFT(*stage)
+			value, _ := readHostIngressSysctl()
+			if err != nil || after != before || value != 1 {
+				t.Fatalf("foreign graph changed: before=%+v after=%+v value=%d err=%v", before, after, value, err)
+			}
+		})
+	})
+	t.Run("same-name-replacement-retained", func(t *testing.T) {
+		runNegative(t, func(m *Manager, stage *hostIngressStage) {
+			apply(t, m, stage)
+			ingressNativeCommand(t, "/usr/sbin/nft", "delete", "table", "inet", "scin_"+stage.OperationID)
+			var commands []map[string]any
+			for i, object := range hostIngressNFTObjects(*stage) {
+				verb := "add"
+				if i == 0 {
+					verb = "create"
+				}
+				commands = append(commands, map[string]any{verb: object})
+			}
+			data, _ := json.Marshal(map[string]any{"nftables": commands})
+			if err := m.withActivationJournalLock(syscall.Fsync, func(store *activationJournalDir) error {
+				_, err := nativeTUNRunNFT(store, data, "-j", "-f", "-")
+				return err
+			}); err != nil {
+				t.Fatal(err)
+			}
+			before, err := observeHostIngressNFT(*stage)
+			if err != nil || !before.Matches || before.Handle == stage.NFTHandle {
+				t.Fatalf("replacement not distinct: %+v %v", before, err)
+			}
+			if err := recover(m, stage); err == nil {
+				t.Fatal("same-name replacement authorized deletion")
+			}
+			after, err := observeHostIngressNFT(*stage)
+			if err != nil || after != before {
+				t.Fatalf("replacement changed: before=%+v after=%+v %v", before, after, err)
+			}
+		})
+	})
+	t.Run("effect-before-nft-receipt-retained", func(t *testing.T) {
+		runNegative(t, func(m *Manager, stage *hostIngressStage) {
+			injected := errors.New("injected NFT receipt persistence failure")
+			err := m.withActivationJournalLock(syscall.Fsync, func(store *activationJournalDir) error {
+				persist := hostIngressJournalPersist(store)
+				return applyHostIngressStageWithPersistLocked(store, stage, testGuard, func(old *hostIngressStage, next hostIngressStage) error {
+					if next.NFTStage == "observed" {
+						return injected
+					}
+					return persist(old, next)
+				})
+			})
+			if !errors.Is(err, injected) || stage.NFTStage != "effect_possible" {
+				t.Fatalf("receipt fault not reached: %+v %v", stage, err)
+			}
+			before, err := observeHostIngressNFT(*stage)
+			if err != nil || !before.Present || !before.Matches {
+				t.Fatalf("kernel effect absent: %+v %v", before, err)
+			}
+			if err := recover(m, stage); err == nil {
+				t.Fatal("unacknowledged exact-looking table adopted")
+			}
+			after, err := observeHostIngressNFT(*stage)
+			value, _ := readHostIngressSysctl()
+			if err != nil || after != before || value != 1 {
+				t.Fatalf("uncertain effect changed: %+v %+v sysctl=%d %v", before, after, value, err)
+			}
+		})
+	})
+	t.Run("effect-before-sysctl-receipt-retained", func(t *testing.T) {
+		runNegative(t, func(m *Manager, stage *hostIngressStage) {
+			injected := errors.New("injected inheritance receipt persistence failure")
+			err := m.withActivationJournalLock(syscall.Fsync, func(store *activationJournalDir) error {
+				persist := hostIngressJournalPersist(store)
+				return applyHostIngressStageWithPersistLocked(store, stage, testGuard, func(old *hostIngressStage, next hostIngressStage) error {
+					if next.SysctlStage == "observed" {
+						return injected
+					}
+					return persist(old, next)
+				})
+			})
+			value, _ := readHostIngressSysctl()
+			if !errors.Is(err, injected) || stage.SysctlStage != "effect_possible" || value != 1 {
+				t.Fatalf("sysctl receipt seam not reached: %+v sysctl=%d %v", stage, value, err)
+			}
+			if err := recover(m, stage); err == nil {
+				t.Fatal("unacknowledged sysctl acquired restoration authority")
+			}
+			value, _ = readHostIngressSysctl()
+			if value != 1 {
+				t.Fatal("unacknowledged sysctl effect overwritten")
+			}
+		})
+	})
+	t.Run("post-removed-sysctl-write-retained", func(t *testing.T) {
+		runNegative(t, func(m *Manager, stage *hostIngressStage) {
+			stage.Phase, stage.SysctlStage, stage.NFTStage = "stop_requested", "removed", "removed"
+			err := m.withActivationJournalLock(syscall.Fsync, func(store *activationJournalDir) error {
+				return writeHostIngressStage(store, *stage, nil)
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			ingressNativeCommand(t, "/usr/sbin/sysctl", "-q", "-w", "net.ipv4.tcp_fwmark_accept=1")
+			if err := recover(m, stage); err == nil {
+				t.Fatal("removed progress reacquired sysctl ownership")
+			}
+			value, _ := readHostIngressSysctl()
+			if value != 1 {
+				t.Fatal("later foreign same-value write was overwritten")
+			}
+		})
+	})
+	t.Run("preexisting-one-never-restored", func(t *testing.T) {
+		runNegative(t, func(m *Manager, stage *hostIngressStage) {
+			ingressNativeCommand(t, "/usr/sbin/sysctl", "-q", "-w", "net.ipv4.tcp_fwmark_accept=1")
+			stage.SysctlBefore = 1
+			apply(t, m, stage)
+			if err := recover(m, stage); err != nil {
+				t.Fatal(err)
+			}
+			value, _ := readHostIngressSysctl()
+			if value != 1 {
+				t.Fatal("preexisting inheritance changed")
+			}
+		})
+	})
+	if routesBefore != routeRulesSnapshot() {
+		t.Fatal("negative seams changed IPv4/IPv6 FIB/RPDB")
+	}
+	_, rawAfter, err = hostIngressRawSnapshot()
+	if err != nil || rawBefore != rawAfter {
+		t.Fatalf("negative seams changed foreign raw policy: %v", err)
+	}
+	fmt.Println("INGRESS_KERNEL_NEGATIVE_PRESERVATION=PASS")
 }

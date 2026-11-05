@@ -4,7 +4,9 @@ package sc
 
 import (
 	"encoding/json"
+	"errors"
 	"strings"
+	"syscall"
 	"testing"
 )
 
@@ -156,3 +158,131 @@ func TestHostIngressStageSelectionUsesTheSameManagerLock(t *testing.T) {
 	}
 }
 func nilSync(fd int) error { return nil }
+
+func TestHostIngressSysctlRestorationRequiresCurrentAcknowledgedOwnership(t *testing.T) {
+	for _, stage := range []string{"planned", "effect_possible", "observed", "removed"} {
+		for before := 0; before <= 1; before++ {
+			for current := 0; current <= 1; current++ {
+				restore, err := hostIngressRestoreSysctl(stage, before, current)
+				wantRestore := stage == "observed" && before == 0 && current == 1
+				wantError := current != before && !wantRestore
+				if restore != wantRestore || (err != nil) != wantError {
+					t.Fatalf("stage=%s before=%d current=%d restore=%t err=%v", stage, before, current, restore, err)
+				}
+			}
+		}
+	}
+	for _, input := range [][3]int{{0, 0, 2}, {0, -1, 1}} {
+		if _, err := hostIngressRestoreSysctl("observed", input[1], input[2]); err == nil {
+			t.Fatal("unsupported sysctl value accepted")
+		}
+	}
+	if _, err := hostIngressRestoreSysctl("unknown", 0, 0); err == nil {
+		t.Fatal("unknown progress accepted even with matching baseline")
+	}
+}
+func TestHostIngressExpiredStageRefusesBeforeObservationOrGuard(t *testing.T) {
+	now, err := trialUptime()
+	if err != nil || now <= 0 {
+		t.Fatalf("uptime unavailable: %d %v", now, err)
+	}
+	r := hostIngressStageExample()
+	r.Deadline = now
+	if code := ErrorCode(hostIngressStageIntact(r)); code != "host_ingress_expired" {
+		t.Fatalf("expired stage reached kernel observations: %s", code)
+	}
+	m := New(privateJournalTempDir(t), DefaultCore, DefaultPort)
+	err = m.withActivationJournalLock(syscall.Fsync, func(store *activationJournalDir) error {
+		return applyHostIngressStageLocked(store, &r, func() error {
+			t.Fatal("expired Apply reached guard")
+			return nil
+		})
+	})
+	if ErrorCode(err) != "host_ingress_expired" {
+		t.Fatalf("expired Apply returned %v", err)
+	}
+}
+func TestHostIngressPersistenceFailureDoesNotAdvanceAcknowledgedState(t *testing.T) {
+	r := hostIngressStageExample()
+	previous := r
+	next := r
+	next.SysctlStage = "effect_possible"
+	refused := errors.New("enclosing journal durability failed")
+	err := advanceHostIngressStage(func(old *hostIngressStage, got hostIngressStage) error {
+		if old == nil || *old != previous || got != next {
+			t.Fatal("callback did not receive exact old/new states")
+		}
+		old.SysctlStage = "removed"
+		return refused
+	}, &r, next)
+	if !errors.Is(err, refused) || r != previous {
+		t.Fatalf("failed persistence changed memory: %+v %v", r, err)
+	}
+	if err := advanceHostIngressStage(nil, &r, next); err == nil || r != previous {
+		t.Fatal("missing callback advanced state")
+	}
+	if err := persistHostIngressStage(func(*hostIngressStage, hostIngressStage) error {
+		t.Fatal("invalid record reached callback")
+		return nil
+	}, nil, hostIngressStage{}); err == nil {
+		t.Fatal("invalid record accepted")
+	}
+}
+func TestHostIngressPersistenceCanUseOneEnclosingJournal(t *testing.T) {
+	type envelope struct {
+		Version int              `json:"version"`
+		Owner   string           `json:"owner"`
+		Ingress hostIngressStage `json:"ingress"`
+	}
+	m := New(privateJournalTempDir(t), DefaultCore, DefaultPort)
+	r := hostIngressStageExample()
+	err := m.withActivationJournalLock(syscall.Fsync, func(store *activationJournalDir) error {
+		persist := func(previous *hostIngressStage, next hostIngressStage) error {
+			record := envelope{Version: 6, Owner: "enclosing-native-operation", Ingress: next}
+			var identity *activationJournalFileIdentity
+			if previous != nil {
+				raw, id, err := store.readJournal()
+				if err != nil {
+					return err
+				}
+				var old envelope
+				if json.Unmarshal(raw, &old) != nil || old.Version != record.Version || old.Owner != record.Owner || old.Ingress != *previous {
+					return errors.New("enclosing operation conflict")
+				}
+				identity = &id
+			}
+			raw, err := json.Marshal(record)
+			if err != nil {
+				return err
+			}
+			return store.writeJournal(raw, identity)
+		}
+		if err := persistHostIngressStage(persist, nil, r); err != nil {
+			return err
+		}
+		next := r
+		next.SysctlStage = "effect_possible"
+		if err := advanceHostIngressStage(persist, &r, next); err != nil {
+			return err
+		}
+		raw, _, err := store.readJournal()
+		if err != nil {
+			return err
+		}
+		var got envelope
+		if json.Unmarshal(raw, &got) != nil || got.Version != 6 || got.Ingress != next {
+			t.Fatalf("separate v5 journal replaced enclosing operation: %s", raw)
+		}
+		if _, err := decodeHostIngressStage(raw); err == nil {
+			t.Fatal("enclosing journal is a standalone v5 record")
+		}
+		stale := hostIngressStageExample()
+		if err := advanceHostIngressStage(persist, &stale, next); err == nil || stale == next {
+			t.Fatal("stale embedded state overwrote enclosing journal")
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
