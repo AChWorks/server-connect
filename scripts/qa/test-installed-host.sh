@@ -339,16 +339,32 @@ done
 for marker in \
   HOST_BARRIER_FINAL_FD_RELEASE_AND_OWNED_ABSENCE \
   HOST_BARRIER_DUAL_STACK_FIB_RPDB_PRESERVED \
-  HOST_SOCKET_BARRIER_REAL_KERNEL_MARK_FILTER \
-  INGRESS_KERNEL_STAGE_OWNED \
-  INGRESS_IPV4_IPV6_SYNCOOKIE_MARKS \
-  INGRESS_GENERATION_DRAIN_SNAPSHOT \
-  INGRESS_KERNEL_FILTERED_QUIESCENCE \
-  INGRESS_FOREIGN_LISTENER_MARK_REFUSAL \
-  INGRESS_KERNEL_NEGATIVE_PRESERVATION \
-  INGRESS_FOREIGN_RAW_FIB_RPDB_PRESERVED; do
+  HOST_SOCKET_BARRIER_REAL_KERNEL_MARK_FILTER; do
   grep -F "$marker=PASS" "$native_host_barrier_log" >/dev/null
 done
+# A runner kernel lacking ip6table_raw is an explicit unsupported-host
+# refusal, NOT evidence of positive protected ingress. On this exact observed
+# condition the product must fail closed before journaling or network Apply.
+# Keep the positive lane mandatory wherever both legacy raw backends work.
+if grep -Fx 'INGRESS_UNSUPPORTED_LEGACY_IPV6_REFUSES_BEFORE_JOURNAL=PASS' "$native_host_barrier_log" >/dev/null; then
+  if grep -Eq '^INGRESS_(KERNEL_STAGE_OWNED|IPV4_IPV6_SYNCOOKIE_MARKS|GENERATION_DRAIN_SNAPSHOT|KERNEL_FILTERED_QUIESCENCE|FOREIGN_LISTENER_MARK_REFUSAL|KERNEL_NEGATIVE_PRESERVATION|FOREIGN_RAW_FIB_RPDB_PRESERVED)=PASS$' "$native_host_barrier_log"; then
+    echo 'INGRESS_NATIVE_ACCEPTANCE=FAIL (partial positive with unsupported legacy backend)' >&2
+    exit 1
+  fi
+  echo 'INGRESS_NATIVE_POSITIVE=NOT_RUN (kernel IPv6 legacy raw unavailable; exact product refusal independently proved)'
+else
+  for marker in \
+    INGRESS_KERNEL_STAGE_OWNED \
+    INGRESS_IPV4_IPV6_SYNCOOKIE_MARKS \
+    INGRESS_GENERATION_DRAIN_SNAPSHOT \
+    INGRESS_KERNEL_FILTERED_QUIESCENCE \
+    INGRESS_FOREIGN_LISTENER_MARK_REFUSAL \
+    INGRESS_KERNEL_NEGATIVE_PRESERVATION \
+    INGRESS_FOREIGN_RAW_FIB_RPDB_PRESERVED; do
+    grep -Fx "$marker=PASS" "$native_host_barrier_log" >/dev/null
+  done
+  echo INGRESS_NATIVE_SUPPORTED_KERNEL_POSITIVE=PASS
+fi
 assert_network_unchanged native-host-barrier "$native_nft_network_before"
 native_host_barrier_nft_after=$(docker exec "$container" /usr/sbin/nft -j list ruleset)
 [[ $native_host_barrier_nft_after == "$native_nft_before" ]] || {

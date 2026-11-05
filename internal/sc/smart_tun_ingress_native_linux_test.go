@@ -209,17 +209,42 @@ func TestHostIngressNativeStageAndIndependentRollback(t *testing.T) {
 	}
 	_, rawBefore, err := hostIngressRawSnapshot()
 	if err != nil {
-		// The CI host kernel and the installed guest can disagree about
-		// legacy xtables availability. Diagnose *inside this fresh netns*;
-		// never treat an unavailable legacy backend as verified empty, and
-		// never print host nftables or unrelated operator policy.
-		for _, backend := range []string{"/usr/sbin/iptables-legacy", "/usr/sbin/ip6tables-legacy"} {
-			command := exec.Command(backend, "-t", "raw", "-S")
-			observed, runErr := command.CombinedOutput()
-			if len(observed) > 1024 {
-				observed = []byte("oversized legacy diagnostic refused")
+		// The Docker guest inherits the CI runner kernel, which may lack
+		// ip6table_raw even though the Debian 13 guest has both iptables
+		// binaries. Prove the exact unsupported IPv6 legacy condition and
+		// the product's own refusal *before* any operation journal or native
+		// ingress stage. A generic error, a nonempty legacy owner, or a
+		// different missing prerequisite is never accepted as negative QA.
+		legacy4, err4 := exec.Command("/usr/sbin/iptables-legacy", "-t", "raw", "-S").CombinedOutput()
+		legacy6, err6 := exec.Command("/usr/sbin/ip6tables-legacy", "-t", "raw", "-S").CombinedOutput()
+		var unavailable *exec.ExitError
+		knownMissing := ErrorCode(err) == "host_ingress_unverified" &&
+			strings.Contains(err.Error(), "legacy raw backend inventory unavailable") &&
+			err4 == nil && strictEmptyLegacyRawPolicy(legacy4) &&
+			errors.As(err6, &unavailable) && unavailable.ExitCode() == 3 &&
+			len(legacy6) < 512 && strings.Contains(string(legacy6), "can't initialize ip6tables table `raw': Table does not exist")
+		if knownMissing {
+			// The known nft raw test fixture is still present. Refusing the
+			// missing *legacy* backend must not be interpreted as an empty
+			// legacy ruleset or an authorization to stage ingress.
+			if _, e := newHostIngressStage("scing0", 60); ErrorCode(e) != "host_ingress_unverified" ||
+				!strings.Contains(e.Error(), "legacy raw backend inventory unavailable") {
+				t.Fatalf("unsupported kernel unexpectedly admitted ingress: %v", e)
 			}
-			t.Logf("ISOLATED_LEGACY_RAW_DIAGNOSTIC backend=%s error=%v bytes=%q", backend, runErr, observed)
+			fmt.Println("INGRESS_UNSUPPORTED_LEGACY_IPV6_REFUSES_BEFORE_JOURNAL=PASS")
+			t.Skip("NOT_RUN: runner kernel lacks IPv6 legacy raw table; positive ingress kernel proof requires supported kernel")
+		}
+		// Print only bounded legacy diagnostics from the disposable fresh
+		// namespace. Never treat unknown output as proof of absence.
+		for _, item := range []struct {
+			name string
+			out  []byte
+			err  error
+		}{{"iptables-legacy", legacy4, err4}, {"ip6tables-legacy", legacy6, err6}} {
+			if len(item.out) > 1024 {
+				item.out = []byte("oversized legacy diagnostic refused")
+			}
+			t.Logf("ISOLATED_LEGACY_RAW_DIAGNOSTIC backend=%s error=%v bytes=%q", item.name, item.err, item.out)
 		}
 		t.Fatal(err)
 	}
