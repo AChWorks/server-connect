@@ -184,3 +184,53 @@ func runHostCaptureGateLocked(
 	}
 	return hostIngressBeforeDeadline(current.Ingress)
 }
+
+// recoverHostCaptureGateLocked is the bounded Off helper for an interrupted
+// ingress/grace prerequisite, not the complete native TUN recovery handler.
+// The enclosing independent executor must have already selected/validated
+// this exact full operation under the SAME manager lock. A failed barrier
+// lifetime cannot be replayed or promoted to "closed" from interface absence.
+// Recovery may remove only the journaled ingress table and may never invent
+// authority over an unowned sysctl. A partial/ambiguous restoration retains
+// the parent for another exact-operation recovery attempt.
+func recoverHostCaptureGateLocked(
+	store *activationJournalDir,
+	current *hostCaptureGateProgress,
+	persist hostCaptureGatePersist,
+) (HostIngressStageReceipt, error) {
+	if store == nil || current == nil || persist == nil {
+		return HostIngressStageReceipt{}, Fault("guard_unavailable", "single parent host capture recovery is required")
+	}
+	if err := validateHostCaptureGatePair(current.Ingress, current.Barrier); err != nil {
+		return HostIngressStageReceipt{}, err
+	}
+	if err := store.ensureLockIdentity(); err != nil {
+		return HostIngressStageReceipt{}, err
+	}
+	// A create_possible record is NOT a completed grace barrier. The
+	// absence check is only an ownership/release proof for the helper FD;
+	// no synchronized-capture receipt is minted during recovery.
+	if err := hostNetworkBarrierContext(current.Barrier); err != nil {
+		return HostIngressStageReceipt{}, err
+	}
+	if err := verifyHostNetworkBarrierReleased(current.Barrier); err != nil {
+		return HostIngressStageReceipt{}, err
+	}
+	result, err := recoverHostIngressStageWithPersistLocked(store, &current.Ingress, true,
+		hostCaptureIngressPersistence(current, persist))
+	if err != nil {
+		return result, err
+	}
+	if !result.RecoveryVerified || current.Ingress.Phase != "recovered" {
+		return result, ingressFault("host ingress recovery was not independently verified")
+	}
+	if err := verifyHostNetworkBarrierReleased(current.Barrier); err != nil {
+		result.RecoveryVerified = false
+		return result, err
+	}
+	if err := validateHostCaptureGatePair(current.Ingress, current.Barrier); err != nil {
+		result.RecoveryVerified = false
+		return result, err
+	}
+	return result, nil
+}

@@ -162,8 +162,7 @@ func TestHostCaptureGateOneJournalAndOwnedOffNative(t *testing.T) {
 		// The parent still owns only the ingress stage. The independent
 		// recovery adapter can release that exact stage while preserving
 		// foreign raw rules and the preexisting inherited-mark sysctl.
-		recovered, err := recoverHostIngressStageWithPersistLocked(store, &progress.Ingress, true,
-			hostCaptureIngressPersistence(&progress, persist))
+		recovered, err := recoverHostCaptureGateLocked(store, &progress, persist)
 		if err != nil || !recovered.RecoveryVerified || progress.Ingress.Phase != "recovered" {
 			return fmt.Errorf("owned ingress recovery not verified: %v", err)
 		}
@@ -175,6 +174,66 @@ func TestHostCaptureGateOneJournalAndOwnedOffNative(t *testing.T) {
 			return errors.New("owned recovery not durably recorded in same operation")
 		}
 		fmt.Println("HOST_CAPTURE_COMMON_JOURNAL_OWNED_OFF=PASS")
+
+		// Start a second strictly owned QA operation only AFTER the first
+		// operation is durably recovered and its ephemeral barrier absent.
+		// Simulate loss of the durable acknowledgement AFTER the kernel
+		// grace lifetime closes: neither a "closed" receipt nor active
+		// capture is allowed to be inferred from helper disappearance.
+		replacement, err := newHostCaptureGateProgress("scgate0", 90)
+		if err != nil {
+			return err
+		}
+		prior, priorID, err := get()
+		if err != nil || prior.Progress != progress || progress.Ingress.Phase != "recovered" {
+			return errors.New("prior capture gate is not verified Off")
+		}
+		if err := save(hostCaptureNativeTestParent{Version: 600, Progress: replacement}, priorID); err != nil {
+			return err
+		}
+		progress = replacement
+		closeReceiptFault := errors.New("synthetic final-FD receipt fsync failure")
+		faultReached := false
+		failAfterBarrierClose := func(previous, next hostCaptureGateProgress) error {
+			if previous.Barrier.Stage == "create_possible" && next.Barrier.Stage == "closed" {
+				faultReached = true
+				return closeReceiptFault
+			}
+			return persist(previous, next)
+		}
+		if err := runHostCaptureGateLocked(store, &progress, guard, failAfterBarrierClose); !errors.Is(err, closeReceiptFault) || !faultReached {
+			return fmt.Errorf("interrupted kernel grace receipt not detected: %v", err)
+		}
+		interrupted, _, err := get()
+		if err != nil || interrupted.Progress != progress ||
+			progress.Barrier.Stage != "create_possible" || progress.Ingress.NFTStage != "observed" {
+			return errors.New("partial ingress/grace operation was not durably retained")
+		}
+		if err := verifyHostNetworkBarrierReleased(progress.Barrier); err != nil {
+			return err
+		}
+		if observed, err := observeHostIngressNFT(progress.Ingress); err != nil || !observed.Present ||
+			!observed.Matches || observed.Handle != progress.Ingress.NFTHandle {
+			return errors.New("interrupted barrier did not retain exact owned ingress evidence")
+		}
+		if err := runHostCaptureGateLocked(store, &progress, guard, persist); err == nil {
+			return errors.New("interrupted barrier was replayed as fresh capture")
+		}
+		// The recovery helper must never upgrade create_possible into
+		// closed. Exact owned ingress removal is the only permitted effect.
+		recovered, err = recoverHostCaptureGateLocked(store, &progress, persist)
+		if err != nil || !recovered.RecoveryVerified || progress.Ingress.Phase != "recovered" ||
+			progress.Barrier.Stage != "create_possible" {
+			return fmt.Errorf("partial barrier recovery failed or fabricated completion: %v", err)
+		}
+		reconciled, _, err := get()
+		if err != nil || reconciled.Progress != progress {
+			return errors.New("interrupted barrier recovery is not durable in enclosing journal")
+		}
+		if observed, err := observeHostIngressNFT(progress.Ingress); err != nil || observed.Present {
+			return errors.New("interrupted ingress rollback retained owned nft effects")
+		}
+		fmt.Println("HOST_CAPTURE_FAILED_BARRIER_RECEIPT_OWNED_OFF=PASS")
 		return nil
 	})
 	if err != nil {
