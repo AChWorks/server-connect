@@ -214,6 +214,7 @@ func TestGeneralHostExistingUntrackedRepliesNeverAdmit(t *testing.T) {
 			r := assessSmartTUNHostBoundary(o, "ens3")
 			if r.HostedReplySessions != tc.status || r.ActivationReady || r.GeneralHostAdmitted ||
 				!hasBoundaryReason(r, "foreign_output_conntrack_opaque") ||
+				!hasBoundaryReason(r, "untracked_reply_socket_generation_not_reserved") ||
 				(tc.reason != "" && !hasBoundaryReason(r, tc.reason)) {
 				t.Fatalf("hosted reply risk lost: %+v", r)
 			}

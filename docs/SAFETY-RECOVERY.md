@@ -379,10 +379,15 @@ iptables-legacy raw backend and inspects Linux inet_diag socket generations,
 without exposing socket tuples. The snapshot is not a
 reservation and remains non-atomic: socket churn, new accepted SYNs, stale
 4-tuple exceptions and source-port-only bypasses can undermine safe hosting
-replies. A disposable kernel namespace proves both accepted-socket mark
-inheritance and the need for exact old-session handling; it does not permit
-treating the raw-table rules as a product-owned exception. Product Apply
-must not use this read-only result as a green activation gate.
+replies. A disposable kernel namespace proves accepted-socket mark
+inheritance, the partial usefulness of an exact old-session bypass, and a
+**negative counterexample**: after the old TCP socket closes, a new socket
+can reuse the same four-tuple and inherit that stale bypass without its
+kernel socket generation matching. Neither a port-wide nor a static
+four-tuple exception is safe for general-host Apply. Require a proven,
+independently guarded, race-safe generation-aware mechanism with owned
+rollback, or refuse hosts with unsupported NOTRACK reply handling.
+Product Apply must not use this read-only result as a green activation gate.
 
 #### Automatic-policy ownership limit
 

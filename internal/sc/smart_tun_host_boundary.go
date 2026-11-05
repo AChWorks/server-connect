@@ -235,6 +235,10 @@ func assessSmartTUNHostBoundary(o smartTUNHostBoundaryObservations, expectedUnde
 		if err == nil {
 			if risk.OpaqueOutputCT {
 				add("foreign_output_conntrack_opaque")
+				// Even a zero-match socket snapshot cannot grant safety:
+				// an old four-tuple can be reused by a new socket generation.
+				// A static tuple bypass would then silently exempt new traffic.
+				add("untracked_reply_socket_generation_not_reserved")
 				if o.hostedReplyErr == nil && o.hostedReplySessions != "" {
 					r.HostedReplySessions = o.hostedReplySessions
 				}

@@ -11,6 +11,7 @@ unshare -n /usr/bin/python3 -B - <<'PY'
 import json
 import os
 import socket
+import struct
 import subprocess
 import sys
 
@@ -109,7 +110,29 @@ assert count('capture') > 0 and count('guard') > 0
 print('NOTRACK_UNPROTECTED_REPLY_FAIL_CLOSED=PASS', flush=True)
 # An already-marked accepted socket continues to receive its replies.
 exchange(new_client, new_accepted, b'ok')
-for conn in (old_client, old_accepted, new_client, new_accepted, other_client, other_accepted, server):
+# Negative: even an exact 4-tuple cannot identify the ORIGINAL socket
+# generation. Close the old session with RST, bind a new connection to the
+# same client port and demonstrate that the stale tuple rule still bypasses
+# capture. This must stay a failure witness, NEVER an Apply workaround.
+linger_rst = struct.pack('ii', 1, 0)
+old_accepted.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, linger_rst)
+old_client.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, linger_rst)
+old_accepted.close()
+old_client.close()
+reused_client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+reused_client.settimeout(1.2)
+reused_client.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+reused_client.bind(('127.0.0.1', old_peer_port))
+reused_client.connect(('127.0.0.1', 28988))
+reused_accepted, reused_peer = server.accept()
+reused_accepted.settimeout(1.2)
+assert reused_peer[1] == old_peer_port
+assert reused_accepted.getsockopt(socket.SOL_SOCKET, socket.SO_MARK) == 0
+prior_old_rule_packets = count('old_session')
+exchange(reused_client, reused_accepted, b'reused')
+assert count('old_session') > prior_old_rule_packets, 'stale tuple did not match reused socket'
+print('NOTRACK_STALE_SOCKET_TUPLE_REUSE_BYPASS=REPRODUCED', flush=True)
+for conn in (reused_client, reused_accepted, new_client, new_accepted, other_client, other_accepted, server):
     conn.close()
 print('NOTRACK_TEST_NETNS_EXIT_WITHOUT_HOST_MUTATION=PASS', flush=True)
 PY
