@@ -386,12 +386,26 @@ func hostSocketBarrierEmptyPing(raw []byte) error {
 	lines := strings.Split(strings.TrimSpace(string(raw)), "\n")
 	expected := []string{"sl", "local_address", "rem_address", "st", "tx_queue", "rx_queue", "tr", "tm->when", "retrnsmt", "uid", "timeout", "inode"}
 	header := strings.Fields(lines[0])
-	if len(header) != len(expected) {
+	// Linux kernels differ in /proc/net/icmp{,6} tail columns. Debian 13
+	// Linux 6.12 exposes ref/pointer/drops while older kernels omit them.
+	// Accept only these two exact layouts: unexpected columns remain refusal,
+	// and any nonempty socket row still blocks the reserved-mark claim.
+	if len(header) != len(expected) && len(header) != len(expected)+3 {
 		return ingressFault("ping socket inventory header unsupported")
 	}
-	for i, field := range header {
+	for i, field := range header[:len(expected)] {
+		if i == 2 && (field == "rem_address" || field == "remote_address") {
+			continue // icmp6 uses remote_address in Linux 6.12
+		}
 		if field != expected[i] {
 			return ingressFault("ping socket inventory header unsupported")
+		}
+	}
+	if len(header) == len(expected)+3 {
+		for i, value := range []string{"ref", "pointer", "drops"} {
+			if header[len(expected)+i] != value {
+				return ingressFault("ping socket inventory header unsupported")
+			}
 		}
 	}
 	for _, line := range lines[1:] {

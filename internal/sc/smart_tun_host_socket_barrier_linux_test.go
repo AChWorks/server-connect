@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net"
 	"os"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -312,10 +313,19 @@ func TestHostSocketBarrierOnlyExplicitSuccessfulCompletionCanReturnNil(t *testin
 }
 func TestHostSocketBarrierPingAndPortInventoriesFailClosed(t *testing.T) {
 	header := "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n"
-	if err := hostSocketBarrierEmptyPing([]byte(header)); err != nil {
-		t.Fatal(err)
+	modern := strings.TrimSuffix(header, "\n") + " ref pointer drops\n"
+	modernIPv6 := strings.Replace(modern, "rem_address", "remote_address", 1)
+	for _, raw := range []string{header, modern, modernIPv6} {
+		if err := hostSocketBarrierEmptyPing([]byte(raw)); err != nil {
+			t.Fatalf("supported kernel schema rejected: %v", err)
+		}
 	}
-	for _, raw := range []string{"", "unexpected header\n", header + " 0: active socket\n", header + "\x00"} {
+	for _, raw := range []string{"", "unexpected header\n", header + " 0: active socket\n", header + "\x00",
+		modern + " 0: active socket\n", modernIPv6 + " 0: active socket\n",
+		strings.Replace(modern, "ref pointer drops", "ref missing drops", 1),
+		strings.Replace(modern, "ref pointer drops", "ref pointer drops surprise", 1),
+		strings.Replace(modern, "ref pointer drops", "ref pointer", 1),
+		strings.Replace(modern, "local_address", "different", 1)} {
 		if err := hostSocketBarrierEmptyPing([]byte(raw)); err == nil {
 			t.Fatal("unverified ping inventory accepted")
 		}
