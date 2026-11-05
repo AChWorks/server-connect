@@ -102,6 +102,35 @@ fail_apt() {
   return 1
 }
 
+# QA-only, bounded method/version diagnostics on this exact error class.
+# Names from the disposable guest's native APT method directory and sanitized
+# tool version banners contain no origin URL, proxy credentials or APT policy.
+# Do not print the raw manager/apt log, which can contain sensitive settings.
+diagnose_apt_method_inventory() {
+  python3 - <<'PY'
+from pathlib import Path
+import re, subprocess
+root = Path("/usr/lib/apt/methods")
+try:
+    names = sorted(p.name for p in root.iterdir())
+    if len(names) > 64 or any(not re.fullmatch(r"[a-zA-Z0-9+._-]{1,64}", n) for n in names):
+        raise ValueError("noncanonical or excessive method entries")
+    print("APT_QA_METHOD_NAMES=" + ",".join(names))
+except (OSError, ValueError):
+    print("APT_QA_METHOD_NAMES=unavailable")
+for name, path in (("get", "/usr/bin/apt-get"), ("config", "/usr/bin/apt-config")):
+    try:
+        result = subprocess.run([path, "--version"], timeout=3, capture_output=True,
+                                text=True, env={"LC_ALL": "C", "PATH": "/usr/sbin:/usr/bin:/sbin:/bin"})
+        first = result.stdout.splitlines()[0] if result.returncode == 0 and result.stdout else ""
+        if not re.fullmatch(r"apt [0-9]+(?:\.[0-9]+){1,4}(?:[+~._a-zA-Z0-9-]{0,24})? \(amd64\)", first):
+            first = "unavailable"
+    except (OSError, subprocess.TimeoutExpired):
+        first = "unavailable"
+    print("APT_QA_" + name.upper() + "_VERSION=" + first)
+PY
+}
+
 # Publish only fixed labels from complete known product error lines. Never
 # echo the raw child log, effective APT configuration or proxy credentials.
 classify_preflight_failure() {
@@ -110,6 +139,9 @@ classify_preflight_failure() {
     while IFS='|' read -r message label; do
       if grep -Fx "$message" "$evidence" >/dev/null; then
         printf 'INSTALLED_APT_FAILURE_CAUSE=%s\n' "$label" >&2
+        if [ "$label" = METHOD_INVENTORY_REFUSAL ]; then
+          diagnose_apt_method_inventory >&2 || echo 'APT_QA_METHOD_DIAGNOSTIC=unavailable' >&2
+        fi
         return 0
       fi
     done <<'SAFE_APT_ERRORS'

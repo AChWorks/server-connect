@@ -333,7 +333,7 @@ for native_case in \
     SC_TEST_HOST_BARRIER_NATIVE=isolated-netns \
       SC_TEST_HOST_SOCKET_BARRIER_NATIVE=isolated-netns \
       SC_TEST_HOST_INGRESS_NATIVE=isolated-netns \
-      /root/qa-native-nft-cas-test -test.run="^1$" -test.v -test.timeout=120s
+      /root/qa-native-nft-cas-test -test.run="^${1}$" -test.v -test.timeout=120s
   ' sh "$native_case" | tee -a "$native_host_barrier_log"
 done
 for marker in \
