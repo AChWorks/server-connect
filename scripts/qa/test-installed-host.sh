@@ -314,26 +314,39 @@ native_nft_after=$(docker exec "$container" /usr/sbin/nft -j list ruleset)
   echo 'NATIVE_NFT_CAS_INDEPENDENT_CLEANUP=FAIL (nftables drift)' >&2
   exit 1
 }
-# The native socket filter and ephemeral final-FD grace barrier need real
-# kernel semantics, not merely mocked netlink bytes. A fresh secondary
-# namespace inside the already disconnected guest preserves its networking,
-# foreign services and all runner resources. Explicit opt-ins are scoped to
-# these two bounded tests only; the guest's PID 1 netns must differ.
+# The native socket filter, final-FD grace barrier and ingress stage need
+# real kernel evidence. Each test gets a distinct ephemeral network namespace
+# INSIDE the disconnected guest, not its PID 1 netns. Sharing one netns
+# would leave marked TCP TIME_WAIT generations from an earlier test, correctly
+# blocking a later admission; combining these cases would be a false negative.
+# No runner/host routes, nft tables, sysctls or third-party sockets are owned.
 native_host_barrier_log="$scratch/native-host-barrier.log"
-docker exec "$container" /usr/bin/unshare --net /bin/sh -c '
-  set -eu
-  test "$(readlink /proc/self/ns/net)" != "$(readlink /proc/1/ns/net)"
-  /sbin/ip link set lo up
-  SC_TEST_HOST_BARRIER_NATIVE=isolated-netns \
-    SC_TEST_HOST_SOCKET_BARRIER_NATIVE=isolated-netns \
-    /root/qa-native-nft-cas-test \
-      -test.run="^(TestHostNetworkBarrierNativeLifetime|TestHostSocketBarrierNativeFilterSemantics)$" \
-      -test.v -test.timeout=90s
-' | tee "$native_host_barrier_log"
+: > "$native_host_barrier_log"
+for native_case in \
+  TestHostNetworkBarrierNativeLifetime \
+  TestHostSocketBarrierNativeFilterSemantics \
+  TestHostIngressNativeStageAndIndependentRollback; do
+  docker exec "$container" /usr/bin/unshare --net /bin/sh -c '
+    set -eu
+    test "$(readlink /proc/self/ns/net)" != "$(readlink /proc/1/ns/net)"
+    /sbin/ip link set lo up
+    SC_TEST_HOST_BARRIER_NATIVE=isolated-netns \
+      SC_TEST_HOST_SOCKET_BARRIER_NATIVE=isolated-netns \
+      SC_TEST_HOST_INGRESS_NATIVE=isolated-netns \
+      /root/qa-native-nft-cas-test -test.run="^1$" -test.v -test.timeout=120s
+  ' sh "$native_case" | tee -a "$native_host_barrier_log"
+done
 for marker in \
   HOST_BARRIER_FINAL_FD_RELEASE_AND_OWNED_ABSENCE \
   HOST_BARRIER_DUAL_STACK_FIB_RPDB_PRESERVED \
-  HOST_SOCKET_BARRIER_REAL_KERNEL_MARK_FILTER; do
+  HOST_SOCKET_BARRIER_REAL_KERNEL_MARK_FILTER \
+  INGRESS_KERNEL_STAGE_OWNED \
+  INGRESS_IPV4_IPV6_SYNCOOKIE_MARKS \
+  INGRESS_GENERATION_DRAIN_SNAPSHOT \
+  INGRESS_KERNEL_FILTERED_QUIESCENCE \
+  INGRESS_FOREIGN_LISTENER_MARK_REFUSAL \
+  INGRESS_KERNEL_NEGATIVE_PRESERVATION \
+  INGRESS_FOREIGN_RAW_FIB_RPDB_PRESERVED; do
   grep -F "$marker=PASS" "$native_host_barrier_log" >/dev/null
 done
 assert_network_unchanged native-host-barrier "$native_nft_network_before"
