@@ -3,6 +3,7 @@
 package sc
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -10,6 +11,7 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 )
 
 // Native QA uses the SAME strict v6 journal and full-parent CAS as the
@@ -214,18 +216,22 @@ func TestHostCaptureGateOneJournalAndOwnedOffNative(t *testing.T) {
 		if err != nil || selected.version != hostCaptureJournalVersion || selected.capture.Progress != progress {
 			return fmt.Errorf("installed independent recovery selection lost exact operation: %v", err)
 		}
-		record = selected.capture
-		progress = record.Progress
-		persist = hostCaptureJournalPersist(store, &record)
-		recovered, err = recoverHostCaptureGateLocked(store, &progress, persist)
-		if err != nil || !recovered.RecoveryVerified || progress.Ingress.Phase != "recovered" ||
-			progress.Barrier.Stage != "create_possible" {
-			return fmt.Errorf("partial barrier recovery failed or fabricated completion: %v", err)
+		// Call the EXACT dispatcher used by the installed oneshot, not
+		// a test-local invocation of a narrower native cleanup helper.
+		independentReceipt, err := recoverSelectedTrialLocked(store, selected, "", "")
+		if err != nil || !independentReceipt.RecoveryVerified ||
+			independentReceipt.Phase != "recovered" ||
+			independentReceipt.OperationID != progress.Ingress.OperationID {
+			return fmt.Errorf("independent v6 dispatcher failed owned recovery: %v", err)
 		}
 		reconciled, _, err := get()
-		if err != nil || reconciled.Progress != progress {
-			return errors.New("interrupted barrier recovery is not durable in enclosing journal")
+		if err != nil || reconciled.Progress.Ingress.Phase != "recovered" ||
+			reconciled.Progress.Barrier.Stage != "create_possible" {
+			return errors.New("independent dispatcher lost journal progress or fabricated barrier receipt")
 		}
+		record = reconciled
+		progress = record.Progress
+		persist = hostCaptureJournalPersist(store, &record)
 		if observed, err := observeHostIngressNFT(progress.Ingress); err != nil || observed.Present {
 			return errors.New("interrupted ingress rollback retained owned nft effects")
 		}
@@ -306,22 +312,79 @@ func TestHostCaptureGateOneJournalAndOwnedOffNative(t *testing.T) {
 		}
 
 		// With independent proof that the helper and table are absent and
-		// the original sysctl was preenabled, only journal progress changes.
-		recovered, err = recoverHostCaptureGateLocked(store, &progress, persist)
-		if err != nil || !recovered.RecoveryVerified || progress.Ingress.Phase != "recovered" ||
-			progress.Barrier.Stage != "create_possible" {
-			return fmt.Errorf("absence-only old-boot Off not verified: %v", err)
+		// the original sysctl was preenabled, the actual installed
+		// dispatcher must perform JOURNAL-ONLY recovery on a fresh read.
+		oldBootSelected, err := selectTrialRecoveryLocked(store, "", "")
+		if err != nil || oldBootSelected.version != hostCaptureJournalVersion ||
+			oldBootSelected.capture.Progress != progress {
+			return fmt.Errorf("old-boot recovery selector lost complete journal: %v", err)
+		}
+		independentReceipt, err = recoverSelectedTrialLocked(store, oldBootSelected, "", "")
+		if err != nil || !independentReceipt.RecoveryVerified ||
+			independentReceipt.Phase != "recovered" ||
+			independentReceipt.OperationID != progress.Ingress.OperationID {
+			return fmt.Errorf("absence-only old-boot dispatcher did not recover: %v", err)
 		}
 		finalRecord, _, err := get()
-		if err != nil || finalRecord.Progress != progress {
+		if err != nil || finalRecord.Progress.Ingress.Phase != "recovered" ||
+			finalRecord.Progress.Barrier.Stage != "create_possible" {
 			return errors.New("old-boot absence-only recovery not durable")
 		}
+		progress, record = finalRecord.Progress, finalRecord
 		fmt.Println("HOST_CAPTURE_OLD_BOOT_NO_FOREIGN_MUTATION_AND_OWNED_OFF=PASS")
 		return nil
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
+
+	// A second fresh v6 operation is owned by a real subprocess, which is
+	// deliberately SIGKILLed AFTER its first kernel effect and durable
+	// parent receipt. Recovery runs in the surviving parent under a NEW
+	// activation lock and selection, not the initiator's memory.
+	crashDir := privateJournalTempDir(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 35*time.Second)
+	defer cancel()
+	child := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestHostCaptureNativeCrashHelper$", "-test.v", "-test.timeout=30s")
+	child.Env = append(os.Environ(), "SC_TEST_HOST_CAPTURE_CRASH_HELPER=isolated-netns", "SC_TEST_HOST_CAPTURE_CRASH_DIR="+crashDir)
+	childOut, childErr := child.CombinedOutput()
+	if ctx.Err() != nil {
+		t.Fatalf("native crash subprocess exceeded bounded deadline: %v", ctx.Err())
+	}
+	var killed *exec.ExitError
+	if !errors.As(childErr, &killed) || !killed.ProcessState.Sys().(syscall.WaitStatus).Signaled() ||
+		killed.ProcessState.Sys().(syscall.WaitStatus).Signal() != syscall.SIGKILL ||
+		!strings.Contains(string(childOut), "HOST_CAPTURE_CHILD_DURABLE_INGRESS_EFFECT_BEFORE_SIGKILL=PASS") {
+		t.Fatalf("native crash subprocess was not exact post-effect SIGKILL: err=%v output=%q", childErr, childOut)
+	}
+	crashed := New(crashDir, DefaultCore, DefaultPort)
+	// This is the same typed handler as the installed systemd independent
+	// recovery role, selected afresh inside the shared Manager lock.
+	result, err := crashed.recoverGuardedTrialWithHandler("", "", func(store *activationJournalDir, selected trialRecoverySelection) (TrialReceipt, error) {
+		if selected.version != hostCaptureJournalVersion || selected.capture.Progress.Ingress.NFTStage != "observed" ||
+			selected.capture.Progress.Barrier.Stage != "planned" {
+			return TrialReceipt{}, errors.New("killed process did not leave a strict v6 owned operation")
+		}
+		return recoverSelectedTrialLocked(store, selected, "", "")
+	})
+	if err != nil || !result.RecoveryVerified || result.Phase != "recovered" {
+		t.Fatalf("surviving independent dispatcher could not restore exact owned ingress: receipt=%+v err=%v", result, err)
+	}
+	err = crashed.withActivationJournalLock(syscall.Fsync, func(store *activationJournalDir) error {
+		record, _, err := loadHostCaptureJournal(store)
+		if err != nil || record.Progress.Ingress.Phase != "recovered" ||
+			record.Progress.Ingress.NFTStage != "removed" || record.Progress.Barrier.Stage != "planned" {
+			return errors.New("SIGKILL recovery did not persist complete owned Off without fabricated barrier")
+		}
+		if observed, err := observeHostIngressNFT(record.Progress.Ingress); err != nil || observed.Present {
+			return errors.New("SIGKILL recovery retained owned ingress table")
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fmt.Println("HOST_CAPTURE_REAL_SIGKILL_INDEPENDENT_DISPATCH_OWNED_OFF=PASS")
 	if after := routesAndRules(); after != baseline {
 		t.Fatal("host capture gate modified foreign route/rule state")
 	}
@@ -332,4 +395,50 @@ func TestHostCaptureGateOneJournalAndOwnedOffNative(t *testing.T) {
 		t.Fatal("preexisting mark-inheritance sysctl was changed")
 	}
 	t.Log("HOST_CAPTURE_COMMON_JOURNAL_FOREIGN_NETWORK_PRESERVED=PASS")
+}
+
+// TestHostCaptureNativeCrashHelper is a separate process that is intentionally
+// killed AFTER the v6 parent durably owns an ingress NFT effect. Its default
+// invocation is inert, and the root scenario is restricted to a fresh netns.
+// It never attempts a TUN/core/host capture Apply.
+func TestHostCaptureNativeCrashHelper(t *testing.T) {
+	if os.Getenv("SC_TEST_HOST_CAPTURE_CRASH_HELPER") != "isolated-netns" {
+		t.Skip("NOT_RUN: crash subprocess requires explicit isolated-netns QA")
+	}
+	requireNativeQANetworkNamespace(t)
+	dir := os.Getenv("SC_TEST_HOST_CAPTURE_CRASH_DIR")
+	if dir == "" || os.Getppid() == 1 {
+		t.Fatal("isolated parent-owned journal or parent process missing")
+	}
+	m := New(dir, DefaultCore, DefaultPort)
+	progress, err := newHostCaptureGateProgress("scgate0", 90)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = m.withActivationJournalLock(syscall.Fsync, func(store *activationJournalDir) error {
+		record := hostCaptureJournal{Version: hostCaptureJournalVersion, Intent: hostCaptureJournalIntent, Progress: progress}
+		if err := writeHostCaptureJournal(store, record, nil); err != nil {
+			return err
+		}
+		guard := func() error {
+			if os.Getppid() == 1 {
+				return errors.New("isolated QA parent watchdog disappeared")
+			}
+			return nil
+		}
+		return applyHostIngressStageWithPersistLocked(store, &progress.Ingress, guard,
+			hostCaptureIngressPersistence(&record.Progress, hostCaptureJournalPersist(store, &record)))
+	})
+	if err != nil || progress.Ingress.NFTStage != "observed" {
+		t.Fatalf("crash child failed to stage owned ingress: %v", err)
+	}
+	if result, err := observeHostIngressNFT(progress.Ingress); err != nil || !result.Present ||
+		result.Handle != progress.Ingress.NFTHandle || !result.Matches {
+		t.Fatalf("crash child did not verify exact owned nft effect: %v", err)
+	}
+	fmt.Println("HOST_CAPTURE_CHILD_DURABLE_INGRESS_EFFECT_BEFORE_SIGKILL=PASS")
+	if err := syscall.Kill(os.Getpid(), syscall.SIGKILL); err != nil {
+		t.Fatalf("expected SIGKILL failed: %v", err)
+	}
+	t.Fatal("SIGKILL unexpectedly returned")
 }

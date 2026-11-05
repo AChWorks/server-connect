@@ -396,3 +396,69 @@ func TestSupervisedVerifiedAttachRemainsDurableWithoutLateLeaseRenewal(t *testin
 		t.Fatal(err)
 	}
 }
+
+// Confirmation must never silently adopt a changed journal merely to avoid
+// a transient Health Executor race. Only the two legitimate unconfirmed
+// health publication shapes can trigger a complete fresh confirmation pass.
+func TestSupervisedConfirmationOnlyRetriesProvenHealthPublication(t *testing.T) {
+	before := supervisedExample(t, false)
+	heartbeat := cloneSmartTUNTrial(before)
+	heartbeat.Supervised.Generation++
+	heartbeat.Supervised.HeartbeatMS += 100
+	heartbeat.Supervised.LeaseDeadlineMS += 100
+	if err := validateSmartTUNTrial(heartbeat); err != nil {
+		t.Fatal(err)
+	}
+	round, stop, reconnect := advanceSupervisedHealth(before, healthySupervisedEvidence(), 100200)
+	if stop != "" || reconnect {
+		t.Fatal("healthy unconfirmed publication unexpectedly stopped or reconnected")
+	}
+	if err := validateSmartTUNTrial(round); err != nil {
+		t.Fatal(err)
+	}
+	if !smartTUNConfirmHealthOnlyRefresh(before, heartbeat) ||
+		!smartTUNConfirmHealthOnlyRefresh(before, round) {
+		t.Fatal("confirmed unmodified heartbeat/healthy round cannot restart fresh confirmation")
+	}
+	if smartTUNConfirmHealthOnlyRefresh(before, before) {
+		t.Fatal("unchanged journal is not a retry event")
+	}
+	for _, tc := range []struct {
+		name   string
+		source smartTUNTrialJournal
+		change func(*smartTUNTrialJournal)
+	}{
+		{"policy", round, func(r *smartTUNTrialJournal) { r.ConfigSHA256 = strings.Repeat("3", 64) }},
+		{"native tun index", round, func(r *smartTUNTrialJournal) { r.Native.LinkIndex++ }},
+		{"management identity", round, func(r *smartTUNTrialJournal) { r.ManagementPeerIP = "203.0.113.1" }},
+		{"challenge", round, func(r *smartTUNTrialJournal) { r.Supervised.ChallengeSHA256 = strings.Repeat("4", 64) }},
+		{"one-use confirmation", round, func(r *smartTUNTrialJournal) { r.Supervised.Confirmed = true }},
+		{"health authority", round, func(r *smartTUNTrialJournal) { r.Supervised.Roles[0].UnitIno++ }},
+		{"core identity", round, func(r *smartTUNTrialJournal) { r.Supervised.CorePID++ }},
+		{"attempt budget", round, func(r *smartTUNTrialJournal) { r.Supervised.Attempts++ }},
+		{"recovery deadline", round, func(r *smartTUNTrialJournal) { r.Supervised.RecoveryDeadlineMS++ }},
+		{"failed paths", round, func(r *smartTUNTrialJournal) { r.Supervised.Evidence.VPNHealthy = false }},
+		{"failure count", round, func(r *smartTUNTrialJournal) { r.Supervised.Failures++ }},
+		{"state degraded", round, func(r *smartTUNTrialJournal) { r.Supervised.State = "degraded" }},
+		{"out of order heartbeat", heartbeat, func(r *smartTUNTrialJournal) {
+			r.Supervised.HeartbeatMS = before.Supervised.HeartbeatMS - 10
+			r.Supervised.LeaseDeadlineMS = r.Supervised.HeartbeatMS + smartTUNHealthLeaseMS
+		}},
+		{"unsupported generation leap", round, func(r *smartTUNTrialJournal) { r.Supervised.Generation += 4 }},
+		{"too many rounds", round, func(r *smartTUNTrialJournal) { r.Supervised.Rounds += 2 }},
+		{"fresh lease only without generation", heartbeat, func(r *smartTUNTrialJournal) { r.Supervised.Generation = before.Supervised.Generation }},
+		{"heartbeat changed health outcome", heartbeat, func(r *smartTUNTrialJournal) { r.Supervised.Reason = "selected_path_healthy" }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			changed := cloneSmartTUNTrial(tc.source)
+			tc.change(&changed)
+			if smartTUNConfirmHealthOnlyRefresh(before, changed) {
+				t.Fatal("different operation, authority or health outcome was treated as a harmless supervisor renewal")
+			}
+		})
+	}
+	if before.Supervised.Generation != 1 || before.Supervised.HeartbeatMS != 100000 ||
+		before.Supervised.Rounds != 0 || before.Supervised.Reason != "" {
+		t.Fatal("comparison aliased or modified original confirmation parent")
+	}
+}

@@ -593,7 +593,62 @@ func supervisedKillValid(point string, confirm bool) bool {
 	return false
 }
 
+// A concurrently running trusted Health Executor can renew an *unconfirmed*
+// operation's heartbeat while the CLI briefly releases the journal lock for
+// its independent VPN probe. Keep the complete old-parent CAS unchanged:
+// only a proven health-only update may restart the ENTIRE authentication,
+// management-session and selected-path measurement sequence. Never accept a
+// stale measurement or carry a prior SSH proof across attempts.
+var errSmartTUNConfirmHealthRefresh = errors.New("supervised health renewed during confirmation")
+
+func smartTUNConfirmHealthOnlyRefresh(before, after smartTUNTrialJournal) bool {
+	if before.Supervised == nil || after.Supervised == nil ||
+		before.Phase != "trial_pending" || after.Phase != "trial_pending" ||
+		before.Supervised.Version != smartTUNSupervisionVersion ||
+		after.Supervised.Version != smartTUNSupervisionVersion ||
+		before.Supervised.Confirmed || after.Supervised.Confirmed ||
+		before.Supervised.State != "awaiting_confirmation" ||
+		after.Supervised.State != "awaiting_confirmation" ||
+		after.Supervised.Generation <= before.Supervised.Generation ||
+		after.Supervised.Generation > before.Supervised.Generation+2 ||
+		after.Supervised.HeartbeatMS < before.Supervised.HeartbeatMS ||
+		after.Supervised.LeaseDeadlineMS < before.Supervised.LeaseDeadlineMS {
+		return false
+	}
+	rise := after.Supervised.Rounds - before.Supervised.Rounds
+	if after.Supervised.Rounds < before.Supervised.Rounds || rise > 1 {
+		return false
+	}
+	normalized := cloneSmartTUNTrial(before)
+	other := after.Supervised
+	s := normalized.Supervised
+	s.Generation = other.Generation
+	s.HeartbeatMS, s.LeaseDeadlineMS = other.HeartbeatMS, other.LeaseDeadlineMS
+	if rise == 1 {
+		if !other.Evidence.UnderlayHealthy || !other.Evidence.VPNHealthy ||
+			other.Reason != "selected_path_healthy" || other.Failures != 0 ||
+			other.RecoveryDeadlineMS != 0 || other.LastProbeMS < s.LastProbeMS {
+			return false
+		}
+		s.Rounds, s.Evidence, s.LastProbeMS, s.NextProbeMS, s.Reason =
+			other.Rounds, other.Evidence, other.LastProbeMS, other.NextProbeMS, other.Reason
+	}
+	return sameSmartTUNTrial(normalized, after)
+}
+
 func (m *Manager) ConfirmSmartTUNTrial(op string, revision uint64, challenge string, qaKill string) (SmartTUNTrialReceipt, error) {
+	// One full fresh retry is sufficient for a bounded publication race;
+	// never loop against a busy or malicious journal writer.
+	for attempt := 0; attempt < 2; attempt++ {
+		receipt, err := m.confirmSmartTUNTrialOnce(op, revision, challenge, qaKill)
+		if !errors.Is(err, errSmartTUNConfirmHealthRefresh) {
+			return receipt, err
+		}
+	}
+	return SmartTUNTrialReceipt{}, Fault("confirmation_unavailable", "supervisor renewed during fresh confirmation; retry only while original authorization is valid")
+}
+
+func (m *Manager) confirmSmartTUNTrialOnce(op string, revision uint64, challenge string, qaKill string) (SmartTUNTrialReceipt, error) {
 	if m.Dir != DefaultDir || m.Core != DefaultCore || !supervisedKillValid(qaKill, true) {
 		return SmartTUNTrialReceipt{}, Fault("invalid_arguments", "installed supervised confirmation and supported kill boundary required")
 	}
@@ -659,6 +714,16 @@ func (m *Manager) ConfirmSmartTUNTrial(op string, revision uint64, challenge str
 	}
 	err = m.withActivationJournalLock(syscall.Fsync, func(store *activationJournalDir) error {
 		if _, err := reloadSmartTUNTrialLocked(store, snapshot); err != nil {
+			if ErrorCode(err) == "activation_journal_conflict" {
+				// Within the same manager lock, prove that the only competing
+				// publication was a normal unconfirmed health renewal. A new
+				// operation, altered policy, core/SSH generation, recovery
+				// transition or foreign journal replacement remains a conflict.
+				fresh, _, readErr := loadSmartTUNTrialLocked(store)
+				if readErr == nil && smartTUNConfirmHealthOnlyRefresh(snapshot, fresh) {
+					return errSmartTUNConfirmHealthRefresh
+				}
+			}
 			return err
 		}
 		boot, err := trialBootIdentity()

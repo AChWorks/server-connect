@@ -777,30 +777,38 @@ func (m *Manager) RecoverGuardedRuleTrial(qaCrashPoint, qaFaultPoint string) (Tr
 	}
 	return m.recoverGuardedTrialWithHandler(qaCrashPoint, qaFaultPoint,
 		func(store *activationJournalDir, selected trialRecoverySelection) (TrialReceipt, error) {
-			switch selected.version {
-			case 0:
-				return TrialReceipt{Phase: "absent", ExperimentOnly: true}, nil
-			case 1:
-				return TrialReceipt{Phase: "unarmed_prepared", ExperimentOnly: true}, nil
-			case smartTUNTrialVersion:
-				return recoverSmartTUNTrialJournalLocked(store, selected.identity, selected.tun)
-			case hostIngressStageVersion:
-				result, err := recoverHostIngressStageLocked(store, &selected.ingress, false)
-				return TrialReceipt{OperationID: result.OperationID, Phase: result.Phase,
-					ExperimentOnly: true, GuardScheduled: result.GuardScheduled,
-					RecoveryVerified: result.RecoveryVerified}, err
-			case hostCaptureJournalVersion:
-				record := selected.capture
-				result, err := recoverHostCaptureGateLocked(store, &record.Progress,
-					hostCaptureJournalPersist(store, &record))
-				return TrialReceipt{OperationID: result.OperationID, Phase: result.Phase,
-					ExperimentOnly: true, RecoveryVerified: result.RecoveryVerified}, err
-			case 2, 3:
-				return recoverLegacyGuardedTrialLocked(store, selected.identity, selected.trial, qaCrashPoint, qaFaultPoint)
-			default:
-				return TrialReceipt{}, activationJournalError("unsupported recovery journal selection")
-			}
+			return recoverSelectedTrialLocked(store, selected, qaCrashPoint, qaFaultPoint)
 		})
+}
+
+// The installed independent recovery oneshot and Native QA must dispatch
+// through the SAME typed handler after selecting a strict journal under
+// the uninterrupted activation lock. No fresh selection, new lock, network
+// effect, or reinterpreted legacy intent may be inserted between these steps.
+func recoverSelectedTrialLocked(store *activationJournalDir, selected trialRecoverySelection, qaCrashPoint, qaFaultPoint string) (TrialReceipt, error) {
+	switch selected.version {
+	case 0:
+		return TrialReceipt{Phase: "absent", ExperimentOnly: true}, nil
+	case 1:
+		return TrialReceipt{Phase: "unarmed_prepared", ExperimentOnly: true}, nil
+	case smartTUNTrialVersion:
+		return recoverSmartTUNTrialJournalLocked(store, selected.identity, selected.tun)
+	case hostIngressStageVersion:
+		result, err := recoverHostIngressStageLocked(store, &selected.ingress, false)
+		return TrialReceipt{OperationID: result.OperationID, Phase: result.Phase,
+			ExperimentOnly: true, GuardScheduled: result.GuardScheduled,
+			RecoveryVerified: result.RecoveryVerified}, err
+	case hostCaptureJournalVersion:
+		record := selected.capture
+		result, err := recoverHostCaptureGateLocked(store, &record.Progress,
+			hostCaptureJournalPersist(store, &record))
+		return TrialReceipt{OperationID: result.OperationID, Phase: result.Phase,
+			ExperimentOnly: true, RecoveryVerified: result.RecoveryVerified}, err
+	case 2, 3:
+		return recoverLegacyGuardedTrialLocked(store, selected.identity, selected.trial, qaCrashPoint, qaFaultPoint)
+	default:
+		return TrialReceipt{}, activationJournalError("unsupported recovery journal selection")
+	}
 }
 
 // Selection and its selected handler share one uninterrupted manager lock.
