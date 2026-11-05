@@ -784,6 +784,11 @@ func (m *Manager) RecoverGuardedRuleTrial(qaCrashPoint, qaFaultPoint string) (Tr
 				return TrialReceipt{Phase: "unarmed_prepared", ExperimentOnly: true}, nil
 			case smartTUNTrialVersion:
 				return recoverSmartTUNTrialJournalLocked(store, selected.identity, selected.tun)
+			case hostIngressStageVersion:
+				result, err := recoverHostIngressStageLocked(store, &selected.ingress, false)
+				return TrialReceipt{OperationID: result.OperationID, Phase: result.Phase,
+					ExperimentOnly: true, GuardScheduled: result.GuardScheduled,
+					RecoveryVerified: result.RecoveryVerified}, err
 			case 2, 3:
 				return recoverLegacyGuardedTrialLocked(store, selected.identity, selected.trial, qaCrashPoint, qaFaultPoint)
 			default:
@@ -801,6 +806,7 @@ type trialRecoverySelection struct {
 	identity activationJournalFileIdentity
 	trial    trialJournal
 	tun      smartTUNTrialJournal
+	ingress  hostIngressStage
 }
 
 func (m *Manager) recoverGuardedTrialWithHandler(qaCrashPoint, qaFaultPoint string,
@@ -833,6 +839,16 @@ func selectTrialRecoveryLocked(store *activationJournalDir, qaCrashPoint, qaFaul
 	}
 	var marker struct {
 		Version int `json:"version"`
+	}
+	if err := json.Unmarshal(raw, &marker); err == nil && marker.Version == hostIngressStageVersion {
+		if qaCrashPoint != "" || qaFaultPoint != "" {
+			return trialRecoverySelection{}, Fault("invalid_arguments", "legacy fault flags do not apply to ingress staging")
+		}
+		record, err := decodeHostIngressStage(raw)
+		if err != nil {
+			return trialRecoverySelection{}, err
+		}
+		return trialRecoverySelection{version: hostIngressStageVersion, identity: identity, ingress: record}, nil
 	}
 	if err := json.Unmarshal(raw, &marker); err == nil && marker.Version == smartTUNTrialVersion &&
 		qaCrashPoint == "" && qaFaultPoint == "" {

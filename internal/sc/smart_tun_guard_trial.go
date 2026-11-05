@@ -599,6 +599,13 @@ func (m *Manager) pendingSmartTUNTrial() (string, error) {
 	if err := json.Unmarshal(data, &marker); err != nil {
 		return "", activationJournalError("activation journal version is invalid")
 	}
+	if marker.Version == hostIngressStageVersion {
+		record, err := decodeHostIngressStage(data)
+		if err != nil {
+			return "", err
+		}
+		return "host_ingress_" + record.Phase, nil
+	}
 	if marker.Version != smartTUNTrialVersion {
 		return "", nil // legacy journal protection remains with its original API
 	}
