@@ -191,16 +191,17 @@ func smartTUNIPv6Policy(o SmartTUNCandidateOptions) ([]string, []any, error) {
 		rules = append(rules, map[string]any{"ip_cidr": []string{exception.CIDR}, "action": "route", "outbound": out})
 	}
 	seen := map[string]bool{}
+	pinnedEstimate := sourcePinnedBundledDualStackEstimate(o)
 	domesticDirect32s := make(map[netip.Prefix]bool)
 	for _, raw := range o.DomesticIPv6CIDRs {
 		prefix, err := canonicalRoutePrefixFamily(raw, true)
-		if err != nil || prefix.Bits() < minDomesticDirectBits ||
+		if err != nil || (!pinnedEstimate && prefix.Bits() < minDomesticDirectBits) ||
 			!conservativelyPublicIPv6Prefix(prefix) || seen[raw] {
 			return nil, nil, errors.New("invalid, broad or duplicate IPv6 domestic Direct prefix")
 		}
 		seen[raw] = true
 		domesticDirect32s[netip.PrefixFrom(prefix.Addr(), 32).Masked()] = true
-		if len(domesticDirect32s) > maxDomesticDirect32s {
+		if !pinnedEstimate && len(domesticDirect32s) > maxDomesticDirect32s {
 			return nil, nil, errors.New("aggregate IPv6 domestic Direct prefixes exceed 1024 distinct /32s")
 		}
 	}

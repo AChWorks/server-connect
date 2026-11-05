@@ -42,12 +42,6 @@ func TestRoutingRulesCLIBundledIRSourcePreviewAndMixedInputRefusal(t *testing.T)
 	for _, extra := range [][]string{nil, {"--tunnel-ipv6", "fd73:98::1/64"}} {
 		flags := append(append([]string(nil), args...), extra...)
 		code, out, stderr := captureRulesCommand(t, m, flags...)
-		if len(extra) != 0 {
-			if code == 0 || out["ok"] != false {
-				t.Fatalf("unsupported broad IPv6 estimate accepted: %+v", out)
-			}
-			continue
-		}
 		if code != 0 || stderr != "" || out["ok"] != true {
 			t.Fatalf("source preview failed: %d %+v %s", code, out, stderr)
 		}

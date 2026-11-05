@@ -59,9 +59,9 @@ func runSmartRoutingRules(jsonMode bool, m *sc.Manager, args []string) int {
 		opts := flag.NewFlagSet(action, flag.ContinueOnError)
 		opts.SetOutput(io.Discard)
 		cidr := opts.String("cidr", "", "canonical public IP/CIDR rule")
-		domain := opts.String("domain", "", "canonical domain (VPN only)")
+		domain := opts.String("domain", "", "canonical domain (Direct requires DNS-correlated preview)")
 		suffix := opts.Bool("suffix", false, "domain matches apex and subdomains")
-		via := opts.String("via", "", "direct|vpn; domain supports vpn only")
+		via := opts.String("via", "", "direct|vpn; Direct domains require DNS correlation")
 		if err := opts.Parse(args); err != nil || len(opts.Args()) != 0 || (*cidr == "") == (*domain == "") ||
 			(*suffix && *cidr != "") || (action == "add" && *via == "") || (action == "remove" && *via != "") {
 			return output(jsonMode, nil, routingOptionsError())
@@ -88,6 +88,9 @@ func runSmartRoutingRules(jsonMode bool, m *sc.Manager, args []string) int {
 		tunnelIPv6 := opts.String("tunnel-ipv6", "", "optional private IPv6 candidate TUN CIDR")
 		endpointPin := opts.String("endpoint-pin-ipv4", "", "operator IPv4 dial pin for compile-only named VLESS preview; not DNS evidence")
 		domesticSource := opts.String("domestic-source", "", "bundled-ir-estimate: source-pinned unsigned country-estimate preview only")
+		dnsIP := opts.String("domain-dns-ipv4", "", "explicit public DoH literal IPv4 for FakeIP correlation")
+		dnsName := opts.String("domain-dns-name", "", "DoH TLS hostname; no sniff-to-Direct fallback")
+		dnsPort := opts.Int("domain-dns-port", 443, "DoH HTTPS port")
 		var domestic, protected, domesticIPv6, protectedIPv6 destinationFlags
 		opts.Var(&domestic, "domestic-cidr", "explicit non-geographic IPv4 policy input")
 		opts.Var(&protected, "protected-cidr", "explicit protected IPv4 host path")
@@ -112,11 +115,31 @@ func runSmartRoutingRules(jsonMode bool, m *sc.Manager, args []string) int {
 		if pinSupplied && *endpointPin == "" {
 			return output(jsonMode, nil, routingOptionsError())
 		}
+		dnsSupplied := false
+		opts.Visit(func(f *flag.Flag) {
+			if strings.HasPrefix(f.Name, "domain-dns-") {
+				dnsSupplied = true
+			}
+		})
+		if dnsSupplied && (*dnsIP == "" || *dnsName == "") {
+			return output(jsonMode, nil, routingOptionsError())
+		}
+		dns := sc.SmartTUNDomainDNS{ServerIPv4: *dnsIP, ServerName: *dnsName, ServerPort: *dnsPort}
 		candidate := sc.SmartTUNCandidateOptions{
 			TunnelInterface: *tunnel, UnderlayInterface: *underlay,
 			TunnelIPv4: *tunnelIPv4, TunnelIPv6: *tunnelIPv6,
 			DomesticCIDRs: domestic, ProtectedCIDRs: protected,
 			DomesticIPv6CIDRs: domesticIPv6, ProtectedIPv6CIDRs: protectedIPv6,
+		}
+		if dnsSupplied {
+			var preview sc.SmartRoutingRulesPreview
+			var err error
+			if *domesticSource == "bundled-ir-estimate" {
+				preview, err = m.PreviewSmartRoutingRulesBundledEstimateDNSCorrelatedPinned(candidate, *endpointPin, dns)
+			} else {
+				preview, err = m.PreviewSmartRoutingRulesDNSCorrelatedPinned(candidate, *endpointPin, dns)
+			}
+			return output(jsonMode, preview, err)
 		}
 		if *domesticSource == "bundled-ir-estimate" {
 			preview, err := m.PreviewSmartRoutingRulesBundledEstimatePinned(candidate, *endpointPin)

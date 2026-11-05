@@ -26,12 +26,12 @@ var routingSourcePattern = regexp.MustCompile("^[a-z][a-z0-9_-]{0,63}$")
 var routingSHA256Pattern = regexp.MustCompile("^[a-f0-9]{64}$")
 
 // SmartRoutingRule is an operator-supplied *saved* routing exception, not
-// permission to change a host policy. Domain Direct is deliberately rejected:
-// client-controlled Host/SNI is not authenticated destination DNS correlation.
+// permission to change a host policy. Direct domain rules require the separate
+// FakeIP DNS-correlated compiler; ordinary sniff-only compilation refuses them.
 type SmartRoutingRule struct {
 	Type  string `json:"type"` // cidr, domain, suffix
 	Value string `json:"value"`
-	Via   string `json:"via"` // direct or vpn; domains are vpn-only
+	Via   string `json:"via"` // direct or vpn; Direct domains require DNS correlation at compile time
 }
 
 type smartRoutingRuleSource struct {
@@ -100,9 +100,6 @@ func normalizeSmartRoutingRule(x SmartRoutingRule) (SmartRoutingRule, error) {
 			return SmartRoutingRule{}, routingRuleInvalid()
 		}
 	} else {
-		if x.Via != "vpn" {
-			return SmartRoutingRule{}, Fault("routing_rules_invalid", "Direct domain exceptions require trusted DNS/IP correlation and are not supported")
-		}
 		// Shared domain parser enforces PSL (including PRIVATE entries) for
 		// suffix routing, not just string label counts.
 		normalized, err := canonicalSmartTUNDomain(x.Value, x.Type == "suffix")
@@ -500,6 +497,7 @@ type SmartRoutingRulesPreview struct {
 	NativeConfigSHA256   string                 `json:"native_config_sha256"`
 	EndpointPinEvidence  string                 `json:"endpoint_pin_evidence,omitempty"`
 	DomesticEstimate     *IranGeoSnapshotStatus `json:"domestic_estimate,omitempty"`
+	DNSCapture           *SmartTUNDNSCapture    `json:"dns_capture,omitempty"`
 	ValidationLevel      string                 `json:"validation_level"`
 	CoreExecutionTested  bool                   `json:"core_execution_tested"`
 	HostNetworkInspected bool                   `json:"host_network_inspected"`
@@ -516,22 +514,31 @@ func (m *Manager) PreviewSmartRoutingRules(opts SmartTUNCandidateOptions) (Smart
 // with a selected real native profile. It neither saves those prefixes nor
 // promotes them to authenticated policy or host Apply.
 func (m *Manager) PreviewSmartRoutingRulesBundledEstimatePinned(opts SmartTUNCandidateOptions, pin string) (SmartRoutingRulesPreview, error) {
+	return m.previewSmartRoutingRulesBundledEstimatePinned(opts, pin, nil)
+}
+
+// PreviewSmartRoutingRulesBundledEstimateDNSCorrelatedPinned keeps source provenance
+// separate from explicit authenticated DNS correlation; it is still compile-only.
+func (m *Manager) PreviewSmartRoutingRulesBundledEstimateDNSCorrelatedPinned(opts SmartTUNCandidateOptions, pin string, dns SmartTUNDomainDNS) (SmartRoutingRulesPreview, error) {
+	return m.previewSmartRoutingRulesBundledEstimatePinned(opts, pin, &dns)
+}
+
+func (m *Manager) previewSmartRoutingRulesBundledEstimatePinned(opts SmartTUNCandidateOptions, pin string, dns *SmartTUNDomainDNS) (SmartRoutingRulesPreview, error) {
 	if len(opts.DomesticCIDRs) != 0 || len(opts.DomesticIPv6CIDRs) != 0 {
 		return SmartRoutingRulesPreview{}, Fault("invalid_arguments", "bundled estimate cannot be combined with caller domestic prefixes")
-	}
-	// The pinned IPv6 estimate includes many /26-/31s, exceeding the
-	// existing safety bound of /32-or-narrower Direct source prefixes.
-	// Never silently truncate, split, or loosen Direct admission to get
-	// a misleading successful dual-stack preview.
-	if opts.TunnelIPv6 != "" {
-		return SmartRoutingRulesPreview{}, Fault("routing_rules_invalid", "complete bundled IR IPv6 estimate exceeds bounded native candidate policy; IPv4-only estimate preview is supported")
 	}
 	ipv4, status, err := bundledIranGeoEstimateForPreview()
 	if err != nil {
 		return SmartRoutingRulesPreview{}, Fault("routing_rules_invalid", "bundled IR estimate is unavailable or failed validation")
 	}
 	opts.DomesticCIDRs = ipv4
-	preview, err := m.PreviewSmartRoutingRulesPinned(opts, pin)
+	if opts.TunnelIPv6 != "" {
+		opts.DomesticIPv6CIDRs, err = bundledIranGeoIPv6ForPreview()
+		if err != nil {
+			return SmartRoutingRulesPreview{}, Fault("routing_rules_invalid", "bundled IR IPv6 estimate is unavailable or failed validation")
+		}
+	}
+	preview, err := m.previewSmartRoutingRulesPinned(opts, pin, dns)
 	if err != nil {
 		return SmartRoutingRulesPreview{}, err
 	}
@@ -542,7 +549,23 @@ func (m *Manager) PreviewSmartRoutingRulesBundledEstimatePinned(opts SmartTUNCan
 // PreviewSmartRoutingRulesPinned only compiles a candidate; an operator pin
 // is not independently verified DNS, underlay or activation evidence.
 func (m *Manager) PreviewSmartRoutingRulesPinned(opts SmartTUNCandidateOptions, pin string) (SmartRoutingRulesPreview, error) {
+	return m.previewSmartRoutingRulesPinned(opts, pin, nil)
+}
+
+// PreviewSmartRoutingRulesDNSCorrelatedPinned is explicit and side-effect-free.
+// Stored Direct domain rules cannot acquire sniff-derived authority through the
+// older preview path. No DNS exchange, core start or host mutation occurs here.
+func (m *Manager) PreviewSmartRoutingRulesDNSCorrelatedPinned(opts SmartTUNCandidateOptions, pin string, dns SmartTUNDomainDNS) (SmartRoutingRulesPreview, error) {
+	return m.previewSmartRoutingRulesPinned(opts, pin, &dns)
+}
+
+func (m *Manager) previewSmartRoutingRulesPinned(opts SmartTUNCandidateOptions, pin string, dns *SmartTUNDomainDNS) (SmartRoutingRulesPreview, error) {
 	var out SmartRoutingRulesPreview
+	if dns != nil {
+		if err := validateSmartTUNDomainDNS(*dns); err != nil {
+			return out, err
+		}
+	}
 	if len(opts.Exceptions) != 0 || len(opts.DomainExceptions) != 0 || len(opts.IPv6Exceptions) != 0 {
 		return out, Fault("invalid_arguments", "preview policy exceptions must come only from saved, validated routing rules")
 	}
@@ -577,7 +600,12 @@ func (m *Manager) PreviewSmartRoutingRulesPinned(opts SmartTUNCandidateOptions, 
 				return Fault("routing_rules_invalid", "operator pin or supported selected native VLESS transport is invalid")
 			}
 		}
-		cfg, err := smartTUNNativeConfig(profile, opts)
+		var cfg []byte
+		if dns != nil {
+			cfg, err = smartTUNDNSCorrelatedNativeConfig(profile, opts, *dns)
+		} else {
+			cfg, err = smartTUNNativeConfig(profile, opts)
+		}
 		if err != nil {
 			return Fault("routing_rules_invalid", "native compiler rejected the selected profile, underlay or routing exceptions")
 		}
@@ -588,6 +616,11 @@ func (m *Manager) PreviewSmartRoutingRulesPinned(opts SmartTUNCandidateOptions, 
 			HostNetworkInspected: false, ActivationReady: false, Applied: false}
 		if pin != "" {
 			out.EndpointPinEvidence = "operator_supplied_unverified"
+		}
+		if dns != nil {
+			capture := SmartTUNDomainDNSCapture(opts)
+			out.DNSCapture = &capture
+			out.ValidationLevel = "native_dns_correlated_policy_compile_only"
 		}
 		for _, v := range doc.Imports {
 			out.RuleCount += len(v.Rules)

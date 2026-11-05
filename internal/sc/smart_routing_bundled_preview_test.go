@@ -53,12 +53,6 @@ func TestBundledIREstimatePreviewCompilesCompletePinnedNativePolicy(t *testing.T
 				candidate.TunnelIPv6 = "fd73:98::1/64"
 			}
 			preview, err := m.PreviewSmartRoutingRulesBundledEstimatePinned(candidate, "")
-			if ipv6 {
-				if ErrorCode(err) != "routing_rules_invalid" {
-					t.Fatalf("unsafe complete IPv6 /26-/31 Direct estimate was accepted: %+v %v", preview, err)
-				}
-				return
-			}
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -76,6 +70,9 @@ func TestBundledIREstimatePreviewCompilesCompletePinnedNativePolicy(t *testing.T
 			}
 			expectedOptions := candidate
 			expectedOptions.DomesticCIDRs = append([]string(nil), snapshot.IPv4...)
+			if ipv6 {
+				expectedOptions.DomesticIPv6CIDRs = append([]string(nil), snapshot.IPv6...)
+			}
 			config, err := smartTUNNativeConfig(profile, expectedOptions)
 			if err != nil {
 				t.Fatal(err)

@@ -80,7 +80,6 @@ func TestRoutingRulesRejectUnsafeAndConflicting(t *testing.T) {
 		{Type: "cidr", Value: "1.1.1.1/24", Via: "vpn"},
 		{Type: "cidr", Value: "1.1.1.1/32", Via: "vpn"},
 		{Type: "cidr", Value: "1.1.1.0/24", Via: "direct"},
-		{Type: "domain", Value: "example.org", Via: "direct"},
 		{Type: "domain", Value: "https://example.org/private", Via: "vpn"},
 		{Type: "suffix", Value: "*.example.org", Via: "vpn"},
 		{Type: "domain", Value: "singlelabel", Via: "vpn"},
@@ -100,7 +99,7 @@ func TestRoutingRulesRejectUnsafeAndConflicting(t *testing.T) {
 }
 func TestRoutingRulesImportFailClosed(t *testing.T) {
 	m := rulesManager(t)
-	for _, raw := range []string{"cidr direct 0.0.0.0/0\n", "domain direct example.org\n", "cidr vpn 8.8.8.8/32 EXTRA\n", "cidr vpn 8.8.8.8/32\ncidr direct 8.8.8.8/32\n", "cidr vpn 127.0.0.1/32\n", "cidr vpn 8.8.8.8/32\r\n", "# no rules\n"} {
+	for _, raw := range []string{"cidr direct 0.0.0.0/0\n", "cidr vpn 8.8.8.8/32 EXTRA\n", "cidr vpn 8.8.8.8/32\ncidr direct 8.8.8.8/32\n", "cidr vpn 127.0.0.1/32\n", "cidr vpn 8.8.8.8/32\r\n", "# no rules\n"} {
 		h := sha256.Sum256([]byte(raw))
 		if _, err := m.ImportSmartRoutingRules("list", "2026-10-01", hex.EncodeToString(h[:]), "", []byte(raw)); err == nil {
 			t.Fatalf("invalid import accepted: %q", raw)
