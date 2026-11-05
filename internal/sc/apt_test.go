@@ -500,29 +500,29 @@ func TestAPT261MayOmitOnlyNativeDirUsr(t *testing.T) {
 	base := nativeAptDumpForTest() + "Acquire::http::Proxy \"" + proxy + "\";\n" +
 		"Acquire::https::Proxy \"" + proxy + "\";\n"
 	withoutUsr := strings.Replace(base, "Dir::Usr \"usr\";\n", "", 1)
-	if err := verifyAptDumpWithCompatibility(withoutUsr, proxy, aptDebian12Native261); err != nil {
-		t.Fatal("observed Debian12/2.6.1 layout rejected:", err)
+	if err := verifyAptDumpWithCompatibility(withoutUsr, proxy, aptDebian12Native26); err != nil {
+		t.Fatal("observed Debian12/2.6.1-or-2.6.2 layout rejected:", err)
 	}
-	if err := verifyAptDumpWithCompatibility(base, proxy, aptDebian12Native261); err != nil {
+	if err := verifyAptDumpWithCompatibility(base, proxy, aptDebian12Native26); err != nil {
 		t.Fatal("exact optional Dir::Usr rejected:", err)
 	}
 	for _, mode := range []aptCompatibility{aptStrictNative, aptCompatibility(255)} {
 		if err := verifyAptDumpWithCompatibility(withoutUsr, proxy, mode); ErrorCode(err) != "apt_policy_conflict" {
-			t.Fatal("Dir::Usr omission accepted outside verified Debian12/2.6.1")
+			t.Fatal("Dir::Usr omission accepted outside verified Debian12/2.6.1-or-2.6.2")
 		}
 	}
 	for _, setting := range []string{"Dir::Usr \"\";\n", "Dir::Usr \"/tmp/foreign\";\n", "Dir::Usr:: \"usr\";\n"} {
-		if err := verifyAptDumpWithCompatibility(withoutUsr+setting, proxy, aptDebian12Native261); ErrorCode(err) != "apt_policy_conflict" {
+		if err := verifyAptDumpWithCompatibility(withoutUsr+setting, proxy, aptDebian12Native26); ErrorCode(err) != "apt_policy_conflict" {
 			t.Fatal("unsafe Dir::Usr spelling accepted in compatibility mode")
 		}
 	}
 	for key, value := range nativeAPTBinConfig {
 		missing := strings.Replace(withoutUsr, key+" \""+value+"\";\n", "", 1)
-		if err := verifyAptDumpWithCompatibility(missing, proxy, aptDebian12Native261); ErrorCode(err) != "apt_policy_conflict" {
+		if err := verifyAptDumpWithCompatibility(missing, proxy, aptDebian12Native26); ErrorCode(err) != "apt_policy_conflict" {
 			t.Fatalf("mandatory native path became optional: %s", key)
 		}
 	}
-	if err := verifyAptDumpWithCompatibility(strings.Replace(withoutUsr, "Dir \"/\";\n", "", 1), proxy, aptDebian12Native261); ErrorCode(err) != "apt_policy_conflict" {
+	if err := verifyAptDumpWithCompatibility(strings.Replace(withoutUsr, "Dir \"/\";\n", "", 1), proxy, aptDebian12Native26); ErrorCode(err) != "apt_policy_conflict" {
 		t.Fatal("mandatory native root became optional")
 	}
 }
@@ -538,7 +538,7 @@ func TestAPTLegacyEnablersRemainRejectedBeforeAcquisition(t *testing.T) {
 				if _, _, err := validateAptArgs([]string{"update", "-o", key + "=" + value}); ErrorCode(err) != "apt_policy_conflict" {
 					t.Fatalf("caller legacy enabler reached credential phase: %s", key)
 				}
-				for _, mode := range []aptCompatibility{aptStrictNative, aptDebian12Native261} {
+				for _, mode := range []aptCompatibility{aptStrictNative, aptDebian12Native26} {
 					dump := base + key + " \"" + value + "\";\n"
 					if err := verifyAptDumpWithCompatibility(dump, proxy, mode); ErrorCode(err) != "apt_policy_conflict" {
 						t.Fatalf("inherited legacy enabler accepted: %s", key)
@@ -562,14 +562,14 @@ func TestAPTOwnedDisabledPolicyMustBeExactAndComplete(t *testing.T) {
 	base := nativeAptDumpForTest() + "Acquire::http::Proxy \"" + proxy + "\";\n" +
 		"Acquire::https::Proxy \"" + proxy + "\";\n"
 	owned := ownedDisabledAptDumpForTest()
-	for _, mode := range []aptCompatibility{aptStrictNative, aptDebian12Native261} {
+	for _, mode := range []aptCompatibility{aptStrictNative, aptDebian12Native26} {
 		if err := verifyAptDumpPolicy(base+owned, proxy, mode, true); err != nil {
 			t.Fatal("exact owned disabled policy refused:", err)
 		}
-		if mode == aptDebian12Native261 {
+		if mode == aptDebian12Native26 {
 			withoutUsr := strings.Replace(base+owned, "Dir::Usr \"usr\";\n", "", 1)
 			if err := verifyAptDumpPolicy(withoutUsr, proxy, mode, true); err != nil {
-				t.Fatal("owned policy refused the exact Debian12/2.6.1 layout:", err)
+				t.Fatal("owned policy refused the exact Debian12/2.6.1-or-2.6.2 layout:", err)
 			}
 		}
 		if err := verifyAptDumpPolicy(base+owned, proxy, mode, false); ErrorCode(err) != "apt_policy_conflict" {
@@ -832,7 +832,7 @@ func TestAPTInheritedUpdateAndWorkerDebugRefusal(t *testing.T) {
 	for _, mode := range []struct {
 		name  string
 		value aptCompatibility
-	}{{"strict", aptStrictNative}, {"debian12", aptDebian12Native261}} {
+	}{{"strict", aptStrictNative}, {"debian12", aptDebian12Native26}} {
 		t.Run(mode.name, func(t *testing.T) {
 			for _, owned := range []bool{false, true} {
 				dump := base
@@ -870,7 +870,7 @@ func TestAPTInheritedHarmlessUpdateAndPresentationPolicy(t *testing.T) {
 		"Binary::apt::APT::Color \"true\";\n" +
 		"Binary::apt::DPkg::Progress-Fancy \"1\";\n" +
 		"Binary::apt-get::APT::Get::Show-Versions \"true\";\n"
-	for _, mode := range []aptCompatibility{aptStrictNative, aptDebian12Native261} {
+	for _, mode := range []aptCompatibility{aptStrictNative, aptDebian12Native26} {
 		for _, owned := range []bool{false, true} {
 			dump := base
 			if owned {

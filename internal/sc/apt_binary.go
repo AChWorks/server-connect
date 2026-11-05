@@ -24,18 +24,24 @@ type aptCompatibility uint8
 
 const (
 	aptStrictNative aptCompatibility = iota
-	aptDebian12Native261
+	aptDebian12Native26
 )
 
 // These banners select a bounded stock-layout compatibility mode; they do NOT
 // identify the separately loaded libapt-pkg. Acquisition always enforces the
 // wrapper-owned disabled-method policy after rejecting inherited enablers.
-// APT 3 removed the default ftp/rsh/ssh guard, so legacy inventory also remains
-// rejected outside this observed Debian12/2.6.1 layout boundary.
+// APT 3 removed the default ftp/rsh/ssh guard, so those stock legacy
+// methods remain rejected outside two EXACT, observed Debian12 layouts.
+// Debian's APT 2.6.2 security update retains the legacy method inventory;
+// no unknown patch or cross-version executable/config pairing is approved.
 // https://github.com/Debian/apt/blob/a626a66fece0a7d680e40b9e35b66e29fe9ae12c/apt-pkg/acquire-worker.cc
+// https://lists.debian.org/debian-lts-announce/2026/11/msg00004.html
 func aptCompatibilityForVersions(target, nativeVersion, configVersion string) aptCompatibility {
-	if target == "debian-12-amd64" && nativeVersion == "apt 2.6.1 (amd64)" && configVersion == nativeVersion {
-		return aptDebian12Native261
+	if target == "debian-12-amd64" && nativeVersion == configVersion {
+		switch nativeVersion {
+		case "apt 2.6.1 (amd64)", "apt 2.6.2 (amd64)":
+			return aptDebian12Native26
+		}
 	}
 	return aptStrictNative
 }
@@ -155,18 +161,18 @@ var nativeAPTMethodAliases = map[string]string{
 	"mirror+copy":  "mirror",
 }
 
-// These stock Debian12 files are not authorization to run remote transports.
+// These stock Debian12 APT 2.6.1/2.6.2 files are not authorization to run remote transports.
 // Every caller/inherited enabler remains forbidden. Explicit wrapper-owned
 // method denial also protects against ABI-compatible newer libapt-pkg builds.
-var debian12APT261MethodExecutables = map[string]bool{"ftp": true, "rsh": true}
-var debian12APT261MethodAliases = map[string]string{"mirror+ftp": "mirror", "ssh": "rsh"}
+var debian12APT26MethodExecutables = map[string]bool{"ftp": true, "rsh": true}
+var debian12APT26MethodAliases = map[string]string{"mirror+ftp": "mirror", "ssh": "rsh"}
 
 func nativeAPTMethodAlias(name string, compatibility aptCompatibility) (string, bool) {
 	if target, ok := nativeAPTMethodAliases[name]; ok {
 		return target, true
 	}
-	if compatibility == aptDebian12Native261 {
-		target, ok := debian12APT261MethodAliases[name]
+	if compatibility == aptDebian12Native26 {
+		target, ok := debian12APT26MethodAliases[name]
 		return target, ok
 	}
 	return "", false
@@ -213,7 +219,7 @@ func verifyNativeAPTMethodInventoryWithCompatibility(dir string, expectedUID uin
 	for _, entry := range entries {
 		name := entry.Name()
 		target, alias := nativeAPTMethodAlias(name, compatibility)
-		legacy := compatibility == aptDebian12Native261 && debian12APT261MethodExecutables[name]
+		legacy := compatibility == aptDebian12Native26 && debian12APT26MethodExecutables[name]
 		if !alias && !nativeAPTMethodExecutables[name] && !legacy {
 			return Fault("apt_untrusted_executable", "unsupported APT acquisition method installed")
 		}

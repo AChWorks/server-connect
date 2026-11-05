@@ -489,9 +489,9 @@ func verifyAptDumpPolicy(dump, expected string, compatibility aptCompatibility, 
 	if ownedDisabled && len(seenDisabled) != len(aptDisabledMethods) {
 		return Fault("apt_policy_conflict", "APT disabled acquisition method policy not established")
 	}
-	// Native APT2.6.1 has no Dir::Usr default. Only the independently observed
-	// Debian12/2.6.1 mode may omit it; a present value was still checked above.
-	if !seenDir || (!seenUsr && compatibility != aptDebian12Native261) || len(seenBins) != len(nativeAPTBinConfig) {
+	// Native Debian12 APT 2.6.1/2.6.2 has no Dir::Usr default. Only the
+	// exact verified Debian12 compatibility mode may omit it.
+	if !seenDir || (!seenUsr && compatibility != aptDebian12Native26) || len(seenBins) != len(nativeAPTBinConfig) {
 		return Fault("apt_policy_conflict", "trusted native APT executable path configuration not established")
 	}
 	return nil

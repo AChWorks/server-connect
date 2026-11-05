@@ -281,7 +281,10 @@ func hostIngressRawSnapshot() (map[uint16]bool, string, error) {
 			ports[port] = true
 		}
 		legacy, err := runReadOnlyHostNetfilter(binary+"-legacy", "-t", "raw", "-S")
-		if err != nil || !strictEmptyLegacyRawPolicy(legacy) {
+		if err != nil {
+			return nil, "", ingressFault("legacy raw backend inventory unavailable")
+		}
+		if !strictEmptyLegacyRawPolicy(legacy) {
 			return nil, "", ingressFault("legacy raw policy is not empty")
 		}
 		parts = append(parts, string(version), string(raw), string(legacy))

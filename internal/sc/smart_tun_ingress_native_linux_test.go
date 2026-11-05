@@ -209,6 +209,18 @@ func TestHostIngressNativeStageAndIndependentRollback(t *testing.T) {
 	}
 	_, rawBefore, err := hostIngressRawSnapshot()
 	if err != nil {
+		// The CI host kernel and the installed guest can disagree about
+		// legacy xtables availability. Diagnose *inside this fresh netns*;
+		// never treat an unavailable legacy backend as verified empty, and
+		// never print host nftables or unrelated operator policy.
+		for _, backend := range []string{"/usr/sbin/iptables-legacy", "/usr/sbin/ip6tables-legacy"} {
+			command := exec.Command(backend, "-t", "raw", "-S")
+			observed, runErr := command.CombinedOutput()
+			if len(observed) > 1024 {
+				observed = []byte("oversized legacy diagnostic refused")
+			}
+			t.Logf("ISOLATED_LEGACY_RAW_DIAGNOSTIC backend=%s error=%v bytes=%q", backend, runErr, observed)
+		}
 		t.Fatal(err)
 	}
 

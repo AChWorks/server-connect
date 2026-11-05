@@ -274,14 +274,18 @@ func TestAPTLegacyCompatibilityRequiresExactHostAndBothVersions(t *testing.T) {
 		name, target, command, config string
 		want                          aptCompatibility
 	}{
-		{"stock Debian12", "debian-12-amd64", "apt 2.6.1 (amd64)", "apt 2.6.1 (amd64)", aptDebian12Native261},
+		{"stock Debian12 original", "debian-12-amd64", "apt 2.6.1 (amd64)", "apt 2.6.1 (amd64)", aptDebian12Native26},
+		{"stock Debian12 security update", "debian-12-amd64", "apt 2.6.2 (amd64)", "apt 2.6.2 (amd64)", aptDebian12Native26},
+		{"Debian13 with Debian12 security binary", "debian-13-amd64", "apt 2.6.2 (amd64)", "apt 2.6.2 (amd64)", aptStrictNative},
+		{"Debian12 upgraded get but old config", "debian-12-amd64", "apt 2.6.2 (amd64)", "apt 2.6.1 (amd64)", aptStrictNative},
+		{"Debian12 upgraded config but old get", "debian-12-amd64", "apt 2.6.1 (amd64)", "apt 2.6.2 (amd64)", aptStrictNative},
 		{"Debian13 with old binary", "debian-13-amd64", "apt 2.6.1 (amd64)", "apt 2.6.1 (amd64)", aptStrictNative},
 		{"unverified OS", "", "apt 2.6.1 (amd64)", "apt 2.6.1 (amd64)", aptStrictNative},
 		{"unknown target", "debian-12-arm64", "apt 2.6.1 (amd64)", "apt 2.6.1 (amd64)", aptStrictNative},
 		{"APT3", "debian-12-amd64", "apt 3.0.3 (amd64)", "apt 3.0.3 (amd64)", aptStrictNative},
 		{"command mismatch", "debian-12-amd64", "apt 3.0.3 (amd64)", "apt 2.6.1 (amd64)", aptStrictNative},
 		{"config mismatch", "debian-12-amd64", "apt 2.6.1 (amd64)", "apt 3.0.3 (amd64)", aptStrictNative},
-		{"unknown patch", "debian-12-amd64", "apt 2.6.2 (amd64)", "apt 2.6.2 (amd64)", aptStrictNative},
+		{"unknown patch", "debian-12-amd64", "apt 2.6.3 (amd64)", "apt 2.6.3 (amd64)", aptStrictNative},
 		{"missing command version", "debian-12-amd64", "", "apt 2.6.1 (amd64)", aptStrictNative},
 		{"missing config version", "debian-12-amd64", "apt 2.6.1 (amd64)", "", aptStrictNative},
 		{"ambiguous banner", "debian-12-amd64", "apt 2.6.1 (amd64) extra", "apt 2.6.1 (amd64) extra", aptStrictNative},
@@ -310,17 +314,17 @@ func createDebian12APTMethodFixture(t *testing.T) (string, uint32) {
 	return dir, uid
 }
 
-func TestNativeAPTLegacyInventoryRequiresVerified261Compatibility(t *testing.T) {
+func TestNativeAPTLegacyInventoryRequiresExactDebian12Compatibility(t *testing.T) {
 	dir, uid := createDebian12APTMethodFixture(t)
-	if err := verifyNativeAPTMethodInventoryWithCompatibility(dir, uid, aptDebian12Native261); err != nil {
+	if err := verifyNativeAPTMethodInventoryWithCompatibility(dir, uid, aptDebian12Native26); err != nil {
 		t.Fatal("stock Debian12 legacy inventory refused:", err)
 	}
 	for _, mode := range []aptCompatibility{aptStrictNative, aptCompatibility(255)} {
 		if err := verifyNativeAPTMethodInventoryWithCompatibility(dir, uid, mode); ErrorCode(err) != "apt_untrusted_executable" {
-			t.Fatal("legacy inventory accepted without the verified Debian12/2.6.1 boundary")
+			t.Fatal("legacy inventory accepted without the verified Debian12/2.6.1-or-2.6.2 boundary")
 		}
 	}
-	if err := verifyNativeAPTMethodInventoryWithCompatibility(dir, uid+1, aptDebian12Native261); ErrorCode(err) != "apt_untrusted_executable" {
+	if err := verifyNativeAPTMethodInventoryWithCompatibility(dir, uid+1, aptDebian12Native26); ErrorCode(err) != "apt_untrusted_executable" {
 		t.Fatal("legacy compatibility bypassed the native owner check")
 	}
 }
@@ -363,7 +367,7 @@ func TestNativeAPTLegacyInventoryRetainsExactIdentityChecks(t *testing.T) {
 			if err := tc.mutate(dir); err != nil {
 				t.Fatal(err)
 			}
-			if err := verifyNativeAPTMethodInventoryWithCompatibility(dir, uid, aptDebian12Native261); ErrorCode(err) != "apt_untrusted_executable" {
+			if err := verifyNativeAPTMethodInventoryWithCompatibility(dir, uid, aptDebian12Native26); ErrorCode(err) != "apt_untrusted_executable" {
 				t.Fatal("unsafe legacy method identity accepted")
 			}
 		})
