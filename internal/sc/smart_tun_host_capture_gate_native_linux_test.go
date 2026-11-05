@@ -234,6 +234,91 @@ func TestHostCaptureGateOneJournalAndOwnedOffNative(t *testing.T) {
 			return errors.New("interrupted ingress rollback retained owned nft effects")
 		}
 		fmt.Println("HOST_CAPTURE_FAILED_BARRIER_RECEIPT_OWNED_OFF=PASS")
+
+		// Simulate a journal surviving a REAL boot epoch change, while
+		// executing only in this disposable namespace (no host reboot).
+		// Old handles/namespace IDs are never accepted as delete authority.
+		oldBoot, err := newHostCaptureGateProgress("scgate0", 90)
+		if err != nil {
+			return err
+		}
+		oldBootID := "11111111-2222-3333-4444-555555555555"
+		if oldBootID == oldBoot.Ingress.BootID {
+			oldBootID = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+		}
+		oldBoot.Ingress.BootID, oldBoot.Barrier.BootID = oldBootID, oldBootID
+		oldBoot.Ingress.SysctlStage = "observed"
+		oldBoot.Ingress.NFTStage = "observed"
+		oldBoot.Ingress.NFTHandle = 123456
+		oldBoot.Ingress.NFTSHA256 = strings.Repeat("c", 64)
+		oldBoot.Barrier.Stage = "create_possible"
+		if err := validateHostCaptureGatePair(oldBoot.Ingress, oldBoot.Barrier); err != nil {
+			return err
+		}
+		prior, priorID, err = get()
+		if err != nil || prior.Progress != progress || progress.Ingress.Phase != "recovered" {
+			return errors.New("cannot enter old-boot QA without verified prior Off")
+		}
+		if err := save(hostCaptureNativeTestParent{Version: 600, Progress: oldBoot}, priorID); err != nil {
+			return err
+		}
+		progress = oldBoot
+
+		refusedRecoveryCode := func(value *hostCaptureGateProgress) string {
+			_, err := recoverHostCaptureGateLocked(store, value, persist)
+			return ErrorCode(err)
+		}
+		// A previous 0->1 sysctl operation has no old-boot CAS authority.
+		unowned := progress
+		unowned.Ingress.SysctlBefore = 0
+		if code := refusedRecoveryCode(&unowned); code != "host_ingress_unverified" {
+			return fmt.Errorf("old-boot sysctl write acquired restoration authority: %s", code)
+		}
+		if unowned != progress {
+			return errors.New("refused old-boot sysctl recovery mutated memory")
+		}
+
+		// Even an exact-looking table name on the current boot belongs to
+		// an unknown owner and must be retained, not deleted by old handles.
+		foreignName := "scin_" + progress.Ingress.OperationID
+		ingressNativeCommand(t, "/usr/sbin/nft", "add", "table", "inet", foreignName)
+		if code := refusedRecoveryCode(&progress); code != "host_ingress_unverified" {
+			return fmt.Errorf("reused nft table name bypassed old-boot admission: %s", code)
+		}
+		if observed, err := observeHostIngressNFT(progress.Ingress); err != nil || !observed.Present {
+			return errors.New("old-boot recovery deleted a foreign same-name table")
+		}
+		ingressNativeCommand(t, "/usr/sbin/nft", "delete", "table", "inet", foreignName)
+
+		// A changed sysctl or occupied helper interface also forbids a
+		// successful old-boot Off receipt.
+		ingressNativeCommand(t, "/usr/sbin/sysctl", "-q", "-w", "net.ipv4.tcp_fwmark_accept=0")
+		if code := refusedRecoveryCode(&progress); code != "host_ingress_unverified" {
+			return fmt.Errorf("sysctl drift bypassed old-boot refusal: %s", code)
+		}
+		ingressNativeCommand(t, "/usr/sbin/sysctl", "-q", "-w", "net.ipv4.tcp_fwmark_accept=1")
+		ingressNativeCommand(t, "/usr/sbin/ip", "link", "add", progress.Barrier.Name, "type", "dummy")
+		if code := refusedRecoveryCode(&progress); code != "host_ingress_unverified" {
+			return fmt.Errorf("foreign helper name bypassed old-boot refusal: %s", code)
+		}
+		ingressNativeCommand(t, "/usr/sbin/ip", "link", "del", progress.Barrier.Name)
+		unchanged, _, err := get()
+		if err != nil || unchanged.Progress != progress {
+			return errors.New("refused old-boot collision mutated parent journal")
+		}
+
+		// With independent proof that the helper and table are absent and
+		// the original sysctl was preenabled, only journal progress changes.
+		recovered, err = recoverHostCaptureGateLocked(store, &progress, persist)
+		if err != nil || !recovered.RecoveryVerified || progress.Ingress.Phase != "recovered" ||
+			progress.Barrier.Stage != "create_possible" {
+			return fmt.Errorf("absence-only old-boot Off not verified: %v", err)
+		}
+		finalRecord, _, err := get()
+		if err != nil || finalRecord.Progress != progress {
+			return errors.New("old-boot absence-only recovery not durable")
+		}
+		fmt.Println("HOST_CAPTURE_OLD_BOOT_NO_FOREIGN_MUTATION_AND_OWNED_OFF=PASS")
 		return nil
 	})
 	if err != nil {

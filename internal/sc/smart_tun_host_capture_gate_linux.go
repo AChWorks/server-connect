@@ -210,9 +210,18 @@ func recoverHostCaptureGateLocked(
 	// A create_possible record is NOT a completed grace barrier. The
 	// absence check is only an ownership/release proof for the helper FD;
 	// no synchronized-capture receipt is minted during recovery.
-	if err := hostNetworkBarrierContext(current.Barrier); err != nil {
+	boot, err := trialBootIdentity()
+	if err != nil {
 		return HostIngressStageReceipt{}, err
 	}
+	if boot == current.Barrier.BootID {
+		if err := hostNetworkBarrierContext(current.Barrier); err != nil {
+			return HostIngressStageReceipt{}, err
+		}
+	}
+	// Across reboot, there is no FD lifetime to continue and no previous
+	// namespace/handle may be mutated. In both cases require current absence
+	// of this exact helper name, never synthesize a closed receipt.
 	if err := verifyHostNetworkBarrierReleased(current.Barrier); err != nil {
 		return HostIngressStageReceipt{}, err
 	}

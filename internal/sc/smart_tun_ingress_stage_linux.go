@@ -673,9 +673,11 @@ func recoverHostIngressStageWithPersistLocked(store *activationJournalDir, r *ho
 		return receipt, err
 	}
 	if boot != r.BootID {
-		// Kernel generations from an earlier boot cannot authorize any writes,
-		// including sysctl restoration. Keep the old record for explicit diagnosis.
-		return receipt, ingressFault("old-boot ingress record requires absence verification; no reused kernel identity is mutable")
+		// No old kernel identity is reusable after boot, even if a table
+		// happens to have the same name/handle. Only two-sided proof of
+		// complete absence can acknowledge old-boot Off. In particular,
+		// never restore a formerly 0 sysctl based on a prior-boot receipt.
+		return recoverOldBootHostIngressLocked(r, persist)
 	}
 	if err := hostIngressNamespace(*r); err != nil {
 		return receipt, err
@@ -771,6 +773,69 @@ func recoverHostIngressStageWithPersistLocked(store *activationJournalDir, r *ho
 	}
 	if observed.Present || value != r.SysctlBefore {
 		return receipt, ingressFault("ingress baseline restoration not verified")
+	}
+	receipt.Phase, receipt.RecoveryVerified = "recovered", true
+	return receipt, nil
+}
+
+// recoverOldBootHostIngressLocked never mutates Linux networking. A prior
+// boot's nft table handle, namespace inode, and scalar sysctl write receipt
+// cannot authorize deletion or sysctl restoration on the current boot.
+// Only a previously enabled tcp_fwmark_accept=1 is safe to acknowledge;
+// if the earlier operation enabled it from 0, retain uncertainty instead.
+// The caller already holds the exact enclosing journal lock.
+func recoverOldBootHostIngressLocked(r *hostIngressStage, persist hostIngressPersist) (HostIngressStageReceipt, error) {
+	receipt := HostIngressStageReceipt{OperationID: r.OperationID, Phase: r.Phase, Drain: "not_run"}
+	if persist == nil {
+		return receipt, activationJournalError("old-boot ingress recovery requires enclosing persistence")
+	}
+	if r.SysctlBefore != 1 {
+		return receipt, ingressFault("old-boot sysctl ownership cannot be restored or attributed")
+	}
+	absent := func() error {
+		value, err := readHostIngressSysctl()
+		if err != nil {
+			return err
+		}
+		if value != 1 {
+			return ingressFault("old-boot ingress sysctl baseline changed")
+		}
+		observed, err := observeHostIngressNFT(*r)
+		if err != nil {
+			return err
+		}
+		if observed.Present {
+			return ingressFault("old-boot ingress table name is occupied; prior handles cannot delete it")
+		}
+		return nil
+	}
+	// Never modify or acknowledge an old-boot record on a single snapshot.
+	if err := absent(); err != nil {
+		return receipt, err
+	}
+	if r.Phase == "pending" {
+		next := *r
+		next.Phase = "stop_requested"
+		if err := advanceHostIngressStage(persist, r, next); err != nil {
+			return receipt, err
+		}
+	}
+	if err := absent(); err != nil {
+		return receipt, err
+	}
+	if r.Phase != "recovered" {
+		next := *r
+		next.NFTStage = "removed"
+		next.SysctlStage = "removed"
+		next.Phase = "recovered"
+		if err := advanceHostIngressStage(persist, r, next); err != nil {
+			return receipt, err
+		}
+	}
+	// A competing foreign table or sysctl change after the fsynced journal
+	// can still be detected. No ownership was transferred by this receipt.
+	if err := absent(); err != nil {
+		return receipt, err
 	}
 	receipt.Phase, receipt.RecoveryVerified = "recovered", true
 	return receipt, nil
