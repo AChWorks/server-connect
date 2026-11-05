@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"strings"
 	"syscall"
 	"testing"
@@ -43,6 +44,30 @@ func TestHostCaptureGateOneJournalAndOwnedOffNative(t *testing.T) {
 	for _, binary := range []string{"/usr/sbin/iptables", "/usr/sbin/ip6tables"} {
 		ingressNativeCommand(t, binary, "-t", "raw", "-A", "PREROUTING", "-p", "tcp", "--dport", "28997", "-j", "NOTRACK")
 		ingressNativeCommand(t, binary, "-t", "raw", "-A", "OUTPUT", "-p", "tcp", "--sport", "28997", "-j", "NOTRACK")
+	}
+	// A disconnected guest shares the hosted runner kernel. Its IPv6
+	// iptables-legacy raw table may be absent even if the nft backend works.
+	// This exact unsupported condition is a negative admission proof, not a
+	// positive composite gate test. No operation journal has been created.
+	if _, _, err := hostIngressRawSnapshot(); err != nil {
+		legacy4, err4 := exec.Command("/usr/sbin/iptables-legacy", "-t", "raw", "-S").CombinedOutput()
+		legacy6, err6 := exec.Command("/usr/sbin/ip6tables-legacy", "-t", "raw", "-S").CombinedOutput()
+		var unavailable *exec.ExitError
+		knownMissing := ErrorCode(err) == "host_ingress_unverified" &&
+			strings.Contains(err.Error(), "legacy raw backend inventory unavailable") &&
+			err4 == nil && strictEmptyLegacyRawPolicy(legacy4) &&
+			errors.As(err6, &unavailable) && unavailable.ExitCode() == 3 &&
+			len(legacy6) < 512 &&
+			strings.Contains(string(legacy6), "can't initialize ip6tables table `raw': Table does not exist")
+		if knownMissing {
+			if _, e := newHostCaptureGateProgress("scgate0", 90); ErrorCode(e) != "host_ingress_unverified" ||
+				!strings.Contains(e.Error(), "legacy raw backend inventory unavailable") {
+				t.Fatalf("unsupported kernel unexpectedly admitted composite gate: %v", e)
+			}
+			fmt.Println("HOST_CAPTURE_UNSUPPORTED_LEGACY_IPV6_REFUSES_BEFORE_JOURNAL=PASS")
+			t.Skip("NOT_RUN: runner kernel lacks IPv6 legacy raw; composite positive requires supported kernel")
+		}
+		t.Fatalf("composite ingress prerequisites unavailable for an unrecognized reason: %v", err)
 	}
 	// An unowned 0->1 sysctl transition is prohibited on real hosts. Prove
 	// the preflight refusal before creating any activation journal or nft

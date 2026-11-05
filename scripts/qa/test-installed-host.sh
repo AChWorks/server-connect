@@ -325,7 +325,8 @@ native_host_barrier_log="$scratch/native-host-barrier.log"
 for native_case in \
   TestHostNetworkBarrierNativeLifetime \
   TestHostSocketBarrierNativeFilterSemantics \
-  TestHostIngressNativeStageAndIndependentRollback; do
+  TestHostIngressNativeStageAndIndependentRollback \
+  TestHostCaptureGateOneJournalAndOwnedOffNative; do
   docker exec "$container" /usr/bin/unshare --net /bin/sh -c '
     set -eu
     test "$(readlink /proc/self/ns/net)" != "$(readlink /proc/1/ns/net)"
@@ -333,6 +334,7 @@ for native_case in \
     SC_TEST_HOST_BARRIER_NATIVE=isolated-netns \
       SC_TEST_HOST_SOCKET_BARRIER_NATIVE=isolated-netns \
       SC_TEST_HOST_INGRESS_NATIVE=isolated-netns \
+      SC_TEST_HOST_CAPTURE_GATE_NATIVE=isolated-netns \
       /root/qa-native-nft-cas-test -test.run="^${1}$" -test.v -test.timeout=120s
   ' sh "$native_case" | tee -a "$native_host_barrier_log"
 done
@@ -352,6 +354,12 @@ if grep -Fx 'INGRESS_UNSUPPORTED_LEGACY_IPV6_REFUSES_BEFORE_JOURNAL=PASS' "$nati
     exit 1
   fi
   echo 'INGRESS_NATIVE_POSITIVE=NOT_RUN (kernel IPv6 legacy raw unavailable; exact product refusal independently proved)'
+  grep -Fx 'HOST_CAPTURE_UNSUPPORTED_LEGACY_IPV6_REFUSES_BEFORE_JOURNAL=PASS' "$native_host_barrier_log" >/dev/null
+  if grep -Eq '^HOST_CAPTURE_(PREEXISTING_SYSCTL_REQUIRED|FAILED_INTENT_HAS_NO_KERNEL_EFFECT|COMMON_JOURNAL_STAGED_AND_BARRIER_CLOSED|COMMON_JOURNAL_OWNED_OFF|FAILED_BARRIER_RECEIPT_OWNED_OFF|OLD_BOOT_NO_FOREIGN_MUTATION_AND_OWNED_OFF|COMMON_JOURNAL_FOREIGN_NETWORK_PRESERVED)=PASS$' "$native_host_barrier_log"; then
+    echo 'HOST_CAPTURE_NATIVE_ACCEPTANCE=FAIL (partial positive on unsupported legacy kernel)' >&2
+    exit 1
+  fi
+  echo 'HOST_CAPTURE_NATIVE_POSITIVE=NOT_RUN (unsupported kernel; exact composite refusal proved)'
 else
   for marker in \
     INGRESS_KERNEL_STAGE_OWNED \
@@ -364,6 +372,21 @@ else
     grep -Fx "$marker=PASS" "$native_host_barrier_log" >/dev/null
   done
   echo INGRESS_NATIVE_SUPPORTED_KERNEL_POSITIVE=PASS
+  if grep -Fx 'HOST_CAPTURE_UNSUPPORTED_LEGACY_IPV6_REFUSES_BEFORE_JOURNAL=PASS' "$native_host_barrier_log" >/dev/null; then
+    echo 'HOST_CAPTURE_NATIVE_ACCEPTANCE=FAIL (unexpected unsupported result on positive ingress kernel)' >&2
+    exit 1
+  fi
+  for marker in \
+    HOST_CAPTURE_PREEXISTING_SYSCTL_REQUIRED \
+    HOST_CAPTURE_FAILED_INTENT_HAS_NO_KERNEL_EFFECT \
+    HOST_CAPTURE_COMMON_JOURNAL_STAGED_AND_BARRIER_CLOSED \
+    HOST_CAPTURE_COMMON_JOURNAL_OWNED_OFF \
+    HOST_CAPTURE_FAILED_BARRIER_RECEIPT_OWNED_OFF \
+    HOST_CAPTURE_OLD_BOOT_NO_FOREIGN_MUTATION_AND_OWNED_OFF \
+    HOST_CAPTURE_COMMON_JOURNAL_FOREIGN_NETWORK_PRESERVED; do
+    grep -Fx "$marker=PASS" "$native_host_barrier_log" >/dev/null
+  done
+  echo HOST_CAPTURE_NATIVE_SUPPORTED_KERNEL_POSITIVE=PASS
 fi
 assert_network_unchanged native-host-barrier "$native_nft_network_before"
 native_host_barrier_nft_after=$(docker exec "$container" /usr/sbin/nft -j list ruleset)
