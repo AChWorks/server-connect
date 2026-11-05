@@ -79,6 +79,10 @@ func TestReadOnlyHostReplyNOTRACKFailClosed(t *testing.T) {
 		map[uint32]smartTUNManagementSocket{7: bad, 8: valid}, 2); err == nil || status != hostRepliesUnverified {
 		t.Fatalf("another socket hid malformed kernel identity: %s, %v", status, err)
 	}
+	if status, err := classifiedExistingHostReplies([]byte(rawHostedNOTRACK),
+		map[uint32]smartTUNManagementSocket{9: valid}, 2); err == nil || status != hostRepliesUnverified {
+		t.Fatalf("socket map inode mismatch produced a trustworthy reply inventory: %s, %v", status, err)
+	}
 }
 
 func TestReadOnlyHostReplyLegacyRawBackendCrosscheck(t *testing.T) {

@@ -143,8 +143,16 @@ func managementClockTicks() (uint64, error) {
 // never SOCK_DESTROY. Kernel cookies distinguish socket generations, including
 // an inode reused between the two independent observations.
 func parseManagementSocket(data []byte) (smartTUNManagementSocket, error) {
-	if len(data) < 72 || data[0] != syscall.AF_INET || data[1] != 1 {
-		return smartTUNManagementSocket{}, managementFault("unexpected established TCP observation")
+	return parseKernelTCPSocket(data, 1<<1) // TCP_ESTABLISHED only for SSH identity.
+}
+
+// A passive hosting inventory needs more than ESTABLISHED sockets: a
+// half-closed CLOSE_WAIT server can still send a complete response. Keep the
+// exact SSH confirmation parser restricted to ESTABLISHED, independently.
+func parseKernelTCPSocket(data []byte, permittedStates uint32) (smartTUNManagementSocket, error) {
+	if len(data) < 72 || data[0] != syscall.AF_INET || data[1] >= 32 ||
+		permittedStates&(uint32(1)<<data[1]) == 0 {
+		return smartTUNManagementSocket{}, managementFault("unexpected or untrusted TCP socket state")
 	}
 	for _, v := range append(append([]byte{}, data[12:24]...), data[28:40]...) {
 		if v != 0 {
@@ -168,6 +176,17 @@ func parseManagementSocket(data []byte) (smartTUNManagementSocket, error) {
 }
 
 func managementSockets() (map[uint32]smartTUNManagementSocket, error) {
+	return observedKernelTCPSockets(1<<1, nil) // TCP_ESTABLISHED only.
+}
+
+// Both SSH confirmation and hosted-reply inspection share the same bounded
+// kernel inet_diag dump, but never share the state mask or admission meaning.
+// Any incomplete/inconsistent state, absent socket identity, or dump churn
+// fails closed; observations cannot reserve sockets or authorize Apply.
+func observedKernelTCPSockets(states uint32, localPorts map[uint16]bool) (map[uint32]smartTUNManagementSocket, error) {
+	if states == 0 || states&^uint32((1<<13)-1) != 0 {
+		return nil, managementFault("invalid TCP diagnostic state request")
+	}
 	fd, err := syscall.Socket(syscall.AF_NETLINK, syscall.SOCK_RAW|syscall.SOCK_CLOEXEC, syscall.NETLINK_INET_DIAG)
 	if err != nil {
 		return nil, managementFault(fmt.Sprintf("kernel TCP transport diagnostics unavailable: %v", err))
@@ -186,7 +205,7 @@ func managementSockets() (map[uint32]smartTUNManagementSocket, error) {
 	binary.NativeEndian.PutUint16(request[6:8], syscall.NLM_F_REQUEST|syscall.NLM_F_DUMP)
 	binary.NativeEndian.PutUint32(request[8:12], 1)
 	request[16], request[17] = syscall.AF_INET, syscall.IPPROTO_TCP
-	binary.NativeEndian.PutUint32(request[20:24], 1<<1) // TCP_ESTABLISHED only
+	binary.NativeEndian.PutUint32(request[20:24], states)
 	binary.NativeEndian.PutUint32(request[64:68], ^uint32(0))
 	binary.NativeEndian.PutUint32(request[68:72], ^uint32(0))
 	if syscall.Sendto(fd, request, 0, &syscall.SockaddrNetlink{Family: syscall.AF_NETLINK}) != nil {
@@ -219,7 +238,20 @@ func managementSockets() (map[uint32]smartTUNManagementSocket, error) {
 				}
 				return result, nil
 			case 20:
-				socket, err := parseManagementSocket(msg.Data)
+				// This filter narrows passive diagnostics to the explicitly
+				// observed foreign NOTRACK service ports; it NEVER creates
+				// a source-port Direct bypass. Unrelated TIME_WAIT sockets
+				// often have no inode, but must not mask a relevant result.
+				if localPorts != nil {
+					if len(msg.Data) < 72 || msg.Data[0] != syscall.AF_INET ||
+						msg.Data[1] >= 32 || states&(uint32(1)<<msg.Data[1]) == 0 {
+						return nil, managementFault("invalid filtered TCP socket evidence")
+					}
+					if !localPorts[binary.BigEndian.Uint16(msg.Data[4:6])] {
+						continue
+					}
+				}
+				socket, err := parseKernelTCPSocket(msg.Data, states)
 				if err != nil {
 					return nil, err
 				}

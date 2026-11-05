@@ -373,7 +373,7 @@ Iranian routing data or DNS/domain authority. Those remain required gates for
 general Smart Routing.
 
 **Existing NOTRACK TCP hosting sessions:** The root-host read-only boundary may
-identify a possible established-socket match to foreign OUTPUT NOTRACK rules.
+identify a possible reply-capable socket match to foreign OUTPUT NOTRACK rules, including half-closed TCP `CLOSE_WAIT` sockets that can still send and conservative `FIN_WAIT`/`TIME_WAIT`/handshake states.
 It independently compares nft/iptables-nft policy counts, requires an empty
 iptables-legacy raw backend and inspects Linux inet_diag socket generations,
 without exposing socket tuples. The snapshot is not a

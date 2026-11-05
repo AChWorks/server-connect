@@ -24,6 +24,24 @@ const (
 	hostRepliesNoXT       = "no_output_xt_ct_observed"
 )
 
+// Linux TCP state values from UAPI linux/tcp.h. LISTEN and CLOSE cannot be
+// old accepted reply sessions; all other states are included conservatively.
+// In particular CLOSE_WAIT can still send application responses after a
+// peer half-close; FIN_WAIT/TIME_WAIT may still emit kernel TCP packets.
+// A request socket with no durable inode/cookie must yield UNVERIFIED,
+// never an optimistic "none". This mask is deliberately NOT used by the
+// exact ESTABLISHED-only SSH-management identity witness.
+const hostReplyTCPStates uint32 = (1 << 1) | (1 << 2) | (1 << 3) |
+	(1 << 4) | (1 << 5) | (1 << 6) | (1 << 8) | (1 << 9) |
+	(1 << 11) | (1 << 12)
+
+func hostReplySockets(ports map[uint16]bool) (map[uint32]smartTUNManagementSocket, error) {
+	if len(ports) == 0 {
+		return nil, errors.New("no validated host NOTRACK ports")
+	}
+	return observedKernelTCPSockets(hostReplyTCPStates, ports)
+}
+
 // Only the strict, currently observed iptables-nft OUTPUT NOTRACK dialect
 // is recognized. Any foreign OUTPUT target, custom chain, ambiguous syntax,
 // range, unexpected line or missing cross-check is UNVERIFIED, not empty.
@@ -77,8 +95,8 @@ func classifiedExistingHostReplies(raw []byte, sockets map[uint32]smartTUNManage
 		return hostRepliesUnverified, errors.New("raw policy and kernel socket evidence disagree")
 	}
 	possible := false
-	for _, sock := range sockets {
-		if sock.Inode == 0 || sock.Cookie == 0 || sock.Cookie == ^uint64(0) || sock.LocalPort == 0 ||
+	for inode, sock := range sockets {
+		if inode == 0 || inode != sock.Inode || sock.Cookie == 0 || sock.Cookie == ^uint64(0) || sock.LocalPort == 0 ||
 			sock.PeerPort == 0 || !sock.Local.Is4() || !sock.Peer.Is4() {
 			return hostRepliesUnverified, errors.New("kernel TCP socket generation invalid")
 		}
@@ -143,7 +161,7 @@ func observedEmptyLegacyRawPolicy() ([]byte, error) {
 }
 
 // Cross-check the same raw-table semantics around an authenticated kernel
-// inet_diag ESTABLISHED snapshot. This is a diagnostic only: a new socket can
+// inet_diag all-reply-states snapshot. This is a diagnostic only: a new socket can
 // appear immediately afterwards and an existing socket can close/reuse its
 // tuple. Actual Apply needs generation-aware, independently guarded pinning.
 func observeExistingHostReplySessions(expectedOutputXTCT int) (string, error) {
@@ -155,7 +173,15 @@ func observeExistingHostReplySessions(expectedOutputXTCT int) (string, error) {
 	if err != nil {
 		return hostRepliesUnverified, err
 	}
-	sockets, err := managementSockets()
+	// Avoid turning unrelated kernel TIME_WAIT sockets with no generation
+	// into a false "unverified" for these verified, foreign-owned ports.
+	// Still reject ANY ambiguous or missing socket generation on a
+	// relevant service port; no tuple/port bypass is authorized.
+	ports, count, err := strictHostOutputNOTRACKPorts(before)
+	if err != nil || count != expectedOutputXTCT {
+		return hostRepliesUnverified, errors.New("host raw policy and nft OUTPUT target count disagree")
+	}
+	sockets, err := hostReplySockets(ports)
 	if err != nil {
 		return hostRepliesUnverified, err
 	}
