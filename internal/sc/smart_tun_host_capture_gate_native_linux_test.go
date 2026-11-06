@@ -35,6 +35,19 @@ func TestHostCaptureGateOneJournalAndOwnedOffNative(t *testing.T) {
 	ingressNativeCommand(t, "/usr/sbin/ip", "link", "set", "lo", "up")
 	ingressNativeCommand(t, "/usr/sbin/ip", "link", "add", "scgate0", "type", "veth", "peer", "name", "scgate1")
 	ingressNativeCommand(t, "/usr/sbin/ip", "link", "set", "scgate0", "up")
+	// Put an ordinary Docker-style NAT owner alongside the existing NOTRACK
+	// host ingress inventory. The complete v6 staging, SIGKILL/independent
+	// dispatch and terminal Off below must retain BOTH foreign owners. This
+	// fixture exists only in the new network namespace, not on the runner.
+	ingressNativeCommand(t, "/usr/sbin/ip", "link", "add", "docker0", "type", "bridge")
+	ingressNativeCommand(t, "/usr/sbin/ip", "address", "add", "172.17.0.1/16", "dev", "docker0")
+	ingressNativeCommand(t, "/usr/sbin/ip", "link", "set", "docker0", "up")
+	const dockerIPTables = "/usr/sbin/iptables-nft"
+	ingressNativeCommand(t, dockerIPTables, "-t", "nat", "-N", "DOCKER")
+	ingressNativeCommand(t, dockerIPTables, "-t", "nat", "-A", "PREROUTING", "-m", "addrtype", "--dst-type", "LOCAL", "-j", "DOCKER")
+	ingressNativeCommand(t, dockerIPTables, "-t", "nat", "-A", "OUTPUT", "!", "-d", "127.0.0.0/8", "-m", "addrtype", "--dst-type", "LOCAL", "-j", "DOCKER")
+	ingressNativeCommand(t, dockerIPTables, "-t", "nat", "-A", "POSTROUTING", "-s", "172.17.0.0/16", "!", "-o", "docker0", "-j", "MASQUERADE")
+	ingressNativeCommand(t, dockerIPTables, "-t", "nat", "-A", "DOCKER", "-i", "docker0", "-j", "RETURN")
 	for _, binary := range []string{"/usr/sbin/iptables", "/usr/sbin/ip6tables"} {
 		ingressNativeCommand(t, binary, "-t", "raw", "-A", "PREROUTING", "-p", "tcp", "--dport", "28997", "-j", "NOTRACK")
 		ingressNativeCommand(t, binary, "-t", "raw", "-A", "OUTPUT", "-p", "tcp", "--sport", "28997", "-j", "NOTRACK")
@@ -468,6 +481,12 @@ func TestHostCaptureGateOneJournalAndOwnedOffNative(t *testing.T) {
 	if after := ingressNativeCommand(t, "/usr/sbin/nft", "-j", "list", "ruleset"); after != rawBaseline {
 		t.Fatal("host capture gate modified foreign raw/NFT baseline")
 	}
+	if nftRaw, err := nativeTUNRunNFT(nil, nil, "-n", "-j", "-a", "list", "ruleset"); err != nil {
+		t.Fatal(err)
+	} else if objects, err := nativeTUNNftObjects(nftRaw); err != nil || !observeDockerNATShape(objects, "scgate0") {
+		t.Fatalf("foreign Docker NAT owner was not preserved after complete v6 recovery: %v", err)
+	}
+	fmt.Println("HOST_CAPTURE_FOREIGN_DOCKER_NAT_PRESERVED_THROUGH_SIGKILL_AND_OFF=PASS")
 	if value, err := readHostIngressSysctl(); err != nil || value != 1 {
 		t.Fatal("preexisting mark-inheritance sysctl was changed")
 	}
