@@ -22,6 +22,7 @@ type HostCapturePreparationQAReceipt struct {
 	GuardScheduled      bool   `json:"guard_scheduled"`
 	ActivationReady     bool   `json:"activation_ready"`
 	KernelBarrierClosed bool   `json:"kernel_barrier_closed"`
+	NativeLinkOnly      bool   `json:"native_link_only,omitempty"`
 	RecoveryVerified    bool   `json:"recovery_verified"`
 }
 

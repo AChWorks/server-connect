@@ -47,6 +47,24 @@ kernel drain, report it as a **correct refusal**, not a successful preparation
 or working host policy. Neither the prepared v6 journal nor a green recovery
 creates or tests full-host TUN/Core/FIB/RPDB/DNS or Runtime Guard.
 
+**Installed v7 native-link-only QA (no VPN Apply):** On the same explicitly
+admitted disposable host, optional
+`host-capture-preparation-qa --management-peer IP --underlay-if IFACE --native-link-if TUN --ack-disposable-host`
+uses one durable v7 parent for the v6 Ingress/Barrier prerequisites and a
+fresh exclusive persistent native TUN link with a fixed private test address.
+It must independently arm the Recovery service/timer and validate the selected
+core service is *idle*, a collision-free name/address, absence of reserved
+nft/RPDB/route effects, unchanged foreign owners, the same SSH/underlay
+baseline and preexisting `tcp_fwmark_accept=1` before any effect. Recovery
+must remove only receipted link effects first, then Ingress/Barrier, retain
+foreign NAT/NOTRACK and refuse any unowned link dependency or changed kernel
+identity. Verify actual kernel recovery after independent-process SIGKILL
+at after-journal, after-ingress, after-link-bind and after-link-persist;
+recovered journal removal requires exact operation ID via
+`host-capture-preparation-clear`. These tests demonstrate ownership and
+crash recovery of **link preparation only**, not VPN delivery, Runtime Health
+Guard health, public IP policy or a physical-host reboot.
+
 **Root-host narrow field proof (still not product Apply):** `scripts/qa/field-root-selected-tun.sh` is a manually authorized, disposable Debian 12 field-only canary. It binds hostname, public underlay IPv4 and interface plus one preselected foreign HTTPS `/32`, selected private VLESS outbound, Direct baseline, a dedicated native RPDB/table and nft egress guard. An independent timer is armed before any host network mutation. It verifies a proxy-unaware host `curl`, independent selected-upstream and TUN packet counters, an unrelated Direct route, an opportunity for fresh external SSH checks, deliberate QA-Core loss without Direct fallback, and exact task-owned restoration. A failed cleanup retains recovery evidence and must not be reported as restored. This experiment does **not** activate the installed product, maintain a product Journal/Runtime Guard, route arbitrary foreign traffic, authenticate Iranian geo-IP prefixes, verify hosted ingress/aaPanel replies, or authorize production. Do not infer general-host admission from a field script. The separate `scripts/qa/field-notrack-inherited-mark.sh` proves accepted-TCP socket mark inheritance with NOTRACK under positive and negative controls **inside an isolated network namespace only**. Enabling the kernel sysctl and protecting pre-existing untracked hosting sessions on a real host remain unimplemented product work; never silently exempt a source port from capture as a substitute. Full-host routing must retain native ownership and author-separated review gates.
 
 **Optional real-host pinned Iranian Direct/foreign selected-VPN split:** The same authorized root-host QA accepts an optional *single* Iranian HTTPS FQDN and exact `/32` address, backed by a locally staged, SHA-256-pinned copy of the **October 2026 DB-IP Lite country estimate** already bundled in the repository. The supplied address must still appear in a fresh observed DNS resolution and pass an independently TLS-validated Direct HTTPS baseline. During the foreign `/32` selected-VPN capture, a separate explicit Direct mark is set **only for the Iranian witness IP on TCP/443**, and a distinct postrouting counter requires physically observed underlay egress; the foreign selected-TUN packet, selected-upstream and final-egress witnesses remain separate. After deliberate Core loss, the foreign selected-VPN `/32` must still fail closed while the pinned Iranian HTTPS request stays Direct. The original four-argument foreign-only test is preserved. The field operator supplies the exact source file and must independently verify both its digest and task-owned cleanup. Gateway SSH Job launch scripts must use POSIX `sh` syntax and explicitly invoke the Bash field script; `pipefail` belongs inside the Bash script, not in the Job launch wrapper. This evidence is **one observed domestic candidate, not trusted automated geographic classification, country-wide routing or arbitrary-host Smart Routing admission**. It cannot certify CDN geography, website hosting ingress, public IPv6, or legacy NOTRACK session safety.

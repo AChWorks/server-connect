@@ -89,6 +89,27 @@ The independent executor selects the journal version and runs its recovery
 handler under one continuous manager lock. Concurrent Apply cannot publish
 a new journal between version selection and legacy interpretation.
 
+**Host-native link preparation (v7, development-only):** The installed
+`host-capture-preparation-qa` can opt into `--native-link-if NAME` on an
+explicitly disposable, admitted Debian host. Unlike the original v6
+Ingress/Barrier-only preparation, v7 stores the exact Host-Capture progress
+and one exclusive persistent *native TUN link* in **one** strict fsynced
+parent journal. Both stages use a full-parent lock/CAS/readback; the
+prearmed independent recovery dispatcher selects the v7 type under that
+same lock and reconciles the receipted TUN link *before* Ingress/Barrier.
+Link-only recovery checks absence of all reserved routing/nft policy and
+foreign link dependencies while preserving independently verified Docker
+NAT and foreign raw NOTRACK owners. A changed or unreceipted owner retains
+the journal rather than deleting foreign resources. Exact recovered v6/v7
+terminal Clear additionally verifies idle core, kernel absence, and Guard
+ownership before disarming the recovery timer. Fault boundaries include
+real SIGKILL after initial parent, Ingress, ephemeral link receipt and
+persistent-link effect, tested in isolated Linux namespaces. v7 never
+starts sing-box, installs FIB/RPDB/nft egress capture, changes DNS or
+asserts `ACTIVE_VERIFIED`: a complete **general-host** operation still needs
+an independently supervised core/policy/Runtime Health Guard transaction
+with field acceptance before full-host Apply is exposed.
+
 The manager validates the selected profile, pinned core, native baseline and
 reserved resource absence, then independently prearms the installed recovery
 oneshot/timer outside the shared journal lock. It repeats admission under the
