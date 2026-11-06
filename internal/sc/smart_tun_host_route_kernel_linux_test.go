@@ -558,3 +558,94 @@ func TestHostRouteV9UnreceiptedSIGKILLEffectFailsClosed(t *testing.T) {
 	// Kernel state only exists in this fresh unshared namespace. It is discarded
 	// on process exit, not by guessing ownership over foreign live host state.
 }
+
+// A foreign nft writer can change the already-receipted guard between the
+// nft addition and first RPDB selector. The v9 sequencer must reobserve the
+// exact guard before installing any rule; independent recovery must not
+// delete the altered table or claim Direct/off.
+func TestHostRouteV9GuardDriftAfterReceiptRefusesBeforeRPDB(t *testing.T) {
+	if os.Getenv("SC_TEST_HOST_ROUTE_NATIVE") != "isolated-netns" {
+		t.Skip("NOT_RUN: isolated root netns required")
+	}
+	guard, base := prepareHostNativeKernelFixture(t)
+	r := hostRouteKernelExample(t)
+	r.Progress, r.Native = base.Progress, base.Native
+	r.Native.NFTName = "scnt_" + r.Progress.Ingress.OperationID
+	digest, err := hostRoutePolicyPlanSHA256(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.Route.PolicySHA256 = digest
+	m := New(privateJournalTempDir(t), DefaultCore, DefaultPort)
+	secret := []byte(`{"simulated":"host-route-v9"}`)
+	tampered := false
+	err = m.withActivationJournalLock(syscall.Fsync, func(store *activationJournalDir) error {
+		if err := hostRouteKernelReady(t, store, &r, guard, secret); err != nil {
+			return err
+		}
+		observer := func(view smartTUNTrialJournal) (nativeTUNNFTObservation, error) {
+			if !tampered && view.Native.NFT.Stage == "observed" &&
+				view.Native.IPv4.Rule.Stage == "planned" {
+				// The injection takes place only AFTER the first durable
+				// guard receipt and BEFORE even an IPv4 RPDB add intent.
+				ingressNativeCommand(t, "/usr/sbin/nft", "add", "rule", "inet", r.Native.NFTName, "guard", "counter")
+				tampered = true
+			}
+			return hostRouteNFTObserver(&r)(view)
+		}
+		native := r.nativeView()
+		if err := nativeTUNApplyGuardFirstWithObserver(store, &native, "", hostRouteNativePersist(store, &r), observer); err == nil {
+			return errors.New("foreign guard change was silently admitted")
+		}
+		if !tampered || r.Native.NFT.Stage != "observed" || r.Native.IPv4.Rule.Stage != "planned" {
+			return errors.New("foreign guard drift was not refused before RPDB")
+		}
+		for _, family := range []int{4, 6} {
+			present, _, err := nativeTUNObserveResource(r.nativeView(), family, "rule")
+			if err != nil || present {
+				return errors.New("RPDB selector was installed after foreign guard mutation")
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	beforeRecovery := hostNativeKernelSnapshot(t)
+	state := smartTUNCoreObservationExample("active")
+	inactive := smartTUNCoreObservationExample("inactive")
+	inactive.identity = state.identity
+	services := hostCoreRecoveryServices{
+		observe: func() (smartTUNTrialUnitObservation, error) { return state, nil },
+		stop: func(_ smartTUNTrialUnitObservation, started, valid bool) error {
+			if !started || !valid {
+				return errors.New("missing native Core recovery authority")
+			}
+			state = inactive
+			return nil
+		},
+	}
+	result, err := m.recoverGuardedTrialWithHandler("", "", func(store *activationJournalDir, selection trialRecoverySelection) (TrialReceipt, error) {
+		return recoverHostRouteJournalLocked(store, &selection.hostRoute, services)
+	})
+	if err == nil || result.RecoveryVerified {
+		t.Fatal("foreign-modified nft guard was adopted or falsely cleaned")
+	}
+	if afterRecovery := hostNativeKernelSnapshot(t); afterRecovery != beforeRecovery {
+		t.Fatal("independent recovery changed foreign-modified kernel state")
+	}
+	if err := m.withActivationJournalLock(syscall.Fsync, func(store *activationJournalDir) error {
+		current, _, err := loadHostRouteJournal(store)
+		if err != nil {
+			return err
+		}
+		if current.Route.State != "off_pending" || current.Core.Stage != "stopped" ||
+			current.Native.NFT.Stage != "observed" || current.Progress.Ingress.Phase != "pending" {
+			return errors.New("foreign guard refusal discarded durable uncertainty")
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	fmt.Println("HOST_ROUTE_V9_FOREIGN_GUARD_DRIFT_BEFORE_RPDB_FAIL_CLOSED=PASS")
+}

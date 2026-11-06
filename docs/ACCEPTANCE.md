@@ -99,6 +99,9 @@ must NOT claim recovered or delete an unreceipted kernel object; verify the
 pending journal and surviving owner evidence. On v9, verify a durably receipted,
 independent nft OUTPUT/POSTROUTING guard exists **before** the first RPDB
 selector and remains intact after the unreceipted-rule recovery refusal.
+The v9 kernel test must also inject a foreign nft guard-chain mutation **after**
+the complete guard receipt and **before** the first RPDB selector, prove
+pre-selector refusal and no foreign-table deletion during Recovery.
 These are guard-first sequencing and safe-refusal proofs, **not** fully
 automatic no-reboot Off; the historical v4 ordering remains unchanged.
 New source tests:
