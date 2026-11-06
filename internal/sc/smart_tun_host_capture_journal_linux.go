@@ -281,6 +281,35 @@ func (m *Manager) ClearRecoveredHostCapturePreparation(operationID string) error
 		return Fault("ownership_required", "root required to clear host capture preparation")
 	}
 	return m.withActivationJournalLock(syscall.Fsync, func(store *activationJournalDir) error {
+		// The operation must be exact and independently recovered BEFORE
+		// touching the shared recovery timer. A failed/wrong/pending Clear
+		// must not disable an active operation's last independent guard.
+		r, _, err := loadHostCaptureJournal(store)
+		if err != nil {
+			return err
+		}
+		if subtle.ConstantTimeCompare([]byte(r.Progress.Ingress.OperationID), []byte(operationID)) != 1 {
+			return Fault("activation_journal_conflict", "host capture operation does not match the guard owner")
+		}
+		if err := verifyHostCapturePreparationOff(r); err != nil {
+			return err
+		}
+		if _, err := smartTUNTrialTimerState(); err != nil {
+			return err
+		}
+		// Disarm only the exact installed timer, not its executor or a
+		// foreign unit. Keep the fully recovered v6 journal until the timer
+		// disarm is verified so SIGKILL remains explicitly recoverable.
+		if err := smartTUNTrialSystemctl("disable", "--now", trialRecoveryTimer); err != nil {
+			return err
+		}
+		armed, err := smartTUNTrialTimerState()
+		if err != nil || armed {
+			return Fault("guard_unavailable", "host capture recovery timer disarm was not verified; recovered journal retained")
+		}
+		// Revalidate complete parent identity AND native absence after the
+		// systemd transition. The strict existing CAS terminal Clear owns
+		// the only journal removal; no manual unlink or broad restore.
 		return clearRecoveredHostCapturePreparationLocked(store, operationID)
 	})
 }

@@ -76,6 +76,10 @@ independent recovery executor may already have initiated Off when the caller
 receives the receipt; it is **not** an activation or permission to install TUN
 routing. After verified independent recovery, clear the *exact* recovered
 journal with the documented `host-capture-preparation-clear --operation-id`.
+The installed Clear first verifies exact owned Off, then disables and
+verifies the **owned recovery timer** under the same lock, and only then
+CAS-clears the recovered journal. Interruption before clearance retains
+the v6 record for an explicit retry; unknown timer ownership refuses.
 If recovery remains uncertain, preserve the journal and inspect real kernel
 ownership rather than unlinking it or disabling the timer.
 

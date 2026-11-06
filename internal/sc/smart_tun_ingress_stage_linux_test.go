@@ -286,3 +286,88 @@ func TestHostIngressPersistenceCanUseOneEnclosingJournal(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// Real Debian 12 nftables 1.0.6 creates the table with the requested
+// comment but drops that table attribute from JSON list output. Its chain and
+// rule survive unchanged, including the operation-tagged rule comment.
+// Allow precisely this known rendering difference, not an untrusted foreign
+// graph, other nft version, missing child, changed policy or renamed table.
+func TestHostIngressDebian12MissingTableCommentRendererIsExact(t *testing.T) {
+	r := hostIngressStageExample()
+	fresh := func() []map[string]any {
+		rows := hostIngressNFTObjects(r)
+		for i, item := range rows {
+			for _, value := range item {
+				value.(map[string]any)["handle"] = json.Number(string(rune('1' + i)))
+			}
+		}
+		return rows
+	}
+	old := fresh()
+	delete(old[0]["table"].(map[string]any), "comment")
+	unverified, err := hostIngressNFTFromRowsWithRenderer(r, old, 123, false)
+	if err != nil || !unverified.Present || unverified.Matches {
+		t.Fatalf("unsupported renderer adopted: %+v %v", unverified, err)
+	}
+	good, err := hostIngressNFTFromRowsWithRenderer(r, old, 123, true)
+	if err != nil || !good.Matches || !good.Present || good.Handle != 1 || good.Generation != 123 || good.SHA256 != unverified.SHA256 {
+		t.Fatalf("pinned Debian12 graph rejected: %+v %v", good, err)
+	}
+	cases := []struct {
+		label   string
+		breakIt func([]map[string]any)
+	}{
+		{"extra foreign child", func(xs []map[string]any) {}},
+		{"wrong underlay", func(xs []map[string]any) {
+			xs[2]["rule"].(map[string]any)["expr"].([]any)[0].(map[string]any)["match"].(map[string]any)["right"] = "other0"
+		}},
+		{"wrong kernel mark", func(xs []map[string]any) {
+			xs[2]["rule"].(map[string]any)["expr"].([]any)[3].(map[string]any)["match"].(map[string]any)["right"] = json.Number("1")
+		}},
+		{"missing rule operation tag", func(xs []map[string]any) { delete(xs[2]["rule"].(map[string]any), "comment") }},
+		{"changed table name", func(xs []map[string]any) { xs[0]["table"].(map[string]any)["name"] = "different" }},
+		{"foreign table comment", func(xs []map[string]any) { xs[0]["table"].(map[string]any)["comment"] = "foreign" }},
+		{"wrong hook", func(xs []map[string]any) { xs[1]["chain"].(map[string]any)["hook"] = "output" }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.label, func(t *testing.T) {
+			xs := fresh()
+			delete(xs[0]["table"].(map[string]any), "comment")
+			if tc.label == "extra foreign child" {
+				xs = append(xs, map[string]any{"rule": map[string]any{"family": "inet", "table": "scin_" + r.OperationID, "chain": "ingress", "comment": "foreign", "expr": []any{map[string]any{"drop": nil}}, "handle": json.Number("4")}})
+			} else {
+				tc.breakIt(xs)
+			}
+			got, e := hostIngressNFTFromRowsWithRenderer(r, xs, 124, true)
+			if e == nil && got.Matches {
+				t.Fatalf("foreign graph adopted: %+v", got)
+			}
+		})
+	}
+}
+
+func TestHostIngressMissingCommentNeedsPinnedNft106Metainfo(t *testing.T) {
+	listing := func(version, release string, schema int) []byte {
+		raw, _ := json.Marshal(map[string]any{"nftables": []any{map[string]any{"metainfo": map[string]any{"version": version, "release_name": release, "json_schema_version": schema}}}})
+		return raw
+	}
+	for _, tc := range []struct {
+		version, release string
+		schema           int
+		allowed          bool
+	}{
+		{"1.0.6", "Lester Gooch #5", 1, true},
+		{"1.1.3", "Lester Gooch #5", 1, false},
+		{"1.0.6", "unknown", 1, false},
+		{"1.0.6", "Lester Gooch #5", 2, false},
+	} {
+		if got := hostIngressLegacyMissingTableComment(listing(tc.version, tc.release, tc.schema)); got != tc.allowed {
+			t.Fatalf("unsupported renderer mode: %+v got=%v", tc, got)
+		}
+	}
+	for _, raw := range [][]byte{nil, []byte(`{}`), []byte(`{"nftables":[]}`), []byte(`{"nftables":[{"foo":{}}]}`)} {
+		if hostIngressLegacyMissingTableComment(raw) {
+			t.Fatalf("bad metainfo admitted: %s", raw)
+		}
+	}
+}

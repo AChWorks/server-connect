@@ -105,3 +105,43 @@ func TestActivationJournalStatusCorruptRefusesFalseAbsenceAndPreservesEvidence(t
 		t.Fatalf("status mutated corrupt journal evidence: %v", err)
 	}
 }
+
+// The installed v6 recovery discriminator is not a legacy v1 SELECTIVE
+// subtype. Operators must see the exact pending operation ID, without
+// disclosing raw foreign nft, service ports, socket marks or claiming safe Off.
+func TestActivationJournalStatusStrictV6PreparationIsVisibleButNotActivation(t *testing.T) {
+	m := New(privateJournalTempDir(t), DefaultCore, DefaultPort)
+	r := hostCaptureJournalExample()
+	if err := m.withActivationJournalLock(nilSync, func(store *activationJournalDir) error { return writeHostCaptureJournal(store, r, nil) }); err != nil {
+		t.Fatal(err)
+	}
+	report, err := New(m.Dir, DefaultCore, DefaultPort).InspectActivationJournal()
+	if err != nil || !report.Present || report.Phase != "host_capture_pending" ||
+		report.OperationID != r.Progress.Ingress.OperationID || !report.RequiresOperatorReview ||
+		report.Revision != 0 || report.ResourceCount != 0 || report.ActivationReady ||
+		report.GuardArmed || report.RecoveryVerified || report.HostNetworkInspected {
+		t.Fatalf("v6 journal hidden or falsely admitted: %+v %v", report, err)
+	}
+	raw, _ := json.Marshal(report)
+	for _, private := range []string{r.Progress.Ingress.RawSHA256, r.Progress.Ingress.Underlay, "namespace_ino", "sysctl_stage", "nft_stage", "barrier"} {
+		if bytes.Contains(raw, []byte(private)) {
+			t.Fatalf("v6 private owner leaked in status: %s", raw)
+		}
+	}
+	path := filepath.Join(m.Dir, activationJournalFilename)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	changed := bytes.Replace(data, []byte(hostCaptureJournalIntent), []byte("other_activation_intent"), 1)
+	if bytes.Equal(data, changed) {
+		t.Fatal("corrupt fixture unchanged")
+	}
+	if err := os.WriteFile(path, changed, 0600); err != nil {
+		t.Fatal(err)
+	}
+	bad, e := m.InspectActivationJournal()
+	if ErrorCode(e) != "activation_journal_invalid" || bad.Present || bad.OperationID != "" || bad.Phase != "" {
+		t.Fatalf("corrupt v6 leaked plausible status: %+v err=%v", bad, e)
+	}
+}

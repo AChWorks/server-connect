@@ -1,5 +1,12 @@
 package sc
 
+import (
+	"encoding/json"
+	"errors"
+	"os"
+	"syscall"
+)
+
 // ActivationJournalStatus reports only the bounded control metadata of the
 // internal intent journal. Before/intended host-resource snapshots are private
 // and MUST NOT be returned by this operator diagnostic. The journal v1 only
@@ -26,14 +33,54 @@ type ActivationJournalStatus struct {
 // Manager state operations, this may initialize a private state directory and
 // lifecycle lock on first inspection; it is not filesystem-side-effect-free.
 func (m *Manager) InspectActivationJournal() (ActivationJournalStatus, error) {
-	journal, err := m.observeActivationJournal()
-	if err != nil {
-		if ErrorCode(err) == "activation_journal_missing" {
-			return ActivationJournalStatus{Phase: "absent"}, nil
+	var report ActivationJournalStatus
+	err := m.withActivationJournalLock(syscall.Fsync, func(store *activationJournalDir) error {
+		raw, _, err := store.readJournal()
+		if errors.Is(err, os.ErrNotExist) {
+			report.Phase = "absent"
+			return nil
 		}
+		if err != nil {
+			return err
+		}
+		if err := rejectAmbiguousJournalJSON(raw); err != nil {
+			return err
+		}
+		var discriminator struct {
+			Version int `json:"version"`
+		}
+		if json.Unmarshal(raw, &discriminator) != nil {
+			return activationJournalError("activation journal version is invalid")
+		}
+		if discriminator.Version == hostCaptureJournalVersion {
+			// Strict v6 selection only, under the same manager lock as its
+			// independent Recovery. The pending/stop/recovered phase is
+			// *journal metadata*, never a kernel or timer-health proof.
+			r, err := decodeHostCaptureJournal(raw)
+			if err != nil {
+				return err
+			}
+			report = ActivationJournalStatus{
+				Phase:                  "host_capture_" + r.Progress.Ingress.Phase,
+				Present:                true,
+				OperationID:            r.Progress.Ingress.OperationID,
+				RequiresOperatorReview: true,
+			}
+			return nil
+		}
+		// Preserve exact historical v1 generic/selective intent semantics.
+		// An unrelated future/invalid subtype must never become "absent".
+		legacy, _, err := loadActivationJournalLocked(store)
+		if err != nil {
+			return err
+		}
+		report = activationJournalStatusFromRecord(legacy)
+		return nil
+	})
+	if err != nil {
 		return ActivationJournalStatus{}, err
 	}
-	return activationJournalStatusFromRecord(journal), nil
+	return report, nil
 }
 
 // A bounded status built from an EXACT journal record. Used both by live

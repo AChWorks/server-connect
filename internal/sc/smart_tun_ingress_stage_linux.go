@@ -345,11 +345,42 @@ func observeHostIngressNFT(r hostIngressStage) (hostIngressNFTObservation, error
 		if err != nil {
 			return hostIngressNFTObservation{}, err
 		}
-		return hostIngressNFTFromRows(r, objects, after)
+		return hostIngressNFTFromRowsWithRenderer(r, objects, after, hostIngressLegacyMissingTableComment(raw))
 	}
 	return hostIngressNFTObservation{}, ingressFault("nft staging observation changed repeatedly")
 }
+
+// nftables 1.0.6 on the observed Debian 12 kernel accepts the table comment
+// in the creation transaction but omits it from subsequent JSON listings.
+// This is an EXACT, source- and kernel-observed renderer exception, not a
+// wildcard for foreign table attributes or arbitrary nft versions. Newer
+// nftables must continue returning the owned table comment. The operation
+// rule comment, complete graph and generation-bound handle are still required.
+func hostIngressLegacyMissingTableComment(raw []byte) bool {
+	var listing struct {
+		NFTables []json.RawMessage `json:"nftables"`
+	}
+	if json.Unmarshal(raw, &listing) != nil || len(listing.NFTables) == 0 {
+		return false
+	}
+	var header struct {
+		Metainfo struct {
+			Version     string `json:"version"`
+			ReleaseName string `json:"release_name"`
+			Schema      int    `json:"json_schema_version"`
+		} `json:"metainfo"`
+	}
+	if json.Unmarshal(listing.NFTables[0], &header) != nil {
+		return false
+	}
+	return header.Metainfo.Version == "1.0.6" && header.Metainfo.ReleaseName == "Lester Gooch #5" && header.Metainfo.Schema == 1
+}
+
 func hostIngressNFTFromRows(r hostIngressStage, objects []map[string]any, generation uint32) (hostIngressNFTObservation, error) {
+	return hostIngressNFTFromRowsWithRenderer(r, objects, generation, false)
+}
+
+func hostIngressNFTFromRowsWithRenderer(r hostIngressStage, objects []map[string]any, generation uint32, oldRenderer bool) (hostIngressNFTObservation, error) {
 	if generation == 0 || objects == nil {
 		return hostIngressNFTObservation{}, ingressFault("ingress nft generation or object inventory absent")
 	}
@@ -396,7 +427,18 @@ func hostIngressNFTFromRows(r hostIngressStage, objects []map[string]any, genera
 	if err != nil {
 		return hostIngressNFTObservation{}, err
 	}
-	expected, err := nativeNFTObjectHash(hostIngressNFTObjects(r), true)
+	expectedObjects := hostIngressNFTObjects(r)
+	// Do not remove the comment from an observed graph, and never normalize
+	// an unexpected present value. Only the pinned 1.0.6 renderer may omit
+	// the table comment; the rule's operation comment remains mandatory.
+	if oldRenderer && len(selected) > 0 {
+		if table, ok := selected[0]["table"].(map[string]any); ok {
+			if _, present := table["comment"]; !present {
+				delete(expectedObjects[0]["table"].(map[string]any), "comment")
+			}
+		}
+	}
+	expected, err := nativeNFTObjectHash(expectedObjects, true)
 	if err != nil {
 		return hostIngressNFTObservation{}, err
 	}
