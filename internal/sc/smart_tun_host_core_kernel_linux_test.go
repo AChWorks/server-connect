@@ -130,7 +130,11 @@ func TestHostCoreCompositeStartRequestedRecoveryKernel(t *testing.T) {
 			if !attempted || !valid {
 				return errors.New("core lacked durable authority or valid credential")
 			}
-			if _, err := os.Stat("/sys/class/net/sctunv70"); err != nil {
+			// /sys/class/net reflects the caller's mount namespace, which
+			// can differ from the isolated NETLINK namespace under unshare.
+			// Observe this exact TUN by rtnetlink instead of assuming sysfs.
+			link, err := nativeTUNObserveLink(r.nativeBase().nativeView())
+			if err != nil || !link.Present || !link.Persistent {
 				return errors.New("native link deleted before owned core stop")
 			}
 			called = true

@@ -285,3 +285,80 @@ func TestHostCoreObservedServiceRecoveryStopsBeforeRemovingCredential(t *testing
 		t.Fatal(err)
 	}
 }
+
+// Crash immediately after fsynced private-credential unlink, before the
+// terminal parent write. The durable remove intent must support idempotent
+// recovery without adopting a foreign active unit or losing the parent.
+func TestHostCoreCredentialUnlinkCrashIsRecoverableWithoutInventingStart(t *testing.T) {
+	m := New(privateJournalTempDir(t), DefaultCore, DefaultPort)
+	r := hostCoreExample()
+	secret := []byte(`{"test":"crash-after-unlink"}`)
+	r.Core.ConfigSHA256 = sha256Hex(secret)
+	observed := smartTUNCoreObservationExample("inactive")
+	services := hostCoreRecoveryServices{
+		observe: func() (smartTUNTrialUnitObservation, error) { return observed, nil },
+		stop: func(smartTUNTrialUnitObservation, bool, bool) error {
+			return errors.New("never-started core must remain unowned")
+		},
+	}
+	err := m.withActivationJournalLock(syscall.Fsync, func(store *activationJournalDir) error {
+		if err := writeHostCoreJournal(store, r, nil); err != nil {
+			return err
+		}
+		if err := hostCoreAdvance(store, &r, "credential_possible"); err != nil {
+			return err
+		}
+		if err := store.writeSmartTUNFile(smartTUNTrialConfigFile, secret, nil); err != nil {
+			return err
+		}
+		if err := hostCoreAdvance(store, &r, "credential_staged"); err != nil {
+			return err
+		}
+		if err := hostCoreAdvance(store, &r, "credential_remove_requested"); err != nil {
+			return err
+		}
+		if err := hostCoreRemoveCredential(store, r); err != nil {
+			return err
+		}
+		// Another independent executor reloads this still-incomplete v8 parent.
+		reloaded, _, err := loadHostCoreJournal(store)
+		if err != nil || reloaded.Core.Stage != "credential_remove_requested" {
+			return errors.New("failed to preserve removable credential stage")
+		}
+		if err := hostCoreStopLocked(store, &reloaded, services); err != nil {
+			return err
+		}
+		if reloaded.Core.Stage != "stopped" || reloaded.Core.StartAttempted {
+			return errors.New("idempotent unstarted core recovery gave foreign stop authority")
+		}
+		return hostCoreStopLocked(store, &reloaded, services)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestHostCoreCredentialRetirementRefusesActiveUnitEvenAfterUnlinkIntent(t *testing.T) {
+	m := New(privateJournalTempDir(t), DefaultCore, DefaultPort)
+	r := hostCoreExample()
+	r.Core.Stage = "credential_remove_requested"
+	active := smartTUNCoreObservationExample("active")
+	stoppedCalls := 0
+	service := hostCoreRecoveryServices{observe: func() (smartTUNTrialUnitObservation, error) { return active, nil },
+		stop: func(smartTUNTrialUnitObservation, bool, bool) error { stoppedCalls++; return nil }}
+	err := m.withActivationJournalLock(syscall.Fsync, func(store *activationJournalDir) error {
+		if err := writeHostCoreJournal(store, r, nil); err != nil {
+			return err
+		}
+		if ErrorCode(hostCoreStopLocked(store, &r, service)) != "trial_recovery_uncertain" {
+			return errors.New("credential removal intent was mistaken for active-unit ownership")
+		}
+		if stoppedCalls != 0 {
+			return errors.New("retired credential was used to stop a foreign unit")
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
