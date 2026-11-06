@@ -134,7 +134,15 @@ func dockerNATRulesMatch(chain string, expr []any, bridge string, subnet netip.P
 	case "OUTPUT":
 		return len(expr) == 4 && dockerNATExactMatch(expr[0], "daddr", netip.MustParsePrefix("127.0.0.0/8"), "!=") && dockerNATExpr(expr[1], "xt", "addrtype") && dockerNATExpr(expr[2], "counter", nil) && dockerNATExpr(expr[3], "jump", "DOCKER")
 	case "POSTROUTING":
-		return len(expr) == 4 && dockerNATExactMatch(expr[0], "oifname", bridge, "!=") && dockerNATExactMatch(expr[1], "saddr", subnet, "==") && dockerNATExpr(expr[2], "counter", nil) && dockerNATExpr(expr[3], "xt", "MASQUERADE")
+		if len(expr) != 4 || !dockerNATExpr(expr[2], "counter", nil) || !dockerNATExpr(expr[3], "xt", "MASQUERADE") {
+			return false
+		}
+		// iptables-nft 1.0.6 and 1.1.3 emit the same two pure, side-effect-free
+		// matches in different orders. Match AND is commutative only BEFORE
+		// the separately required counter and exact MASQUERADE target.
+		iface := func(x any) bool { return dockerNATExactMatch(x, "oifname", bridge, "!=") }
+		source := func(x any) bool { return dockerNATExactMatch(x, "saddr", subnet, "==") }
+		return (iface(expr[0]) && source(expr[1])) || (source(expr[0]) && iface(expr[1]))
 	case "DOCKER":
 		return len(expr) == 3 && dockerNATExactMatch(expr[0], "iifname", bridge, "==") && dockerNATExpr(expr[1], "counter", nil) && dockerNATExpr(expr[2], "return", nil)
 	}
@@ -257,7 +265,7 @@ func strictDockerNATBridge(link, address, route json.RawMessage, bridge, underla
 	}
 	if flags, exists := row["flags"]; exists {
 		var names []string
-		if json.Unmarshal(flags, &names) != nil || len(names) != 1 || names[0] != "linkdown" {
+		if json.Unmarshal(flags, &names) != nil || (len(names) != 0 && !(len(names) == 1 && names[0] == "linkdown")) {
 			return bad()
 		}
 	}
@@ -341,7 +349,13 @@ func strictDockerNATGraph(objects []map[string]any, bridge string, subnet netip.
 			}
 		}
 	}
-	return tableSeen && len(chains) == 5 && len(rules) == 4 && chains["INPUT"] && chains["DOCKER"] && rules["PREROUTING"] && rules["OUTPUT"] && rules["POSTROUTING"] && rules["DOCKER"]
+	// On Debian 13 iptables-nft reports an implicit empty INPUT ACCEPT
+	// policy without materializing a chain in nft JSON. All four actual
+	// Docker rules, including their targets, remain mandatory. Any present
+	// INPUT chain must have the exact verified hook/policy from above.
+	return tableSeen && (len(chains) == 4 || (len(chains) == 5 && chains["INPUT"])) &&
+		chains["PREROUTING"] && chains["OUTPUT"] && chains["POSTROUTING"] && chains["DOCKER"] &&
+		len(rules) == 4 && rules["PREROUTING"] && rules["OUTPUT"] && rules["POSTROUTING"] && rules["DOCKER"]
 }
 
 func dockerNATExprList(fields map[string]any) []any { x, _ := fields["expr"].([]any); return x }

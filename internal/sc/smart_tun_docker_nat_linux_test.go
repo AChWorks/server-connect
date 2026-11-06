@@ -108,6 +108,18 @@ func TestDockerNATExactBackendBridgeAndRootNetfilterGraph(t *testing.T) {
 			t.Fatalf("unsafe Docker bridge discovered: %s", b)
 		}
 	}
+	// Independent Debian13 kernel renders an unmaterialized empty INPUT
+	// chain, reverse ordering of two pure POSTROUTING matches and no
+	// linkdown flag on an unconnected but UP synthetic bridge. These are
+	// exact equivalent shapes, NOT broad acceptance of foreign rules.
+	debian13 := dockerNATClone(t, objects)
+	debian13 = append(debian13[:2], debian13[3:]...)
+	post := debian13[7]["rule"].(map[string]any)["expr"].([]any)
+	post[0], post[1] = post[1], post[0]
+	noLinkDown := json.RawMessage(`[{"dst":"172.17.0.0/16","protocol":"kernel","scope":"link","prefsrc":"172.17.0.1","flags":[]}]`)
+	if !strictDockerNATSnapshot(link, address, noLinkDown, debian13, text, legacy, "docker0", "ens3") {
+		t.Fatal("kernel-equivalent Debian13 NAT renderer rejected")
+	}
 	// Counters and handles change during ordinary traffic. They are not
 	// effect grammar and must not cause false drift in a read-only report.
 	// The bridge identity is derived from the observed NAT grammar, not a
@@ -215,6 +227,17 @@ func TestDockerNATRefusesForeignOwnershipAndAmbiguousBridge(t *testing.T) {
 	})
 	test("injected route statement", func(a, b, c *json.RawMessage, d *[]map[string]any, e, f *[]byte, bridge, underlay *string) {
 		(*d)[6]["rule"].(map[string]any)["expr"].([]any)[0].(map[string]any)["xt"].(map[string]any)["name"] = "MARK"
+	})
+	test("missing required prerouting base chain", func(a, b, c *json.RawMessage, d *[]map[string]any, e, f *[]byte, bridge, underlay *string) {
+		*d = append((*d)[:1], (*d)[2:]...)
+	})
+	test("extra empty chain", func(a, b, c *json.RawMessage, d *[]map[string]any, e, f *[]byte, bridge, underlay *string) {
+		*d = append(*d, map[string]any{"chain": map[string]any{"family": "ip", "table": "nat", "name": "unexpected"}})
+	})
+	test("nat swapped with effectful expression", func(a, b, c *json.RawMessage, d *[]map[string]any, e, f *[]byte, bridge, underlay *string) {
+		row := (*d)[8]["rule"].(map[string]any)
+		exprs := row["expr"].([]any)
+		exprs[0], exprs[2] = exprs[2], exprs[0]
 	})
 	test("duplicate Docker nft chain", func(a, b, c *json.RawMessage, d *[]map[string]any, e, f *[]byte, bridge, underlay *string) {
 		*d = append(*d, (*d)[5])
