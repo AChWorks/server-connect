@@ -212,6 +212,10 @@ func nativeTUNApplyPolicy(store *activationJournalDir, record *smartTUNTrialJour
 }
 
 func nativeTUNApplyPolicyWithPersist(store *activationJournalDir, record *smartTUNTrialJournal, qaPoint string, persist nativeTUNRecordPersist) error {
+	return nativeTUNApplyPolicyWithObserver(store, record, qaPoint, persist, nativeTUNObserveNFT)
+}
+
+func nativeTUNApplyPolicyWithObserver(store *activationJournalDir, record *smartTUNTrialJournal, qaPoint string, persist nativeTUNRecordPersist, observe func(smartTUNTrialJournal) (nativeTUNNFTObservation, error)) error {
 	if err := nativeTUNCheckNamespace(*record); err != nil {
 		return err
 	}
@@ -224,6 +228,32 @@ func nativeTUNApplyPolicyWithPersist(store *activationJournalDir, record *smartT
 	}
 	if err := nativeTUNVerifyLink(*record, link); err != nil {
 		return err
+	}
+	// A host can have foreign Docker NAT or other packet-path writers even
+	// after earlier admission. Refuse them BEFORE the first FIB/RPDB effect,
+	// not after partially publishing a native routing operation. Any later
+	// race still requires independent exact-owned recovery/refusal.
+	beforePolicy, err := observe(*record)
+	if err != nil {
+		return err
+	}
+	if beforePolicy.Present {
+		return nativeTUNConflict("native nft policy slot occupied before any kernel routing mutation")
+	}
+	// Repeat the admission's complete reserved-slot absence BEFORE the
+	// first route/fallback intent. Otherwise a newly occupied RPDB selector
+	// discovered last could leave our earlier FIB effects half-published.
+	// The per-object check below remains mandatory against concurrent drift.
+	for _, family := range []int{4, 6} {
+		for _, kind := range []string{"rule", "route", "fallback"} {
+			present, _, err := nativeTUNObserveResource(*record, family, kind)
+			if err != nil {
+				return err
+			}
+			if present {
+				return nativeTUNConflict("native reserved policy slot occupied before any routing mutation")
+			}
+		}
 	}
 	for _, family := range []int{4, 6} {
 		if nativeFamily(record.Native, family).Address == "" {
@@ -269,7 +299,7 @@ func nativeTUNApplyPolicyWithPersist(store *activationJournalDir, record *smartT
 			}
 		}
 	}
-	before, err := nativeTUNObserveNFT(*record)
+	before, err := observe(*record)
 	if err != nil {
 		return err
 	}
@@ -291,7 +321,7 @@ func nativeTUNApplyPolicyWithPersist(store *activationJournalDir, record *smartT
 	if err := trialQAKillAt("after-native-nft-effect", qaPoint); err != nil {
 		return err
 	}
-	observed, err := nativeTUNObserveNFT(*record)
+	observed, err := observe(*record)
 	if err != nil {
 		return err
 	}
@@ -384,6 +414,10 @@ func nativeTUNVerifyPending(record smartTUNTrialJournal) error {
 }
 
 func nativeTUNCheckRecoveryGraph(record smartTUNTrialJournal) error {
+	return nativeTUNCheckRecoveryGraphWithObserver(record, nativeTUNObserveNFT)
+}
+
+func nativeTUNCheckRecoveryGraphWithObserver(record smartTUNTrialJournal, observe func(smartTUNTrialJournal) (nativeTUNNFTObservation, error)) error {
 	if err := nativeTUNCheckNamespace(record); err != nil {
 		return err
 	}
@@ -420,7 +454,7 @@ func nativeTUNCheckRecoveryGraph(record smartTUNTrialJournal) error {
 			}
 		}
 	}
-	nft, err := nativeTUNObserveNFT(record)
+	nft, err := observe(record)
 	if err != nil {
 		return err
 	}
@@ -469,6 +503,10 @@ func nativeTUNRemoveResource(store *activationJournalDir, record *smartTUNTrialJ
 }
 
 func nativeTUNRemoveResourceWithPersist(store *activationJournalDir, record *smartTUNTrialJournal, family int, kind, qaPoint string, persist nativeTUNRecordPersist) error {
+	return nativeTUNRemoveResourceWithObserver(store, record, family, kind, qaPoint, persist, nativeTUNObserveNFT)
+}
+
+func nativeTUNRemoveResourceWithObserver(store *activationJournalDir, record *smartTUNTrialJournal, family int, kind, qaPoint string, persist nativeTUNRecordPersist, observe func(smartTUNTrialJournal) (nativeTUNNFTObservation, error)) error {
 	object := *nativeTUNResource(record.Native, family, kind)
 	present, hash, err := nativeTUNObserveResource(*record, family, kind)
 	if err != nil {
@@ -492,7 +530,7 @@ func nativeTUNRemoveResourceWithPersist(store *activationJournalDir, record *sma
 		if err := nativeTUNObjectRecovery(*nativeTUNResource(record.Native, family, kind), present, hash); err != nil {
 			return err
 		}
-		guard, err := nativeTUNObserveNFT(*record)
+		guard, err := observe(*record)
 		if err != nil {
 			return err
 		}
@@ -529,6 +567,10 @@ func nativeTUNRemoveLink(store *activationJournalDir, record *smartTUNTrialJourn
 }
 
 func nativeTUNRemoveLinkWithPersist(store *activationJournalDir, record *smartTUNTrialJournal, qaPoint string, persist nativeTUNRecordPersist) error {
+	return nativeTUNRemoveLinkWithObserver(store, record, qaPoint, persist, nativeTUNObserveNFT)
+}
+
+func nativeTUNRemoveLinkWithObserver(store *activationJournalDir, record *smartTUNTrialJournal, qaPoint string, persist nativeTUNRecordPersist, observe func(smartTUNTrialJournal) (nativeTUNNFTObservation, error)) error {
 	link, err := nativeTUNObserveLink(*record)
 	if err != nil {
 		return err
@@ -547,7 +589,7 @@ func nativeTUNRemoveLinkWithPersist(store *activationJournalDir, record *smartTU
 		}
 		// Includes ALL addresses, attached routes and foreign rule/nft/link
 		// dependencies. The earlier whole-host hash is never deletion authority.
-		if err := nativeTUNCheckRecoveryGraph(*record); err != nil {
+		if err := nativeTUNCheckRecoveryGraphWithObserver(*record, observe); err != nil {
 			return err
 		}
 		link, err = nativeTUNObserveLink(*record)
@@ -593,8 +635,12 @@ func nativeTUNRemoveNFT(store *activationJournalDir, record *smartTUNTrialJourna
 }
 
 func nativeTUNRemoveNFTWithPersist(store *activationJournalDir, record *smartTUNTrialJournal, qaPoint string, persist nativeTUNRecordPersist) error {
+	return nativeTUNRemoveNFTWithObserver(store, record, qaPoint, persist, nativeTUNObserveNFT)
+}
+
+func nativeTUNRemoveNFTWithObserver(store *activationJournalDir, record *smartTUNTrialJournal, qaPoint string, persist nativeTUNRecordPersist, observe func(smartTUNTrialJournal) (nativeTUNNFTObservation, error)) error {
 	for attempt := 0; attempt < 3; attempt++ {
-		observed, err := nativeTUNObserveNFT(*record)
+		observed, err := observe(*record)
 		if err != nil {
 			return err
 		}
@@ -623,7 +669,7 @@ func nativeTUNRemoveNFTWithPersist(store *activationJournalDir, record *smartTUN
 		if err := trialQAKillAt("after-native-nft-remove", qaPoint); err != nil {
 			return err
 		}
-		after, err := nativeTUNObserveNFT(*record)
+		after, err := observe(*record)
 		if err != nil {
 			return err
 		}

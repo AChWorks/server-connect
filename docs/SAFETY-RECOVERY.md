@@ -124,6 +124,32 @@ the v6 record for an explicit retry; unknown timer ownership refuses.
 If recovery remains uncertain, preserve the journal and inspect real kernel
 ownership rather than unlinking it or disabling the timer.
 
+### Development v9 routed-policy parent (no public Apply authority)
+
+The independently selected version-9 parent is the first development-only
+single durable owner for Ingress/Barrier, selected-Core start/credential,
+native Link and FIB/RPDB/nft policy receipts. Its kernel QA runs only in a
+fresh isolated disposable network namespace, with **simulated Core unit
+state**, not on a general production host. The v9-specific observer admits
+only the already-receipted same-operation ingress mark graph, exact paired
+nft-backed raw NOTRACK grammar, and independently cross-checked basic Docker
+NAT. Other owners or changed prerequisites refuse before first policy effect.
+Both v8 and v9 reuse the same no-adoption Core stop/credential unlink
+semantics; v9 additionally removes the exact native policy before the Link
+and Ingress and only then allows a terminal operation-bound Clear.
+
+A kernel mutation acknowledged **without its durable receipt** remains
+`UNCERTAIN`; even a same-name, same-shape native route or nft table cannot be
+promoted to owned. The journal and relevant kernel evidence must be retained,
+and independent Recovery must never report `DIRECT` or delete foreign state
+as a workaround. Current isolated SIGKILL negative tests prove this refusal,
+not guaranteed automatic recovery from every kernel boundary. A fully
+receipted v9 kernel graph is recoverable after real initiator SIGKILL. Neither
+path is product activation: selected VPN and Iranian Direct path validation,
+active Runtime Health Guard, no-Direct-leak outage tests, IPv6 and DNS, field
+SSH/hosting ingress and reboot acceptance remain required before general
+host Apply is exposed.
+
 ### Disposable v4 guarded TUN trial (not production acceptance)
 
 The installed experimental v4 journal never reaches `ACTIVE_VERIFIED`.

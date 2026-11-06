@@ -16,11 +16,11 @@ func hostRouteExample(t *testing.T) hostRouteJournal {
 	v8 := hostCoreLinkedExample()
 	v8.Version, v8.Intent = hostRouteJournalVersion, hostRouteJournalIntent
 	r := hostRouteJournal{hostCoreJournal: v8, Route: hostRouteStage{State: "planned"}}
-	data, err := nativeNFTCreateJSON(r.nativeView())
+	digest, err := hostRoutePolicyPlanSHA256(r)
 	if err != nil {
 		t.Fatal(err)
 	}
-	r.Route.PolicySHA256 = sha256Hex(data)
+	r.Route.PolicySHA256 = digest
 	if err := validateHostRouteJournal(r); err != nil {
 		t.Fatal(err)
 	}

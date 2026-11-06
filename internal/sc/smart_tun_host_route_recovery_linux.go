@@ -61,9 +61,31 @@ func recoverHostRouteJournalLocked(store *activationJournalDir, r *hostRouteJour
 		if err := persistHostRouteParent(store, r, next); err != nil {
 			return receipt, err
 		}
+	} else if hostRouteNoKernelPolicyIntent(r.Native) {
+		// The admission rejected before even the first durable route effect
+		// intent. In this provably pre-policy state use the host-native link
+		// path that already admits Docker NAT/NOTRACK without adopting it.
+		base := r.hostCoreJournal.nativeBase()
+		if err := hostNativeRemoveLinkWithPersist(store, &base, hostRouteNativePersist(store, r)); err != nil {
+			return receipt, err
+		}
+		next := *r
+		next.Native.NFT.Stage = "removed"
+		for _, f := range []*smartTUNNativeFamily{&next.Native.IPv4, &next.Native.IPv6} {
+			if f.Address == "" {
+				continue
+			}
+			f.Rule.Stage = "removed"
+			f.Route.Stage = "removed"
+			f.Fallback.Stage = "removed"
+		}
+		if err := persistHostRouteParent(store, r, next); err != nil {
+			return receipt, err
+		}
 	} else {
 		native := r.nativeView()
-		if err := nativeTUNCheckRecoveryGraph(native); err != nil {
+		observe := hostRouteNFTObserver(r)
+		if err := nativeTUNCheckRecoveryGraphWithObserver(native, observe); err != nil {
 			return receipt, err
 		}
 		for _, family := range []int{4, 6} {
@@ -71,15 +93,15 @@ func recoverHostRouteJournalLocked(store *activationJournalDir, r *hostRouteJour
 				continue
 			}
 			for _, kind := range []string{"rule", "route", "fallback"} {
-				if err := nativeTUNRemoveResourceWithPersist(store, &native, family, kind, "", hostRouteNativePersist(store, r)); err != nil {
+				if err := nativeTUNRemoveResourceWithObserver(store, &native, family, kind, "", hostRouteNativePersist(store, r), observe); err != nil {
 					return receipt, err
 				}
 			}
 		}
-		if err := nativeTUNRemoveLinkWithPersist(store, &native, "", hostRouteNativePersist(store, r)); err != nil {
+		if err := nativeTUNRemoveLinkWithObserver(store, &native, "", hostRouteNativePersist(store, r), observe); err != nil {
 			return receipt, err
 		}
-		if err := nativeTUNRemoveNFTWithPersist(store, &native, "", hostRouteNativePersist(store, r)); err != nil {
+		if err := nativeTUNRemoveNFTWithObserver(store, &native, "", hostRouteNativePersist(store, r), observe); err != nil {
 			return receipt, err
 		}
 	}

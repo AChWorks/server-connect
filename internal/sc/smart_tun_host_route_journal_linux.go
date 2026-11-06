@@ -7,7 +7,9 @@ package sc
 // only current mutator entry is the explicit isolated-netns kernel QA. No
 // installed operator CLI can enable routed traffic through this subtype.
 // Route and native effects MUST share this same durable parent with ingress,
-// core, and their independently selected rollback.
+// core, and their independently selected rollback. The policy observer accepts
+// only separately verified raw/NOTRACK and basic Docker-bridge NAT owners;
+// a changed foreign packet path refuses before new routing mutations.
 
 import (
 	"bytes"
@@ -67,6 +69,24 @@ func hostRouteNoEffects(n smartTUNNativeLedger) bool {
 	}
 	return true
 }
+
+// No FIB/RPDB/nft mutation intent was ever persisted. A rejected foreign
+// firewall preflight can recover the TUN/ingress without requiring the
+// experimental native-policy classifier to accept unrelated Docker NAT.
+func hostRouteNoKernelPolicyIntent(n smartTUNNativeLedger) bool {
+	if n.NFT.Stage != "planned" || n.NFTHandle != 0 || n.NFTCount != 0 {
+		return false
+	}
+	for _, f := range []smartTUNNativeFamily{n.IPv4, n.IPv6} {
+		for _, o := range []smartTUNNativeObject{f.Rule, f.Route, f.Fallback} {
+			if o.Stage != "planned" || o.SHA256 != "" {
+				return false
+			}
+		}
+	}
+	return true
+}
+
 func hostRouteOffEffects(n smartTUNNativeLedger) bool {
 	if n.NFT.Stage != "removed" || n.LinkStage != "removed" {
 		return false
@@ -84,6 +104,21 @@ func hostRouteOffEffects(n smartTUNNativeLedger) bool {
 	}
 	return true
 }
+
+// The future ifindex is assigned by the kernel AFTER the durable parent is
+// created. Hash the immutable policy *intent* with that dynamic slot zeroed;
+// the installed nft graph is separately bound to its actual link index by
+// the per-object receipt digests and the complete parent CAS.
+func hostRoutePolicyPlanSHA256(r hostRouteJournal) (string, error) {
+	view := r.nativeView()
+	view.Native.LinkIndex = 0
+	program, err := nativeNFTCreateJSON(view)
+	if err != nil {
+		return "", err
+	}
+	return sha256Hex(program), nil
+}
+
 func validateHostRouteJournal(r hostRouteJournal) error {
 	bad := func() error {
 		return activationJournalError("host policy operation identity, progress or receipt invalid")
@@ -92,8 +127,8 @@ func validateHostRouteJournal(r hostRouteJournal) error {
 		validateHostCoreJournal(r.coreWithoutPolicy()) != nil || !journalHex64.MatchString(r.Route.PolicySHA256) {
 		return bad()
 	}
-	program, err := nativeNFTCreateJSON(r.nativeView())
-	if err != nil || sha256Hex(program) != r.Route.PolicySHA256 {
+	digest, err := hostRoutePolicyPlanSHA256(r)
+	if err != nil || digest != r.Route.PolicySHA256 {
 		return bad()
 	}
 	n := r.Native

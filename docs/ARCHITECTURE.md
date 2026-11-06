@@ -135,6 +135,39 @@ recognized. CLI `host-core-preparation-qa` / operation-bound
 proof; `activation_ready` and `general_host_admitted` remain false. A live
 Core-only TUN does not route public host traffic or prove VPN delivery.
 
+**v9 single-parent routed-policy kernel QA (development-only, no installed
+Apply command):** A strict new parent joins the exact v8 Core/Ingress/Barrier
+and native Link with individually journaled IPv4/IPv6 FIB, RPDB and nft
+capture/guard effects; it is selected and reconciled under the same
+independent Recovery lock as all older journal types. The immutable nft
+policy *plan* hashes the unallocated Link ifindex as zero, while kernel-owned
+nft receipt identities later bind the actual ifindex, graph handles, semantic
+object digests and whole-parent CAS. A v9-only nft observer (the old v4
+fixture observer remains strict) independently proves the exact receipted
+Ingress graph, unchanged cross-checked ip/ip6 raw NOTRACK text, matching
+native nft CT port/chain/action grammar in both families and the complete,
+known basic Docker-bridge NAT graph and its empty legacy backend. Unrecognized
+foreign packet writers, published Docker DNAT, changed underlay, flowtables,
+mark overlap, unexpected CT grammar and stale operation generations are
+refused **before the first new FIB/RPDB effect**. The static Docker bridge
+and raw-rule exemptions are *never* used as a broad Direct bypass.
+
+In an isolated real Linux netns with simulated owned Core identity, tests
+install the actual marked RPDB/FIB fallback/route and native inet OUTPUT
+capture/POSTROUTING guard alongside Docker NAT/NOTRACK, then independently
+stop Core, remove exact receipted resources and compare the complete
+foreign route/rule/nft baseline. A true process SIGKILL after all durable
+receipts also recovers. A process SIGKILL *after a kernel route or nft effect
+but before its durable receipt* deliberately leaves an **uncertain** parent:
+matching-looking kernel resources are not adoption authority, and Recovery
+must retain the guard/evidence instead of claiming Direct/off. The latter
+is a production readiness blocker, not a successful rollback; its isolated
+namespace is discarded after the negative test. Neither these kernel tests
+nor a v9 journal prove a live selected VPN exit, automated Iranian Direct,
+DNS/UDP/IPv6 capture, preserved real foreign-hosted ingress, a continuously
+operating Runtime Health Guard, or general-host admission. No public v9
+Apply CLI or stable release is enabled.
+
 The manager validates the selected profile, pinned core, native baseline and
 reserved resource absence, then independently prearms the installed recovery
 oneshot/timer outside the shared journal lock. It repeats admission under the

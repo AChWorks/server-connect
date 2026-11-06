@@ -7,37 +7,46 @@ package sc
 // test cannot authorize general-host Apply or claim actual VPN delivery.
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 )
 
+// All v9 positive/negative kernel tests use the same exact Docker NAT and
+// paired ip/ip6 raw NOTRACK fixture as the host-ingress acceptance. The
+// v4 disconnected policy classifier deliberately remains stricter.
 func hostRouteKernelReady(t *testing.T, store *activationJournalDir, r *hostRouteJournal, guard func() error, secret []byte) error {
 	t.Helper()
 	if err := writeHostRouteJournal(store, *r, nil); err != nil {
-		return err
+		return fmt.Errorf("kernel-ready early: %w", err)
 	}
 	if err := runHostCaptureGateLocked(store, &r.Progress, guard, hostRouteCapturePersist(store, r)); err != nil {
-		return err
+		return fmt.Errorf("ingress: %w", err)
 	}
 	native := r.nativeView()
 	if err := nativeTUNPrepareLinkWithPersist(store, &native, "", hostRouteNativePersist(store, r)); err != nil {
-		return err
+		return fmt.Errorf("link: %w", err)
 	}
 	for _, stage := range []string{"credential_possible", "credential_staged", "start_requested", "active_observed"} {
 		if stage == "credential_staged" {
 			if err := store.writeSmartTUNFile(smartTUNTrialConfigFile, secret, nil); err != nil {
-				return err
+				return fmt.Errorf("credential: %w", err)
 			}
 		}
 		if err := hostRouteCoreStagePersist(store, r, stage); err != nil {
-			return err
+			return fmt.Errorf("core %s: %w", stage, err)
 		}
 	}
-	return hostRoutePhasePersist(store, r, "effect_possible")
+	if err := hostRoutePhasePersist(store, r, "effect_possible"); err != nil {
+		return fmt.Errorf("policy-intent: %w", err)
+	}
+	return nil
 }
 
 func hostRouteKernelExample(t *testing.T) hostRouteJournal {
@@ -48,11 +57,11 @@ func hostRouteKernelExample(t *testing.T) hostRouteJournal {
 		ProfileID: "abcdef0123456789", ConfigSHA256: sha256Hex([]byte(`{"simulated":"host-route-v9"}`)),
 		PinnedEndpoint: "8.8.8.8", Stage: "planned",
 	}}, Route: hostRouteStage{State: "planned"}}
-	raw, err := nativeNFTCreateJSON(r.nativeView())
+	digest, err := hostRoutePolicyPlanSHA256(r)
 	if err != nil {
 		t.Fatal(err)
 	}
-	r.Route.PolicySHA256 = sha256Hex(raw)
+	r.Route.PolicySHA256 = digest
 	return r
 }
 
@@ -66,11 +75,11 @@ func TestHostRouteV9RealKernelOwnedPolicyAndCoreFirstOff(t *testing.T) {
 	r.Progress = base.Progress
 	r.Native = base.Native
 	r.Native.NFTName = "scnt_" + r.Progress.Ingress.OperationID
-	program, err := nativeNFTCreateJSON(r.nativeView())
+	digest, err := hostRoutePolicyPlanSHA256(r)
 	if err != nil {
 		t.Fatal(err)
 	}
-	r.Route.PolicySHA256 = sha256Hex(program)
+	r.Route.PolicySHA256 = digest
 	if err := validateHostRouteJournal(r); err != nil {
 		t.Fatal(err)
 	}
@@ -78,14 +87,14 @@ func TestHostRouteV9RealKernelOwnedPolicyAndCoreFirstOff(t *testing.T) {
 	secret := []byte(`{"simulated":"host-route-v9"}`)
 	err = m.withActivationJournalLock(syscall.Fsync, func(store *activationJournalDir) error {
 		if err := hostRouteKernelReady(t, store, &r, guard, secret); err != nil {
-			return err
+			return fmt.Errorf("kernel-ready: %w", err)
 		}
 		native := r.nativeView()
-		if err := nativeTUNApplyPolicyWithPersist(store, &native, "", hostRouteNativePersist(store, &r)); err != nil {
-			return err
+		if err := nativeTUNApplyPolicyWithObserver(store, &native, "", hostRouteNativePersist(store, &r), hostRouteNFTObserver(&r)); err != nil {
+			return fmt.Errorf("native-apply: %w", err)
 		}
 		if err := hostRoutePhasePersist(store, &r, "observed"); err != nil {
-			return err
+			return fmt.Errorf("observed-phase: %w", err)
 		}
 		if r.Route.State != "observed" || r.Native.NFT.Stage != "observed" || r.Native.IPv4.Rule.Stage != "observed" {
 			return errors.New("v9 kernel routing receipt was not durable in the same journal")
@@ -98,7 +107,7 @@ func TestHostRouteV9RealKernelOwnedPolicyAndCoreFirstOff(t *testing.T) {
 		if err != nil || !present {
 			return errors.New("native fail-closed unreachable route not installed")
 		}
-		obs, err := nativeTUNObserveNFT(r.nativeView())
+		obs, err := hostRouteNFTObserver(&r)(r.nativeView())
 		if err != nil || !obs.Present || !obs.Matches {
 			return errors.New("native paired output/postrouting guard missing")
 		}
@@ -154,39 +163,379 @@ func TestHostRouteV9ForeignOwnedKernelSlotCannotBeAdopted(t *testing.T) {
 		t.Skip("NOT_RUN: isolated root netns required")
 	}
 	guard, base := prepareHostNativeKernelFixture(t)
+	before := hostNativeKernelSnapshot(t)
 	r := hostRouteKernelExample(t)
 	r.Progress = base.Progress
 	r.Native = base.Native
 	r.Native.NFTName = "scnt_" + r.Progress.Ingress.OperationID
-	program, err := nativeNFTCreateJSON(r.nativeView())
+	digest, err := hostRoutePolicyPlanSHA256(r)
 	if err != nil {
 		t.Fatal(err)
 	}
-	r.Route.PolicySHA256 = sha256Hex(program)
+	r.Route.PolicySHA256 = digest
 	m := New(privateJournalTempDir(t), DefaultCore, DefaultPort)
 	secret := []byte(`{"simulated":"host-route-v9"}`)
 	err = m.withActivationJournalLock(syscall.Fsync, func(store *activationJournalDir) error {
 		if err := hostRouteKernelReady(t, store, &r, guard, secret); err != nil {
 			return err
 		}
-		// A foreign owner of the fixed RPDB priority is a conflict, not a
-		// reason to delete that resource or force-create our own capture rule.
-		// An exact-looking foreign rule occupies the same RPDB selector,
-		// but has no matching *journaled* creation intent or receipt.
-		ingressNativeCommand(t, "/usr/sbin/ip", nativeRouteArgs(r.nativeView(), 4, "rule", "add")...)
-		// Policy admission must reobserve exact absence, not trust a prior plan.
+		// An exact-looking foreign RPDB selector is not a durable receipt.
+		foreign := nativeRouteArgs(r.nativeView(), 4, "rule", "add")
+		ingressNativeCommand(t, "/usr/sbin/ip", foreign...)
 		native := r.nativeView()
-		err := nativeTUNApplyPolicyWithPersist(store, &native, "", hostRouteNativePersist(store, &r))
+		err := nativeTUNApplyPolicyWithObserver(store, &native, "", hostRouteNativePersist(store, &r), hostRouteNFTObserver(&r))
 		if err == nil {
-			return errors.New("foreign owned RPDB priority was adopted")
+			return errors.New("foreign RPDB selector was silently adopted")
 		}
-		if strings.Contains(err.Error(), "panic") {
+		if !hostRouteNoKernelPolicyIntent(r.Native) {
+			return errors.New("foreign RPDB drift left our own FIB/RPDB intent")
+		}
+		for _, kind := range []string{"route", "fallback"} {
+			present, _, err := nativeTUNObserveResource(r.nativeView(), 4, kind)
+			if err != nil || present {
+				return errors.New("foreign RPDB drift caused partial FIB effects")
+			}
+		}
+		// Undo only the isolated test's own deliberately created foreign rule.
+		ingressNativeCommand(t, "/usr/sbin/ip", nativeRouteArgs(r.nativeView(), 4, "rule", "del")...)
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := smartTUNCoreObservationExample("active")
+	inactive := smartTUNCoreObservationExample("inactive")
+	inactive.identity = state.identity
+	services := hostCoreRecoveryServices{
+		observe: func() (smartTUNTrialUnitObservation, error) { return state, nil },
+		stop: func(_ smartTUNTrialUnitObservation, started, valid bool) error {
+			if !started || !valid {
+				return errors.New("invalid core stop authority")
+			}
+			state = inactive
+			return nil
+		},
+	}
+	receipt, err := m.recoverGuardedTrialWithHandler("", "", func(store *activationJournalDir, s trialRecoverySelection) (TrialReceipt, error) {
+		return recoverHostRouteJournalLocked(store, &s.hostRoute, services)
+	})
+	if err != nil || !receipt.RecoveryVerified {
+		t.Fatalf("exact pre-policy conflict Off failed: %+v %v", receipt, err)
+	}
+	if err := m.withActivationJournalLock(syscall.Fsync, func(store *activationJournalDir) error {
+		return clearRecoveredHostRouteLocked(store, r.Progress.Ingress.OperationID, services)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if after := hostNativeKernelSnapshot(t); after != before {
+		t.Fatal("foreign RPDB rejection/Off changed host baseline")
+	}
+	fmt.Println("HOST_ROUTE_V9_FOREIGN_RPDB_CONFLICT_BEFORE_FIB_AND_EXACT_OFF=PASS")
+}
+
+// Foreign mutations discovered after initial ingress/Core admission must
+// refuse BEFORE the first routing effect, preserving Docker/NOTRACK and
+// allowing a same-parent exact Core-first Off after their owner restores the
+// original prerequisite. No code here edits a non-disposable host.
+func TestHostRouteV9ForeignFirewallDriftRefusesBeforeAnyRoutingEffect(t *testing.T) {
+	if os.Getenv("SC_TEST_HOST_ROUTE_NATIVE") != "isolated-netns" {
+		t.Skip("NOT_RUN: isolated root netns required")
+	}
+	requested := os.Getenv("SC_TEST_HOST_ROUTE_FIREWALL_DRIFT")
+	if requested != "added_raw_notrack" && requested != "published_docker_nat" {
+		t.Skip("NOT_RUN: one drift case per fresh isolated namespace")
+	}
+	for _, tc := range []struct {
+		name     string
+		add, del []string
+		program  string
+	}{
+		{name: "added_raw_notrack", add: []string{"-t", "raw", "-A", "OUTPUT", "-p", "tcp", "--sport", "28998", "-j", "NOTRACK"}, del: []string{"-t", "raw", "-D", "OUTPUT", "-p", "tcp", "--sport", "28998", "-j", "NOTRACK"}},
+		{name: "published_docker_nat", add: []string{"-t", "nat", "-A", "DOCKER", "-p", "tcp", "--dport", "18080", "-j", "DNAT", "--to-destination", "172.17.0.2:80"}, del: []string{"-t", "nat", "-D", "DOCKER", "-p", "tcp", "--dport", "18080", "-j", "DNAT", "--to-destination", "172.17.0.2:80"}},
+	} {
+		if tc.name != requested {
+			continue
+		}
+		t.Run(tc.name, func(t *testing.T) {
+			guard, base := prepareHostNativeKernelFixture(t)
+			before := hostNativeKernelSnapshot(t)
+			r := hostRouteKernelExample(t)
+			r.Progress = base.Progress
+			r.Native = base.Native
+			r.Native.NFTName = "scnt_" + r.Progress.Ingress.OperationID
+			digest, err := hostRoutePolicyPlanSHA256(r)
+			if err != nil {
+				t.Fatal(err)
+			}
+			r.Route.PolicySHA256 = digest
+			secret := []byte(`{"simulated":"host-route-v9"}`)
+			m := New(privateJournalTempDir(t), DefaultCore, DefaultPort)
+			err = m.withActivationJournalLock(syscall.Fsync, func(store *activationJournalDir) error {
+				if err := hostRouteKernelReady(t, store, &r, guard, secret); err != nil {
+					return err
+				}
+				ingressNativeCommand(t, "/usr/sbin/iptables-nft", tc.add...)
+				native := r.nativeView()
+				err := nativeTUNApplyPolicyWithObserver(store, &native, "", hostRouteNativePersist(store, &r), hostRouteNFTObserver(&r))
+				if err == nil {
+					return errors.New("foreign firewall mutation was not refused")
+				}
+				if !hostRouteNoKernelPolicyIntent(r.Native) {
+					return errors.New("preflight failure left native FIB/RPDB intent behind")
+				}
+				for _, kind := range []string{"fallback", "route", "rule"} {
+					exists, _, err := nativeTUNObserveResource(r.nativeView(), 4, kind)
+					if err != nil || exists {
+						return errors.New("preflight refusal mutated native routing")
+					}
+				}
+				ingressNativeCommand(t, "/usr/sbin/iptables-nft", tc.del...)
+				return nil
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			state := smartTUNCoreObservationExample("active")
+			inactive := smartTUNCoreObservationExample("inactive")
+			inactive.identity = state.identity
+			stopped := false
+			services := hostCoreRecoveryServices{
+				observe: func() (smartTUNTrialUnitObservation, error) { return state, nil },
+				stop: func(_ smartTUNTrialUnitObservation, started, valid bool) error {
+					if !started || !valid {
+						return errors.New("no owned core stop authority")
+					}
+					stopped = true
+					state = inactive
+					return nil
+				},
+			}
+			result, err := m.recoverGuardedTrialWithHandler("", "", func(store *activationJournalDir, s trialRecoverySelection) (TrialReceipt, error) {
+				return recoverHostRouteJournalLocked(store, &s.hostRoute, services)
+			})
+			if err != nil || !result.RecoveryVerified || !stopped {
+				t.Fatalf("pre-policy rollback failed: %+v %v", result, err)
+			}
+			if err := m.withActivationJournalLock(syscall.Fsync, func(store *activationJournalDir) error {
+				return clearRecoveredHostRouteLocked(store, r.Progress.Ingress.OperationID, services)
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if hostNativeKernelSnapshot(t) != before {
+				t.Fatal("foreign firewall preflight rollback changed host baseline")
+			}
+			fmt.Println("HOST_ROUTE_V9_" + tc.name + "_BEFORE_FIB_AND_EXACT_OFF=PASS")
+		})
+	}
+}
+
+func TestHostRouteV9CrashHelper(t *testing.T) {
+	if os.Getenv("SC_TEST_HOST_ROUTE_CRASH_HELPER") != "isolated-netns" {
+		t.Skip("NOT_RUN: isolated crash helper only")
+	}
+	dir := os.Getenv("SC_TEST_HOST_ROUTE_CRASH_DIR")
+	if dir == "" {
+		t.Fatal("crash helper missing the previously staged journal")
+	}
+	m := New(dir, DefaultCore, DefaultPort)
+	err := m.withActivationJournalLock(syscall.Fsync, func(store *activationJournalDir) error {
+		r, _, err := loadHostRouteJournal(store)
+		if err != nil {
 			return err
+		}
+		if r.Route.State != "effect_possible" || r.Core.Stage != "active_observed" {
+			return errors.New("crash helper was not given an exact routable parent")
+		}
+		native := r.nativeView()
+		point := os.Getenv("SC_TEST_HOST_ROUTE_CRASH_POINT")
+		if point != "" && point != "after-native-route-effect" && point != "after-native-nft-effect" {
+			return errors.New("unsupported routed SIGKILL boundary")
+		}
+		if err := nativeTUNApplyPolicyWithObserver(store, &native, point, hostRouteNativePersist(store, &r), hostRouteNFTObserver(&r)); err != nil {
+			return err
+		}
+		if err := hostRoutePhasePersist(store, &r, "observed"); err != nil {
+			return err
+		}
+		if err := syscall.Kill(os.Getpid(), syscall.SIGKILL); err != nil {
+			return err
+		}
+		return errors.New("SIGKILL unexpectedly returned")
+	})
+	t.Fatalf("crash helper did not SIGKILL: %v", err)
+}
+
+func TestHostRouteV9RealSIGKILLAfterPolicyReceiptIndependentOff(t *testing.T) {
+	if os.Getenv("SC_TEST_HOST_ROUTE_NATIVE") != "isolated-netns" {
+		t.Skip("NOT_RUN: isolated root netns required")
+	}
+	guard, base := prepareHostNativeKernelFixture(t)
+	before := hostNativeKernelSnapshot(t)
+	r := hostRouteKernelExample(t)
+	r.Progress = base.Progress
+	r.Native = base.Native
+	r.Native.NFTName = "scnt_" + r.Progress.Ingress.OperationID
+	digest, err := hostRoutePolicyPlanSHA256(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.Route.PolicySHA256 = digest
+	dir := privateJournalTempDir(t)
+	m := New(dir, DefaultCore, DefaultPort)
+	secret := []byte(`{"simulated":"host-route-v9"}`)
+	err = m.withActivationJournalLock(syscall.Fsync, func(store *activationJournalDir) error {
+		return hostRouteKernelReady(t, store, &r, guard, secret)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 35*time.Second)
+	defer cancel()
+	child := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestHostRouteV9CrashHelper$", "-test.v", "-test.timeout=30s")
+	child.Env = append(os.Environ(), "SC_TEST_HOST_ROUTE_CRASH_HELPER=isolated-netns", "SC_TEST_HOST_ROUTE_CRASH_DIR="+dir)
+	out, err := child.CombinedOutput()
+	var killed *exec.ExitError
+	if ctx.Err() != nil || !errors.As(err, &killed) || !killed.ProcessState.Sys().(syscall.WaitStatus).Signaled() ||
+		killed.ProcessState.Sys().(syscall.WaitStatus).Signal() != syscall.SIGKILL {
+		t.Fatalf("routed policy initiator did not SIGKILL after full receipt: %v %s", err, out)
+	}
+	fmt.Println("HOST_ROUTE_V9_REAL_SIGKILL_AFTER_ALL_KERNEL_POLICY_RECEIPTS=PASS")
+	state := smartTUNCoreObservationExample("active")
+	inactive := smartTUNCoreObservationExample("inactive")
+	inactive.identity = state.identity
+	stopCount := 0
+	service := hostCoreRecoveryServices{
+		observe: func() (smartTUNTrialUnitObservation, error) { return state, nil },
+		stop: func(_ smartTUNTrialUnitObservation, started, valid bool) error {
+			if !started || !valid {
+				return errors.New("no core start/credential authority")
+			}
+			stopCount++
+			state = inactive
+			return nil
+		},
+	}
+	result, err := m.recoverGuardedTrialWithHandler("", "", func(store *activationJournalDir, s trialRecoverySelection) (TrialReceipt, error) {
+		if s.version != hostRouteJournalVersion || s.hostRoute.Route.State != "observed" ||
+			s.hostRoute.Native.NFT.Stage != "observed" || s.hostRoute.Native.IPv4.Rule.Stage != "observed" {
+			return TrialReceipt{}, errors.New("independent process lost exact durable native routing receipt")
+		}
+		return recoverHostRouteJournalLocked(store, &s.hostRoute, service)
+	})
+	if err != nil || !result.RecoveryVerified || stopCount != 1 {
+		t.Fatalf("v9 genuine SIGKILL independent Off failed: %+v %v", result, err)
+	}
+	if err := m.withActivationJournalLock(syscall.Fsync, func(store *activationJournalDir) error {
+		return clearRecoveredHostRouteLocked(store, r.Progress.Ingress.OperationID, service)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if after := hostNativeKernelSnapshot(t); after != before {
+		t.Fatal("post-SIGKILL policy cleanup altered Docker/NAT/foreign kernel baseline")
+	}
+	fmt.Println("HOST_ROUTE_V9_POST_SIGKILL_CORE_FIRST_OFF_BASELINE_IDENTICAL=PASS")
+}
+
+// The kernel route or nft creation might succeed immediately before the
+// initiator dies and before its exact receipt is fsynced. A later matching
+// object is NOT historical proof of ownership. In this case the independent
+// executor must retain journal and conflict evidence, never manufacture
+// a successful Direct/off or broad-delete an unreceipted host resource.
+func TestHostRouteV9UnreceiptedSIGKILLEffectFailsClosed(t *testing.T) {
+	if os.Getenv("SC_TEST_HOST_ROUTE_NATIVE") != "isolated-netns" {
+		t.Skip("NOT_RUN: isolated root netns required")
+	}
+	point := os.Getenv("SC_TEST_HOST_ROUTE_UNRECEIPTED")
+	if point != "after-native-route-effect" && point != "after-native-nft-effect" {
+		t.Skip("NOT_RUN: exact one effect boundary per isolated namespace")
+	}
+	guard, base := prepareHostNativeKernelFixture(t)
+	r := hostRouteKernelExample(t)
+	r.Progress = base.Progress
+	r.Native = base.Native
+	r.Native.NFTName = "scnt_" + r.Progress.Ingress.OperationID
+	digest, err := hostRoutePolicyPlanSHA256(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.Route.PolicySHA256 = digest
+	dir := privateJournalTempDir(t)
+	m := New(dir, DefaultCore, DefaultPort)
+	secret := []byte(`{"simulated":"host-route-v9"}`)
+	if err := m.withActivationJournalLock(syscall.Fsync, func(store *activationJournalDir) error {
+		return hostRouteKernelReady(t, store, &r, guard, secret)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 35*time.Second)
+	defer cancel()
+	child := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestHostRouteV9CrashHelper$", "-test.v", "-test.timeout=30s")
+	child.Env = append(os.Environ(), "SC_TEST_HOST_ROUTE_CRASH_HELPER=isolated-netns", "SC_TEST_HOST_ROUTE_CRASH_DIR="+dir, "SC_TEST_HOST_ROUTE_CRASH_POINT="+point)
+	out, err := child.CombinedOutput()
+	var killed *exec.ExitError
+	if ctx.Err() != nil || !errors.As(err, &killed) || !killed.ProcessState.Sys().(syscall.WaitStatus).Signaled() ||
+		killed.ProcessState.Sys().(syscall.WaitStatus).Signal() != syscall.SIGKILL {
+		t.Fatalf("native effect boundary did not SIGKILL: %v %s", err, out)
+	}
+	present := false
+	err = m.withActivationJournalLock(syscall.Fsync, func(store *activationJournalDir) error {
+		actual, _, err := loadHostRouteJournal(store)
+		if err != nil {
+			return err
+		}
+		if actual.Route.State != "effect_possible" {
+			return errors.New("native crash lost incomplete durable parent")
+		}
+		if point == "after-native-route-effect" {
+			if actual.Native.IPv4.Route.Stage != "effect_possible" {
+				return errors.New("route intent was not persisted before SIGKILL")
+			}
+			present, _, err = nativeTUNObserveResource(actual.nativeView(), 4, "route")
+		} else {
+			if actual.Native.NFT.Stage != "effect_possible" {
+				return errors.New("nft intent was not persisted before SIGKILL")
+			}
+			var observed nativeTUNNFTObservation
+			observed, err = hostRouteNFTObserver(&actual)(actual.nativeView())
+			present = observed.Present && observed.Matches
+		}
+		return err
+	})
+	if err != nil || !present {
+		t.Fatalf("unreceipted native effect was not observed: %v", err)
+	}
+	state := smartTUNCoreObservationExample("active")
+	inactive := smartTUNCoreObservationExample("inactive")
+	inactive.identity = state.identity
+	service := hostCoreRecoveryServices{observe: func() (smartTUNTrialUnitObservation, error) { return state, nil },
+		stop: func(_ smartTUNTrialUnitObservation, attempted, valid bool) error {
+			if !attempted || !valid {
+				return errors.New("no legal core stop authority")
+			}
+			state = inactive
+			return nil
+		},
+	}
+	result, err := m.recoverGuardedTrialWithHandler("", "", func(store *activationJournalDir, s trialRecoverySelection) (TrialReceipt, error) {
+		return recoverHostRouteJournalLocked(store, &s.hostRoute, service)
+	})
+	if err == nil || result.RecoveryVerified {
+		t.Fatal("unreceipted native resource was mistakenly claimed recovered")
+	}
+	err = m.withActivationJournalLock(syscall.Fsync, func(store *activationJournalDir) error {
+		actual, _, err := loadHostRouteJournal(store)
+		if err != nil {
+			return err
+		}
+		if actual.Route.State != "off_pending" || actual.Core.Stage != "stopped" || actual.Progress.Ingress.Phase != "pending" {
+			return errors.New("failed recovery destroyed parent, guard or truthful pending state")
 		}
 		return nil
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	fmt.Println("HOST_ROUTE_V9_FOREIGN_POLICY_PRIORITY_FAILS_CLOSED=PASS")
+	fmt.Println("HOST_ROUTE_V9_" + strings.ToUpper(strings.ReplaceAll(point, "-", "_")) + "_UNRECEIPTED_NO_FALSE_OFF=PASS")
+	// Kernel state only exists in this fresh unshared namespace. It is discarded
+	// on process exit, not by guessing ownership over foreign live host state.
 }
