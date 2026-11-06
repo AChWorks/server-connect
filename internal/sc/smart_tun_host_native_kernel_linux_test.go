@@ -119,6 +119,35 @@ func TestHostNativeJournalOneKernelLinkAndOwnedOff(t *testing.T) {
 		t.Fatal(err)
 	}
 	runner := New(m.Dir, DefaultCore, DefaultPort)
+	// A separate native nftables owner referencing the TUN link must veto
+	// deletion without losing the journal or touching that foreign table.
+	ingressNativeCommand(t, "/usr/sbin/nft", "add", "table", "inet", "scqa_foreign")
+	ingressNativeCommand(t, "/usr/sbin/nft", "add", "chain", "inet", "scqa_foreign", "view")
+	ingressNativeCommand(t, "/usr/sbin/nft", "add", "rule", "inet", "scqa_foreign", "view", "oifname", "sctunv70", "counter")
+	_, conflictErr := runner.recoverGuardedTrialWithHandler("", "", func(store *activationJournalDir, selected trialRecoverySelection) (TrialReceipt, error) {
+		return recoverHostNativeJournalLocked(store, &selected.hostNative, guard)
+	})
+	if conflictErr == nil {
+		t.Fatal("foreign nft interface dependency failed to block native TUN deletion")
+	}
+	if err := m.withActivationJournalLock(syscall.Fsync, func(store *activationJournalDir) error {
+		retained, _, err := loadHostNativeJournal(store)
+		if err != nil {
+			return err
+		}
+		if retained.Native.LinkStage != "observed" {
+			return errors.New("foreign dependency caused unreceipted link cleanup")
+		}
+		link, err := nativeTUNObserveLink(retained.nativeView())
+		if err != nil || !link.Present {
+			return errors.New("foreign dependency caused lost link identity")
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	ingressNativeCommand(t, "/usr/sbin/nft", "delete", "table", "inet", "scqa_foreign")
+	fmt.Println("HOST_NATIVE_V7_FOREIGN_NFT_LINK_DEPENDENCY_RETAINED=PASS")
 	result, err := runner.recoverGuardedTrialWithHandler("", "", func(store *activationJournalDir, selected trialRecoverySelection) (TrialReceipt, error) {
 		if selected.version != hostNativeJournalVersion || selected.hostNative.Native.LinkStage != "observed" {
 			return TrialReceipt{}, errors.New("independent selector lost persisted native link")
@@ -178,13 +207,22 @@ func TestHostNativeKernelCrashHelper(t *testing.T) {
 		if err := writeHostNativeJournal(store, r, nil); err != nil {
 			return err
 		}
-		if err := runHostCaptureGateLocked(store, &r.Progress, guard, hostNativeCapturePersist(store, &r)); err != nil {
+		point := os.Getenv("SC_TEST_HOST_NATIVE_CRASH_POINT")
+		if point == "" {
+			point = "after-native-persist"
+		}
+		if point == "after-journal" {
+			return trialQAKillAt("after-journal", point)
+		}
+		if err := runHostCaptureGateLockedWithHook(store, &r.Progress, guard,
+			hostNativeCapturePersist(store, &r), func(stage string) error {
+				return trialQAKillAt(stage, point)
+			}); err != nil {
 			return err
 		}
-		// The real native syscall persists the link before the next journal write.
-		// An actual process SIGKILL exercises the independent recoverer, not a mock.
+		// Crash at a true kernel/journal boundary, never before the effect.
 		native := r.nativeView()
-		return nativeTUNPrepareLinkWithPersist(store, &native, "after-native-persist", hostNativeLinkPersist(store, &r))
+		return nativeTUNPrepareLinkWithPersist(store, &native, point, hostNativeLinkPersist(store, &r))
 	})
 	t.Fatalf("native crash helper returned instead of terminating: %v", err)
 }
@@ -234,4 +272,71 @@ func TestHostNativeKernelCrashAfterPersistentLink(t *testing.T) {
 		t.Fatalf("independent post-SIGKILL native recovery failed: %+v %v", result, err)
 	}
 	fmt.Println("HOST_NATIVE_V7_REAL_SIGKILL_INDEPENDENT_OFF=PASS")
+}
+
+func TestHostNativeKernelCrashPrePolicyBoundaries(t *testing.T) {
+	if os.Getenv("SC_TEST_HOST_NATIVE_NATIVE") != "isolated-netns" {
+		t.Skip("NOT_RUN: isolated network namespace required")
+	}
+	point := os.Getenv("SC_TEST_HOST_NATIVE_BOUNDARY_POINT")
+	expected := map[string]string{"after-journal": "planned", "after-ingress": "planned", "after-native-link-bind": "bound"}
+	stage, ok := expected[point]
+	if !ok {
+		t.Skip("NOT_RUN: select an exact pre-policy crash boundary")
+	}
+	requireNativeQANetworkNamespace(t)
+	dir := privateJournalTempDir(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 35*time.Second)
+	defer cancel()
+	child := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestHostNativeKernelCrashHelper$", "-test.v", "-test.timeout=30s")
+	child.Env = append(os.Environ(), "SC_TEST_HOST_NATIVE_CRASH_HELPER=isolated-netns", "SC_TEST_HOST_NATIVE_CRASH_DIR="+dir, "SC_TEST_HOST_NATIVE_CRASH_POINT="+point)
+	out, err := child.CombinedOutput()
+	var killed *exec.ExitError
+	if ctx.Err() != nil || !errors.As(err, &killed) || !killed.ProcessState.Sys().(syscall.WaitStatus).Signaled() ||
+		killed.ProcessState.Sys().(syscall.WaitStatus).Signal() != syscall.SIGKILL {
+		t.Fatalf("native pre-policy crash not SIGKILL: %v %s", err, out)
+	}
+	m := New(dir, DefaultCore, DefaultPort)
+	err = m.withActivationJournalLock(syscall.Fsync, func(store *activationJournalDir) error {
+		r, _, err := loadHostNativeJournal(store)
+		if err != nil {
+			return err
+		}
+		if r.Native.LinkStage != stage {
+			return fmt.Errorf("wrong durable native crash intent: got=%s want=%s", r.Native.LinkStage, stage)
+		}
+		if point == "after-ingress" && r.Progress.Ingress.NFTStage != "observed" {
+			return errors.New("post-ingress crash missed durable nft receipt")
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := m.recoverGuardedTrialWithHandler("", "", func(store *activationJournalDir, s trialRecoverySelection) (TrialReceipt, error) {
+		if s.version != hostNativeJournalVersion {
+			return TrialReceipt{}, errors.New("v7 crash recovery selected wrong intent")
+		}
+		return recoverHostNativeJournalLocked(store, &s.hostNative, func() error { return nil })
+	})
+	if err != nil || !result.RecoveryVerified || result.Phase != "host_native_recovered" {
+		t.Fatalf("partial-effect independent recovery failed: %+v %v", result, err)
+	}
+	err = m.withActivationJournalLock(syscall.Fsync, func(store *activationJournalDir) error {
+		r, _, err := loadHostNativeJournal(store)
+		if err != nil {
+			return err
+		}
+		if r.Native.LinkStage != "removed" || r.Progress.Ingress.Phase != "recovered" {
+			return errors.New("partial-effect native/ingress ownership not fully recovered")
+		}
+		if err := clearRecoveredHostNativeLocked(store, r.Progress.Ingress.OperationID, func() error { return nil }); err != nil {
+			return err
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fmt.Printf("HOST_NATIVE_V7_%s_SIGKILL_OWNED_OFF=PASS\n", strings.ToUpper(strings.ReplaceAll(point, "-", "_")))
 }
