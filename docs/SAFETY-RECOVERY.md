@@ -74,7 +74,13 @@ Failed stages retain that v6 journal and independent recovery timer; no
 short-lived ingress/grace prerequisite reached its pending state. The
 independent recovery executor may already have initiated Off when the caller
 receives the receipt; it is **not** an activation or permission to install TUN
-routing. After verified independent recovery, clear the *exact* recovered
+routing. On an explicitly authorized disposable host, the optional
+`--qa-kill-at after-journal|after-ingress|after-barrier|after-verified`
+terminates **only the short-lived manager process**, after the corresponding
+durable journal boundary. The prearmed independent timer owns exact-resource
+cleanup; inspect its evidence before any retry. This crash injection is not
+for a production host.
+After verified independent recovery, clear the *exact* recovered
 journal with the documented `host-capture-preparation-clear --operation-id`.
 The installed Clear first verifies exact owned Off, then disables and
 verifies the **owned recovery timer** under the same lock, and only then

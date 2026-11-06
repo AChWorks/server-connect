@@ -469,10 +469,11 @@ func run(j bool, m *sc.Manager, args []string) int {
 		underlay := opts.String("underlay-if", "", "verified physical underlay interface")
 		deadline := opts.Int("deadline-seconds", 120, "bounded independent recovery deadline 30-300 seconds")
 		disposable := opts.Bool("ack-disposable-host", false, "explicitly authorize experimental ingress effects on this disposable host")
+		qaKill := opts.String("qa-kill-at", "", "authorized disposable SIGKILL after-journal|after-ingress|after-barrier|after-verified")
 		if e := opts.Parse(args); e != nil || len(opts.Args()) != 0 || !*disposable || *peer == "" || *underlay == "" {
 			return output(j, nil, sc.Fault("invalid_arguments", "host capture QA requires explicit peer/underlay and --ack-disposable-host"))
 		}
-		receipt, err := m.BeginHostCapturePreparationQA(*peer, *underlay, *deadline)
+		receipt, err := m.BeginHostCapturePreparationQAWithFault(*peer, *underlay, *deadline, *qaKill)
 		return output(j, receipt, err)
 	case "host-capture-preparation-clear":
 		opts := flag.NewFlagSet(name, flag.ContinueOnError)
@@ -760,6 +761,7 @@ Commands:
                               policy, IPv6 and foreign nft risk; no Apply token
   host-capture-preparation-qa --management-peer IPv4 --underlay-if NAME
                               --ack-disposable-host [--deadline-seconds 120]
+                              [--qa-kill-at after-journal|after-ingress|after-barrier|after-verified]
                               Host ingress/grace PREPARATION QA only, with independent
                               journal/Guard and recovery. Never TUN, DNS or routing Apply.
   smart-tun-host-check --endpoint-ip IP --management-peer IP --underlay-if NAME

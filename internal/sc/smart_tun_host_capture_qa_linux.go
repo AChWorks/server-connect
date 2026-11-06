@@ -67,7 +67,36 @@ func hostCaptureQAPrerequisiteResult(m *Manager, peer, underlay string, deadline
 // strict installed journal lock, whole-record CAS and independent executor.
 func (m *Manager) runHostCaptureQAWithPrearm(peer, underlay string, deadline int,
 	prearm func() error) (HostCapturePreparationQAReceipt, error) {
+	return m.runHostCaptureQAWithPrearmFault(peer, underlay, deadline, prearm, "")
+}
+
+func hostCaptureQAKillValid(point string) bool {
+	switch point {
+	case "", "after-journal", "after-ingress", "after-barrier", "after-verified":
+		return true
+	}
+	return false
+}
+
+// A synthetic crash is restricted to an explicitly opted-in installed QA
+// command. It kills only this short-lived manager process; the previously
+// armed systemd recovery service/timer owns exact kernel reconciliation.
+func hostCaptureQAKillAt(point, configured string) error {
+	if configured != point {
+		return nil
+	}
+	if err := syscall.Kill(os.Getpid(), syscall.SIGKILL); err != nil {
+		return err
+	}
+	return Fault("trial_pending_recovery", "disposable QA SIGKILL unexpectedly returned")
+}
+
+func (m *Manager) runHostCaptureQAWithPrearmFault(peer, underlay string, deadline int,
+	prearm func() error, qaPoint string) (HostCapturePreparationQAReceipt, error) {
 	receipt := HostCapturePreparationQAReceipt{Phase: "not_started", ExperimentOnly: true}
+	if !hostCaptureQAKillValid(qaPoint) {
+		return receipt, Fault("invalid_arguments", "unsupported disposable host capture SIGKILL boundary")
+	}
 	// Malformed or uninstalled invocation must never create even a private
 	// journal lock, let alone arm independent systemd or touch the kernel.
 	if m == nil || m.Dir != DefaultDir || m.Core != DefaultCore || os.Geteuid() != 0 ||
@@ -129,8 +158,13 @@ func (m *Manager) runHostCaptureQAWithPrearm(peer, underlay string, deadline int
 		journalPersisted = true
 		receipt.OperationID, receipt.Phase = fresh.Ingress.OperationID, "pending_recovery"
 		receipt.GuardScheduled = true
-		if err := runHostCaptureGateLocked(store, &record.Progress, trialGuardScheduled,
-			hostCaptureJournalPersist(store, &record)); err != nil {
+		if err := hostCaptureQAKillAt("after-journal", qaPoint); err != nil {
+			return err
+		}
+		if err := runHostCaptureGateLockedWithHook(store, &record.Progress, trialGuardScheduled,
+			hostCaptureJournalPersist(store, &record), func(point string) error {
+				return hostCaptureQAKillAt(point, qaPoint)
+			}); err != nil {
 			return err
 		}
 		if record.Progress.Barrier.Stage != "closed" || record.Progress.Ingress.NFTStage != "observed" {
@@ -152,7 +186,11 @@ func (m *Manager) runHostCaptureQAWithPrearm(peer, underlay string, deadline int
 // The caller's explicit disposable acknowledgement is validated by the CLI;
 // authority must never be derived from an environment variable or a README.
 func (m *Manager) BeginHostCapturePreparationQA(peer, underlay string, deadline int) (HostCapturePreparationQAReceipt, error) {
-	return m.runHostCaptureQAWithPrearm(peer, underlay, deadline, func() error {
+	return m.BeginHostCapturePreparationQAWithFault(peer, underlay, deadline, "")
+}
+
+func (m *Manager) BeginHostCapturePreparationQAWithFault(peer, underlay string, deadline int, qaPoint string) (HostCapturePreparationQAReceipt, error) {
+	return m.runHostCaptureQAWithPrearmFault(peer, underlay, deadline, func() error {
 		if err := trialGuardUnits(false); err != nil {
 			return err
 		}
@@ -168,5 +206,5 @@ func (m *Manager) BeginHostCapturePreparationQA(peer, underlay string, deadline 
 			return err
 		}
 		return nil
-	})
+	}, qaPoint)
 }

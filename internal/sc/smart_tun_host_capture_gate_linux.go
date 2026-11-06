@@ -120,6 +120,25 @@ func runHostCaptureGateLocked(
 	guard func() error,
 	persist hostCaptureGatePersist,
 ) error {
+	return runHostCaptureGateLockedWithHook(store, current, guard, persist, nil)
+}
+
+// A preauthorized disposable host QA may inject a process-only SIGKILL after
+// durable stage receipts. The common native transaction never invokes a QA
+// hook without an explicit caller. No hook may replace the independent Guard.
+func runHostCaptureGateLockedWithHook(
+	store *activationJournalDir,
+	current *hostCaptureGateProgress,
+	guard func() error,
+	persist hostCaptureGatePersist,
+	stageHook func(point string) error,
+) error {
+	fire := func(point string) error {
+		if stageHook == nil {
+			return nil
+		}
+		return stageHook(point)
+	}
 	if store == nil || current == nil || guard == nil || persist == nil {
 		return Fault("guard_unavailable", "one independently recoverable host capture operation is required")
 	}
@@ -158,6 +177,9 @@ func runHostCaptureGateLocked(
 		hostCaptureIngressPersistence(current, persist)); err != nil {
 		return err
 	}
+	if err := fire("after-ingress"); err != nil {
+		return err
+	}
 	// Userspace drain first, independently journaled kernel grace next,
 	// in-kernel filtered socket query last. No snapshot is a reservation.
 	if err := hostIngressDrainBarrier(current.Ingress, guard); err != nil {
@@ -165,6 +187,9 @@ func runHostCaptureGateLocked(
 	}
 	if err := runHostNetworkBarrierLocked(store, &current.Barrier, guard,
 		hostCaptureBarrierPersistence(current, persist)); err != nil {
+		return err
+	}
+	if err := fire("after-barrier"); err != nil {
 		return err
 	}
 	if err := observeHostIngressKernelQuiescence(current.Ingress, guard); err != nil {
@@ -182,7 +207,10 @@ func runHostCaptureGateLocked(
 	if err := guard(); err != nil {
 		return err
 	}
-	return hostIngressBeforeDeadline(current.Ingress)
+	if err := hostIngressBeforeDeadline(current.Ingress); err != nil {
+		return err
+	}
+	return fire("after-verified")
 }
 
 // recoverHostCaptureGateLocked is the bounded Off helper for an interrupted

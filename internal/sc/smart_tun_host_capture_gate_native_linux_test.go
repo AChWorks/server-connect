@@ -129,8 +129,15 @@ func TestHostCaptureGateOneJournalAndOwnedOffNative(t *testing.T) {
 			return errors.New("unacknowledged ingress intent created nft effects")
 		}
 		fmt.Println("HOST_CAPTURE_FAILED_INTENT_HAS_NO_KERNEL_EFFECT=PASS")
-		if err := runHostCaptureGateLocked(store, &progress, guard, persist); err != nil {
+		var stages []string
+		if err := runHostCaptureGateLockedWithHook(store, &progress, guard, persist, func(stage string) error {
+			stages = append(stages, stage)
+			return nil
+		}); err != nil {
 			return err
+		}
+		if len(stages) != 3 || stages[0] != "after-ingress" || stages[1] != "after-barrier" || stages[2] != "after-verified" {
+			return fmt.Errorf("crash hook did not bind to exact durable stage boundaries: %v", stages)
 		}
 		saved, _, err := get()
 		if err != nil || saved.Progress != progress || progress.Barrier.Stage != "closed" ||

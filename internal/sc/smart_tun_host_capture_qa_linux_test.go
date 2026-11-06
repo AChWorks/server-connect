@@ -42,6 +42,26 @@ func TestHostCaptureQAInvalidOrUninstalledNeverPrearms(t *testing.T) {
 	}
 }
 
+func TestHostCaptureQAUnrecognizedCrashPointRefusesBeforePrearmAndJournal(t *testing.T) {
+	for _, name := range []string{"after-native-nft-effect", "after-journal,after-ingress", "after-guard-disarm", "after-start", "unexpected"} {
+		t.Run(name, func(t *testing.T) {
+			prearmed := false
+			m := New(filepath.Join(t.TempDir(), "not-created"), DefaultCore, DefaultPort)
+			receipt, err := m.runHostCaptureQAWithPrearmFault("8.8.8.8", "ens3", 90, func() error {
+				prearmed = true
+				return nil
+			}, name)
+			if ErrorCode(err) != "invalid_arguments" || prearmed || receipt.Phase != "not_started" ||
+				receipt.ActivationReady || receipt.GuardScheduled || receipt.KernelBarrierClosed || receipt.OperationID != "" {
+				t.Fatalf("unauthorized fault stage was admitted: %+v %v", receipt, err)
+			}
+			if _, err := os.Stat(m.Dir); !os.IsNotExist(err) {
+				t.Fatalf("fault validation created a state dir: %v", err)
+			}
+		})
+	}
+}
+
 func TestHostCaptureQAReceiptCannotClaimActivation(t *testing.T) {
 	receipt := HostCapturePreparationQAReceipt{OperationID: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", Phase: "prepared_pending_independent_recovery", ExperimentOnly: true, GuardScheduled: true, KernelBarrierClosed: true}
 	wire, err := json.Marshal(receipt)

@@ -15,6 +15,7 @@ func TestHostCaptureQACLIMissingDisposableAcknowledgementDoesNotWriteState(t *te
 		{"host-capture-preparation-qa", "--management-peer", "8.8.8.8", "--underlay-if", "ens3"},
 		{"host-capture-preparation-qa", "--management-peer", "8.8.8.8", "--underlay-if", "ens3", "--ack-disposable-host=false"},
 		{"host-capture-preparation-qa", "--management-peer", "8.8.8.8", "--underlay-if", "ens3", "--ack-disposable-host", "unexpected"},
+		{"host-capture-preparation-qa", "--management-peer", "8.8.8.8", "--underlay-if", "ens3", "--ack-disposable-host", "--qa-kill-at", "after-start"},
 	} {
 		dir := filepath.Join(t.TempDir(), "uncreated")
 		m := sc.New(dir, "", sc.DefaultPort)
