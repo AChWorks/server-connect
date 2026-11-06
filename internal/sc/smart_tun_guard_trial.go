@@ -613,6 +613,13 @@ func (m *Manager) pendingSmartTUNTrial() (string, error) {
 		}
 		return "host_capture_" + record.Progress.Ingress.Phase, nil
 	}
+	if marker.Version == hostRouteJournalVersion {
+		r, err := decodeHostRouteJournal(data)
+		if err != nil {
+			return "", err
+		}
+		return "host_route_" + r.Route.State, nil
+	}
 	if marker.Version == hostCoreJournalVersion {
 		r, err := decodeHostCoreJournal(data)
 		if err != nil {

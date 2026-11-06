@@ -262,6 +262,10 @@ func hostCoreAdvance(store *activationJournalDir, r *hostCoreJournal, stage stri
 }
 
 func hostCoreCredentialState(store *activationJournalDir, r hostCoreJournal) (bool, activationJournalFileIdentity, error) {
+	return hostCoreCredentialMatch(store, r.Core.ConfigSHA256)
+}
+
+func hostCoreCredentialMatch(store *activationJournalDir, digest string) (bool, activationJournalFileIdentity, error) {
 	data, id, err := store.readSmartTUNFile(smartTUNTrialConfigFile)
 	if errors.Is(err, os.ErrNotExist) {
 		return false, id, nil
@@ -269,7 +273,7 @@ func hostCoreCredentialState(store *activationJournalDir, r hostCoreJournal) (bo
 	if err != nil {
 		return false, id, err
 	}
-	if sha256Hex(data) != r.Core.ConfigSHA256 {
+	if sha256Hex(data) != digest {
 		return false, id, Fault("trial_resource_conflict", "host core credential no longer matches owning operation")
 	}
 	return true, id, nil
@@ -278,7 +282,11 @@ func hostCoreCredentialState(store *activationJournalDir, r hostCoreJournal) (bo
 // Only the exact operation's matching private credential may be unlinked.
 // An ambiguous in-flight write must be recorded before touching its bytes.
 func hostCoreRemoveCredential(store *activationJournalDir, r hostCoreJournal) error {
-	present, id, err := hostCoreCredentialState(store, r)
+	return hostCoreRemoveCredentialDigest(store, r.Core.ConfigSHA256)
+}
+
+func hostCoreRemoveCredentialDigest(store *activationJournalDir, digest string) error {
+	present, id, err := hostCoreCredentialMatch(store, digest)
 	if err != nil {
 		return err
 	}

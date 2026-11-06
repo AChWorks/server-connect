@@ -24,63 +24,78 @@ func defaultHostCoreRecoveryServices() hostCoreRecoveryServices {
 }
 
 func hostCoreStopLocked(store *activationJournalDir, r *hostCoreJournal, services hostCoreRecoveryServices) error {
-	if store == nil || r == nil || services.observe == nil || services.stop == nil {
-		return Fault("guard_unavailable", "independent core recovery requires pinned unit service")
-	}
-	if err := store.ensureLockIdentity(); err != nil {
-		return err
+	if r == nil {
+		return Fault("guard_unavailable", "independent core parent missing")
 	}
 	if err := validateHostCoreJournal(*r); err != nil {
 		return err
 	}
+	return hostCoreStopWith(store, &r.Core, func(stage string) error { return hostCoreAdvance(store, r, stage) }, services)
+}
+
+// Both v8 and v9 call this exact core-first, no-adoption recovery protocol.
+// Its injected stage writer MUST fsync a full enclosing parent before any
+// systemd action or credential unlink; the caller holds the journal lock.
+func hostCoreStopWith(store *activationJournalDir, core *hostCoreLedger, advance func(string) error, services hostCoreRecoveryServices) error {
+	if store == nil || core == nil || advance == nil || services.observe == nil || services.stop == nil {
+		return Fault("guard_unavailable", "independent core recovery requires owned unit and parent writer")
+	}
+	if err := store.ensureLockIdentity(); err != nil {
+		return err
+	}
+	digest := core.ConfigSHA256
+	if !journalHex64.MatchString(digest) {
+		return Fault("trial_resource_conflict", "invalid owned core credential fingerprint")
+	}
+
 	observed, err := services.observe()
 	if err != nil {
 		return err
 	}
-	present, _, err := hostCoreCredentialState(store, *r)
+	present, _, err := hostCoreCredentialMatch(store, digest)
 	if err != nil {
 		return err
 	}
-	if r.Core.Stage == "stopped" {
+	if core.Stage == "stopped" {
 		if !observed.stopped() || present {
 			return Fault("trial_recovery_uncertain", "stopped core still active or credential retained")
 		}
 		return nil
 	}
-	if r.Core.Stage == "planned" && present {
+	if core.Stage == "planned" && present {
 		return Fault("trial_resource_conflict", "core credential appeared before any write intent")
 	}
 	// A durable credential-remove intent can survive a SIGKILL between
 	// unlink and terminal fsync. Such an operation must still independently
 	// prove this very unit is stopped before treating absence as clean.
-	if r.Core.Stage == "credential_remove_requested" {
+	if core.Stage == "credential_remove_requested" {
 		if !observed.stopped() {
 			return Fault("trial_recovery_uncertain", "credential retirement not yet quiescent")
 		}
 		if present {
-			if err := hostCoreRemoveCredential(store, *r); err != nil {
+			if err := hostCoreRemoveCredentialDigest(store, digest); err != nil {
 				return err
 			}
 		}
-		if still, _, err := hostCoreCredentialState(store, *r); err != nil || still {
+		if still, _, err := hostCoreCredentialMatch(store, digest); err != nil || still {
 			return Fault("trial_recovery_uncertain", "retired core credential reappeared or is ambiguous")
 		}
-		return hostCoreAdvance(store, r, "stopped")
+		return advance("stopped")
 	}
-	if r.Core.StartAttempted && !present {
+	if core.StartAttempted && !present {
 		return Fault("trial_resource_conflict", "core was started without its recorded trusted credential")
 	}
-	if r.Core.Stage == "credential_staged" && !present {
+	if core.Stage == "credential_staged" && !present {
 		return Fault("trial_resource_conflict", "durably staged core credential disappeared")
 	}
 	// A missing start intent forbids even an apparently safe systemctl stop:
 	// external actors might own the active TUN service. No cleanup until idle.
-	if !r.Core.StartAttempted && !observed.stopped() {
+	if !core.StartAttempted && !observed.stopped() {
 		return Fault("trial_resource_conflict", "unowned core activity without a durable start intent")
 	}
-	if r.Core.StartAttempted {
-		if r.Core.Stage != "stop_requested" {
-			if err := hostCoreAdvance(store, r, "stop_requested"); err != nil {
+	if core.StartAttempted {
+		if core.Stage != "stop_requested" {
+			if err := advance("stop_requested"); err != nil {
 				return err
 			}
 		}
@@ -97,16 +112,16 @@ func hostCoreStopLocked(store *activationJournalDir, r *hostCoreJournal, service
 	}
 	// A durable effect intent precedes unlink, so a SIGKILL after unlink
 	// cannot manufacture an unowned missing-credential conflict.
-	if err := hostCoreAdvance(store, r, "credential_remove_requested"); err != nil {
+	if err := advance("credential_remove_requested"); err != nil {
 		return err
 	}
-	if err := hostCoreRemoveCredential(store, *r); err != nil {
+	if err := hostCoreRemoveCredentialDigest(store, digest); err != nil {
 		return err
 	}
-	if still, _, err := hostCoreCredentialState(store, *r); err != nil || still {
+	if still, _, err := hostCoreCredentialMatch(store, digest); err != nil || still {
 		return Fault("trial_recovery_uncertain", "core credential removal not independently observed")
 	}
-	return hostCoreAdvance(store, r, "stopped")
+	return advance("stopped")
 }
 
 func recoverHostCoreJournalLocked(store *activationJournalDir, r *hostCoreJournal, services hostCoreRecoveryServices) (TrialReceipt, error) {

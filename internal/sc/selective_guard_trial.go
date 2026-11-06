@@ -810,6 +810,9 @@ func recoverSelectedTrialLocked(store *activationJournalDir, selected trialRecov
 	case hostCoreJournalVersion:
 		record := selected.hostCore
 		return recoverHostCoreJournalLocked(store, &record, defaultHostCoreRecoveryServices())
+	case hostRouteJournalVersion:
+		record := selected.hostRoute
+		return recoverHostRouteJournalLocked(store, &record, defaultHostCoreRecoveryServices())
 	case 2, 3:
 		return recoverLegacyGuardedTrialLocked(store, selected.identity, selected.trial, qaCrashPoint, qaFaultPoint)
 	default:
@@ -830,6 +833,7 @@ type trialRecoverySelection struct {
 	capture    hostCaptureJournal
 	hostNative hostNativeJournal
 	hostCore   hostCoreJournal
+	hostRoute  hostRouteJournal
 }
 
 func (m *Manager) recoverGuardedTrialWithHandler(qaCrashPoint, qaFaultPoint string,
@@ -882,6 +886,16 @@ func selectTrialRecoveryLocked(store *activationJournalDir, qaCrashPoint, qaFaul
 			return trialRecoverySelection{}, err
 		}
 		return trialRecoverySelection{version: hostCaptureJournalVersion, identity: identity, capture: record}, nil
+	}
+	if marker.Version == hostRouteJournalVersion {
+		if qaCrashPoint != "" || qaFaultPoint != "" {
+			return trialRecoverySelection{}, Fault("invalid_arguments", "legacy fault flags cannot apply to host routed policy")
+		}
+		record, err := decodeHostRouteJournal(raw)
+		if err != nil {
+			return trialRecoverySelection{}, err
+		}
+		return trialRecoverySelection{version: hostRouteJournalVersion, identity: identity, hostRoute: record}, nil
 	}
 	if marker.Version == hostCoreJournalVersion {
 		if qaCrashPoint != "" || qaFaultPoint != "" {
