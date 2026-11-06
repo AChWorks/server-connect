@@ -40,6 +40,15 @@ func prepareHostNativeKernelFixture(t *testing.T) (func() error, hostNativeJourn
 	} else {
 		t.Log("iptables-nft unavailable: isolated bridge and native ownership still tested; Docker NAT coexistence verified on Test Server")
 	}
+	// Preserve representative foreign raw/NOTRACK owners, including both
+	// families, to exercise the same admitted ingress contract as v6.
+	for _, binary := range []string{"/usr/sbin/iptables", "/usr/sbin/ip6tables"} {
+		if _, err := os.Stat(binary); err != nil {
+			continue
+		}
+		ingressNativeCommand(t, binary, "-t", "raw", "-A", "PREROUTING", "-p", "tcp", "--dport", "28997", "-j", "NOTRACK")
+		ingressNativeCommand(t, binary, "-t", "raw", "-A", "OUTPUT", "-p", "tcp", "--sport", "28997", "-j", "NOTRACK")
+	}
 	ingressNativeCommand(t, "/usr/sbin/sysctl", "-q", "-w", "net.ipv4.tcp_fwmark_accept=1")
 	progress, err := newHostCaptureGateProgress("scv7edge0", 90)
 	if err != nil {
