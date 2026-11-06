@@ -462,6 +462,18 @@ func run(j bool, m *sc.Manager, args []string) int {
 		}
 		result, err := m.InspectSmartTUNTrial()
 		return output(j, result, err)
+	case "host-capture-preparation-qa":
+		opts := flag.NewFlagSet(name, flag.ContinueOnError)
+		opts.SetOutput(io.Discard)
+		peer := opts.String("management-peer", "", "current authenticated management peer IPv4")
+		underlay := opts.String("underlay-if", "", "verified physical underlay interface")
+		deadline := opts.Int("deadline-seconds", 120, "bounded independent recovery deadline 30-300 seconds")
+		disposable := opts.Bool("ack-disposable-host", false, "explicitly authorize experimental ingress effects on this disposable host")
+		if e := opts.Parse(args); e != nil || len(opts.Args()) != 0 || !*disposable || *peer == "" || *underlay == "" {
+			return output(j, nil, sc.Fault("invalid_arguments", "host capture QA requires explicit peer/underlay and --ack-disposable-host"))
+		}
+		receipt, err := m.BeginHostCapturePreparationQA(*peer, *underlay, *deadline)
+		return output(j, receipt, err)
 	case "host-capture-preparation-clear":
 		opts := flag.NewFlagSet(name, flag.ContinueOnError)
 		opts.SetOutput(io.Discard)
@@ -746,6 +758,10 @@ Commands:
   smart-tun-host-boundary --management-peer IPv4 --underlay-if NAME
                               Read-only real-host network constraints, IPv4
                               policy, IPv6 and foreign nft risk; no Apply token
+  host-capture-preparation-qa --management-peer IPv4 --underlay-if NAME
+                              --ack-disposable-host [--deadline-seconds 120]
+                              Host ingress/grace PREPARATION QA only, with independent
+                              journal/Guard and recovery. Never TUN, DNS or routing Apply.
   smart-tun-host-check --endpoint-ip IP --management-peer IP --underlay-if NAME
                        [--dns-resolver IP --dns-port 53]
                               Read-only selected VLESS hostname/DNS, TCP, routes and

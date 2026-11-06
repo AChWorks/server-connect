@@ -53,6 +53,32 @@ outside Server Connect ownership and must be assessed under the
 operator's own change/rollback procedures. Even two observed enabled
 values are neither an atomic reservation nor general-host admission.
 
+### Installed host-capture preparation QA (still not full Smart Routing)
+
+An operator may **explicitly opt in on a disposable supported Debian 12/13 host** to
+`server-connect --json host-capture-preparation-qa --management-peer IPV4 --underlay-if DEVICE --deadline-seconds 120 --ack-disposable-host`.
+The root-only command refuses any current activation journal, a non-Direct
+product mode, an active Core, unverified management return route, unowned or
+absent raw NOTRACK inventory, and a missing **preexisting**
+`tcp_fwmark_accept=1`. It never changes that global sysctl, host routes,
+RPDB, resolver, or selected profile. A temporary operator-owned change to the
+sysctl must have its own independently armed rollback, not a product journal
+claim.
+
+The installed recovery oneshot/timer is verified and prearmed **before** the
+first ingress nft effect. After a second exact raw/boot/netns/underlay
+admission under the manager lock, the strict v6 parent is durable before
+staging accepted-socket bypass marks and the temporary kernel grace barrier.
+Failed stages retain that v6 journal and independent recovery timer; no
+"no effects" inference is allowed. A positive receipt only says that the
+short-lived ingress/grace prerequisite reached its pending state. The
+independent recovery executor may already have initiated Off when the caller
+receives the receipt; it is **not** an activation or permission to install TUN
+routing. After verified independent recovery, clear the *exact* recovered
+journal with the documented `host-capture-preparation-clear --operation-id`.
+If recovery remains uncertain, preserve the journal and inspect real kernel
+ownership rather than unlinking it or disabling the timer.
+
 ### Disposable v4 guarded TUN trial (not production acceptance)
 
 The installed experimental v4 journal never reaches `ACTIVE_VERIFIED`.
