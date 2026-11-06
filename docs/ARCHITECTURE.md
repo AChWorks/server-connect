@@ -99,7 +99,10 @@ prearmed independent recovery dispatcher selects the v7 type under that
 same lock and reconciles the receipted TUN link *before* Ingress/Barrier.
 Link-only recovery checks absence of all reserved routing/nft policy and
 foreign link dependencies while preserving independently verified Docker
-NAT and foreign raw NOTRACK owners. A changed or unreceipted owner retains
+NAT and foreign raw NOTRACK owners. The installed independent recovery unit
+requires only `CAP_NET_ADMIN` and `CAP_NET_RAW`: on Debian 12, even the
+read-only `iptables-legacy -t nat -S` corroboration fails without `CAP_NET_RAW`;
+that permission gap must not orphan an already-guarded native link. A changed or unreceipted owner retains
 the journal rather than deleting foreign resources. Exact recovered v6/v7
 terminal Clear additionally verifies idle core, kernel absence, and Guard
 ownership before disarming the recovery timer. Fault boundaries include

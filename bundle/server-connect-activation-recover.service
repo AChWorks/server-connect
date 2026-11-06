@@ -15,6 +15,9 @@ PrivateTmp=yes
 ProtectKernelTunables=yes
 ProtectKernelModules=yes
 ProtectControlGroups=yes
-CapabilityBoundingSet=CAP_NET_ADMIN
-AmbientCapabilities=CAP_NET_ADMIN
+# Debian 12 iptables-legacy nat/raw inventory uses a raw socket even for
+# read-only inspection. The independent rollback must corroborate third-party
+# Docker NAT, not refuse it due to its own missing capability (IRA-124 field QA).
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW
 UMask=0077

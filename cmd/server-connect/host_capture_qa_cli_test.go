@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/AChWorks/server-connect/internal/sc"
@@ -78,6 +79,39 @@ func TestHostNativeQACLIUninstalledOrUnsupportedFaultHasNoState(t *testing.T) {
 		}
 		if _, err := os.Stat(path); !os.IsNotExist(err) {
 			t.Fatalf("native QA created state without installed authority: %v", err)
+		}
+	}
+}
+
+// The installed independent recovery executor needs CAP_NET_RAW to read
+// iptables-legacy's NAT table on Debian 12; CAP_NET_ADMIN alone returns
+// EPERM even for -S, falsely rejecting exact Docker NAT during owned Off.
+// Keep the bound strictly limited to the two capabilities used in field QA.
+func TestIndependentRecoveryUnitReadsLegacyNATWithMinimalCapabilities(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("..", "..", "bundle", "server-connect-activation-recover.service"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := string(raw)
+	for _, line := range []string{
+		"CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW",
+		"AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW",
+		"NoNewPrivileges=yes",
+		"ProtectSystem=strict",
+		"ProtectHome=yes",
+		"ProtectKernelTunables=yes",
+		"ReadWritePaths=/var/lib/server-connect /proc/sys/net/ipv4/tcp_fwmark_accept",
+	} {
+		if strings.Count(body, line) != 1 {
+			t.Fatalf("independent recovery unit omitted/duplicated constrained capability or sandbox: %q", line)
+		}
+	}
+	for _, line := range strings.Split(body, "\n") {
+		if strings.HasPrefix(line, "CapabilityBoundingSet=") && line != "CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW" {
+			t.Fatalf("unexpected capability bound: %q", line)
+		}
+		if strings.HasPrefix(line, "AmbientCapabilities=") && line != "AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW" {
+			t.Fatalf("unexpected ambient privilege: %q", line)
 		}
 	}
 }
