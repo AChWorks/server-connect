@@ -201,6 +201,13 @@ func runHostCaptureGateLockedWithHook(
 	if err := verifyHostNetworkBarrierReleased(current.Barrier); err != nil {
 		return err
 	}
+	// Docker can rewrite its NAT graph after prearm. Repeat the full
+	// no-mutation foreign-owner check after the kernel grace phase, under
+	// the still-active independent Guard and common parent lock. A positive
+	// check is fleeting, never an active TUN authorization or a reservation.
+	if err := hostIngressMarkBoundary(current.Ingress); err != nil {
+		return err
+	}
 	if err := validateHostCaptureGatePair(current.Ingress, current.Barrier); err != nil {
 		return err
 	}

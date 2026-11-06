@@ -75,7 +75,28 @@ func hostIngressMarkBoundary(r hostIngressStage) error {
 	if err != nil {
 		return err
 	}
+	if err := hostIngressForeignNATBoundary(r, objects); err != nil {
+		return err
+	}
 	return hostIngressForeignNFTBoundary(r, record, objects)
+}
+
+// A foreign NAT rule is *never* inherited as an activation or rollback
+// resource. During ingress-only preparation, accept as an observed foreign
+// prerequisite only the exact independently cross-checked Docker bridge NAT
+// grammar. A published Docker port, changed bridge, second NAT backend or
+// unknown translation rule refuses before any ownership can be claimed.
+// This is not a reservation: full-host Apply still needs a common journal,
+// verified ingress/egress ordering and its own independently running guard.
+func hostIngressForeignNATBoundary(r hostIngressStage, objects []map[string]any) error {
+	profile, err := generalHostForeignNFTEffects(objects)
+	if err != nil {
+		return ingressFault("foreign firewall inventory is ambiguous")
+	}
+	if profile.ForeignNAT && !observeDockerNATShape(objects, r.Underlay) {
+		return Fault("foreign_nat_unverified", "unverified foreign NAT prevents host ingress preparation")
+	}
+	return nil
 }
 func hostIngressForeignNFTBoundary(r hostIngressStage, record smartTUNTrialJournal, objects []map[string]any) error {
 	for _, item := range objects {

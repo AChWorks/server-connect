@@ -58,15 +58,35 @@ func TestDockerNATRealKernelKnownShapeAndForeignDrift(t *testing.T) {
 		fmt.Println(label + "=PASS")
 	}
 	check("DOCKER_NAT_REAL_KERNEL_BRIDGE_AND_OPAQUE_EXTENSIONS", true)
+	// The *product* ingress preflight must use the same independently
+	// corroborated foreign-owner boundary. It may not simply rely on a
+	// read-only operator status field to proceed with kernel mutation.
+	stage := hostIngressStage{Underlay: "ens3", UnderlayIndex: 2, OperationID: "abababababababababababababababab"}
+	if err := hostIngressMarkBoundary(stage); err != nil {
+		t.Fatalf("product ingress preflight refused exact supported kernel shape: %v", err)
+	}
+	fmt.Println("DOCKER_NAT_PRODUCT_INGRESS_PREFLIGHT_KNOWN_SHAPE=PASS")
 	// An additional Docker-published DNAT must never inherit the narrow
 	// basic-bridge-only classifier without its own independently verified
 	// ingress and host-local routing safety proof.
 	run(iptables, "-t", "nat", "-A", "DOCKER", "-p", "tcp", "--dport", "18080", "-j", "DNAT", "--to-destination", "172.17.0.2:80")
 	check("DOCKER_NAT_REAL_KERNEL_PUBLISHED_DNAT_REFUSED", false)
+	if code := ErrorCode(hostIngressMarkBoundary(stage)); code != "foreign_nat_unverified" {
+		t.Fatalf("product ingress did not refuse unknown Docker DNAT: %s", code)
+	}
+	fmt.Println("DOCKER_NAT_PRODUCT_INGRESS_PUBLISHED_DNAT_REFUSED=PASS")
 	run(iptables, "-t", "nat", "-D", "DOCKER", "-p", "tcp", "--dport", "18080", "-j", "DNAT", "--to-destination", "172.17.0.2:80")
 	check("DOCKER_NAT_REAL_KERNEL_EXACT_DNAT_REMOVAL_REOBSERVED", true)
+	if err := hostIngressMarkBoundary(stage); err != nil {
+		t.Fatalf("product ingress failed to reobserve repaired private graph: %v", err)
+	}
+	fmt.Println("DOCKER_NAT_PRODUCT_INGRESS_REOBSERVED_AFTER_REPAIR=PASS")
 	run(ip, "address", "add", "10.66.0.1/24", "dev", "docker0")
 	check("DOCKER_NAT_REAL_KERNEL_FOREIGN_BRIDGE_ADDRESS_REFUSED", false)
+	if code := ErrorCode(hostIngressMarkBoundary(stage)); code != "foreign_nat_unverified" {
+		t.Fatalf("product ingress admitted foreign bridge address: %s", code)
+	}
+	fmt.Println("DOCKER_NAT_PRODUCT_INGRESS_FOREIGN_BRIDGE_ADDR_REFUSED=PASS")
 	run(ip, "address", "del", "10.66.0.1/24", "dev", "docker0")
 	check("DOCKER_NAT_REAL_KERNEL_BRIDGE_IDENTITY_REOBSERVED", true)
 }

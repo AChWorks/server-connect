@@ -75,6 +75,13 @@ Docker shape is observed, `foreign_nat_ownership_unverified` and
 `foreign_nft_coexistence_unverified` remain activation blockers. Existing
 iptables raw NOTRACK owners are independently inspected by the host ingress
 barrier and never adopted, changed or made into permanent port exceptions.
+Host-capture preparation preflight now applies this narrow NAT grammar
+both before and after independent Guard prearming, and rechecks the firewall
+boundary after the kernel grace phase. A foreign NAT mismatch refuses with
+`foreign_nat_unverified`, retains a pending v6 journal for the normal
+independent recovery if one was already written, and never adopts or
+replaces an external Docker object. This preparatory guard is still not a
+runtime rule-change monitor or active native TUN permission.
 The full-host transaction must revalidate all foreign owner identities while
 actually guarded and independently recover any owned effects before this
 static proof can support a future activation decision.
