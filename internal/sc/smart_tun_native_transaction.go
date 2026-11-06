@@ -216,6 +216,17 @@ func nativeTUNApplyPolicyWithPersist(store *activationJournalDir, record *smartT
 }
 
 func nativeTUNApplyPolicyWithObserver(store *activationJournalDir, record *smartTUNTrialJournal, qaPoint string, persist nativeTUNRecordPersist, observe func(smartTUNTrialJournal) (nativeTUNNFTObservation, error)) error {
+	return nativeTUNApplyPolicyOrderedWithObserver(store, record, qaPoint, persist, observe, false)
+}
+
+// The v9 host-route transaction installs and receipts the independent nft
+// final-egress guard before the first RPDB selector can activate TUN routing.
+// Historical v4 guests preserve their existing sequencing.
+func nativeTUNApplyGuardFirstWithObserver(store *activationJournalDir, record *smartTUNTrialJournal, qaPoint string, persist nativeTUNRecordPersist, observe func(smartTUNTrialJournal) (nativeTUNNFTObservation, error)) error {
+	return nativeTUNApplyPolicyOrderedWithObserver(store, record, qaPoint, persist, observe, true)
+}
+
+func nativeTUNApplyPolicyOrderedWithObserver(store *activationJournalDir, record *smartTUNTrialJournal, qaPoint string, persist nativeTUNRecordPersist, observe func(smartTUNTrialJournal) (nativeTUNNFTObservation, error), guardFirst bool) error {
 	if err := nativeTUNCheckNamespace(*record); err != nil {
 		return err
 	}
@@ -255,49 +266,74 @@ func nativeTUNApplyPolicyWithObserver(store *activationJournalDir, record *smart
 			}
 		}
 	}
-	for _, family := range []int{4, 6} {
-		if nativeFamily(record.Native, family).Address == "" {
-			continue
-		}
-		for _, kind := range []string{"fallback", "route", "rule"} {
-			present, _, err := nativeTUNObserveResource(*record, family, kind)
-			if err != nil {
-				return err
+	addResources := func(kinds []string) error {
+		for _, family := range []int{4, 6} {
+			if nativeFamily(record.Native, family).Address == "" {
+				continue
 			}
-			if present {
-				return nativeTUNConflict("native slot changed before exclusive addition")
-			}
-			next := cloneSmartTUNTrial(*record)
-			nativeTUNResource(next.Native, family, kind).Stage = "effect_possible"
-			if err := nativeTUNAdvanceWithPersist(record, next, persist); err != nil {
-				return err
-			}
-			if err := nativeTUNRunIP(store, nativeRouteArgs(*record, family, kind, "add")...); err != nil {
-				return err
-			}
-			if family == 4 && kind == "route" {
-				if err := trialQAKillAt("after-native-route-effect", qaPoint); err != nil {
+			for _, kind := range kinds {
+				if guardFirst && kind == "rule" {
+					// Check the receipt and current independent final-egress
+					// containment before each routing selector. The guard must
+					// already exist even if the first rule has not been added.
+					current, err := observe(*record)
+					if err != nil {
+						return err
+					}
+					if record.Native.NFT.Stage != "observed" ||
+						!current.Matches || !nativeTUNNFTReceiptCovers(*record, current, true) {
+						return nativeTUNUncertain("native nft guard not independently intact before RPDB capture")
+					}
+				}
+				present, _, err := nativeTUNObserveResource(*record, family, kind)
+				if err != nil {
+					return err
+				}
+				if present {
+					return nativeTUNConflict("native slot changed before exclusive addition")
+				}
+				next := cloneSmartTUNTrial(*record)
+				nativeTUNResource(next.Native, family, kind).Stage = "effect_possible"
+				if err := nativeTUNAdvanceWithPersist(record, next, persist); err != nil {
+					return err
+				}
+				if err := nativeTUNRunIP(store, nativeRouteArgs(*record, family, kind, "add")...); err != nil {
+					return err
+				}
+				if family == 4 && kind == "route" {
+					if err := trialQAKillAt("after-native-route-effect", qaPoint); err != nil {
+						return err
+					}
+				}
+				if family == 4 && kind == "rule" {
+					if err := trialQAKillAt("after-native-rule-effect", qaPoint); err != nil {
+						return err
+					}
+				}
+				present, hash, err := nativeTUNObserveResource(*record, family, kind)
+				if err != nil {
+					return err
+				}
+				if !present {
+					return nativeTUNUncertain("acknowledged native addition was not observed")
+				}
+				next = cloneSmartTUNTrial(*record)
+				*nativeTUNResource(next.Native, family, kind) = smartTUNNativeObject{Stage: "observed", SHA256: hash}
+				if err := nativeTUNAdvanceWithPersist(record, next, persist); err != nil {
 					return err
 				}
 			}
-			if family == 4 && kind == "rule" {
-				if err := trialQAKillAt("after-native-rule-effect", qaPoint); err != nil {
-					return err
-				}
-			}
-			present, hash, err := nativeTUNObserveResource(*record, family, kind)
-			if err != nil {
-				return err
-			}
-			if !present {
-				return nativeTUNUncertain("acknowledged native addition was not observed")
-			}
-			next = cloneSmartTUNTrial(*record)
-			*nativeTUNResource(next.Native, family, kind) = smartTUNNativeObject{Stage: "observed", SHA256: hash}
-			if err := nativeTUNAdvanceWithPersist(record, next, persist); err != nil {
-				return err
-			}
 		}
+		return nil
+	}
+	kinds := []string{"fallback", "route", "rule"}
+	if guardFirst {
+		// The rules make fwmark-based routing live. Until the verified
+		// nft POSTROUTING guard exists, only inert FIB tables may be staged.
+		kinds = []string{"fallback", "route"}
+	}
+	if err := addResources(kinds); err != nil {
+		return err
 	}
 	before, err := observe(*record)
 	if err != nil {
@@ -334,6 +370,20 @@ func nativeTUNApplyPolicyWithObserver(store *activationJournalDir, record *smart
 	next.Native.NFTCount, next.Native.NFTObjects = observed.Count, observed.Objects
 	if err := nativeTUNAdvanceWithPersist(record, next, persist); err != nil {
 		return err
+	}
+	if guardFirst {
+		if err := addResources([]string{"rule"}); err != nil {
+			return err
+		}
+		// Never report full policy staging while its independent leak
+		// guard has disappeared or changed after the final RPDB write.
+		current, err := observe(*record)
+		if err != nil {
+			return err
+		}
+		if !current.Matches || !nativeTUNNFTReceiptCovers(*record, current, true) {
+			return nativeTUNUncertain("native nft guard changed during RPDB capture")
+		}
 	}
 	return nil
 }

@@ -134,6 +134,11 @@ state**, not on a general production host. The v9-specific observer admits
 only the already-receipted same-operation ingress mark graph, exact paired
 nft-backed raw NOTRACK grammar, and independently cross-checked basic Docker
 NAT. Other owners or changed prerequisites refuse before first policy effect.
+For v9 only, a fully receipted nft final-egress guard must precede RPDB
+selector installation. Guard identity is reobserved before each selector and
+after the final selector, while the legacy v4 disconnected guest remains
+unchanged. A crash after the RPDB effect but before its receipt keeps that
+guard and the operation parent uncertain; it cannot mint ownership or Off.
 Both v8 and v9 reuse the same no-adoption Core stop/credential unlink
 semantics; v9 additionally removes the exact native policy before the Link
 and Ingress and only then allows a terminal operation-bound Clear.

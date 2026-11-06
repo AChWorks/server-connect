@@ -90,7 +90,7 @@ func TestHostRouteV9RealKernelOwnedPolicyAndCoreFirstOff(t *testing.T) {
 			return fmt.Errorf("kernel-ready: %w", err)
 		}
 		native := r.nativeView()
-		if err := nativeTUNApplyPolicyWithObserver(store, &native, "", hostRouteNativePersist(store, &r), hostRouteNFTObserver(&r)); err != nil {
+		if err := nativeTUNApplyGuardFirstWithObserver(store, &native, "", hostRouteNativePersist(store, &r), hostRouteNFTObserver(&r)); err != nil {
 			return fmt.Errorf("native-apply: %w", err)
 		}
 		if err := hostRoutePhasePersist(store, &r, "observed"); err != nil {
@@ -183,7 +183,7 @@ func TestHostRouteV9ForeignOwnedKernelSlotCannotBeAdopted(t *testing.T) {
 		foreign := nativeRouteArgs(r.nativeView(), 4, "rule", "add")
 		ingressNativeCommand(t, "/usr/sbin/ip", foreign...)
 		native := r.nativeView()
-		err := nativeTUNApplyPolicyWithObserver(store, &native, "", hostRouteNativePersist(store, &r), hostRouteNFTObserver(&r))
+		err := nativeTUNApplyGuardFirstWithObserver(store, &native, "", hostRouteNativePersist(store, &r), hostRouteNFTObserver(&r))
 		if err == nil {
 			return errors.New("foreign RPDB selector was silently adopted")
 		}
@@ -276,7 +276,7 @@ func TestHostRouteV9ForeignFirewallDriftRefusesBeforeAnyRoutingEffect(t *testing
 				}
 				ingressNativeCommand(t, "/usr/sbin/iptables-nft", tc.add...)
 				native := r.nativeView()
-				err := nativeTUNApplyPolicyWithObserver(store, &native, "", hostRouteNativePersist(store, &r), hostRouteNFTObserver(&r))
+				err := nativeTUNApplyGuardFirstWithObserver(store, &native, "", hostRouteNativePersist(store, &r), hostRouteNFTObserver(&r))
 				if err == nil {
 					return errors.New("foreign firewall mutation was not refused")
 				}
@@ -348,10 +348,10 @@ func TestHostRouteV9CrashHelper(t *testing.T) {
 		}
 		native := r.nativeView()
 		point := os.Getenv("SC_TEST_HOST_ROUTE_CRASH_POINT")
-		if point != "" && point != "after-native-route-effect" && point != "after-native-nft-effect" {
+		if point != "" && point != "after-native-route-effect" && point != "after-native-nft-effect" && point != "after-native-rule-effect" {
 			return errors.New("unsupported routed SIGKILL boundary")
 		}
-		if err := nativeTUNApplyPolicyWithObserver(store, &native, point, hostRouteNativePersist(store, &r), hostRouteNFTObserver(&r)); err != nil {
+		if err := nativeTUNApplyGuardFirstWithObserver(store, &native, point, hostRouteNativePersist(store, &r), hostRouteNFTObserver(&r)); err != nil {
 			return err
 		}
 		if err := hostRoutePhasePersist(store, &r, "observed"); err != nil {
@@ -436,7 +436,7 @@ func TestHostRouteV9RealSIGKILLAfterPolicyReceiptIndependentOff(t *testing.T) {
 	fmt.Println("HOST_ROUTE_V9_POST_SIGKILL_CORE_FIRST_OFF_BASELINE_IDENTICAL=PASS")
 }
 
-// The kernel route or nft creation might succeed immediately before the
+// A kernel route, nft graph or RPDB selector might be committed immediately before the
 // initiator dies and before its exact receipt is fsynced. A later matching
 // object is NOT historical proof of ownership. In this case the independent
 // executor must retain journal and conflict evidence, never manufacture
@@ -446,7 +446,7 @@ func TestHostRouteV9UnreceiptedSIGKILLEffectFailsClosed(t *testing.T) {
 		t.Skip("NOT_RUN: isolated root netns required")
 	}
 	point := os.Getenv("SC_TEST_HOST_ROUTE_UNRECEIPTED")
-	if point != "after-native-route-effect" && point != "after-native-nft-effect" {
+	if point != "after-native-route-effect" && point != "after-native-nft-effect" && point != "after-native-rule-effect" {
 		t.Skip("NOT_RUN: exact one effect boundary per isolated namespace")
 	}
 	guard, base := prepareHostNativeKernelFixture(t)
@@ -491,9 +491,22 @@ func TestHostRouteV9UnreceiptedSIGKILLEffectFailsClosed(t *testing.T) {
 				return errors.New("route intent was not persisted before SIGKILL")
 			}
 			present, _, err = nativeTUNObserveResource(actual.nativeView(), 4, "route")
+		} else if point == "after-native-rule-effect" {
+			if actual.Native.IPv4.Rule.Stage != "effect_possible" || actual.Native.NFT.Stage != "observed" {
+				return errors.New("RPDB effect occurred without the earlier durable nft guard")
+			}
+			present, _, err = nativeTUNObserveResource(actual.nativeView(), 4, "rule")
+			if err != nil || !present {
+				return errors.New("unreceipted RPDB rule did not survive SIGKILL")
+			}
+			guard, guardErr := hostRouteNFTObserver(&actual)(actual.nativeView())
+			if guardErr != nil || !guard.Matches ||
+				!nativeTUNNFTReceiptCovers(actual.nativeView(), guard, true) {
+				return errors.New("RPDB crash did not retain the fully receipted independent leak guard")
+			}
 		} else {
-			if actual.Native.NFT.Stage != "effect_possible" {
-				return errors.New("nft intent was not persisted before SIGKILL")
+			if actual.Native.NFT.Stage != "effect_possible" || actual.Native.IPv4.Rule.Stage != "planned" {
+				return errors.New("nft effect occurred after an unguarded RPDB selector")
 			}
 			var observed nativeTUNNFTObservation
 			observed, err = hostRouteNFTObserver(&actual)(actual.nativeView())
@@ -529,6 +542,12 @@ func TestHostRouteV9UnreceiptedSIGKILLEffectFailsClosed(t *testing.T) {
 		}
 		if actual.Route.State != "off_pending" || actual.Core.Stage != "stopped" || actual.Progress.Ingress.Phase != "pending" {
 			return errors.New("failed recovery destroyed parent, guard or truthful pending state")
+		}
+		if point == "after-native-rule-effect" {
+			guard, guardErr := hostRouteNFTObserver(&actual)(actual.nativeView())
+			if guardErr != nil || !guard.Matches || !nativeTUNNFTReceiptCovers(actual.nativeView(), guard, true) {
+				return errors.New("failed RPDB recovery lost the independently receipted leak guard")
+			}
 		}
 		return nil
 	})

@@ -93,10 +93,15 @@ route/rule/nft snapshots and explicit terminal clear. Include actual
 SIGKILL after all policy receipts, foreign RPDB slot collision and temporary
 foreign NAT/raw changes: both post-admission changes MUST refuse before
 any new native FIB/RPDB effect and still allow exact cleanup after foreign
-state is restored. The SIGKILL tests at the non-atomic **after route effect**
-and **after nft effect** boundaries intentionally must NOT claim recovered
-or delete an unreceipted kernel object; verify the pending journal and
-surviving owner evidence. New source tests:
+state is restored. The SIGKILL tests at the non-atomic **after route effect**,
+**after nft effect**, and **after RPDB rule effect** boundaries intentionally
+must NOT claim recovered or delete an unreceipted kernel object; verify the
+pending journal and surviving owner evidence. On v9, verify a durably receipted,
+independent nft OUTPUT/POSTROUTING guard exists **before** the first RPDB
+selector and remains intact after the unreceipted-rule recovery refusal.
+These are guard-first sequencing and safe-refusal proofs, **not** fully
+automatic no-reboot Off; the historical v4 ordering remains unchanged.
+New source tests:
 `TestHostRouteV9RealKernelOwnedPolicyAndCoreFirstOff`,
 `TestHostRouteV9RealSIGKILLAfterPolicyReceiptIndependentOff`,
 `TestHostRouteV9ForeignFirewallDriftRefusesBeforeAnyRoutingEffect`,

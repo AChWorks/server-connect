@@ -151,6 +151,12 @@ foreign packet writers, published Docker DNAT, changed underlay, flowtables,
 mark overlap, unexpected CT grammar and stale operation generations are
 refused **before the first new FIB/RPDB effect**. The static Docker bridge
 and raw-rule exemptions are *never* used as a broad Direct bypass.
+The v9-only guard-first sequencer durably receipts its inert fallback/TUN
+routes and the complete independent nft OUTPUT/POSTROUTING guard **before**
+installing either RPDB capture selector. It rechecks the exact nft receipt
+before each selector and after the final selector. This prevents an
+RPDB-enabled but not-yet-guarded transition; it does not make kernel effects
+and journal receipts atomic. The historical v4 trial sequence is unchanged.
 
 In an isolated real Linux netns with simulated owned Core identity, tests
 install the actual marked RPDB/FIB fallback/route and native inet OUTPUT
