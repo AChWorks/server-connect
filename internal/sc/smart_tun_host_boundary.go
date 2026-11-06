@@ -25,6 +25,7 @@ type SmartTUNHostBoundary struct {
 	IPv4Policy          string   `json:"ipv4_policy"`
 	IPv6Policy          string   `json:"ipv6_policy"`
 	ForeignNFT          string   `json:"foreign_nft"`
+	DockerNATShape      string   `json:"docker_nat_shape"`
 	HostedReplySessions string   `json:"hosted_reply_sessions"`
 	TCPMarkInheritance  string   `json:"tcp_mark_inheritance"`
 	OutOfBandRecovery   string   `json:"out_of_band_recovery"`
@@ -44,6 +45,7 @@ type smartTUNHostBoundaryObservations struct {
 	ipv6Err             error
 	nft                 []map[string]any
 	nftErr              error
+	dockerNATShape      string
 	hostedReplySessions string
 	hostedReplyErr      error
 	markBefore          int
@@ -171,7 +173,7 @@ func assessSmartTUNHostBoundary(o smartTUNHostBoundaryObservations, expectedUnde
 		InstalledTarget: "unavailable", NativePlatform: "unsupported_or_unverified",
 		SSHReturnPath: "unverified", InterfaceInventory: "unverified",
 		IPv4Policy: "unverified", IPv6Policy: "unverified",
-		ForeignNFT: "unverified", HostedReplySessions: hostRepliesUnverified,
+		ForeignNFT: "unverified", DockerNATShape: dockerNATAbsent, HostedReplySessions: hostRepliesUnverified,
 		TCPMarkInheritance: "unverified", OutOfBandRecovery: "not_verified",
 		Reasons: []string{}, Limitations: []string{
 			"A fresh authenticated SSH transport is not proved by this passive kernel route observation.",
@@ -275,6 +277,14 @@ func assessSmartTUNHostBoundary(o smartTUNHostBoundaryObservations, expectedUnde
 				r.HostedReplySessions = hostRepliesNoXT
 			}
 			if risk.ForeignNAT {
+				// A static Docker NAT signature can help identify the actual
+				// owner, but it never proves future changes, ingress/hosting
+				// protection or final-egress guard coexistence. Preserve the
+				// foreign-NAT activation blocker even when the shape matches.
+				r.DockerNATShape = dockerNATUnverified
+				if o.dockerNATShape == dockerNATObservedShape {
+					r.DockerNATShape = dockerNATObservedShape
+				}
 				add("foreign_nat_ownership_unverified")
 			}
 			if risk.PacketEffects == 0 {
@@ -318,6 +328,11 @@ func InspectSmartTUNHostBoundary(managementPeer, underlay string) (SmartTUNHostB
 	if o.nftErr == nil {
 		o.nft, o.nftErr = nativeTUNNftObjects(nftRaw)
 		if o.nftErr == nil {
+			if risk, err := generalHostForeignNFTEffects(o.nft); err == nil && risk.ForeignNAT {
+				if observeDockerNATShape(o.nft, underlay) {
+					o.dockerNATShape = dockerNATObservedShape
+				}
+			}
 			if risk, err := generalHostForeignNFTEffects(o.nft); err == nil && risk.OpaqueOutputCT {
 				if risk.OutputXTCTCount > 0 && !risk.NativeOutputNotrack {
 					o.hostedReplySessions, o.hostedReplyErr = observeExistingHostReplySessions(risk.OutputXTCTCount)

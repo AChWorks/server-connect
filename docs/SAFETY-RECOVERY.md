@@ -53,6 +53,32 @@ outside Server Connect ownership and must be assessed under the
 operator's own change/rollback procedures. Even two observed enabled
 values are neither an atomic reservation nor general-host admission.
 
+### Foreign Docker IPv4 NAT ownership discovery (read-only)
+
+The root-only `smart-tun-host-boundary` diagnostic now independently
+cross-checks the *current* iptables-nft `nat -S` grammar, **empty** iptables-legacy
+NAT policy, the actual private, single-address Linux bridge and its single
+kernel-connected IPv4 route, and the complete ip/nat nftables table (chains,
+hooks, priorities, ordered rules and translation source). It derives the
+bridge name from the native NAT policy, rather than treating `docker0` or
+`172.17/16` as a universal constant. This intentionally supports only the
+observed small Docker NAT topology without published-port DNAT; an extra
+DNAT/SNAT target, unknown chain, changed bridge, foreign backend, translation
+source or ambiguous read reports `foreign_or_unverified`. Live firewall
+counters and generated kernel handles do not change rule semantics.
+
+A positive `docker_nat_shape="docker_bridge_nat_shape_observed_only"`
+**does not authorize traffic capture**. Static observation cannot reserve a
+Docker rule, prove the final egress ordering, protect foreign-client HTTP/SSH
+replies or establish an operation-bound runtime guard. Even when the known
+Docker shape is observed, `foreign_nat_ownership_unverified` and
+`foreign_nft_coexistence_unverified` remain activation blockers. Existing
+iptables raw NOTRACK owners are independently inspected by the host ingress
+barrier and never adopted, changed or made into permanent port exceptions.
+The full-host transaction must revalidate all foreign owner identities while
+actually guarded and independently recover any owned effects before this
+static proof can support a future activation decision.
+
 ### Installed host-capture preparation QA (still not full Smart Routing)
 
 An operator may **explicitly opt in on a disposable supported Debian 12/13 host** to
