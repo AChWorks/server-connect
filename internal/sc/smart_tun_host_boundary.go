@@ -78,6 +78,11 @@ func generalHostForeignNFTEffects(objects []map[string]any) (generalHostNFTProfi
 		return result, errors.New("nft inventory unavailable")
 	}
 	hooks := map[generalHostNFTChainKey]string{}
+	// An unknown extension target in a NAT chain must fail closed even if
+	// its name is not one of the familiar SNAT/DNAT/MASQUERADE spellings.
+	// Docker's user chain lacks a base-chain type; ip/nat table membership
+	// independently binds its nested rules to NAT semantics.
+	natChains := map[generalHostNFTChainKey]bool{}
 	for _, item := range objects {
 		if len(item) != 1 {
 			return result, errors.New("ambiguous foreign nft object")
@@ -102,6 +107,9 @@ func generalHostForeignNFTEffects(objects []map[string]any) (generalHostNFTProfi
 			return result, errors.New("duplicate foreign nft chain")
 		}
 		hooks[key] = generalHostNFTObjectText(fields, "hook")
+		if fields["type"] == "nat" || key.Table == "nat" {
+			natChains[key] = true
+		}
 	}
 	for _, item := range objects {
 		for kind, value := range item {
@@ -121,6 +129,9 @@ func generalHostForeignNFTEffects(objects []map[string]any) (generalHostNFTProfi
 				hook, present := hooks[key]
 				if !present {
 					return result, errors.New("foreign nft rule lacks a bound chain")
+				}
+				if natChains[key] && !nativeNFTForeignRulePassive(fields) {
+					result.ForeignNAT = true
 				}
 				expressions, ok := fields["expr"].([]any)
 				if !ok || len(expressions) == 0 {
@@ -158,6 +169,9 @@ func generalHostForeignNFTEffects(objects []map[string]any) (generalHostNFTProfi
 				// A drop policy can change traffic even if the chain is empty.
 				if policy, present := fields["policy"]; present && policy != "accept" {
 					result.PacketEffects++
+					if fields["type"] == "nat" || fields["table"] == "nat" {
+						result.ForeignNAT = true
+					}
 				}
 			}
 		}

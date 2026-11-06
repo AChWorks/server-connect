@@ -168,6 +168,61 @@ func TestGeneralHostNFTEffectsRefuseOpaqueAndMutation(t *testing.T) {
 	}
 }
 
+// Foreign NAT is not limited to four well-known target spellings. An
+// opaque extension in a NAT chain/table or a nonaccept NAT policy must be
+// treated as unverified, not omitted from the capture-preflight risk profile.
+func TestGeneralHostForeignNATUnknownExtensionFailsClosed(t *testing.T) {
+	nat := func(family, table, chain string, kind string, value any) []map[string]any {
+		return []map[string]any{
+			{"table": map[string]any{"family": family, "name": table}},
+			{"chain": map[string]any{"family": family, "table": table, "name": chain, "type": "nat", "hook": "output", "policy": "accept"}},
+			{"rule": map[string]any{"family": family, "table": table, "chain": chain, "expr": []any{map[string]any{kind: value}}}},
+		}
+	}
+	unknown := map[string]any{"type": "target", "name": "FUTURE_NAT"}
+	for _, tc := range []struct {
+		name    string
+		objects []map[string]any
+	}{
+		{"unknown xt target in ip nat", nat("ip", "nat", "OUTPUT", "xt", unknown)},
+		{"unknown xt target in inet custom nat", nat("inet", "other-nat", "OUTPUT", "xt", unknown)},
+		{"unknown expression in ip nat", nat("ip", "nat", "OUTPUT", "future_translate", map[string]any{"mode": "rewrite"})},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			profile, e := generalHostForeignNFTEffects(tc.objects)
+			if e != nil || !profile.ForeignNAT || profile.PacketEffects == 0 {
+				t.Fatalf("opaque NAT effect missed: %+v %v", profile, e)
+			}
+			o := hostBoundaryFixture()
+			o.nft = tc.objects
+			r := assessSmartTUNHostBoundary(o, "ens3")
+			if !hasBoundaryReason(r, "foreign_nat_ownership_unverified") || r.ActivationReady || r.GeneralHostAdmitted || r.DockerNATShape != dockerNATUnverified {
+				t.Fatalf("unknown NAT extension falsely admitted: %+v", r)
+			}
+			// This is the installed preparation entry, not just a read-only
+			// diagnostic result. The old v6 parent must never stage a table
+			// after seeing a nat-type unknown effect.
+			stage := hostIngressStage{Underlay: "ens3", OperationID: "abababababababababababababababab"}
+			if got := ErrorCode(hostIngressForeignNATBoundary(stage, tc.objects)); got != "foreign_nat_unverified" {
+				t.Fatalf("product ingress accepted unknown NAT: %s", got)
+			}
+		})
+	}
+	chain := nat("ip", "nat", "OUTPUT", "counter", map[string]any{"packets": json.Number("0"), "bytes": json.Number("0")})
+	chain[1]["chain"].(map[string]any)["policy"] = "drop"
+	got, e := generalHostForeignNFTEffects(chain)
+	if e != nil || !got.ForeignNAT {
+		t.Fatalf("foreign NAT chain policy overlooked: %+v %v", got, e)
+	}
+	// Ordinary foreign raw/OUTPUT CT is a separate NOTRACK owner, not
+	// permission to adopt NAT or a false positive for NAT detection.
+	ct := hostNFTFixture("output", map[string]any{"xt": map[string]any{"type": "target", "name": "CT"}})
+	risk, e := generalHostForeignNFTEffects(ct)
+	if e != nil || risk.ForeignNAT || !risk.OpaqueOutputCT {
+		t.Fatalf("NOTRACK confused with NAT: %+v %v", risk, e)
+	}
+}
+
 func TestGeneralHostDockerAndHostedReplyConntrackRemainBlocked(t *testing.T) {
 	o := hostBoundaryFixture()
 	docker := hostNFTFixture("postrouting", map[string]any{"match": map[string]any{"op": "==", "left": map[string]any{"payload": map[string]any{"protocol": "ip", "field": "saddr"}}, "right": map[string]any{"prefix": map[string]any{"addr": "172.17.0.0", "len": 16}}}}, map[string]any{"xt": map[string]any{"type": "target", "name": "MASQUERADE"}})

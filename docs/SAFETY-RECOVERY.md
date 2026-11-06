@@ -64,8 +64,10 @@ bridge name from the native NAT policy, rather than treating `docker0` or
 `172.17/16` as a universal constant. This intentionally supports only the
 observed small Docker NAT topology without published-port DNAT; an extra
 DNAT/SNAT target, unknown chain, changed bridge, foreign backend, translation
-source or ambiguous read reports `foreign_or_unverified`. Live firewall
-counters and generated kernel handles do not change rule semantics.
+source or ambiguous read reports `foreign_or_unverified`. Unknown opaque
+extension targets and nonaccept policies in NAT chains are also classified
+as foreign NAT effects, even without a recognizable SNAT/DNAT name. Live
+firewall counters and generated kernel handles do not change rule semantics.
 
 A positive `docker_nat_shape="docker_bridge_nat_shape_observed_only"`
 **does not authorize traffic capture**. Static observation cannot reserve a
