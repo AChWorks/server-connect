@@ -149,7 +149,13 @@ promoted to owned. The journal and relevant kernel evidence must be retained,
 and independent Recovery must never report `DIRECT` or delete foreign state
 as a workaround. Current isolated SIGKILL negative tests prove this refusal,
 not guaranteed automatic recovery from every kernel boundary. A fully
-receipted v9 kernel graph is recoverable after real initiator SIGKILL. Neither
+receipted v9 kernel graph is recoverable after real initiator SIGKILL.
+A separate isolated-kernel QA lane starts the actual pinned official sing-box
+Core with a blocked test-only outbound, observes its TUN attachment and
+fully receipted v9 policy guard, then verifies Core-first Off after normal
+stop or actual Core SIGKILL. This is genuine Core/Kernel ownership composition:
+the test's process-bound observer is **not** installed systemd, and the
+blocked outbound is **not** selected-VPN data-plane proof. Neither
 path is product activation: selected VPN and Iranian Direct path validation,
 active Runtime Health Guard, no-Direct-leak outage tests, IPv6 and DNS, field
 SSH/hosting ingress and reboot acceptance remain required before general
