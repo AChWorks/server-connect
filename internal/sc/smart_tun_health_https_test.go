@@ -286,6 +286,36 @@ func TestSmartTUNHTTPSPartialTargetsAndProtocolIsolation(t *testing.T) {
 	}
 }
 
+// The AfterFunc cancellation owns the socket. It can close the connection
+// before SetDeadline returns; such a failure is cancellation, not evidence
+// that the caller omitted a mandatory deadline. This deterministic failing
+// conn catches both sides of that race without timing-sensitive sleeps.
+type healthFailDeadlineConn struct{ net.Conn }
+
+func (healthFailDeadlineConn) SetDeadline(time.Time) error { return net.ErrClosed }
+
+func TestSmartTUNHTTPSDeadlineSetupCancellationPrecedence(t *testing.T) {
+	for _, cancelled := range []bool{false, true} {
+		t.Run(fmt.Sprintf("cancelled_%v", cancelled), func(t *testing.T) {
+			c, peer := net.Pipe()
+			defer peer.Close()
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+			if cancelled {
+				cancel()
+			}
+			result := smartTUNHealthExchangeWithDeadline(ctx, healthFailDeadlineConn{c}, smartTUNHealthProbe{protocol: "https"}, bytes.Repeat([]byte{8}, 16))
+			expected := "deadline_unavailable"
+			if cancelled {
+				expected = "canceled"
+			}
+			if result.Result != expected || result.StatusCode != 0 {
+				t.Fatalf("setup race misreported: %+v want %s", result, expected)
+			}
+		})
+	}
+}
+
 func TestSmartTUNHTTPSCancellationClosesHandshakeAndPartialResponse(t *testing.T) {
 	for _, stage := range []string{"handshake", "body"} {
 		t.Run(stage, func(t *testing.T) {

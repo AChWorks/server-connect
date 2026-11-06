@@ -241,6 +241,28 @@ func TestHostHealthDNSUsesActualFreshUDPAndRejectsMismatch(t *testing.T) {
 		})
 	}
 }
+func TestHostHealthDeadlineSetupCancellationPrecedence(t *testing.T) {
+	for _, cancelled := range []bool{false, true} {
+		t.Run(fmt.Sprintf("cancelled_%v", cancelled), func(t *testing.T) {
+			c, peer := net.Pipe()
+			defer peer.Close()
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+			if cancelled {
+				cancel()
+			}
+			got := exchangeHostHealthConnection(ctx, healthFailDeadlineConn{c}, hostHealthProbe{role: "endpoint"}, nil)
+			expected := "deadline_unavailable"
+			if cancelled {
+				expected = "canceled"
+			}
+			if got.Result != expected || got.HTTPStatus != 0 {
+				t.Fatalf("setup race misreported: %+v want %s", got, expected)
+			}
+		})
+	}
+}
+
 func TestHostHealthConnectionCancellationDeadlineAndSourceBinding(t *testing.T) {
 	client, server := net.Pipe()
 	defer server.Close()

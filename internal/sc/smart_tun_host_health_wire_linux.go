@@ -38,7 +38,13 @@ func exchangeHostHealthConnection(ctx context.Context, c net.Conn, p hostHealthP
 		}
 	}()
 	deadline, ok := ctx.Deadline()
-	if !ok || c.SetDeadline(deadline) != nil {
+	if !ok {
+		return HostHealthResult{Result: "deadline_unavailable"}
+	}
+	if err := c.SetDeadline(deadline); err != nil {
+		if ctx.Err() != nil {
+			return HostHealthResult{Result: "canceled"}
+		}
 		return HostHealthResult{Result: "deadline_unavailable"}
 	}
 	if p.bypass && p.source != "" {

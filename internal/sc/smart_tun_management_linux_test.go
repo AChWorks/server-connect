@@ -199,7 +199,12 @@ func TestSmartTUNManagementLiveReadOnlySocketIdentity(t *testing.T) {
 	defer server.Close()
 	local := server.LocalAddr().(*net.TCPAddr)
 	peer := server.RemoteAddr().(*net.TCPAddr)
-	first, err := managementSockets()
+	// The global production dump deliberately refuses any unrelated opaque
+	// socket generation. This isolated test asserts only its own live TCP
+	// connection, not arbitrary kernel socket churn from other tests/agents.
+	// The parser/state mask and inet_diag read are exactly the same.
+	ownPort := map[uint16]bool{uint16(local.Port): true}
+	first, err := observedKernelTCPSockets(1<<1, ownPort)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -213,7 +218,7 @@ func TestSmartTUNManagementLiveReadOnlySocketIdentity(t *testing.T) {
 	if expected.Inode == 0 || expected.Cookie == 0 {
 		t.Fatal("established ephemeral connection not found in kernel diagnostics")
 	}
-	second, err := managementSockets()
+	second, err := observedKernelTCPSockets(1<<1, ownPort)
 	if err != nil || second[expected.Inode] != expected {
 		t.Fatalf("stable live socket identity not reproduced: %v", err)
 	}

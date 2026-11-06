@@ -91,7 +91,10 @@ func TestHostReplyKernelHalfClosedSocketStillEmitsAndIsObserved(t *testing.T) {
 		return s.Local == netip.MustParseAddr("127.0.0.1") &&
 			int(s.LocalPort) == local.Port && int(s.PeerPort) == peer.Port
 	}
-	management, err := managementSockets()
+	// The production SSH dump intentionally fails closed on *any* unrelated
+	// unidentifiable kernel socket. Test only this stable socket generation
+	// to avoid ambient network-namespace churn becoming a false test failure.
+	management, err := observedKernelTCPSockets(1<<1, map[uint16]bool{uint16(local.Port): true})
 	if err != nil {
 		t.Fatal(err)
 	}

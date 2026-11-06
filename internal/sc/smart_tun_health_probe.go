@@ -261,8 +261,20 @@ func smartTUNHealthExchangeWithDeadline(ctx context.Context, connection net.Conn
 		}
 	}()
 	deadline, ok := ctx.Deadline()
-	if !ok || connection.SetDeadline(deadline) != nil {
+	if !ok {
 		return SmartTUNHTTPSResult{Result: "deadline_unavailable"}
+	}
+	if err := connection.SetDeadline(deadline); err != nil {
+		// Context cancellation closes the same owned socket in AfterFunc.
+		// An already-closed socket may then reject SetDeadline; do not
+		// mistake that expected cancellation race for unavailable policy.
+		if ctx.Err() != nil {
+			return SmartTUNHTTPSResult{Result: "canceled"}
+		}
+		return SmartTUNHTTPSResult{Result: "deadline_unavailable"}
+	}
+	if ctx.Err() != nil {
+		return SmartTUNHTTPSResult{Result: "canceled"}
 	}
 	if probe.protocol == "https" {
 		return exchangeSmartTUNHTTPSHealth(ctx, connection, probe, nonce)
