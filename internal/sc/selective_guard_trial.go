@@ -804,6 +804,9 @@ func recoverSelectedTrialLocked(store *activationJournalDir, selected trialRecov
 			hostCaptureJournalPersist(store, &record))
 		return TrialReceipt{OperationID: result.OperationID, Phase: result.Phase,
 			ExperimentOnly: true, RecoveryVerified: result.RecoveryVerified}, err
+	case hostNativeJournalVersion:
+		record := selected.hostNative
+		return recoverHostNativeJournalLocked(store, &record, hostNativeCoreIdle)
 	case 2, 3:
 		return recoverLegacyGuardedTrialLocked(store, selected.identity, selected.trial, qaCrashPoint, qaFaultPoint)
 	default:
@@ -816,12 +819,13 @@ func recoverSelectedTrialLocked(store *activationJournalDir, selected trialRecov
 // v4 Apply to legacy recovery. The private typed handler permits no-native
 // tests of that exact lock boundary; production uses the wrapper above.
 type trialRecoverySelection struct {
-	version  int
-	identity activationJournalFileIdentity
-	trial    trialJournal
-	tun      smartTUNTrialJournal
-	ingress  hostIngressStage
-	capture  hostCaptureJournal
+	version    int
+	identity   activationJournalFileIdentity
+	trial      trialJournal
+	tun        smartTUNTrialJournal
+	ingress    hostIngressStage
+	capture    hostCaptureJournal
+	hostNative hostNativeJournal
 }
 
 func (m *Manager) recoverGuardedTrialWithHandler(qaCrashPoint, qaFaultPoint string,
@@ -874,6 +878,16 @@ func selectTrialRecoveryLocked(store *activationJournalDir, qaCrashPoint, qaFaul
 			return trialRecoverySelection{}, err
 		}
 		return trialRecoverySelection{version: hostCaptureJournalVersion, identity: identity, capture: record}, nil
+	}
+	if marker.Version == hostNativeJournalVersion {
+		if qaCrashPoint != "" || qaFaultPoint != "" {
+			return trialRecoverySelection{}, Fault("invalid_arguments", "legacy fault flags do not apply to host native operation")
+		}
+		record, err := decodeHostNativeJournal(raw)
+		if err != nil {
+			return trialRecoverySelection{}, err
+		}
+		return trialRecoverySelection{version: hostNativeJournalVersion, identity: identity, hostNative: record}, nil
 	}
 	if err := json.Unmarshal(raw, &marker); err == nil && marker.Version == smartTUNTrialVersion &&
 		qaCrashPoint == "" && qaFaultPoint == "" {
@@ -1089,6 +1103,9 @@ func (m *Manager) InstallerCheckGuardClear() error {
 	}
 	if _, err := decodeHostCaptureJournal(raw); err == nil {
 		return Fault("guard_pending", "clear the exact recovered host capture preparation before update or uninstall")
+	}
+	if _, err := decodeHostNativeJournal(raw); err == nil {
+		return Fault("guard_pending", "clear the exact recovered host native preparation before update or uninstall")
 	}
 	if err := strictActivationJournalJSON(raw); err != nil {
 		return Fault("activation_journal_invalid", "unsupported activation journal blocks installer")
