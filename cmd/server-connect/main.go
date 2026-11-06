@@ -462,6 +462,23 @@ func run(j bool, m *sc.Manager, args []string) int {
 		}
 		result, err := m.InspectSmartTUNTrial()
 		return output(j, result, err)
+	case "host-core-preparation-qa":
+		opts := flag.NewFlagSet(name, flag.ContinueOnError)
+		opts.SetOutput(io.Discard)
+		peer := opts.String("management-peer", "", "current authenticated management peer IPv4")
+		underlay := opts.String("underlay-if", "", "verified physical underlay interface")
+		nativeLink := opts.String("native-link-if", "", "exclusive persistent native TUN for core-only QA")
+		pinned := opts.String("pinned-endpoint-ip", "", "verified selected VLESS endpoint IPv4")
+		resolver := opts.String("dns-resolver", "", "explicit public IPv4 resolver for pinned underlay observation")
+		deadline := opts.Int("deadline-seconds", 120, "independent recovery budget 30-300 seconds")
+		disposable := opts.Bool("ack-disposable-host", false, "explicitly accept experimental ingress and inert core attachment on this host")
+		killPoint := opts.String("qa-kill-at", "", "deliberate SIGKILL at a recorded core/ingress/native effect boundary")
+		if e := opts.Parse(args); e != nil || len(opts.Args()) != 0 || !*disposable ||
+			*peer == "" || *underlay == "" || *nativeLink == "" || *pinned == "" || *resolver == "" {
+			return output(j, nil, sc.Fault("invalid_arguments", "host core QA requires explicit management, underlay, native link, pinned endpoint, resolver and disposable-host acknowledgement"))
+		}
+		receipt, err := m.BeginHostCorePreparationQAWithFault(*peer, *underlay, *nativeLink, *pinned, *resolver, *deadline, *killPoint)
+		return output(j, receipt, err)
 	case "host-capture-preparation-qa":
 		opts := flag.NewFlagSet(name, flag.ContinueOnError)
 		opts.SetOutput(io.Discard)
@@ -764,6 +781,14 @@ Commands:
   smart-tun-host-boundary --management-peer IPv4 --underlay-if NAME
                               Read-only real-host network constraints, IPv4
                               policy, IPv6 and foreign nft risk; no Apply token
+  host-core-preparation-qa --management-peer IPv4 --underlay-if NAME
+                           --native-link-if NAME --pinned-endpoint-ip IPv4
+                           --dns-resolver IPv4 --ack-disposable-host
+                           [--deadline-seconds 120] [--qa-kill-at POINT]
+                              Temporary host Ingress+TUN and selected official
+                              core ATTACHMENT (v8), one durable parent.
+                              No VPN Apply, DNS interception, RPDB or public capture.
+                              Independent timer performs core-first owned Off.
   host-capture-preparation-qa --management-peer IPv4 --underlay-if NAME
                               --ack-disposable-host [--deadline-seconds 120]
                               [--native-link-if NAME]
@@ -773,7 +798,7 @@ Commands:
                               native TUN link (v7), with independent recovery.
                               NEVER starts VPN, DNS, RPDB, or routing Apply.
   host-capture-preparation-clear --operation-id HEX32
-                              Clear only exactly recovered v6/v7 host preparation
+                              Clear only exactly recovered v6/v7/v8 host preparation
   smart-tun-host-check --endpoint-ip IP --management-peer IP --underlay-if NAME
                        [--dns-resolver IP --dns-port 53]
                               Read-only selected VLESS hostname/DNS, TCP, routes and

@@ -272,5 +272,8 @@ func (m *Manager) ClearRecoveredHostPreparation(op string) error {
 	if strings.HasPrefix(status.Phase, "host_native_") {
 		return m.ClearRecoveredHostNativePreparation(op)
 	}
+	if strings.HasPrefix(status.Phase, "host_core_") {
+		return m.ClearRecoveredHostCorePreparation(op)
+	}
 	return m.ClearRecoveredHostCapturePreparation(op)
 }

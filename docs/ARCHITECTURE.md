@@ -113,6 +113,28 @@ asserts `ACTIVE_VERIFIED`: a complete **general-host** operation still needs
 an independently supervised core/policy/Runtime Health Guard transaction
 with field acceptance before full-host Apply is exposed.
 
+**Host-native Core attachment preparation (v8, development-only):** An
+explicitly disposable installed-host QA extends the same parent ledger with
+an immutable selected profile ID, public pinned VLESS/WS TLS endpoint,
+SHA-256 of the private official sing-box configuration, and durable
+credential/start/stop transitions. The already receipted persistent native
+TUN is attached by the **exact installed pinned systemd unit**, not a
+second process or a route-owning core. Compilation cannot enable
+`auto_route`, `auto_redirect`, host FIB/RPDB/nft egress capture or DNS
+interception. Underlay TCP/DNS, selected profile, management route, native
+NAT, and other readiness observations are repeated around Guard prearm.
+Core start is never authorized before the link receipt and fsynced
+`start_requested` intent. The independent recovery executor first stops
+that recorded unit (without adopting unrelated processes), verifies full
+quiescence, retires only the matching private credential, then reconciles
+native link and host ingress/grace. A separate journaled
+`credential_remove_requested` effect intent survives SIGKILL between
+credential unlink and terminal record. Old v6/v7 journals remain strictly
+recognized. CLI `host-core-preparation-qa` / operation-bound
+`host-capture-preparation-clear` provide *only* this isolated lifecycle
+proof; `activation_ready` and `general_host_admitted` remain false. A live
+Core-only TUN does not route public host traffic or prove VPN delivery.
+
 The manager validates the selected profile, pinned core, native baseline and
 reserved resource absence, then independently prearms the installed recovery
 oneshot/timer outside the shared journal lock. It repeats admission under the

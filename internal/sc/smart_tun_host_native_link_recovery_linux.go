@@ -95,6 +95,15 @@ func hostNativeNoOwnedPolicyNFT(objects []map[string]any) error {
 }
 
 func hostNativeRemoveLinkLocked(store *activationJournalDir, r *hostNativeJournal) error {
+	return hostNativeRemoveLinkWithPersist(store, r, hostNativeLinkPersist(store, r))
+}
+
+// Reuse the exactly owned link removal with an enclosing v8 core parent.
+// Both v7 and v8 must persist the effect intent into their same parent.
+func hostNativeRemoveLinkWithPersist(store *activationJournalDir, r *hostNativeJournal, persist nativeTUNRecordPersist) error {
+	if store == nil || r == nil || persist == nil {
+		return Fault("guard_unavailable", "host native link removal requires owning parent")
+	}
 	if err := store.ensureLockIdentity(); err != nil {
 		return err
 	}
@@ -115,7 +124,7 @@ func hostNativeRemoveLinkLocked(store *activationJournalDir, r *hostNativeJourna
 	if link.Present {
 		next := cloneSmartTUNTrial(native)
 		next.Native.LinkStage = "remove_requested"
-		if err := nativeTUNAdvanceWithPersist(&native, next, hostNativeLinkPersist(store, r)); err != nil {
+		if err := nativeTUNAdvanceWithPersist(&native, next, persist); err != nil {
 			return err
 		}
 		// Durably record remove intent first, then fresh reobservations of owned
@@ -148,5 +157,5 @@ func hostNativeRemoveLinkLocked(store *activationJournalDir, r *hostNativeJourna
 	}
 	next := r.nativeView()
 	next.Native.LinkStage = "removed"
-	return nativeTUNAdvanceWithPersist(&native, next, hostNativeLinkPersist(store, r))
+	return nativeTUNAdvanceWithPersist(&native, next, persist)
 }

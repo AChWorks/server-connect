@@ -807,6 +807,9 @@ func recoverSelectedTrialLocked(store *activationJournalDir, selected trialRecov
 	case hostNativeJournalVersion:
 		record := selected.hostNative
 		return recoverHostNativeJournalLocked(store, &record, hostNativeCoreIdle)
+	case hostCoreJournalVersion:
+		record := selected.hostCore
+		return recoverHostCoreJournalLocked(store, &record, defaultHostCoreRecoveryServices())
 	case 2, 3:
 		return recoverLegacyGuardedTrialLocked(store, selected.identity, selected.trial, qaCrashPoint, qaFaultPoint)
 	default:
@@ -826,6 +829,7 @@ type trialRecoverySelection struct {
 	ingress    hostIngressStage
 	capture    hostCaptureJournal
 	hostNative hostNativeJournal
+	hostCore   hostCoreJournal
 }
 
 func (m *Manager) recoverGuardedTrialWithHandler(qaCrashPoint, qaFaultPoint string,
@@ -878,6 +882,16 @@ func selectTrialRecoveryLocked(store *activationJournalDir, qaCrashPoint, qaFaul
 			return trialRecoverySelection{}, err
 		}
 		return trialRecoverySelection{version: hostCaptureJournalVersion, identity: identity, capture: record}, nil
+	}
+	if marker.Version == hostCoreJournalVersion {
+		if qaCrashPoint != "" || qaFaultPoint != "" {
+			return trialRecoverySelection{}, Fault("invalid_arguments", "legacy fault flags do not apply to host core operation")
+		}
+		record, err := decodeHostCoreJournal(raw)
+		if err != nil {
+			return trialRecoverySelection{}, err
+		}
+		return trialRecoverySelection{version: hostCoreJournalVersion, identity: identity, hostCore: record}, nil
 	}
 	if marker.Version == hostNativeJournalVersion {
 		if qaCrashPoint != "" || qaFaultPoint != "" {
@@ -1106,6 +1120,9 @@ func (m *Manager) InstallerCheckGuardClear() error {
 	}
 	if _, err := decodeHostNativeJournal(raw); err == nil {
 		return Fault("guard_pending", "clear the exact recovered host native preparation before update or uninstall")
+	}
+	if _, err := decodeHostCoreJournal(raw); err == nil {
+		return Fault("guard_pending", "clear the exact recovered host core preparation before update or uninstall")
 	}
 	if err := strictActivationJournalJSON(raw); err != nil {
 		return Fault("activation_journal_invalid", "unsupported activation journal blocks installer")

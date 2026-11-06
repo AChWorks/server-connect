@@ -52,6 +52,15 @@ func (m *Manager) InspectActivationJournal() (ActivationJournalStatus, error) {
 		if json.Unmarshal(raw, &discriminator) != nil {
 			return activationJournalError("activation journal version is invalid")
 		}
+		if discriminator.Version == hostCoreJournalVersion {
+			r, err := decodeHostCoreJournal(raw)
+			if err != nil {
+				return err
+			}
+			report = ActivationJournalStatus{Phase: "host_core_" + r.Progress.Ingress.Phase,
+				Present: true, OperationID: r.Progress.Ingress.OperationID, RequiresOperatorReview: true}
+			return nil
+		}
 		if discriminator.Version == hostNativeJournalVersion {
 			r, err := decodeHostNativeJournal(raw)
 			if err != nil {

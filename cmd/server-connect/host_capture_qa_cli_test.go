@@ -10,6 +10,42 @@ import (
 	"github.com/AChWorks/server-connect/internal/sc"
 )
 
+func TestHostCoreQACLIRejectsMissingAcknowledgementBeforeSideEffects(t *testing.T) {
+	for _, args := range [][]string{
+		{"host-core-preparation-qa"},
+		{"host-core-preparation-qa", "--management-peer", "8.8.8.8", "--underlay-if", "ens3", "--native-link-if", "sctunv70", "--pinned-endpoint-ip", "1.1.1.1", "--dns-resolver", "9.9.9.9"},
+		{"host-core-preparation-qa", "--management-peer", "8.8.8.8", "--underlay-if", "ens3", "--native-link-if", "sctunv70", "--pinned-endpoint-ip", "1.1.1.1", "--dns-resolver", "9.9.9.9", "--ack-disposable-host=false"},
+		{"host-core-preparation-qa", "--ack-disposable-host", "--management-peer", "8.8.8.8", "--underlay-if", "ens3", "--native-link-if", "sctunv70", "--pinned-endpoint-ip", "1.1.1.1"},
+		{"host-core-preparation-qa", "--ack-disposable-host", "--management-peer", "8.8.8.8", "--underlay-if", "ens3", "--native-link-if", "sctunv70", "--pinned-endpoint-ip", "1.1.1.1", "--dns-resolver", "9.9.9.9", "unexpected"},
+	} {
+		dir := filepath.Join(t.TempDir(), "not-created")
+		m := sc.New(dir, sc.DefaultCore, sc.DefaultPort)
+		read, write, err := os.Pipe()
+		if err != nil {
+			t.Fatal(err)
+		}
+		previous := os.Stdout
+		os.Stdout = write
+		code := run(true, m, args)
+		_ = write.Close()
+		os.Stdout = previous
+		var response struct {
+			OK    bool `json:"ok"`
+			Error struct {
+				Code string `json:"code"`
+			} `json:"error"`
+		}
+		err = json.NewDecoder(read).Decode(&response)
+		_ = read.Close()
+		if err != nil || code != 1 || response.OK || response.Error.Code != "invalid_arguments" {
+			t.Fatalf("invalid v8 host QA accepted: args=%v response=%+v err=%v", args, response, err)
+		}
+		if _, err := os.Stat(dir); !os.IsNotExist(err) {
+			t.Fatalf("rejected v8 QA created state: %v", err)
+		}
+	}
+}
+
 func TestHostCaptureQACLIMissingDisposableAcknowledgementDoesNotWriteState(t *testing.T) {
 	for _, args := range [][]string{
 		{"host-capture-preparation-qa"},
