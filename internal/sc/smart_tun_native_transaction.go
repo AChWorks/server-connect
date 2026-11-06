@@ -88,30 +88,64 @@ func nativeTUNAdmission(options SmartTUNCandidateOptions, host HostPreflight) (s
 	return n, nil
 }
 
-// Every transition revalidates the complete previous record, publishes one
-// fsynced replacement, and verifies all next contents before refreshing inode.
-func nativeTUNAdvance(store *activationJournalDir, record *smartTUNTrialJournal, next smartTUNTrialJournal) error {
-	identity, err := reloadSmartTUNTrialLocked(store, *record)
-	if err != nil {
-		return err
+// Native mutators use a full-record durable callback rather than assuming
+// their caller owns a v4 trial journal. A general-host operation must persist
+// native deltas in the SAME enclosing journal as ingress and recovery state.
+// The callback is responsible for a full-parent CAS, durable write and exact
+// readback. A failed callback must not advance the in-memory native record.
+type nativeTUNRecordPersist func(previous, next smartTUNTrialJournal) error
+
+func nativeTUNAdvanceWithPersist(record *smartTUNTrialJournal, next smartTUNTrialJournal, persist nativeTUNRecordPersist) error {
+	if record == nil || persist == nil {
+		return Fault("guard_unavailable", "native TUN mutation requires one durable parent")
 	}
-	if err := writeSmartTUNTrialLocked(store, next, &identity); err != nil {
-		return err
+	if record.OperationID == "" || record.OperationID != next.OperationID ||
+		record.BootID != next.BootID || record.Native == nil || next.Native == nil {
+		return Fault("activation_journal_conflict", "native TUN operation identity changed")
 	}
-	if _, err := reloadSmartTUNTrialLocked(store, next); err != nil {
+	if err := persist(cloneSmartTUNTrial(*record), cloneSmartTUNTrial(next)); err != nil {
 		return err
 	}
 	*record = cloneSmartTUNTrial(next)
 	return nil
 }
 
+// Existing disconnected-guest trials retain their exact v4 journal protocol.
+// This adapter is separate from the general-host parent and cannot select it.
+func nativeTUNTrialJournalPersist(store *activationJournalDir) nativeTUNRecordPersist {
+	return func(previous, next smartTUNTrialJournal) error {
+		if store == nil {
+			return Fault("guard_unavailable", "native TUN v4 journal is unavailable")
+		}
+		identity, err := reloadSmartTUNTrialLocked(store, previous)
+		if err != nil {
+			return err
+		}
+		if err := writeSmartTUNTrialLocked(store, next, &identity); err != nil {
+			return err
+		}
+		if _, err := reloadSmartTUNTrialLocked(store, next); err != nil {
+			return err
+		}
+		return nil
+	}
+}
+
+func nativeTUNAdvance(store *activationJournalDir, record *smartTUNTrialJournal, next smartTUNTrialJournal) error {
+	return nativeTUNAdvanceWithPersist(record, next, nativeTUNTrialJournalPersist(store))
+}
+
 func nativeTUNPrepareLink(store *activationJournalDir, record *smartTUNTrialJournal, qaPoint string) error {
+	return nativeTUNPrepareLinkWithPersist(store, record, qaPoint, nativeTUNTrialJournalPersist(store))
+}
+
+func nativeTUNPrepareLinkWithPersist(store *activationJournalDir, record *smartTUNTrialJournal, qaPoint string, persist nativeTUNRecordPersist) error {
 	if err := nativeTUNCheckNamespace(*record); err != nil {
 		return err
 	}
 	next := cloneSmartTUNTrial(*record)
 	next.Native.LinkStage = "create_possible"
-	if err := nativeTUNAdvance(store, record, next); err != nil {
+	if err := nativeTUNAdvanceWithPersist(record, next, persist); err != nil {
 		return err
 	}
 	file, link, err := nativeTUNCreateEphemeral(store, *record)
@@ -126,7 +160,7 @@ func nativeTUNPrepareLink(store *activationJournalDir, record *smartTUNTrialJour
 	next.Native.AddressSHA256 = link.AddressSHA256
 	next.Native.IPv4.DependentSHA256 = link.Dependent4
 	next.Native.IPv6.DependentSHA256 = link.Dependent6
-	if err := nativeTUNAdvance(store, record, next); err != nil {
+	if err := nativeTUNAdvanceWithPersist(record, next, persist); err != nil {
 		return err
 	}
 	if err := trialQAKillAt("after-native-link-bind", qaPoint); err != nil {
@@ -137,7 +171,7 @@ func nativeTUNPrepareLink(store *activationJournalDir, record *smartTUNTrialJour
 	// ioctl succeeds and the process dies before an observed flag is written.
 	next = cloneSmartTUNTrial(*record)
 	next.Native.LinkStage = "persist_possible"
-	if err := nativeTUNAdvance(store, record, next); err != nil {
+	if err := nativeTUNAdvanceWithPersist(record, next, persist); err != nil {
 		return err
 	}
 	if err := nativeTUNPersist(file); err != nil {
@@ -158,7 +192,7 @@ func nativeTUNPrepareLink(store *activationJournalDir, record *smartTUNTrialJour
 	}
 	next = cloneSmartTUNTrial(*record)
 	next.Native.LinkStage = "observed"
-	return nativeTUNAdvance(store, record, next)
+	return nativeTUNAdvanceWithPersist(record, next, persist)
 }
 
 func nativeTUNResource(ledger *smartTUNNativeLedger, family int, kind string) *smartTUNNativeObject {
@@ -174,6 +208,10 @@ func nativeTUNResource(ledger *smartTUNNativeLedger, family int, kind string) *s
 }
 
 func nativeTUNApplyPolicy(store *activationJournalDir, record *smartTUNTrialJournal, qaPoint string) error {
+	return nativeTUNApplyPolicyWithPersist(store, record, qaPoint, nativeTUNTrialJournalPersist(store))
+}
+
+func nativeTUNApplyPolicyWithPersist(store *activationJournalDir, record *smartTUNTrialJournal, qaPoint string, persist nativeTUNRecordPersist) error {
 	if err := nativeTUNCheckNamespace(*record); err != nil {
 		return err
 	}
@@ -201,7 +239,7 @@ func nativeTUNApplyPolicy(store *activationJournalDir, record *smartTUNTrialJour
 			}
 			next := cloneSmartTUNTrial(*record)
 			nativeTUNResource(next.Native, family, kind).Stage = "effect_possible"
-			if err := nativeTUNAdvance(store, record, next); err != nil {
+			if err := nativeTUNAdvanceWithPersist(record, next, persist); err != nil {
 				return err
 			}
 			if err := nativeTUNRunIP(store, nativeRouteArgs(*record, family, kind, "add")...); err != nil {
@@ -226,7 +264,7 @@ func nativeTUNApplyPolicy(store *activationJournalDir, record *smartTUNTrialJour
 			}
 			next = cloneSmartTUNTrial(*record)
 			*nativeTUNResource(next.Native, family, kind) = smartTUNNativeObject{Stage: "observed", SHA256: hash}
-			if err := nativeTUNAdvance(store, record, next); err != nil {
+			if err := nativeTUNAdvanceWithPersist(record, next, persist); err != nil {
 				return err
 			}
 		}
@@ -240,7 +278,7 @@ func nativeTUNApplyPolicy(store *activationJournalDir, record *smartTUNTrialJour
 	}
 	next := cloneSmartTUNTrial(*record)
 	next.Native.NFT.Stage = "effect_possible"
-	if err := nativeTUNAdvance(store, record, next); err != nil {
+	if err := nativeTUNAdvanceWithPersist(record, next, persist); err != nil {
 		return err
 	}
 	program, err := nativeNFTCreateJSON(*record)
@@ -264,7 +302,7 @@ func nativeTUNApplyPolicy(store *activationJournalDir, record *smartTUNTrialJour
 	next.Native.NFT = smartTUNNativeObject{Stage: "observed", SHA256: observed.SHA256}
 	next.Native.NFTHandle = observed.Handle
 	next.Native.NFTCount, next.Native.NFTObjects = observed.Count, observed.Objects
-	if err := nativeTUNAdvance(store, record, next); err != nil {
+	if err := nativeTUNAdvanceWithPersist(record, next, persist); err != nil {
 		return err
 	}
 	return nil
@@ -427,6 +465,10 @@ func nativeTUNRecoveryContainment(record smartTUNTrialJournal, observed nativeTU
 }
 
 func nativeTUNRemoveResource(store *activationJournalDir, record *smartTUNTrialJournal, family int, kind, qaPoint string) error {
+	return nativeTUNRemoveResourceWithPersist(store, record, family, kind, qaPoint, nativeTUNTrialJournalPersist(store))
+}
+
+func nativeTUNRemoveResourceWithPersist(store *activationJournalDir, record *smartTUNTrialJournal, family int, kind, qaPoint string, persist nativeTUNRecordPersist) error {
 	object := *nativeTUNResource(record.Native, family, kind)
 	present, hash, err := nativeTUNObserveResource(*record, family, kind)
 	if err != nil {
@@ -438,7 +480,7 @@ func nativeTUNRemoveResource(store *activationJournalDir, record *smartTUNTrialJ
 	if present {
 		next := cloneSmartTUNTrial(*record)
 		nativeTUNResource(next.Native, family, kind).Stage = "remove_requested"
-		if err := nativeTUNAdvance(store, record, next); err != nil {
+		if err := nativeTUNAdvanceWithPersist(record, next, persist); err != nil {
 			return err
 		}
 		// Reobserve immediately after the durable deletion intent. No broad
@@ -479,10 +521,14 @@ func nativeTUNRemoveResource(store *activationJournalDir, record *smartTUNTrialJ
 	}
 	next := cloneSmartTUNTrial(*record)
 	nativeTUNResource(next.Native, family, kind).Stage = "removed"
-	return nativeTUNAdvance(store, record, next)
+	return nativeTUNAdvanceWithPersist(record, next, persist)
 }
 
 func nativeTUNRemoveLink(store *activationJournalDir, record *smartTUNTrialJournal, qaPoint string) error {
+	return nativeTUNRemoveLinkWithPersist(store, record, qaPoint, nativeTUNTrialJournalPersist(store))
+}
+
+func nativeTUNRemoveLinkWithPersist(store *activationJournalDir, record *smartTUNTrialJournal, qaPoint string, persist nativeTUNRecordPersist) error {
 	link, err := nativeTUNObserveLink(*record)
 	if err != nil {
 		return err
@@ -496,7 +542,7 @@ func nativeTUNRemoveLink(store *activationJournalDir, record *smartTUNTrialJourn
 		}
 		next := cloneSmartTUNTrial(*record)
 		next.Native.LinkStage = "remove_requested"
-		if err := nativeTUNAdvance(store, record, next); err != nil {
+		if err := nativeTUNAdvanceWithPersist(record, next, persist); err != nil {
 			return err
 		}
 		// Includes ALL addresses, attached routes and foreign rule/nft/link
@@ -539,10 +585,14 @@ func nativeTUNRemoveLink(store *activationJournalDir, record *smartTUNTrialJourn
 	if next.Native.DNSResolverIPv4 != "" {
 		next.Native.DNSStage = "removed"
 	}
-	return nativeTUNAdvance(store, record, next)
+	return nativeTUNAdvanceWithPersist(record, next, persist)
 }
 
 func nativeTUNRemoveNFT(store *activationJournalDir, record *smartTUNTrialJournal, qaPoint string) error {
+	return nativeTUNRemoveNFTWithPersist(store, record, qaPoint, nativeTUNTrialJournalPersist(store))
+}
+
+func nativeTUNRemoveNFTWithPersist(store *activationJournalDir, record *smartTUNTrialJournal, qaPoint string, persist nativeTUNRecordPersist) error {
 	for attempt := 0; attempt < 3; attempt++ {
 		observed, err := nativeTUNObserveNFT(*record)
 		if err != nil {
@@ -551,14 +601,14 @@ func nativeTUNRemoveNFT(store *activationJournalDir, record *smartTUNTrialJourna
 		if !observed.Present {
 			next := cloneSmartTUNTrial(*record)
 			next.Native.NFT.Stage = "removed"
-			return nativeTUNAdvance(store, record, next)
+			return nativeTUNAdvanceWithPersist(record, next, persist)
 		}
 		if (record.Native.NFT.Stage != "observed" && record.Native.NFT.Stage != "remove_requested") || !nativeTUNNFTReceiptCovers(*record, observed, false) {
 			return nativeTUNConflict("foreign nft objects prevent native final deactivation")
 		}
 		next := cloneSmartTUNTrial(*record)
 		next.Native.NFT.Stage = "remove_requested"
-		if err := nativeTUNAdvance(store, record, next); err != nil {
+		if err := nativeTUNAdvanceWithPersist(record, next, persist); err != nil {
 			return err
 		}
 		// A generation-conditioned kernel batch makes this prior full graph
@@ -582,7 +632,7 @@ func nativeTUNRemoveNFT(store *activationJournalDir, record *smartTUNTrialJourna
 		}
 		next = cloneSmartTUNTrial(*record)
 		next.Native.NFT.Stage = "removed"
-		return nativeTUNAdvance(store, record, next)
+		return nativeTUNAdvanceWithPersist(record, next, persist)
 	}
 	return nativeTUNUncertain("nft reconciliation exceeded bounded generation retries")
 }
