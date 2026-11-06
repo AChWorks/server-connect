@@ -263,11 +263,7 @@ func recoverHostNativeJournalLocked(store *activationJournalDir, r *hostNativeJo
 		return receipt, err
 	}
 	if boot == r.Progress.Ingress.BootID {
-		native := r.nativeView()
-		if err := nativeTUNCheckRecoveryGraph(native); err != nil {
-			return receipt, err
-		}
-		if err := nativeTUNRemoveLinkWithPersist(store, &native, "", hostNativeLinkPersist(store, r)); err != nil {
+		if err := hostNativeRemoveLinkLocked(store, r); err != nil {
 			return receipt, err
 		}
 	} else {
@@ -302,7 +298,7 @@ func hostNativeVerifyLinkAbsent(r hostNativeJournal, boot string) error {
 		return hostNativeOldBootLinkAbsent(r)
 	}
 	native := r.nativeView()
-	if err := nativeTUNCheckRecoveryGraph(native); err != nil {
+	if err := hostNativeCheckNoPolicy(r); err != nil {
 		return err
 	}
 	if r.Native.LinkStage != "removed" {
@@ -341,14 +337,32 @@ func hostNativeOldBootLinkAbsent(r hostNativeJournal) error {
 			}
 		}
 	}
-	nft, err := nativeTUNObserveNFT(native)
-	if err != nil {
-		return err
+	// A prior boot never authorizes deleting or interpreting foreign NAT.
+	// Only explicitly verify absence of reserved native tables, not a v4
+	// policy fixture's blanket foreign-packet-rule restriction.
+	for attempt := 0; attempt < 3; attempt++ {
+		before, err := nativeNFTGeneration()
+		if err != nil {
+			return err
+		}
+		raw, err := nativeTUNRunNFT(nil, nil, "-n", "-j", "-a", "list", "ruleset")
+		if err != nil {
+			return err
+		}
+		after, err := nativeNFTGeneration()
+		if err != nil {
+			return err
+		}
+		if before == 0 || before != after {
+			continue
+		}
+		objects, err := nativeTUNNftObjects(raw)
+		if err != nil {
+			return err
+		}
+		return hostNativeNoOwnedPolicyNFT(objects)
 	}
-	if nft.Present {
-		return Fault("trial_resource_conflict", "old-boot native nft name occupied")
-	}
-	return nil
+	return Fault("trial_recovery_uncertain", "old-boot native nft generation did not stabilize")
 }
 
 // No standalone unlock, no guessed Direct mode, no automatic resource removal

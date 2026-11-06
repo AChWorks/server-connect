@@ -33,7 +33,10 @@ func prepareHostNativeKernelFixture(t *testing.T) (func() error, hostNativeJourn
 	if _, err := os.Stat("/usr/sbin/iptables-nft"); err == nil {
 		for _, args := range [][]string{
 			{"-t", "nat", "-N", "DOCKER"},
+			{"-t", "nat", "-A", "PREROUTING", "-m", "addrtype", "--dst-type", "LOCAL", "-j", "DOCKER"},
+			{"-t", "nat", "-A", "OUTPUT", "!", "-d", "127.0.0.0/8", "-m", "addrtype", "--dst-type", "LOCAL", "-j", "DOCKER"},
 			{"-t", "nat", "-A", "POSTROUTING", "-s", "172.17.0.0/16", "!", "-o", "docker0", "-j", "MASQUERADE"},
+			{"-t", "nat", "-A", "DOCKER", "-i", "docker0", "-j", "RETURN"},
 		} {
 			ingressNativeCommand(t, "/usr/sbin/iptables-nft", args...)
 		}

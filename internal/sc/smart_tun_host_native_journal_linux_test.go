@@ -6,7 +6,6 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
-	"os"
 	"strings"
 	"syscall"
 	"testing"
@@ -181,4 +180,14 @@ func TestHostNativeNoPolicyLinkProgressAndStatus(t *testing.T) {
 	}
 }
 
-var _ = os.ErrNotExist
+func TestHostNativeReservedPolicyNFTNeverAdopted(t *testing.T) {
+	for _, table := range []string{"scnt_" + strings.Repeat("a", 32), "scnt_" + strings.Repeat("b", 32)} {
+		rows := []map[string]any{{"table": map[string]any{"family": "ip", "name": table}}}
+		if ErrorCode(hostNativeNoOwnedPolicyNFT(rows)) != "trial_resource_conflict" {
+			t.Fatal("foreign native table was silently accepted")
+		}
+	}
+	if err := hostNativeNoOwnedPolicyNFT([]map[string]any{{"table": map[string]any{"family": "ip", "name": "Docker"}}}); err != nil {
+		t.Fatal(err)
+	}
+}
