@@ -69,6 +69,18 @@ func TestHostCoreCompositeParentRealKernelWithoutCore(t *testing.T) {
 	}
 	fmt.Println("HOST_CORE_V8_LINK_INGRESS_CORE_ONE_PARENT_RECOVERED=PASS")
 	err = m.withActivationJournalLock(syscall.Fsync, func(store *activationJournalDir) error {
+		if err := hostTerminalClearReplacementRegression(t, store, m.Dir, func(change func() error) error {
+			changed := services
+			changed.observe = func() (smartTUNTrialUnitObservation, error) {
+				if err := change(); err != nil {
+					return smartTUNTrialUnitObservation{}, err
+				}
+				return services.observe()
+			}
+			return clearRecoveredHostCoreLocked(store, r.Progress.Ingress.OperationID, changed)
+		}); err != nil {
+			return err
+		}
 		return clearRecoveredHostCoreLocked(store, r.Progress.Ingress.OperationID, services)
 	})
 	if err != nil {

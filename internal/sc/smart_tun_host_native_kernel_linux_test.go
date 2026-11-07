@@ -175,6 +175,16 @@ func TestHostNativeJournalOneKernelLinkAndOwnedOff(t *testing.T) {
 	}
 	ingressNativeCommand(t, "/usr/sbin/ip", "link", "del", "sctunv70")
 	err = m.withActivationJournalLock(syscall.Fsync, func(store *activationJournalDir) error {
+		if err := hostTerminalClearReplacementRegression(t, store, m.Dir, func(change func() error) error {
+			return clearRecoveredHostNativeLocked(store, r.Progress.Ingress.OperationID, func() error {
+				if err := guard(); err != nil {
+					return err
+				}
+				return change()
+			})
+		}); err != nil {
+			return err
+		}
 		if err := clearRecoveredHostNativeLocked(store, r.Progress.Ingress.OperationID, guard); err != nil {
 			return err
 		}

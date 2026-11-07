@@ -147,6 +147,18 @@ func TestHostRouteV9RealKernelOwnedPolicyAndCoreFirstOff(t *testing.T) {
 	}
 	fmt.Println("HOST_ROUTE_V9_CORE_FIRST_ROUTED_OFF=PASS")
 	err = m.withActivationJournalLock(syscall.Fsync, func(store *activationJournalDir) error {
+		if err := hostTerminalClearReplacementRegression(t, store, m.Dir, func(change func() error) error {
+			changed := services
+			changed.observe = func() (smartTUNTrialUnitObservation, error) {
+				if err := change(); err != nil {
+					return smartTUNTrialUnitObservation{}, err
+				}
+				return services.observe()
+			}
+			return clearRecoveredHostRouteLocked(store, r.Progress.Ingress.OperationID, changed)
+		}); err != nil {
+			return err
+		}
 		return clearRecoveredHostRouteLocked(store, r.Progress.Ingress.OperationID, services)
 	})
 	if err != nil {
