@@ -1,6 +1,7 @@
 #!/bin/sh
-# Development bootstrap. Public one-line channel is gated on publisher signing.
-# Supply an independently trusted 64-character SHA-256 digest.
+# Trusted acquisition entrypoint for signed online/mirror/offline bundles.
+# No public release or production publisher identity has been approved.
+# Unsigned developer archives require explicit --local-qa and a trusted digest.
 set -eu
 umask 077
 # Privileged entry must be through trusted sudo + env -i BEFORE this
@@ -119,6 +120,13 @@ bootstrap_read_os_version() (
 )
 
 url=''
+archive_file=''
+metadata_file=''
+signature_file=''
+publisher_key=''
+version=''
+target=''
+local_qa=no
 digest=''
 verify_only=no
 # Official pinned core 1.14.3 is 31,678,266 compressed / 93,255,156
@@ -130,15 +138,49 @@ max_expanded_bytes=201326592
 max_file_bytes=134217728
 while [ "$#" -gt 0 ]; do
  case "$1" in
-  --archive-url) [ "$#" -ge 2 ] || exit 2; url=$2;shift 2;;
-  --sha256) [ "$#" -ge 2 ] || exit 2; digest=$2;shift 2;;
+  --archive-url) [ "$#" -ge 2 ] && [ -z "$url" ] || exit 2; url=$2;shift 2;;
+  --archive-file) [ "$#" -ge 2 ] && [ -z "$archive_file" ] || exit 2; archive_file=$2;shift 2;;
+  --metadata-file) [ "$#" -ge 2 ] && [ -z "$metadata_file" ] || exit 2; metadata_file=$2;shift 2;;
+  --signature-file) [ "$#" -ge 2 ] && [ -z "$signature_file" ] || exit 2; signature_file=$2;shift 2;;
+  --publisher-key) [ "$#" -ge 2 ] && [ -z "$publisher_key" ] || exit 2; publisher_key=$2;shift 2;;
+  --version) [ "$#" -ge 2 ] && [ -z "$version" ] || exit 2; version=$2;shift 2;;
+  --target) [ "$#" -ge 2 ] && [ -z "$target" ] || exit 2; target=$2;shift 2;;
+  --local-qa) [ "$local_qa" = no ] || exit 2; local_qa=yes;shift;;
+  --sha256) [ "$#" -ge 2 ] && [ -z "$digest" ] || exit 2; digest=$2;shift 2;;
   --verify-only)verify_only=yes;shift;;
   --max-download-bytes) [ "$#" -ge 2 ] || exit 2; max_download_bytes=$2;shift 2;;
-  *) echo 'Usage: bootstrap-online.sh --archive-url HTTPS_URL --sha256 TRUSTED_DIGEST [--verify-only] [--max-download-bytes 1..100663296]' >&2;exit 2;;
+  *) echo 'Usage: bootstrap-online.sh (--archive-url HTTPS_URL | --archive-file ABSOLUTE_FILE) --publisher-key ABSOLUTE_TRUSTED_KEY --version VERSION --target TARGET [--metadata-file FILE --signature-file FILE] [--verify-only]; unsigned QA requires --local-qa --sha256 TRUSTED_DIGEST' >&2;exit 2;;
  esac
 done
-[ "${#digest}" -eq 64 ] || { echo 'A trusted 64-character SHA-256 digest is required' >&2;exit 2; }
-case "$digest" in *[!0123456789abcdefABCDEF]*) echo 'Invalid digest syntax' >&2;exit 2;; esac
+if { [ -n "$url" ] && [ -n "$archive_file" ]; } ||
+   { [ -z "$url" ] && [ -z "$archive_file" ]; }; then
+ echo 'Choose exactly one online URL or offline archive file' >&2;exit 2
+fi
+authenticated=yes
+if [ "$local_qa" = yes ] && [ -z "$publisher_key$version$target$metadata_file$signature_file" ]; then
+ authenticated=no
+ [ "${#digest}" -eq 64 ] || { echo 'A trusted 64-character SHA-256 digest is required for LOCAL QA' >&2;exit 2; }
+ case "$digest" in *[!0123456789abcdefABCDEF]*) echo 'Invalid digest syntax' >&2;exit 2;; esac
+else
+ [ -n "$publisher_key" ] && [ -n "$version" ] && [ -n "$target" ] && [ -z "$digest" ] || {
+  echo 'Publisher key, version and target pins are required; SHA256 alone is LOCAL QA ONLY' >&2;exit 2;
+ }
+ case "$publisher_key" in /*) ;; *) echo 'An independent local public-key path is required' >&2;exit 2;; esac
+ [ -f "$publisher_key" ] && [ ! -L "$publisher_key" ] || {
+  echo 'Independent public key is missing or not a regular local file' >&2;exit 2;
+ }
+ [ -z "$metadata_file$signature_file" ] ||
+  { [ -n "$metadata_file" ] && [ -n "$signature_file" ]; } || {
+  echo 'Metadata and signature file overrides must be supplied together' >&2;exit 2;
+ }
+fi
+if [ -n "$archive_file" ]; then
+ case "$archive_file" in /*) ;; *) echo 'Offline archive must use an absolute local path' >&2;exit 2;; esac
+ if [ "$authenticated" = yes ] && [ -z "$metadata_file" ]; then
+  metadata_file=$archive_file.release.json
+  signature_file=$archive_file.sig
+ fi
+fi
 case "$max_download_bytes" in ''|*[!0123456789]*) echo 'Invalid download ceiling' >&2;exit 2;; esac
 # Strip leading zeroes without using arbitrary precision/signed shell math.
 max_download_bytes=$(printf '%s' "$max_download_bytes" | sed 's/^0*//')
@@ -149,10 +191,14 @@ max_download_bytes=$(printf '%s' "$max_download_bytes" | sed 's/^0*//')
 # prerequisites via the host's existing signed APT policy. This is a separate
 # OS package transaction, not a second Server Connect installer. --verify-only
 # NEVER changes OS packages, even when invoked as root.
-case "$url" in
- https://?*|http://127.0.0.1:*|http://localhost:*) ;;
- *) echo 'Unsupported URL scheme or missing authority' >&2; exit 2;;
-esac
+if [ -n "$url" ]; then
+ case "$url" in
+  https://?*) ;;
+  http://127.0.0.1:*|http://localhost:*)
+   [ "$local_qa" = yes ] || { echo 'HTTP requires explicit --local-qa' >&2;exit 2; };;
+  *) echo 'Unsupported URL scheme or missing authority' >&2;exit 2;;
+ esac
+fi
 user_id=$(id -u)
 if [ "$verify_only" != yes ] && [ "$user_id" -ne 0 ]; then
  echo 'Run the online installation command as root; non-root --verify-only is supported.' >&2
@@ -170,15 +216,24 @@ for native_tool in id sed sha256sum stat timeout mktemp rm wc cut head readlink;
  fi
 done
 set --
-command -v curl >/dev/null 2>&1 || set -- "$@" curl
+if [ -n "$url" ]; then
+ command -v curl >/dev/null 2>&1 || set -- "$@" curl
+fi
 command -v python3 >/dev/null 2>&1 || set -- "$@" python3
+if [ "$authenticated" = yes ]; then
+ command -v openssl >/dev/null 2>&1 || set -- "$@" openssl
+fi
 case "$url" in
  https://*)
   [ -r /etc/ssl/certs/ca-certificates.crt ] || set -- "$@" ca-certificates ;;
 esac
 if [ "$#" -gt 0 ]; then
+ if [ -n "$archive_file" ]; then
+  echo 'Offline verification needs preinstalled Python 3 and OpenSSL; no packages or downloads attempted' >&2
+  exit 1
+ fi
  if [ "$verify_only" = yes ]; then
-  echo 'Online --verify-only needs existing curl, Python 3 and HTTPS CA certificates; no packages installed' >&2
+  echo 'Online --verify-only needs existing curl, Python 3, OpenSSL for signed mode and HTTPS CA certificates; no packages installed' >&2
   exit 1
  fi
  # Read only the fixed trusted host identity. No shell evaluation or caller
@@ -227,14 +282,18 @@ if [ "$#" -gt 0 ]; then
   exit 1
  fi
 fi
-command -v curl >/dev/null 2>&1 || { echo 'A supported downloader (curl) is required for the online bootstrap' >&2;exit 1; }
+if [ -n "$url" ]; then
+ command -v curl >/dev/null 2>&1 || { echo 'A supported downloader (curl) is required for the online bootstrap' >&2;exit 1; }
+fi
 command -v sha256sum >/dev/null 2>&1 || { echo 'sha256sum is required' >&2;exit 1; }
 command -v stat >/dev/null 2>&1 || { echo 'stat is required for trusted staging' >&2;exit 1; }
-command -v python3 >/dev/null 2>&1 || { echo 'Python 3 is required for bounded ONLINE archive processing (not needed offline)' >&2;exit 1; }
+command -v python3 >/dev/null 2>&1 || { echo 'Python 3 is required for bounded archive processing' >&2;exit 1; }
 command -v timeout >/dev/null 2>&1 || { echo 'timeout is required for bounded ONLINE archive processing' >&2;exit 1; }
 # Parse the effective authority, never textual localhost prefixes. Test-only
 # HTTP permits only explicit IPv4 loopback / localhost with a numeric port.
 # URL credentials, encoded authority, fragments and unsafe bytes are refused.
+acquisition_mode=offline
+if [ -n "$url" ]; then
 acquisition_mode=$(python3 -I -S - "$url" <<'PYURL'
 import sys
 from urllib.parse import urlsplit
@@ -262,6 +321,7 @@ except ValueError:
     sys.exit(1)
 PYURL
 ) || { echo 'Unsupported URL: HTTPS required except for strict loopback HTTP test host' >&2;exit 2; }
+fi
 # Privileged installation requires root-owned staging from the first download.
 # Root authority is acquired before network acquisition, never after a user
 # controls a temporary archive/extraction directory.
@@ -304,27 +364,53 @@ then
  exit 1
 fi
 
-# Production HTTPS redirects are bounded and HTTPS-only. Test HTTP has ZERO
-# redirects; no proxy and no external resolution are allowed. Pin localhost
-# to IPv4 loopback, rather than trusting mutable resolver configuration.
-case "$acquisition_mode" in
- https)
-  allowed_proto='=https'; max_redirs=5; set --;;
- http_loopback)
-  allowed_proto='=http'; max_redirs=0; set --;;
- http_localhost:*)
-  allowed_proto='=http'; max_redirs=0
-  loopback_port=$(printf '%s' "$acquisition_mode" | cut -d: -f2)
-  set -- --resolve "localhost:$loopback_port:127.0.0.1";;
- *) echo 'Unsupported download mode' >&2; exit 2;;
-esac
-# curl's byte ceiling is active DURING the receive, even for chunked bodies.
-# stderr is private and never reflects an input URL/token in CLI output.
-if ! curl -q --fail --location --max-redirs "$max_redirs" \
- --proto "$allowed_proto" --proto-redir "$allowed_proto" --noproxy '*' "$@" \
- --silent --show-error --connect-timeout 15 --max-time 180 --retry 2 \
- --max-filesize "$max_download_bytes" \
- --output "$work/bundle.tar.gz" "$url" 2>"$work/download.err"; then
+# Copy only bounded local regular files into private staging. A local input
+# may be uploaded by an unprivileged operator; authentication covers the copy,
+# never a later reread of the replaceable original. Offline has no curl/APT.
+copy_input() {
+ python3 -I -S - "$1" "$2" "$3" <<'PYCOPY'
+import os, stat, sys
+source, target, limit = sys.argv[1:]
+limit = int(limit)
+fd = os.open(source, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+with os.fdopen(fd, "rb") as src:
+    info = os.fstat(src.fileno())
+    if not stat.S_ISREG(info.st_mode) or not 0 < info.st_size <= limit:
+        sys.exit(1)
+    count = 0
+    with open(target, "xb") as dst:
+        while piece := src.read(min(65536, limit + 1 - count)):
+            count += len(piece)
+            if count > limit:
+                sys.exit(1)
+            dst.write(piece)
+    if count != info.st_size:
+        sys.exit(1)
+PYCOPY
+}
+download() {
+ # HTTPS redirects stay HTTPS; loopback QA has no redirects/proxy/DNS.
+ case "$acquisition_mode" in
+  https) allowed_proto='=https'; max_redirs=5; set -- "$1" "$2" "$3";;
+  http_loopback) allowed_proto='=http'; max_redirs=0; set -- "$1" "$2" "$3";;
+  http_localhost:*)
+   allowed_proto='=http'; max_redirs=0
+   loopback_port=$(printf '%s' "$acquisition_mode" | cut -d: -f2)
+   set -- "$1" "$2" "$3" --resolve "localhost:$loopback_port:127.0.0.1";;
+  *) return 1;;
+ esac
+ download_url=$1; download_output=$2; download_limit=$3; shift 3
+ curl -q --fail --location --max-redirs "$max_redirs" \
+  --proto "$allowed_proto" --proto-redir "$allowed_proto" --noproxy '*' "$@" \
+  --silent --show-error --connect-timeout 15 --max-time 180 --retry 2 \
+  --max-filesize "$download_limit" \
+  --output "$download_output" "$download_url" 2>"$work/download.err"
+}
+if [ -n "$archive_file" ]; then
+ copy_input "$archive_file" "$work/bundle.tar.gz" "$max_download_bytes" || {
+  echo 'Offline archive copy rejected before installation' >&2;exit 1;
+ }
+elif ! download "$url" "$work/bundle.tar.gz" "$max_download_bytes"; then
  echo 'Online acquisition failed or exceeded the transfer ceiling; no installation changes.' >&2
  exit 1
 fi
@@ -332,13 +418,61 @@ archive_bytes=$(wc -c < "$work/bundle.tar.gz")
 [ "$archive_bytes" -le "$max_download_bytes" ] || {
  echo 'Downloaded archive exceeded the permitted size' >&2;exit 1;
 }
-printf '%s  %s\n' "$digest" "$work/bundle.tar.gz" |
- sha256sum --quiet --check - || { echo 'Independent artifact digest mismatch' >&2;exit 1; }
+if [ "$authenticated" = yes ]; then
+ if [ -n "$metadata_file" ]; then
+  copy_input "$metadata_file" "$work/release.json" 16384 &&
+   copy_input "$signature_file" "$work/release.sig" 4096 || {
+   echo 'Release identity or signature copy refused' >&2;exit 1;
+  }
+ else
+  # Preserve a URL's query without treating it as part of a filename. Both
+  # sidecars share the already validated authority; no downloaded key exists.
+  for sidecar in release.json sig; do
+   sidecar_url=$(python3 -I -S - "$url" "$sidecar" <<'PYURLSIDECAR'
+import sys
+from urllib.parse import urlsplit, urlunsplit
+url = urlsplit(sys.argv[1])
+print(urlunsplit((url.scheme, url.netloc, url.path + "." + sys.argv[2], url.query, "")))
+PYURLSIDECAR
+   ) || exit 1
+   case "$sidecar" in release.json) limit=16384; destination=$work/release.json;; sig) limit=4096; destination=$work/release.sig;; esac
+   download "$sidecar_url" "$destination" "$limit" || {
+    echo 'Signed release identity acquisition failed' >&2;exit 1;
+   }
+  done
+ fi
+ # This helper belongs to the independently trusted bootstrap distribution,
+ # never to the as-yet unauthenticated archive.
+ auth_helper=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)/release-auth.py
+ [ -f "$auth_helper" ] && [ ! -L "$auth_helper" ] || {
+  echo 'Trusted release-auth.py is required beside the trusted bootstrap' >&2;exit 1;
+ }
+ if [ "$user_id" -eq 0 ]; then
+  # The trusted shell must not load adjacent Python code from a directory
+  # replaceable by an unprivileged user. Check the complete ancestry before
+  # the helper can execute; the helper independently checks the key/payload.
+  trusted_path=$auth_helper
+  while :; do
+   [ ! -L "$trusted_path" ] && bootstrap_os_path_owned "$trusted_path" || {
+    echo 'Authentication helper requires protected root-owned ancestry' >&2;exit 1;
+   }
+   [ "$trusted_path" != / ] || break
+   trusted_path=$(dirname -- "$trusted_path") || exit 1
+  done
+ fi
+ python3 -I -S "$auth_helper" verify --metadata "$work/release.json" \
+  --signature "$work/release.sig" --publisher-key "$publisher_key" \
+  --version "$version" --target "$target" --archive "$work/bundle.tar.gz" || exit 1
+else
+ printf '%s  %s\n' "$digest" "$work/bundle.tar.gz" |
+  sha256sum --quiet --check - || { echo 'Independent artifact digest mismatch' >&2;exit 1; }
+ echo 'LOCAL QA ONLY: unsigned archive; publisher authentication was not performed.' >&2
+fi
 
 # One isolated stdlib parser validates AND privately extracts with the
 # same tar semantics, including for --verify-only. No unbounded tar listing files or parser discrepancies.
 # Enforce memory/time ceilings BEFORE parsing gzip/pax/longname metadata.
-# Online mode needs Debian's python3; the standalone OFFLINE installer does not.
+# Both acquisition modes use the same preinstalled trusted Python extractor.
 (
  ulimit -v 262144 || exit 1
  timeout -s TERM -k 3s 150s python3 -I -S - \
@@ -374,6 +508,7 @@ def check_staging_capacity(next_write):
 
 REQUIRED_FILES = {
     "server-connect/install.sh",
+    "server-connect/release-auth.py",
     "server-connect/server-connect.service",
     "server-connect/server-connect-activation-recover.service",
     "server-connect/server-connect-activation-recover.timer",
@@ -489,6 +624,10 @@ def archive_pass(extract):
                         finally:
                             os.close(fd)
                         os.chmod(destination, 0o700 if canonical in EXECUTABLES else 0o600)
+        # tar EOF may precede the gzip trailer. Drain through the same byte
+        # budget so a signed but truncated/corrupt gzip cannot pass preflight.
+        while bounded.read(65536):
+            pass
         if seen_files != REQUIRED_FILES:
             raise ValueError("missing or unexpected release payload")
     return total_files
@@ -508,10 +647,21 @@ except (OSError, EOFError, ValueError, tarfile.TarError, OverflowError, MemoryEr
 PYARCHIVE
 ) || { echo 'Online archive rejected before installation; staging will be removed' >&2;exit 1; }
 
+if [ "$authenticated" = yes ]; then
+ python3 -I -S "$auth_helper" verify --metadata "$work/release.json" \
+  --signature "$work/release.sig" --publisher-key "$publisher_key" \
+  --version "$version" --target "$target" --bundle "$work/server-connect" || exit 1
+fi
 if [ "$verify_only" = yes ];then
- echo 'Online fetch, independent digest, bounded archive and release layout: verified. Installation was not attempted.'
+ echo 'Acquisition, bounded archive and release layout verified. Installation was not attempted.'
  exit 0
 fi
 # The shared local installer independently verifies ownership, ancestry,
 # complete payload checksums and service identity before lifecycle mutation.
-sh "$work/server-connect/install.sh" --offline
+if [ "$authenticated" = yes ]; then
+ sh "$work/server-connect/install.sh" --offline \
+  --publisher-key "$publisher_key" --metadata-file "$work/release.json" \
+  --signature-file "$work/release.sig" --version "$version" --target "$target"
+else
+ sh "$work/server-connect/install.sh" --offline --local-qa
+fi

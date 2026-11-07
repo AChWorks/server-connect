@@ -26,6 +26,12 @@ FUNCTIONS = (
     + "\n"
     + extract("verify_release_payload() (\n", "\n)\n")
     + "\n"
+    + extract("release_trust_file() (\n", "\n)\n")
+    + "\n"
+    + extract("verify_release_trust() (\n", "\n)\n")
+    + "\n"
+    + extract("write_release_trust() (\n", "\n)\n")
+    + "\n"
     + extract("verify_installed_release() (\n", "\n)\n")
     + "\n"
     + extract("check_owned() {\n", "\n}\n")
@@ -59,10 +65,13 @@ FILES = (
     "server-connect-smart-health.service",
     "server-connect-smart-health.timer",
     "install.sh",
+    "release-auth.py",
     "THIRD-PARTY-LICENSES/sing-box-LICENSE",
     "manifest.json",
 )
 PROLOG = """set -eu
+local_qa=yes
+retained_auth=no
 check_root_file() { [ -f "$1" ] && [ ! -L "$1" ]; }
 check_root_dir() { [ -d "$1" ] && [ ! -L "$1" ]; }
 check_dir() { check_root_dir "$1"; }
@@ -87,6 +96,43 @@ class ReleasePayloadTests(unittest.TestCase):
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(("fixture-for-" + name + "\n").encode())
         self.checksums()
+
+    def test_previous_twelve_entry_release_is_retained_and_removable(self):
+        # A real pre-authentication format has exactly the old manifest.
+        # New helper membership must not strand that valid predecessor.
+        (self.source / "release-auth.py").unlink()
+        (self.source / "checksums.sha256").write_text("".join(
+            hashlib.sha256((self.source / name).read_bytes()).hexdigest()
+            + "  " + name + "\n" for name in FILES if name != "release-auth.py"
+        ))
+        release = self.publish()
+        self.installed_audit(release)
+        self.assertFalse((release / "release-auth.py").exists())
+        # Adding an unreceipted authentication helper changes the exact
+        # layout and cannot silently reinterpret the predecessor.
+        (release / "release-auth.py").write_bytes(b"foreign helper\n")
+        self.installed_audit(release, expected=1)
+
+    def test_missing_new_authentication_helper_cannot_fall_back_to_old_layout(self):
+        release = self.publish()
+        (release / "release-auth.py").unlink()
+        self.installed_audit(release, expected=1)
+
+    def test_missing_or_changed_local_qa_receipt_never_silently_downgrades_trust(self):
+        release = self.publish()
+        receipt = release / "local-qa.sha256"
+        original = receipt.read_bytes()
+        self.assertEqual(receipt.stat().st_mode & 0o777, 0o600)
+        for bad in (b"", b"0" * 64 + b"\n", original + b"\n"):
+            receipt.write_bytes(bad)
+            self.installed_audit(release, expected=1)
+        receipt.unlink()
+        self.installed_audit(release, expected=1)
+        receipt.write_bytes(original)
+        receipt.chmod(0o600)
+        self.installed_audit(release)
+        (release / "authentication.json").write_bytes(b"unrelated signed state")
+        self.installed_audit(release, expected=1)
 
     def checksums(self):
         (self.source / "checksums.sha256").write_text(
@@ -227,7 +273,7 @@ class ReleasePayloadTests(unittest.TestCase):
         canonical = checksums.read_bytes()
         assert canonical.endswith(b"\n") and canonical.count(b"\n") == len(FILES)
         # GNU sha256sum -c exits ZERO on a malformed trailing line unless
-        # --strict is used. The 12 canonical lines remain intact, so merely
+        # --strict is used. The canonical payload lines remain intact, so merely
         # counting newline bytes or matching parsed filenames is insufficient.
         checksums.write_bytes(canonical + b"malformed-end-without-newline")
         reply = self.audit(release, expected=21)

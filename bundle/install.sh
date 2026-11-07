@@ -18,6 +18,14 @@ GUARD_SERVICE=/etc/systemd/system/server-connect-activation-recover.service
 GUARD_TIMER=/etc/systemd/system/server-connect-activation-recover.timer
 SOURCE_DIR=$(dirname -- "$0")
 ACTION=${1:---offline}
+[ "$#" -eq 0 ] || shift
+local_qa=no
+retained_auth=no
+publisher_key=''
+metadata_file=''
+signature_file=''
+pinned_version=''
+pinned_target=''
 
 say() { printf 'Server Connect: %s\n' "$*"; }
 die() { say "ERROR: $*" >&2; exit 1; }
@@ -50,29 +58,86 @@ server-connect-smart-tun.service
 server-connect-smart-health.service
 server-connect-smart-health.timer
 install.sh
-THIRD-PARTY-LICENSES/sing-box-LICENSE
-manifest.json
 RELEASE_FILES
+ # Earlier checksum-bearing development releases have no authentication
+ # helper. Their exact 12-entry manifest remains valid for rollback/removal;
+ # a damaged newer 13-entry manifest cannot fall back to that layout.
+ if [ -e "$1/release-auth.py" ] || [ -L "$1/release-auth.py" ]; then
+  printf '%s\n' release-auth.py
+ fi
+ printf '%s\n' THIRD-PARTY-LICENSES/sing-box-LICENSE manifest.json
 }
 verify_release_payload() (
  root=$1
  check_root_dir "$root"
  check_root_dir "$root/bin"
  check_root_dir "$root/THIRD-PARTY-LICENSES"
- for path in $(release_payload_files); do
+ for path in $(release_payload_files "$root"); do
   check_root_file "$root/$path"
  done
  check_root_file "$root/checksums.sha256"
  # Reject missing, duplicate, extra, reordered, or noncanonical checksum
  # entries. sha256sum -c alone accepts omitted entries and path escapes.
- expected=$(release_payload_files)
+ expected=$(release_payload_files "$root")
  actual=$(sed -n 's/^[0-9a-f]\{64\}  //p' "$root/checksums.sha256") ||
   die 'cannot read release checksum manifest'
  [ "$expected" = "$actual" ] &&
- [ "$(wc -l < "$root/checksums.sha256")" -eq 12 ] ||
+ [ "$(wc -l < "$root/checksums.sha256")" -eq "$(release_payload_files "$root" | wc -l)" ] ||
   die 'release checksum manifest does not cover the exact owned payload'
  (cd "$root" && sha256sum --strict --quiet -c checksums.sha256) ||
   die 'release checksum mismatch; no mutation permitted'
+)
+# New-format installed releases always record their trust policy separately
+# from the immutable archive payload. Missing signed data cannot silently be
+# reclassified as unsigned. Historic 12-entry releases retain their old rules.
+release_trust_file() (
+ root=$1
+ if [ ! -e "$root/release-auth.py" ] && [ ! -L "$root/release-auth.py" ]; then return 0;fi
+ if [ -e "$root/authentication.json" ] || [ -L "$root/authentication.json" ]; then
+  [ ! -e "$root/local-qa.sha256" ] && [ ! -L "$root/local-qa.sha256" ] ||
+   die 'conflicting signed and local QA installation receipts'
+  printf '%s\n' authentication.json
+ else
+  [ -e "$root/local-qa.sha256" ] || [ -L "$root/local-qa.sha256" ] ||
+   die 'installed release trust receipt is missing'
+  printf '%s\n' local-qa.sha256
+ fi
+)
+verify_release_trust() (
+ root=$1
+ receipt=$(release_trust_file "$root") || exit 1
+ [ -n "$receipt" ] || return 0
+ check_root_file "$root/$receipt"
+ [ "$(stat -c '%a:%h' "$root/$receipt")" = 600:1 ] ||
+  die 'installed trust receipt is not private and singly owned'
+ if [ "$receipt" = authentication.json ]; then
+  need python3;need openssl
+  python3 -I -S "$root/release-auth.py" verify-installed --bundle "$root" >/dev/null ||
+   die 'installed publisher authentication receipt is invalid'
+ else
+  [ "$(wc -c < "$root/$receipt")" -eq 65 ] &&
+   [ "$(cat "$root/$receipt")" = "$(sha256sum "$root/checksums.sha256" | cut -d' ' -f1)" ] ||
+   die 'installed LOCAL QA receipt does not match the immutable release'
+ fi
+)
+write_release_trust() (
+ root=$1
+ if [ "$local_qa" = yes ] && [ ! -e "$root/release-auth.py" ] && [ ! -L "$root/release-auth.py" ]; then return 0;fi
+ if [ "$local_qa" = yes ]; then
+  [ ! -e "$root/authentication.json" ] && [ ! -L "$root/authentication.json" ] ||
+   die 'cannot replace a signed receipt with local QA state'
+  # Fresh private stage only; noclobber refuses an unexpected same-name file.
+  (set -C; sha256sum "$root/checksums.sha256" | cut -d' ' -f1 > "$root/local-qa.sha256") ||
+   die 'cannot create the explicit LOCAL QA installation receipt'
+  chmod 0600 "$root/local-qa.sha256" || die 'cannot protect LOCAL QA receipt'
+ else
+  [ "$retained_auth" = no ] || die 'unexpected new stage from a retained installed source'
+  python3 -I -S "$root/release-auth.py" install-receipt \
+   --metadata "$metadata_file" --signature "$signature_file" \
+   --publisher-key "$publisher_key" --version "$pinned_version" \
+   --target "$pinned_target" --bundle "$root" ||
+   die 'cannot persist authenticated installation receipt'
+ fi
 )
 # A missing modern manifest is NOT evidence of a legacy release. The old
 # installer used only four payload files, a .owner marker and an ID derived
@@ -95,6 +160,7 @@ verify_installed_release() (
   full_identity=$(sha256sum "$root/checksums.sha256" | cut -c 1-16) ||
    die 'installed release checksum identity unreadable'
   [ "$full_identity" = "$suffix" ] || die 'installed release full identity changed'
+  verify_release_trust "$root"
  else
   check_root_dir "$root/bin"
   check_root_dir "$root/THIRD-PARTY-LICENSES"
@@ -146,6 +212,28 @@ check_platform() {
 verify_payload() {
  check_root_dir "$(dirname -- "$SOURCE_DIR")"
  verify_release_payload "$SOURCE_DIR" >/dev/null || die 'bundle checksum mismatch; no changes applied'
+ # The outer trusted bootstrap authenticates the archive before executing
+ # this installer. Repeat the same signature and full payload binding here
+ # before any bundled executable or installed-service observation.
+ if [ "$local_qa" = yes ]; then
+  say 'LOCAL QA ONLY: publisher authentication was not requested'
+ elif [ "$retained_auth" = yes ]; then
+  # Only an already managed canonical installed release can reuse its
+  # root-private trust store. No incoming bundle can supply an authority key.
+  case "$SOURCE_DIR" in "$PREFIX"/releases/0.1.0-dev-*) ;; *) die 'incoming bundles require an independently supplied publisher key' ;; esac
+  verify_installed_release "$SOURCE_DIR" || die 'installed source authentication is unavailable'
+  [ "$(release_trust_file "$SOURCE_DIR")" = authentication.json ] ||
+   die 'installed source is LOCAL QA; select --local-qa explicitly'
+  say 'retained publisher authentication verified offline'
+ else
+  need python3; need openssl
+  check_root_file "$SOURCE_DIR/release-auth.py"
+  python3 -I -S "$SOURCE_DIR/release-auth.py" verify \
+   --metadata "$metadata_file" --signature "$signature_file" \
+   --publisher-key "$publisher_key" --version "$pinned_version" \
+   --target "$pinned_target" --bundle "$SOURCE_DIR" ||
+   die 'publisher authentication failed before candidate execution'
+ fi
  # The same installer serves both target-specific bundles. The verified
  # manager reads the actual host identity; callers cannot override its OS.
  "$SOURCE_DIR/bin/server-connect" installer-check-target --manifest "$SOURCE_DIR/manifest.json" >/dev/null ||
@@ -301,8 +389,30 @@ check_owned() {
 }
 
 if [ "$ACTION" = --help ]; then
- say 'Usage: sudo sh install.sh --offline | --verify-only | --uninstall'
+ say 'Use the independently trusted bootstrap to authenticate before executing extracted scripts.'
+ say 'Actions: --offline | --verify-only | --uninstall; unsigned developer use requires --local-qa.'
  exit 0
+fi
+while [ "$#" -gt 0 ]; do
+ case "$1" in
+  --local-qa) [ "$local_qa" = no ] || die 'duplicate local QA flag';local_qa=yes;shift;;
+  --publisher-key) [ "$#" -ge 2 ] && [ -z "$publisher_key" ] || die 'invalid publisher key option';publisher_key=$2;shift 2;;
+  --metadata-file) [ "$#" -ge 2 ] && [ -z "$metadata_file" ] || die 'invalid metadata option';metadata_file=$2;shift 2;;
+  --signature-file) [ "$#" -ge 2 ] && [ -z "$signature_file" ] || die 'invalid signature option';signature_file=$2;shift 2;;
+  --version) [ "$#" -ge 2 ] && [ -z "$pinned_version" ] || die 'invalid version pin';pinned_version=$2;shift 2;;
+  --target) [ "$#" -ge 2 ] && [ -z "$pinned_target" ] || die 'invalid target pin';pinned_target=$2;shift 2;;
+  *) die 'unknown installer argument';;
+ esac
+done
+if [ "$local_qa" = yes ]; then
+ [ -z "$publisher_key$metadata_file$signature_file$pinned_version$pinned_target" ] ||
+  die 'local QA and publisher trust options cannot be mixed'
+elif [ -z "$publisher_key$metadata_file$signature_file$pinned_version$pinned_target" ]; then
+ retained_auth=yes
+else
+ [ -n "$publisher_key" ] && [ -n "$metadata_file" ] && [ -n "$signature_file" ] &&
+  [ -n "$pinned_version" ] && [ -n "$pinned_target" ] ||
+  die 'publisher verification is required; use trusted bootstrap or explicitly select --local-qa'
 fi
 case "$ACTION" in --offline|--verify-only|--uninstall) ;; *) die 'only --offline, --verify-only, --uninstall supported; online bootstrap fetches a verified bundle first' ;; esac
 require_root
@@ -313,7 +423,7 @@ check_owned
 check_service_owner
 check_guard_units
 
-if [ "$ACTION" = --verify-only ]; then say 'local bundle and owned-resource preflight PASS; publisher signature must be independently verified'; exit 0;fi
+if [ "$ACTION" = --verify-only ]; then say 'bundle integrity, selected trust policy and owned-resource preflight PASS'; exit 0;fi
 
 # The installer and all manager state changes coordinate through one flock.
 # A fresh state directory may be created only after complete payload preflight.
@@ -375,9 +485,11 @@ if [ "$ACTION" = --uninstall ]; then
    [ -d "$release" ] || continue
    [ ! -L "$release" ] || die 'unsafe release symlink retained'
    [ -f "$release/.owner" ] && [ "$(cat "$release/.owner")" = 'AChWorks/server-connect' ] || die 'release ownership conflict; preserve for inspection'
-   for path in $(release_payload_files); do
+   receipt=$(release_trust_file "$release") || die 'owned release receipt cannot be enumerated'
+   for path in $(release_payload_files "$release"); do
     rm -f -- "$release/$path" || die 'owned release removal failed'
    done
+   for path in $receipt; do rm -f -- "$release/$path" || die 'owned trust receipt removal failed'; done
    rm -f -- "$release/checksums.sha256" "$release/.owner" || die 'release marker removal failed'
    rmdir "$release/bin" "$release/THIRD-PARTY-LICENSES" "$release" 2>/dev/null || say "retained modified release at $release"
   done
@@ -503,9 +615,14 @@ rollback_candidate() {
   if [ -n "$release_stage_identity" ] &&
      [ "$(stat -c '%d:%i' "$release" 2>/dev/null || :)" = "$release_stage_identity" ] &&
      verify_release_payload "$release" >/dev/null 2>&1 &&
+     verify_release_trust "$release" >/dev/null 2>&1 &&
+     receipt=$(release_trust_file "$release") &&
      cmp -s "$SOURCE_DIR/checksums.sha256" "$release/checksums.sha256"; then
-   for path in $(release_payload_files); do
+   for path in $(release_payload_files "$release"); do
     rm -f -- "$release/$path" || { say 'RECOVERY_REQUIRED: candidate release payload cleanup failed';failed=yes; }
+   done
+   for path in $receipt; do
+    rm -f -- "$release/$path" || { say 'RECOVERY_REQUIRED: candidate trust receipt cleanup failed';failed=yes; }
    done
    rm -f -- "$release/checksums.sha256" "$release/.owner" ||
     { say 'RECOVERY_REQUIRED: candidate release marker cleanup failed';failed=yes; }
@@ -564,16 +681,21 @@ if [ -e "$release" ] || [ -L "$release" ];then
  [ -f "$release/.owner" ] && [ ! -L "$release/.owner" ] &&
  [ "$(cat "$release/.owner")" = 'AChWorks/server-connect' ] ||
   die 'unowned candidate release directory'
- verify_release_payload "$release" || die 'existing release integrity failed'
- for path in $(release_payload_files); do
+ verify_installed_release "$release" || die 'existing release integrity or trust failed'
+ for path in $(release_payload_files "$SOURCE_DIR"); do
   cmp -s "$SOURCE_DIR/$path" "$release/$path" || die "existing release differs from candidate: $path"
  done
  cmp -s "$SOURCE_DIR/checksums.sha256" "$release/checksums.sha256" ||
   die 'existing release checksum manifest differs from candidate'
+ if [ "$local_qa" != yes ] && [ "$retained_auth" != yes ]; then
+  # Idempotent reuse only: an existing valid receipt must match the exact
+  # signed inputs. No trust-anchor rotation or unsigned promotion is implicit.
+  write_release_trust "$release"
+ fi
 else
  stage=$(mktemp -d "$PREFIX/releases/.stage.XXXXXXXX") || die 'cannot stage release'
  install -d -m 0755 "$stage/bin" "$stage/THIRD-PARTY-LICENSES"
- for path in $(release_payload_files); do
+ for path in $(release_payload_files "$SOURCE_DIR"); do
   mode=0644
   case "$path" in bin/server-connect|bin/sing-box|install.sh) mode=0755 ;; esac
   install -m "$mode" "$SOURCE_DIR/$path" "$stage/$path" ||
@@ -585,6 +707,8 @@ else
  chmod 0644 "$stage/.owner"
  chmod 0755 "$stage"
  verify_release_payload "$stage" || die 'staged release integrity failed'
+ write_release_trust "$stage"
+ verify_release_trust "$stage" || die 'staged release trust failed'
  # Mark the intended new release for rollback BEFORE publishing the final
  # directory. A signal between a successful rename and the next statement
  # must not orphan an unchecked release: cleanup still verifies its exact
@@ -602,6 +726,18 @@ else
   die 'candidate release publication failed'
  [ "$(stat -c '%d:%i' "$release" 2>/dev/null || :)" = "$release_stage_identity" ] ||
   die 'release name collision; foreign directory preserved'
+ if [ "$local_qa" != yes ]; then
+  # The receipt/file and stage directory were fsynced before publication.
+  # Make the release-directory rename durable before selecting its binaries.
+  python3 -I -S - "$PREFIX/releases" <<'PYSYNCRELEASE'
+import os, sys
+fd = os.open(sys.argv[1], os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+try:
+    os.fsync(fd)
+finally:
+    os.close(fd)
+PYSYNCRELEASE
+ fi
  stage=''
 fi
 chmod 0755 "$release"
@@ -677,4 +813,8 @@ fi
 operation_done=yes
 rollback_needed=no
 say "local verified payload installed at $release; Direct preserved unless an owned proxy was already active"
-say 'Bundle checksums confirm byte integrity only; release authenticity requires independently trusted provenance'
+if [ "$local_qa" = yes ]; then
+ say 'LOCAL QA ONLY: checksums confirm byte integrity; no publisher authenticity asserted'
+else
+ say 'Signed payload verified against the supplied independent key; public release approval remains separate'
+fi

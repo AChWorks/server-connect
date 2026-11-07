@@ -53,7 +53,7 @@ docker exec "$container" /bin/sh -c '
  sha256sum bin/server-connect bin/sing-box bin/libcronet.so \
    server-connect.service server-connect-activation-recover.service \
    server-connect-activation-recover.timer server-connect-smart-tun.service \
-      server-connect-smart-health.service server-connect-smart-health.timer install.sh \
+      server-connect-smart-health.service server-connect-smart-health.timer install.sh release-auth.py \
    THIRD-PARTY-LICENSES/sing-box-LICENSE manifest.json > checksums.sha256
  sha256sum --quiet --check checksums.sha256
 '
@@ -79,7 +79,7 @@ echo '=== Real restoration-failure injection in isolated systemd guest ==='
 # AFTER it replaces the units; no source/runtime hook modifies installer logic.
 docker exec "$container" /usr/bin/env -i \
   HOME=/root PATH=/usr/sbin:/usr/bin:/sbin:/bin LC_ALL=C \
-  /bin/sh /root/server-connect-bad-update/install.sh --offline \
+  /bin/sh /root/server-connect-bad-update/install.sh --offline --local-qa \
   >"$scratch/update-real-restore-fault.stdout" \
   2>"$scratch/update-real-restore-fault.stderr" &
 installer_pid=$!

@@ -5,7 +5,8 @@
 # The original installer/lifecycle guest remains Docker --network none.
 # A separate short-lived connected guest tests online prerequisite acquisition
 # before its own network is disconnected. NEVER run on a production host;
-# public publisher authenticity is out of scope.
+# public publisher identity selection is out of scope; ephemeral QA keys test
+# the common authenticated acquisition and retained offline lifecycle.
 set -euo pipefail
 umask 077
 # A privileged container needs an already disposable, credential-free runner.
@@ -450,7 +451,7 @@ run_offline() {
     -e trace=%network,%process \
     -o "/root/qa-strace/$label" /usr/bin/env -i \
     HOME=/root PATH=/usr/sbin:/usr/bin:/sbin:/bin LC_ALL=C \
-    /bin/sh "$source_dir/install.sh" "$action"
+    /bin/sh "$source_dir/install.sh" "$action" --local-qa
   assert_no_offline_fetch "$label"
 }
 # An active proxy is intentionally permitted to open its existing loopback
@@ -461,14 +462,14 @@ run_active_offline() {
   echo "=== Disconnected guest active-proxy update $label ==="
   docker exec "$container" /usr/bin/env -i \
     HOME=/root PATH=/usr/sbin:/usr/bin:/sbin:/bin LC_ALL=C \
-    /bin/sh "$source_dir/install.sh" --offline
+    /bin/sh "$source_dir/install.sh" --offline --local-qa
 }
 run_active_offline_expect_failure() {
   local label=$1 source_dir=$2
   echo "=== Disconnected guest expected active-update failure $label ==="
   if docker exec "$container" /usr/bin/env -i \
     HOME=/root PATH=/usr/sbin:/usr/bin:/sbin:/bin LC_ALL=C \
-    /bin/sh "$source_dir/install.sh" --offline \
+    /bin/sh "$source_dir/install.sh" --offline --local-qa \
     >"$scratch/$label.stdout" 2>"$scratch/$label.stderr"; then
     echo "Broken candidate unexpectedly installed: $label" >&2
     exit 1
@@ -689,7 +690,7 @@ if docker exec "$container" /usr/bin/strace -ff -qq -yy -s 128 \
   -e trace=%network,%process \
   -o /root/qa-strace/missing-core /usr/bin/env -i \
   HOME=/root PATH=/usr/sbin:/usr/bin:/sbin:/bin LC_ALL=C \
-  /bin/sh /root/server-connect/install.sh --offline \
+  /bin/sh /root/server-connect/install.sh --offline --local-qa \
   2>"$scratch/missing-core.stderr"; then
   echo 'Missing pinned sing-box unexpectedly installed' >&2
   exit 1
@@ -2027,21 +2028,23 @@ link=$(readlink /opt/server-connect/current)
 release=/opt/server-connect/$link
 unit_hash=$(sha256sum /etc/systemd/system/server-connect.service | cut -d" " -f1)
 mkdir -m 0700 /root/qa-provenance-original
-for file in checksums.sha256 manifest.json server-connect-smart-health.service; do
+for file in checksums.sha256 manifest.json server-connect-smart-health.service local-qa.sha256; do
  cp -p "$release/$file" "/root/qa-provenance-original/$file"
 done
 printf "do-not-delete-foreign\n" > /root/qa-provenance-foreign-sentinel
-for scenario in no-checksums no-manifest no-both no-both-and-tampered-service; do
+for scenario in no-checksums no-manifest no-both no-both-and-tampered-service no-trust bad-trust; do
  case "$scenario" in
   no-checksums) rm "$release/checksums.sha256" ;;
   no-manifest) rm "$release/manifest.json" ;;
+  no-trust) rm "$release/local-qa.sha256" ;;
+  bad-trust) printf "invalid-trust-receipt\n" > "$release/local-qa.sha256" ;;
   no-both*) rm "$release/checksums.sha256" "$release/manifest.json" ;;
  esac
  if [ "$scenario" = no-both-and-tampered-service ]; then
   printf "unauthorized unit mutation\n" >> "$release/server-connect-smart-health.service"
  fi
  for action in --verify-only --offline --uninstall; do
-  if /bin/sh /root/server-connect/install.sh "$action" \
+  if /bin/sh /root/server-connect/install.sh "$action" --local-qa \
       >/root/qa-provenance-refusal.log 2>&1; then
    echo "INVALID_INSTALLED_PROVENANCE_WAS_ACCEPTED:$scenario:$action" >&2
    exit 1
@@ -2053,7 +2056,7 @@ for scenario in no-checksums no-manifest no-both no-both-and-tampered-service; d
   [ "$(cat /root/qa-provenance-foreign-sentinel)" = do-not-delete-foreign ]
   [ "$(cat /var/lib/server-connect/profiles/qa-retained)" = SC_QA_RETAIN_PROFILE_BYTES ]
  done
- for file in checksums.sha256 manifest.json server-connect-smart-health.service; do
+ for file in checksums.sha256 manifest.json server-connect-smart-health.service local-qa.sha256; do
   cp -p "/root/qa-provenance-original/$file" "$release/$file"
  done
  (cd "$release" && sha256sum --strict --quiet -c checksums.sha256)
@@ -2061,7 +2064,7 @@ done
 rm -f /root/qa-provenance-refusal.log /root/qa-provenance-foreign-sentinel
 rm -f /root/qa-provenance-original/*
 rmdir /root/qa-provenance-original
-echo 'INSTALLED_MODERN_METADATA_DOWNGRADE_REFUSALS=PASS (4 variants x 3 actual installer actions, active VLESS and foreign state preserved)'
+echo 'INSTALLED_MODERN_METADATA_DOWNGRADE_REFUSALS=PASS (6 variants x 3 actual installer actions, active VLESS and foreign state preserved)'
 QA_PROVENANCE_CURRENT
 docker exec "$container" /bin/sh /root/qa-proxy-only.sh positive
 assert_network_unchanged active-modern-provenance-refusals "$offline_before"
@@ -2108,7 +2111,7 @@ digest=$(sha256sum /etc/systemd/system/server-connect.service | cut -d" " -f1)
 cp -p "$release/checksums.sha256" /root/qa-old-provenance-checksums.saved
 cp -p "$release/manifest.json" /root/qa-old-provenance-manifest.saved
 rm "$release/checksums.sha256" "$release/manifest.json"
-if /bin/sh /root/server-connect/install.sh --uninstall \
+if /bin/sh /root/server-connect/install.sh --uninstall --local-qa \
     >/root/qa-old-provenance-refusal.log 2>&1; then
  echo "UNINSTALL_ACCEPTED_DAMAGED_NONCURRENT_RELEASE" >&2
  exit 1
@@ -2292,7 +2295,7 @@ done
 docker exec "$container" /usr/bin/env -i \
   HOME=/root PATH=/usr/sbin:/usr/bin:/sbin:/bin LC_ALL=C \
   /bin/sh /root/sc-qa-bootstrap.sh \
-  --archive-url http://localhost:19179/bundle.tar.gz --sha256 "$digest"
+  --local-qa --archive-url http://localhost:19179/bundle.tar.gz --sha256 "$digest"
 verify_direct_install
 assert_network_unchanged loopback-online-install "$online_before"
 verify_host_services loopback-online-install
@@ -2304,6 +2307,84 @@ verify_host_services loopback-online-uninstall
 docker exec "$container" /bin/sh -c \
   'test -z "$(find /root -maxdepth 1 -name ".server-connect-bootstrap.*" -print)"'
 echo 'LOCAL_LOOPBACK_ONLINE_INSTALL=PASS'
+
+
+# The same immutable base archive also exercises the authenticated path.
+# The public trust anchor is generated independently of the archive inside
+# this existing disconnected disposable guest. It is an ephemeral QA key,
+# never a selected publisher identity or public-release authorization.
+echo '=== Signed offline install and retained offline uninstall (QA key) ==='
+[[ -f "$bundle.release.json" && ! -L "$bundle.release.json" ]]
+docker exec "$container" /bin/mkdir -m 0700 /root/qa-release-trust
+docker cp "$bootstrap" "$container:/root/qa-release-trust/bootstrap-online.sh"
+docker cp "$root/scripts/release-auth.py" "$container:/root/qa-release-trust/release-auth.py"
+docker cp "$bundle.release.json" "$container:/root/qa-release-trust/release.json"
+docker exec -i -e "SC_QA_DEBIAN_VERSION=$qa_version" "$container" /usr/bin/env -i \
+  HOME=/root PATH=/usr/sbin:/usr/bin:/sbin:/bin LC_ALL=C \
+  "SC_QA_DEBIAN_VERSION=$qa_version" /bin/sh -s <<'QASIGN'
+set -eu
+umask 077
+cd /root/qa-release-trust
+openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:3072 -out ephemeral-private.pem >/dev/null 2>&1
+openssl pkey -in ephemeral-private.pem -pubout -out independent-public.pem >/dev/null 2>&1
+python3 -I -B release-auth.py sign-local-qa \
+  --metadata /root/qa-release-trust/release.json \
+  --signature /root/qa-release-trust/release.sig \
+  --signing-key /root/qa-release-trust/ephemeral-private.pem \
+  --version 0.1.0-dev --target "debian-$SC_QA_DEBIAN_VERSION-amd64" \
+  --archive /root/sc-qa-bundle.tar.gz --bundle /root/server-connect
+QASIGN
+signed_before=$(network_digest)
+docker exec "$container" /usr/bin/strace -ff -qq -yy -s 128 \
+  -e trace=%network,%process -o /root/qa-strace/signed-offline-install \
+  /usr/bin/env -i HOME=/root PATH=/usr/sbin:/usr/bin:/sbin:/bin LC_ALL=C \
+  /bin/sh /root/qa-release-trust/bootstrap-online.sh \
+  --archive-file /root/sc-qa-bundle.tar.gz \
+  --metadata-file /root/qa-release-trust/release.json \
+  --signature-file /root/qa-release-trust/release.sig \
+  --publisher-key /root/qa-release-trust/independent-public.pem \
+  --version 0.1.0-dev --target "debian-$qa_version-amd64"
+assert_no_offline_fetch signed-offline-install
+verify_direct_install
+assert_network_unchanged signed-offline-install "$signed_before"
+verify_host_services signed-offline-install
+signed_release=$(docker exec "$container" /usr/bin/readlink -f /opt/server-connect/current)
+[[ $signed_release =~ ^/opt/server-connect/releases/0\.1\.0-dev-[a-f0-9]{16}$ ]]
+docker exec -i "$container" /bin/sh -s "$signed_release" <<'QARETAINED'
+set -eu
+release=$1
+test -f "$release/authentication.json" && test ! -L "$release/authentication.json"
+test "$(stat -c %u:%a:%h "$release/authentication.json")" = 0:600:1
+test ! -e "$release/local-qa.sha256"
+python3 -I -B /root/qa-release-trust/release-auth.py verify-installed --bundle "$release"
+# Remove only the exact transient inputs in this newly created QA directory.
+# Later verification and uninstall cannot reuse bootstrap staging or keys.
+rm -- /root/qa-release-trust/ephemeral-private.pem \
+  /root/qa-release-trust/independent-public.pem \
+  /root/qa-release-trust/release.json /root/qa-release-trust/release.sig
+test ! -e /root/qa-release-trust/ephemeral-private.pem
+test ! -e /root/qa-release-trust/independent-public.pem
+test ! -e /root/qa-release-trust/release.json
+test ! -e /root/qa-release-trust/release.sig
+test -z "$(find /root -maxdepth 1 -name ".server-connect-bootstrap.*" -print)"
+QARETAINED
+for action in verify-only uninstall; do
+  docker exec "$container" /usr/bin/strace -ff -qq -yy -s 128 \
+    -e trace=%network,%process -o "/root/qa-strace/signed-retained-$action" \
+    /usr/bin/env -i HOME=/root PATH=/usr/sbin:/usr/bin:/sbin:/bin LC_ALL=C \
+    /bin/sh "$signed_release/install.sh" "--$action"
+  assert_no_offline_fetch "signed-retained-$action"
+  assert_network_unchanged "signed-retained-$action" "$signed_before"
+  verify_host_services "signed-retained-$action"
+done
+verify_clean_uninstall
+docker exec "$container" /bin/sh -c '
+  set -eu
+  test ! -e /opt/server-connect
+  rm -- /root/qa-release-trust/bootstrap-online.sh /root/qa-release-trust/release-auth.py
+  rmdir /root/qa-release-trust
+'
+echo 'SIGNED_OFFLINE_INSTALL_RETAINED_AUTH_UNINSTALL=PASS (ephemeral QA key; original sidecars and key removed)'
 
 # Destructive fixture tests come LAST: nothing after this block requires the
 # two independent guest-loopback services to remain available. A stopped
@@ -2337,7 +2418,7 @@ if docker exec "$container" /bin/sh /root/qa-host-coexistence.sh probe \
   exit 1
 fi
 echo 'ISOLATED_SSH_STOPPED=PASS'
-echo 'LIMITATION: QA bundle is digest-matched but NOT a publisher-authenticated public release'
+echo 'LIMITATION: authenticated lifecycle used an ephemeral QA key; no official publisher identity or public release is asserted'
 # A separate disconnected guest exercises a persistent /var/lib QA journal
 # and independently enabled boot service across two real Docker restarts.
 # Docker restart is NOT physical host reboot and resets its network namespace;

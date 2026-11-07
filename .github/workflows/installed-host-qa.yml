@@ -15,6 +15,7 @@ on:
       - 'bundle/server-connect-smart-health.service'
       - 'bundle/server-connect-smart-health.timer'
       - 'scripts/bootstrap-online.sh'
+      - 'scripts/release-auth.py'
       - 'scripts/package.sh'
       - 'scripts/qa/**'
       - 'cmd/server-connect/**'

@@ -1057,7 +1057,7 @@ class Fixture:
         before.update({str(path): path.read_bytes() for path in UNITS.glob("server-connect*.timer")})
         release = os.readlink("/opt/server-connect/current")
         for flags in (("--offline",), ("--uninstall",)):
-            result = self.command(["/bin/sh", "/root/server-connect/install.sh", *flags], check=False)
+            result = self.command(["/bin/sh", "/root/server-connect/install.sh", *flags, "--local-qa"], check=False)
             assert result.returncode, "installer accepted an active supervised operation"
             assert os.readlink("/opt/server-connect/current") == release
             assert all(Path(path).read_bytes() == data for path, data in before.items())
