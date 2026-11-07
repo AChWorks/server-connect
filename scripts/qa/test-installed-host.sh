@@ -2319,12 +2319,39 @@ docker exec "$container" /bin/mkdir -m 0700 /root/qa-release-trust
 docker cp "$bootstrap" "$container:/root/qa-release-trust/bootstrap-online.sh"
 docker cp "$root/scripts/release-auth.py" "$container:/root/qa-release-trust/release-auth.py"
 docker cp "$bundle.release.json" "$container:/root/qa-release-trust/release.json"
+# docker cp retains source permission bits. Protect only these exact
+# task-owned imports; never change /root or relax the production verifier.
+# Report original metadata before replacing it with byte-identical root copies.
+docker exec -i "$container" /usr/bin/env -i \
+  PATH=/usr/sbin:/usr/bin:/sbin:/bin LC_ALL=C /bin/sh -s <<'QAPROTECT'
+set -eu
+umask 077
+cd /root/qa-release-trust
+for name in bootstrap-online.sh release-auth.py release.json archive.tar.gz; do
+  source=$name
+  if [ "$name" = archive.tar.gz ]; then source=/root/sc-qa-bundle.tar.gz; fi
+  test -f "$source" && test ! -L "$source"
+  test "$(stat -c %h -- "$source")" = 1
+  stat -c 'SIGNED_QA_IMPORTED_INPUT path=%n uid=%u gid=%g mode=%a' -- "$source"
+  test ! -e "protected-$name" && test ! -L "protected-$name"
+  install -m 0600 -- "$source" "protected-$name"
+  cmp -- "$source" "protected-$name"
+  mv -T -- "protected-$name" "$name"
+  test "$(stat -c %u:%a:%h -- "$name")" = 0:600:1
+done
+echo 'SIGNED_QA_IMPORTED_INPUTS_PROTECTED=PASS'
+QAPROTECT
 docker exec -i -e "SC_QA_DEBIAN_VERSION=$qa_version" "$container" /usr/bin/env -i \
   HOME=/root PATH=/usr/sbin:/usr/bin:/sbin:/bin LC_ALL=C \
   "SC_QA_DEBIAN_VERSION=$qa_version" /bin/sh -s <<'QASIGN'
 set -eu
 umask 077
 cd /root/qa-release-trust
+# Keep any unrelated unsafe ancestry/payload as a hard failure with precise
+# metadata diagnostics; do not normalize an extracted tree or an ancestor.
+stat -c 'SIGNED_QA_SIGNER_PATH path=%n uid=%u gid=%g mode=%a' -- \
+  / /root /root/qa-release-trust /root/server-connect \
+  /root/server-connect/manifest.json /root/server-connect/checksums.sha256
 openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:3072 -out ephemeral-private.pem >/dev/null 2>&1
 openssl pkey -in ephemeral-private.pem -pubout -out independent-public.pem >/dev/null 2>&1
 python3 -I -B release-auth.py sign-local-qa \
@@ -2332,14 +2359,14 @@ python3 -I -B release-auth.py sign-local-qa \
   --signature /root/qa-release-trust/release.sig \
   --signing-key /root/qa-release-trust/ephemeral-private.pem \
   --version 0.1.0-dev --target "debian-$SC_QA_DEBIAN_VERSION-amd64" \
-  --archive /root/sc-qa-bundle.tar.gz --bundle /root/server-connect
+  --archive /root/qa-release-trust/archive.tar.gz --bundle /root/server-connect
 QASIGN
 signed_before=$(network_digest)
 docker exec "$container" /usr/bin/strace -ff -qq -yy -s 128 \
   -e trace=%network,%process -o /root/qa-strace/signed-offline-install \
   /usr/bin/env -i HOME=/root PATH=/usr/sbin:/usr/bin:/sbin:/bin LC_ALL=C \
   /bin/sh /root/qa-release-trust/bootstrap-online.sh \
-  --archive-file /root/sc-qa-bundle.tar.gz \
+  --archive-file /root/qa-release-trust/archive.tar.gz \
   --metadata-file /root/qa-release-trust/release.json \
   --signature-file /root/qa-release-trust/release.sig \
   --publisher-key /root/qa-release-trust/independent-public.pem \
@@ -2361,11 +2388,13 @@ python3 -I -B /root/qa-release-trust/release-auth.py verify-installed --bundle "
 # Later verification and uninstall cannot reuse bootstrap staging or keys.
 rm -- /root/qa-release-trust/ephemeral-private.pem \
   /root/qa-release-trust/independent-public.pem \
-  /root/qa-release-trust/release.json /root/qa-release-trust/release.sig
+  /root/qa-release-trust/release.json /root/qa-release-trust/release.sig \
+  /root/qa-release-trust/archive.tar.gz
 test ! -e /root/qa-release-trust/ephemeral-private.pem
 test ! -e /root/qa-release-trust/independent-public.pem
 test ! -e /root/qa-release-trust/release.json
 test ! -e /root/qa-release-trust/release.sig
+test ! -e /root/qa-release-trust/archive.tar.gz
 test -z "$(find /root -maxdepth 1 -name ".server-connect-bootstrap.*" -print)"
 QARETAINED
 for action in verify-only uninstall; do

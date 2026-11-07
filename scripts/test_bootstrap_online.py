@@ -1046,6 +1046,68 @@ class SignedReleaseTest(unittest.TestCase):
         self.assertNotEqual(self.run_bootstrap().returncode, 0)
         self.signature.write_bytes(saved)
 
+    @unittest.skipUnless(os.geteuid() == 0, "real root-owned import ancestry requires CI root")
+    def test_signed_guest_imports_preserve_bytes_and_protect_root_trust(self):
+        trust = self.case / "qa-release-trust"
+        trust.mkdir(mode=0o700)
+        originals = {"bootstrap-online.sh": self.bootstrap.read_bytes(),
+                     "release-auth.py": self.auth.read_bytes(),
+                     "release.json": self.metadata.read_bytes(),
+                     "archive.tar.gz": self.bundle.read_bytes()}
+        for name in ("bootstrap-online.sh", "release-auth.py", "release.json"):
+            (trust / name).write_bytes(originals[name])
+            (trust / name).chmod(0o666)  # docker cp may preserve an unsafe source mode.
+        self.bundle.chmod(0o666)
+        signature = trust / "fixture.sig"
+        argv = [
+            "/usr/bin/python3", "-I", "-S", str(self.auth), "sign-local-qa",
+            "--metadata", str(trust / "release.json"), "--signature", str(signature),
+            "--signing-key", str(self.private), "--version", "0.1.0-dev",
+            "--target", "debian-13-amd64", "--archive", str(self.bundle),
+        ]
+        rejected = subprocess.run(argv, capture_output=True, text=True, timeout=30)
+        self.assertNotEqual(rejected.returncode, 0)
+        self.assertIn("protected root-owned ancestry", rejected.stderr)
+        self.assertFalse(signature.exists())
+
+        fixture = (ROOT / "scripts/qa/test-installed-host.sh").read_text()
+        self.assertEqual(fixture.count("<<'QAPROTECT'\n"), 1)
+        prepare = fixture.split("<<'QAPROTECT'\n", 1)[1].split("\nQAPROTECT\n", 1)[0]
+        prepare = prepare.replace("/root/qa-release-trust", str(trust)).replace(
+            "/root/sc-qa-bundle.tar.gz", str(self.bundle))
+        staged = subprocess.run(
+            ["/bin/sh", "-s"], input=prepare, capture_output=True, text=True,
+            env={"PATH": "/usr/sbin:/usr/bin:/sbin:/bin", "LC_ALL": "C"}, timeout=10,
+        )
+        self.assertEqual(staged.returncode, 0, staged.stdout + staged.stderr)
+        self.assertEqual(staged.stdout.count("mode=666"), 4)
+        self.assertIn("SIGNED_QA_IMPORTED_INPUTS_PROTECTED=PASS", staged.stdout)
+        for name, raw in originals.items():
+            path = trust / name
+            self.assertEqual(path.read_bytes(), raw)
+            self.assertEqual((path.stat().st_uid, path.stat().st_mode & 0o777,
+                              path.stat().st_nlink), (0, 0o600, 1))
+        self.assertEqual(self.bundle.stat().st_mode & 0o777, 0o666,
+                         "fixture must not normalize the original external archive")
+        argv[-1] = str(trust / "archive.tar.gz")
+        signed = subprocess.run(argv, capture_output=True, text=True, timeout=30)
+        self.assertEqual(signed.returncode, 0, signed.stderr)
+        self.assertIn("LOCAL QA signature created", signed.stdout)
+        subprocess.run(
+            ["/usr/bin/openssl", "dgst", "-sha256", "-verify", str(self.public),
+             "-signature", str(signature), str(trust / "release.json")],
+            capture_output=True, check=True, timeout=10,
+        )
+
+        # Protected leaf copies never authorize an unsafe ancestor.
+        original_signature = signature.read_bytes()
+        trust.chmod(0o777)
+        refused = subprocess.run(argv, capture_output=True, text=True, timeout=30)
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertIn("protected root-owned ancestry", refused.stderr)
+        self.assertEqual(signature.read_bytes(), original_signature)
+        trust.chmod(0o700)
+
     def test_local_qa_signing_uses_explicit_key_and_never_overwrites_signature(self):
         output = self.case / "new.sig"
         argv = [
