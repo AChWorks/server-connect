@@ -6,6 +6,8 @@ This table separates package compatibility, command/intent admission and
 measured behavior. It grants no new host authority, ownership exception or
 release waiver. [Acceptance](ACCEPTANCE.md) owns the required test thresholds;
 [Distribution](OFFLINE-DISTRIBUTION.md) owns artifact trust and installation.
+The [release component and legal inventory](RELEASE-LEGAL-INVENTORY.md)
+separates notice/source engineering gaps from unresolved Owner decisions.
 
 | Development lane | Admitted OS / fixture | Bounded behavior and evidence | Remaining boundary |
 | --- | --- | --- | --- |
