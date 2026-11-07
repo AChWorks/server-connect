@@ -9,6 +9,8 @@
 - Evidence levels differ: **source/unit**, **disposable installed Linux guest**, **independently observed real Iran/foreign field path**, **authenticated distributable artifact**, and **separately authorized production rollout**. A lower level never implies a higher one.
 - Privileged/network-affecting implementation needs exact-candidate fault and safety tests and **fresh author-separated high-assurance review**. Production server changes and publication require their own applicable Owner approval. No real customer server is an initial test host.
 
+Owner-approved **proportional recovery** requires representative evidence for normal Disconnect, unexpected Core exit, safe restoration of Direct/off, and common selected-path failures. It does not demand exhaustive fault permutations or a guarantee against arbitrary simultaneous privileged host writers. Unknown ownership still preserves third-party resources and is reported uncertain; unsupported paths are not labeled PASS.
+
 ## Required release matrix
 
 | Area | Observable acceptance | Evidence |

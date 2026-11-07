@@ -8,6 +8,8 @@ product_tun_trial() {
   test "$(ps -p 1 -o comm=)" = systemd
   test "$(systemctl show server-connect-smart-tun.service -p LoadState --value)" = loaded
   test "$(systemctl show server-connect-smart-tun.service -p UnitFileState --value)" = static
+  test "$(systemctl show server-connect-native-tun.service -p UnitFileState --value)" = disabled
+  test "$(systemctl show server-connect-native-tun.service -p ActiveState --value)" = inactive
   test "$(systemctl show server-connect-smart-tun.service -p ActiveState --value)" = inactive
   test "$(systemctl show server-connect-activation-recover.timer -p ActiveState --value)" = inactive
   test ! -e /var/lib/server-connect/route-activation-journal.json

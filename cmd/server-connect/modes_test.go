@@ -53,7 +53,7 @@ func TestModeOverviewHonestServiceAndTrialStates(t *testing.T) {
 				reply.Data.SelectedProfileID != "0123456789abcdef" ||
 				reply.Data.VPNPathProof != "not_run" || reply.Data.HostDirectPathProof != "not_run" ||
 				len(reply.Data.Modes) != 3 || reply.Data.Modes[2].ID != "smart_routing" ||
-				reply.Data.Modes[2].Availability != "disposable_guest_only" ||
+				reply.Data.Modes[2].Availability != "candidate_not_field_verified" ||
 				reply.Data.Modes[2].GeneralHostActivation || reply.Data.Modes[0].ID != "direct" ||
 				reply.Data.Modes[1].ID != "proxy_only" {
 				t.Fatalf("dishonest or divergent mode overview, reads=%d: %+v", reads, reply)
@@ -69,6 +69,28 @@ func TestModeOverviewHonestServiceAndTrialStates(t *testing.T) {
 				t.Fatalf("uncertain state claimed route proof: %+v", reply.Data)
 			}
 		})
+	}
+}
+
+func TestModeOverviewNativeObservationNeverClaimsVPNPath(t *testing.T) {
+	for _, tc := range []struct {
+		desired, observed, health string
+		err                       error
+		want                      string
+	}{
+		{"smart", "native_active", "native_selected_path_not_tested", nil, "smart_routing"},
+		{"smart", "native_failed", "native_recovery_unverified", sc.Fault("guard_pending", "recovery pending"), "unknown"},
+		{"direct", "native_inactive", "native_recovery_unverified", sc.Fault("guard_pending", "claim cleanup pending"), "unknown"},
+	} {
+		view, err := modeOverviewFromStatus(sc.Status{
+			Desired: tc.desired, Observed: tc.observed, Selected: "0123456789abcdef",
+			Health: tc.health,
+		}, tc.err)
+		if err != nil || view.ObservedMode != tc.want || view.ActiveRouteVerified ||
+			view.VPNPathProof != "not_run" || view.HostDirectPathProof != "not_run" ||
+			view.Modes[2].GeneralHostActivation {
+			t.Fatalf("native status cannot prove selected path: %+v err=%v", view, err)
+		}
 	}
 }
 
@@ -156,7 +178,7 @@ func TestModeOverviewCLIAndMenuShareReadOnlySurface(t *testing.T) {
 		t.Fatalf("menu cannot explain non-admitted mode: exit=%d out=%s err=%s", code, menuOut, menuErr)
 	}
 	_, cliOut, _ := hostDriftCapturedOutput(t, func() int { return run(false, m, []string{"mode-overview"}) })
-	for _, part := range []string{`"availability": "disposable_guest_only"`, `"host_direct_path_proof": "not_run"`, `"observed_mode": "unknown"`} {
+	for _, part := range []string{`"availability": "candidate_not_field_verified"`, `"host_direct_path_proof": "not_run"`, `"observed_mode": "unknown"`} {
 		if !strings.Contains(menuOut, part) || !strings.Contains(cliOut, part) {
 			t.Fatalf("CLI/menu mode drift: %s\nmenu=%s\nCLI=%s", part, menuOut, cliOut)
 		}

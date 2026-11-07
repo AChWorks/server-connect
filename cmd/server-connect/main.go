@@ -205,6 +205,40 @@ func run(j bool, m *sc.Manager, args []string) int {
 		return output(j, report, err)
 	case "status":
 		return runStatus(j, m.Status)
+	case "connect-smart":
+		opts := flag.NewFlagSet(name, flag.ContinueOnError)
+		opts.SetOutput(io.Discard)
+		underlay := opts.String("underlay-if", "", "the host network underlay interface")
+		tun := opts.String("tunnel-if", "sctun0", "dedicated Server Connect TUN name")
+		ipv4 := opts.String("tunnel-ipv4", "172.31.99.1/30", "dedicated private IPv4 TUN CIDR")
+		ipv6 := opts.String("tunnel-ipv6", "fd73:99::1/64", "dedicated private IPv6 TUN CIDR")
+		mode := opts.String("mode", "bypass_iran", "default|bypass_iran")
+		if e := opts.Parse(args); e != nil || len(opts.Args()) != 0 || *underlay == "" {
+			return output(j, nil, sc.Fault("invalid_arguments", "connect-smart requires --underlay-if"))
+		}
+		report, e := m.ConnectNativeSmartRouting(sc.NativePolicyOptions{
+			InterfaceName: *tun, UnderlayInterface: *underlay,
+			IPv4Address: *ipv4, IPv6Address: *ipv6, Mode: *mode,
+		})
+		return output(j, report, e)
+	case "native-status":
+		if len(args) != 0 {
+			return output(j, nil, sc.Fault("invalid_arguments", "native-status takes no options"))
+		}
+		report, e := m.NativeStatus()
+		return output(j, report, e)
+	case "native-preflight":
+		if len(args) != 0 {
+			return output(j, nil, sc.Fault("invalid_arguments", "installed native service preflight takes no options"))
+		}
+		e := m.NativePreflightInstalled()
+		return output(j, map[string]bool{"native_preflight_ok": e == nil}, e)
+	case "native-recover":
+		if len(args) != 0 {
+			return output(j, nil, sc.Fault("invalid_arguments", "installed native service recovery takes no options"))
+		}
+		e := m.NativeRecoverInstalled()
+		return output(j, map[string]bool{"native_recovery_verified": e == nil}, e)
 	case "smart-routing-rules":
 		return runSmartRoutingRules(j, m, args)
 	case "mode-overview":
@@ -271,7 +305,7 @@ func run(j bool, m *sc.Manager, args []string) int {
 		return output(j, "Proxy Only connection requested; use probe to verify upstream reachability", e)
 	case "disconnect":
 		e := m.Disconnect()
-		return output(j, "Direct mode restored; no host routes or firewall settings were touched", e)
+		return output(j, "Direct mode restored after owned-service cleanup", e)
 	case "probe", "test":
 		opts := flag.NewFlagSet(name, flag.ContinueOnError)
 		opts.SetOutput(io.Discard)
@@ -692,6 +726,12 @@ Commands:
   smart-routing-rules import --source ID --as-of YYYY-MM-DD --sha256 HEX --file FILE|-
                              [--replaces-sha256 HEX] for explicit source replacement
   smart-routing-rules remove-source --source ID --sha256 HEX
+  smart-routing-rules preview-native --tunnel-if NAME --underlay-if NAME
+                                     --tunnel-ipv4 CIDR [--tunnel-ipv6 CIDR]
+                                     [--mode default|bypass_iran]
+                                     [--protected-peer IP...]
+                              Compiles saved rules with official sing-box;
+                              checks Core config only, never activates host TUN
   smart-routing-rules preview --tunnel-if NAME --underlay-if NAME --tunnel-ipv4 CIDR
                               --domestic-cidr CIDR [--protected-cidr CIDR...]
                               [--endpoint-pin-ipv4 PUBLIC_IP] (named VLESS TCP only)
@@ -708,6 +748,12 @@ Commands:
   select ID                  Select a saved profile (disconnect first)
   remove ID                  Remove an inactive profile
   connect                    Start authenticated loopback Proxy Only
+  connect-smart --underlay-if NAME [--tunnel-if NAME] [--tunnel-ipv4 CIDR]
+                [--tunnel-ipv6 CIDR] [--mode default|bypass_iran]
+                             Start guarded native sing-box Smart Routing
+  native-status              Read actual native unit and recovery-claim state
+  native-preflight           Installed systemd ExecStartPre only
+  native-recover             Installed systemd ExecStopPost only
   ready                      Verify owned authenticated listener (not upstream)
   disconnect                 Stop and disable product-owned local proxy service
   status [--json]            Desired/observed service state, not fake VPN health

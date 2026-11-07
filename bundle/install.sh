@@ -47,6 +47,7 @@ server-connect.service
 server-connect-activation-recover.service
 server-connect-activation-recover.timer
 server-connect-smart-tun.service
+server-connect-native-tun.service
 server-connect-smart-health.service
 server-connect-smart-health.timer
 install.sh
@@ -56,20 +57,26 @@ RELEASE_FILES
 }
 verify_release_payload() (
  root=$1
+ prior_installed=no
+ if [ "$#" -eq 2 ]; then prior_installed=$2; fi
  check_root_dir "$root"
  check_root_dir "$root/bin"
  check_root_dir "$root/THIRD-PARTY-LICENSES"
- for path in $(release_payload_files); do
+ check_root_file "$root/checksums.sha256"
+ # New bundles MUST contain the exact current complete manifest. Only an
+ # already-installed previous 12-entry release may omit the native unit.
+ expected=$(release_payload_files)
+ if [ "$prior_installed" = yes ] &&
+    [ "$(wc -l < "$root/checksums.sha256")" -eq 12 ]; then
+  expected=$(release_payload_files | sed '/^server-connect-native-tun.service$/d')
+ fi
+ for path in $expected; do
   check_root_file "$root/$path"
  done
- check_root_file "$root/checksums.sha256"
- # Reject missing, duplicate, extra, reordered, or noncanonical checksum
- # entries. sha256sum -c alone accepts omitted entries and path escapes.
- expected=$(release_payload_files)
  actual=$(sed -n 's/^[0-9a-f]\{64\}  //p' "$root/checksums.sha256") ||
   die 'cannot read release checksum manifest'
  [ "$expected" = "$actual" ] &&
- [ "$(wc -l < "$root/checksums.sha256")" -eq 12 ] ||
+ [ "$(wc -l < "$root/checksums.sha256")" -eq "$(printf '%s\n' "$expected" | wc -l)" ] ||
   die 'release checksum manifest does not cover the exact owned payload'
  (cd "$root" && sha256sum --strict --quiet -c checksums.sha256) ||
   die 'release checksum mismatch; no mutation permitted'
@@ -91,7 +98,7 @@ verify_installed_release() (
   die 'installed release owner conflict'
  if [ -e "$root/checksums.sha256" ] || [ -L "$root/checksums.sha256" ] ||
     [ -e "$root/manifest.json" ] || [ -L "$root/manifest.json" ]; then
-  verify_release_payload "$root" || die 'installed release checksum conflict'
+  verify_release_payload "$root" yes || die 'installed release checksum conflict'
   full_identity=$(sha256sum "$root/checksums.sha256" | cut -c 1-16) ||
    die 'installed release checksum identity unreadable'
   [ "$full_identity" = "$suffix" ] || die 'installed release full identity changed'
@@ -194,7 +201,7 @@ check_service_owner() {
 # Independently installed recovery units start DISABLED. The exact owner and
 # manifest digest of each are checked before ANY subsequent replacement.
 check_guard_units() (
- for name in server-connect-activation-recover.service server-connect-activation-recover.timer server-connect-smart-tun.service server-connect-smart-health.service server-connect-smart-health.timer; do
+ for name in server-connect-activation-recover.service server-connect-activation-recover.timer server-connect-smart-tun.service server-connect-native-tun.service server-connect-smart-health.service server-connect-smart-health.timer; do
   target=/etc/systemd/system/$name
   digest_file=$PREFIX/$name.sha256
   props=$(systemctl show "$name" --property=LoadState --property=FragmentPath --property=DropInPaths --property=Transient) ||
@@ -210,9 +217,19 @@ check_guard_units() (
     die 'recovery unit differs from owned manifest'
    [ "$load" = loaded ] && [ "$fragment" = "$target" ] && [ -z "$dropins" ] && [ "$transient" = no ] ||
     die 'effective managed unit identity conflict'
-   if [ "$name" = server-connect-smart-tun.service ] || [ "$name" = server-connect-smart-health.service ]; then
+   if [ "$name" = server-connect-smart-health.service ]; then
     [ "$(systemctl show "$name" -p UnitFileState --value)" = static ] ||
-      die 'TUN and health executors must remain static and unenabled'
+      die 'experimental health executor must remain static'
+   fi
+   if [ "$name" = server-connect-smart-tun.service ]; then
+    [ "$(systemctl show "$name" -p UnitFileState --value)" = static ] ||
+      die 'experimental TUN service must remain static'
+   fi
+   if [ "$name" = server-connect-native-tun.service ]; then
+    case "$(systemctl show "$name" -p UnitFileState --value)" in
+      enabled|disabled) ;;
+      *) die 'native Smart Routing unit has unsupported activation state' ;;
+    esac
    fi
   else
    [ "$load" = not-found ] && [ -z "$fragment" ] && [ -z "$dropins" ] && [ "$transient" = no ] ||
@@ -233,7 +250,7 @@ normalize_idle_health_failure() {
  # A failed oneshot is not sufficient evidence of a cleared operation.
  # Before resetting bookkeeping prove every guard, core and timer inactive,
  # no live health process, and recheck the exact owned role provenance.
- for role in server-connect-activation-recover.timer server-connect-activation-recover.service server-connect-smart-tun.service server-connect-smart-health.timer; do
+ for role in server-connect-activation-recover.timer server-connect-activation-recover.service server-connect-smart-tun.service server-connect-native-tun.service server-connect-smart-health.timer; do
   [ "$(systemctl show "$role" -p ActiveState --value)" = inactive ] ||
     die 'cannot normalize health failure while another TUN/guard role is active'
  done
@@ -256,7 +273,7 @@ normalize_idle_health_failure() {
 # An active timer or oneshot may own pending kernel state. Updating or
 # uninstalling its recovery executable would sever the only independent guard.
 require_guard_inactive() {
- for name in server-connect-activation-recover.timer server-connect-activation-recover.service server-connect-smart-tun.service server-connect-smart-health.service server-connect-smart-health.timer; do
+ for name in server-connect-activation-recover.timer server-connect-activation-recover.service server-connect-smart-tun.service server-connect-native-tun.service server-connect-smart-health.service server-connect-smart-health.timer; do
   case "$(systemctl show "$name" -p ActiveState --value)" in
    inactive) ;; *) die 'independent recovery guard active or uncertain; refuse installer change' ;;
   esac
@@ -360,11 +377,17 @@ if [ "$ACTION" = --uninstall ]; then
    systemctl disable "$timer" || die 'cannot disable owned recovery/health timer'
   fi
  done
+ if [ -f /etc/systemd/system/server-connect-native-tun.service ]; then
+  systemctl disable server-connect-native-tun.service ||
+   die 'cannot disable owned native unit during uninstall'
+ fi
  rm -f -- "$COMMAND" "$UNIT" "$PREFIX/current" "$PREFIX/unit.sha256" "$PREFIX/.owner" \
   "$GUARD_SERVICE" "$GUARD_TIMER" /etc/systemd/system/server-connect-smart-tun.service \
+  /etc/systemd/system/server-connect-native-tun.service \
   "$PREFIX/server-connect-activation-recover.service.sha256" \
   "$PREFIX/server-connect-activation-recover.timer.sha256" \
   "$PREFIX/server-connect-smart-tun.service.sha256" \
+  "$PREFIX/server-connect-native-tun.service.sha256" \
   /etc/systemd/system/server-connect-smart-health.service \
   /etc/systemd/system/server-connect-smart-health.timer \
   "$PREFIX/server-connect-smart-health.service.sha256" \
@@ -453,7 +476,7 @@ rollback_candidate() {
     { say 'RECOVERY_REQUIRED: new unit removal failed';failed=yes; }
   fi
   # Restore precisely the previous supplemental unit bytes (or absence).
-  for name in server-connect-activation-recover.service server-connect-activation-recover.timer server-connect-smart-tun.service server-connect-smart-health.service server-connect-smart-health.timer;do
+  for name in server-connect-activation-recover.service server-connect-activation-recover.timer server-connect-smart-tun.service server-connect-native-tun.service server-connect-smart-health.service server-connect-smart-health.timer;do
    path=/etc/systemd/system/$name
    digest=$PREFIX/$name.sha256
    if [ -n "$guard_backup" ] && [ -f "$guard_backup/$name" ];then
@@ -619,7 +642,7 @@ fi
 # Capture the EXACT prior supplemental unit bytes before the candidate can
 # replace them. Guard is inactive by the preceding authoritative inspection.
 guard_backup=$(mktemp -d "$PREFIX/.guard-backup.XXXXXXXX") || die 'guard unit backup unavailable'
-for name in server-connect-activation-recover.service server-connect-activation-recover.timer server-connect-smart-tun.service server-connect-smart-health.service server-connect-smart-health.timer;do
+for name in server-connect-activation-recover.service server-connect-activation-recover.timer server-connect-smart-tun.service server-connect-native-tun.service server-connect-smart-health.service server-connect-smart-health.timer;do
  if [ -f "/etc/systemd/system/$name" ];then
   install -m 0644 "/etc/systemd/system/$name" "$guard_backup/$name"
   install -m 0644 "$PREFIX/$name.sha256" "$guard_backup/$name.sha256"
@@ -646,7 +669,7 @@ if [ ! -e "$COMMAND" ] && [ ! -L "$COMMAND" ];then
 fi
 install -m 0644 "$SOURCE_DIR/server-connect.service" "$UNIT" || die 'owned unit installation failed'
 sha256sum "$UNIT" | cut -d' ' -f1 > "$PREFIX/unit.sha256" || die 'owned unit digest write failed'
-for name in server-connect-activation-recover.service server-connect-activation-recover.timer server-connect-smart-tun.service server-connect-smart-health.service server-connect-smart-health.timer;do
+for name in server-connect-activation-recover.service server-connect-activation-recover.timer server-connect-smart-tun.service server-connect-native-tun.service server-connect-smart-health.service server-connect-smart-health.timer;do
  install -m 0644 "$SOURCE_DIR/$name" "/etc/systemd/system/$name" || die 'managed unit installation failed'
  sha256sum "/etc/systemd/system/$name" | cut -d' ' -f1 > "$PREFIX/$name.sha256" ||
   die 'managed unit digest write failed'

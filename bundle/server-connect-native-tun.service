@@ -1,0 +1,34 @@
+# Official sing-box native TUN; the Manager stages a narrow private session
+# claim and independently verifies free host resources before this unit starts.
+# ExecStopPost removes only verified native orphan objects after an abnormal
+# exit. Do not run this systemd unit outside the installed Server Connect CLI.
+[Unit]
+Description=Server Connect managed native Smart Routing (sing-box)
+Documentation=https://github.com/AChWorks/server-connect
+After=network.target
+
+[Service]
+Type=exec
+WorkingDirectory=/opt/server-connect/current/bin
+LoadCredential=native-config:/var/lib/server-connect/native-tun.json
+ExecStartPre=/opt/server-connect/current/bin/server-connect native-preflight
+ExecStart=/opt/server-connect/current/bin/sing-box run -c /run/credentials/server-connect-native-tun.service/native-config
+ExecStopPost=/opt/server-connect/current/bin/server-connect native-recover
+Restart=no
+KillMode=control-group
+TimeoutStartSec=30s
+TimeoutStopSec=20s
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/var/lib/server-connect
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

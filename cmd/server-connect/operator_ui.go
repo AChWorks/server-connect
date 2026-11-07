@@ -64,7 +64,7 @@ func (p operatorPresenter) menu(m *sc.Manager, advanced bool) {
 	} else {
 		fmt.Fprintln(p.out, "  "+state)
 	}
-	fmt.Fprintln(p.out, "  Smart Routing on general Linux hosts: "+p.tint("NOT AVAILABLE", "1;33"))
+	fmt.Fprintln(p.out, "  Smart Routing: "+p.tint("NOT AVAILABLE FOR GENERAL HOSTS (native candidate testing)", "1;33"))
 	p.section("Connection")
 	if p.width < 66 {
 		fmt.Fprintln(p.out, "  1 Status")

@@ -1036,6 +1036,14 @@ func (m *Manager) InstallerCheckGuardClear() error {
 	if os.Geteuid() != 0 {
 		return Fault("ownership_required", "root required for installer guard check")
 	}
+	if _, e := m.readNativeSession(); e == nil {
+		return Fault("guard_pending", "finish native Smart Routing Disconnect before update or uninstall")
+	} else if !errors.Is(e, os.ErrNotExist) {
+		return Fault("guard_pending", "native recovery claim cannot be verified for update")
+	}
+	if desired, e := m.load(); e != nil || desired.Desired == "smart" {
+		return Fault("guard_pending", "native Smart Routing must be verified Direct before update")
+	}
 	raw, err := readRegular(filepath.Join(m.Dir, activationJournalFilename))
 	if errors.Is(err, os.ErrNotExist) {
 		return nil

@@ -383,6 +383,8 @@ verify_direct_install() {
     test "$(systemctl is-enabled server-connect-activation-recover.timer)" = disabled
     test "$(systemctl show server-connect-smart-tun.service -p LoadState --value)" = loaded
     test "$(systemctl show server-connect-smart-tun.service -p UnitFileState --value)" = static
+    test "$(systemctl show server-connect-native-tun.service -p UnitFileState --value)" = disabled
+    test "$(systemctl show server-connect-native-tun.service -p ActiveState --value)" = inactive
     test "$(systemctl show server-connect-smart-tun.service -p ActiveState --value)" = inactive
     test "$(systemctl show server-connect-smart-health.service -p LoadState --value)" = loaded
     test "$(systemctl show server-connect-smart-health.service -p UnitFileState --value)" = static
@@ -401,6 +403,11 @@ verify_direct_install() {
       test "$(systemctl show "$name" -p ControlPID --value)" = 0
       test -z "$(systemctl show "$name" -p Job --value)"
     done
+    test "$(systemctl show server-connect-native-tun.service -p FragmentPath --value)" = /etc/systemd/system/server-connect-native-tun.service
+    test -z "$(systemctl show server-connect-native-tun.service -p DropInPaths --value)"
+    test "$(systemctl show server-connect-native-tun.service -p Transient --value)" = no
+    test "$(systemctl show server-connect-native-tun.service -p UnitFileState --value)" = disabled
+    test "$(systemctl show server-connect-native-tun.service -p ActiveState --value)" = inactive
     for name in server-connect-activation-recover.timer server-connect-smart-health.timer; do
       test "$(systemctl show "$name" -p ActiveState --value)" = inactive
       test -z "$(systemctl show "$name" -p Job --value)"
@@ -418,6 +425,7 @@ verify_clean_uninstall() {
     test ! -e /etc/systemd/system/server-connect-activation-recover.service
     test ! -e /etc/systemd/system/server-connect-activation-recover.timer
     test ! -e /etc/systemd/system/server-connect-smart-tun.service
+    test ! -e /etc/systemd/system/server-connect-native-tun.service
     test ! -e /etc/systemd/system/server-connect-smart-health.service
     test ! -e /etc/systemd/system/server-connect-smart-health.timer
     test "$(stat -c %a /var/lib/server-connect)" = 700
@@ -615,7 +623,7 @@ assert data["active_route_verified"] is False
 assert [(mode["id"],mode["availability"],mode["general_host_activation"]) for mode in data["modes"]]==[
     ("direct","implemented",True),
     ("proxy_only","implemented",True),
-    ("smart_routing","disposable_guest_only",False),
+    ("smart_routing","candidate_not_field_verified",False),
 ]
 '
 printf '18\n0\n' | docker exec -i "$container" /usr/local/bin/server-connect menu >"$scratch/installed-mode-menu.log"
@@ -626,7 +634,7 @@ message=Path(sys.argv[1]).read_text()
 assert "18 Mode Overview" in message
 assert '"observed_mode": "unknown"' in message
 assert '"host_direct_path_proof": "not_run"' in message
-assert '"availability": "disposable_guest_only"' in message
+assert '"availability": "candidate_not_field_verified"' in message
 assert '"general_host_activation": false' in message
 PYMODEMENU
 assert_network_unchanged installed-mode-overview "$offline_before"
