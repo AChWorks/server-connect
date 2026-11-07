@@ -57,7 +57,11 @@ func (m *Manager) InspectActivationJournal() (ActivationJournalStatus, error) {
 			if err != nil {
 				return err
 			}
-			report = ActivationJournalStatus{Phase: "host_route_" + r.Route.State,
+			phase := r.Route.State
+			if hostRouteSupervised(r) {
+				phase = r.Supervision.State
+			}
+			report = ActivationJournalStatus{Phase: "host_route_" + phase,
 				Present: true, OperationID: r.Progress.Ingress.OperationID, RequiresOperatorReview: true}
 			return nil
 		}

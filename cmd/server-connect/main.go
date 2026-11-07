@@ -462,6 +462,33 @@ func run(j bool, m *sc.Manager, args []string) int {
 		}
 		result, err := m.InspectSmartTUNTrial()
 		return output(j, result, err)
+	case "smart-tun-host-status", "smart-tun-host-health":
+		if len(args) != 0 {
+			return output(j, nil, sc.Fault("invalid_arguments", "host status and health take no options"))
+		}
+		if name == "smart-tun-host-health" {
+			result, err := m.RunHostRouteHealthRound()
+			return output(j, result, err)
+		}
+		result, err := m.InspectHostRouteSupervision()
+		return output(j, result, err)
+	case "smart-tun-host-confirm", "smart-tun-host-disconnect":
+		opts := flag.NewFlagSet(name, flag.ContinueOnError)
+		opts.SetOutput(io.Discard)
+		id := opts.String("operation-id", "", "exact supervised host operation ID")
+		var challenge *string
+		if name == "smart-tun-host-confirm" {
+			challenge = opts.String("challenge", "", "one-use operation-bound confirmation challenge")
+		}
+		if e := opts.Parse(args); e != nil || len(opts.Args()) != 0 || *id == "" || challenge != nil && *challenge == "" {
+			return output(j, nil, sc.Fault("invalid_arguments", "exact host operation and confirmation challenge when applicable required"))
+		}
+		if name == "smart-tun-host-confirm" {
+			result, err := m.ConfirmHostRouteSupervision(*id, *challenge)
+			return output(j, result, err)
+		}
+		result, err := m.DisconnectHostRouteSupervision(*id)
+		return output(j, result, err)
 	case "host-core-preparation-qa":
 		opts := flag.NewFlagSet(name, flag.ContinueOnError)
 		opts.SetOutput(io.Discard)
@@ -799,6 +826,13 @@ Commands:
                               NEVER starts VPN, DNS, RPDB, or routing Apply.
   host-capture-preparation-clear --operation-id HEX32
                               Clear only exactly recovered v6/v7/v8 host preparation
+  smart-tun-host-status      Inspect an existing experimental supervised v9 operation
+  smart-tun-host-health      Run its independent bounded selected-path health round
+  smart-tun-host-confirm --operation-id HEX32 --challenge HEX64
+                              Requires fresh authenticated SSH and selected-path proof
+  smart-tun-host-disconnect --operation-id HEX32
+                              Exact Core-first Off; ambiguous recovery stays UNCERTAIN
+                              These commands do not enable general-host Connect.
   smart-tun-host-check --endpoint-ip IP --management-peer IP --underlay-if NAME
                        [--dns-resolver IP --dns-port 53]
                               Read-only selected VLESS hostname/DNS, TCP, routes and

@@ -618,6 +618,9 @@ func (m *Manager) pendingSmartTUNTrial() (string, error) {
 		if err != nil {
 			return "", err
 		}
+		if hostRouteSupervised(r) {
+			return "host_route_" + r.Supervision.State, nil
+		}
 		return "host_route_" + r.Route.State, nil
 	}
 	if marker.Version == hostCoreJournalVersion {

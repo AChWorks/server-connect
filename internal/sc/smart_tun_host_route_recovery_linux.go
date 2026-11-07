@@ -218,6 +218,11 @@ func (m *Manager) ClearRecoveredHostRoutePreparation(op string) error {
 		if err := hostRouteVerifyOff(store, r, defaultHostCoreRecoveryServices()); err != nil {
 			return err
 		}
+		if hostRouteSupervised(r) {
+			if err := hostRouteDisarmHealth(r); err != nil {
+				return err
+			}
+		}
 		if _, err := smartTUNTrialTimerState(); err != nil {
 			return err
 		}

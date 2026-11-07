@@ -4,8 +4,8 @@ package sc
 
 // v9 is a deliberately unavailable general-host Apply: it is the strict
 // persistence/recovery owner for one routed kernel-policy experiment. Its
-// only current mutator entry is the explicit isolated-netns kernel QA. No
-// installed operator CLI can enable routed traffic through this subtype.
+// only mutators are explicit isolated-netns QA and the exact resettable
+// installed test fixture. No operator CLI enables routed traffic through it.
 // Route and native effects MUST share this same durable parent with ingress,
 // core, and their independently selected rollback. The policy observer accepts
 // only separately verified raw/NOTRACK and basic Docker-bridge NAT owners;
@@ -30,7 +30,8 @@ type hostRouteStage struct {
 
 type hostRouteJournal struct {
 	hostCoreJournal
-	Route hostRouteStage `json:"route"`
+	Route       hostRouteStage       `json:"route"`
+	Supervision hostRouteSupervision `json:"supervision,omitempty"`
 }
 
 // Check v8 core/native ownership with its native policy deliberately absent;
@@ -123,7 +124,7 @@ func validateHostRouteJournal(r hostRouteJournal) error {
 	bad := func() error {
 		return activationJournalError("host policy operation identity, progress or receipt invalid")
 	}
-	if r.Version != hostRouteJournalVersion || r.Intent != hostRouteJournalIntent ||
+	if r.Version != hostRouteJournalVersion || (r.Intent != hostRouteJournalIntent && r.Intent != hostRouteSupervisedIntent) ||
 		validateHostCoreJournal(r.coreWithoutPolicy()) != nil || !journalHex64.MatchString(r.Route.PolicySHA256) {
 		return bad()
 	}
@@ -224,7 +225,7 @@ func validateHostRouteJournal(r hostRouteJournal) error {
 	if r.Progress.Ingress.Phase == "recovered" && r.Route.State != "removed" && r.Route.State != "off_pending" {
 		return bad()
 	}
-	return nil
+	return validateHostRouteSupervision(r)
 }
 
 func (r hostRouteJournal) nativeView() smartTUNTrialJournal {
@@ -243,14 +244,23 @@ func decodeHostRouteJournal(raw []byte) (hostRouteJournal, error) {
 	if err := rejectAmbiguousJournalJSON(raw); err != nil {
 		return r, err
 	}
-	if err := requireExactJournalKeys(raw, map[string]bool{
-		"version": true, "intent_type": true, "progress": true, "tunnel_interface": true, "native": true, "core": true, "route": true,
-	}); err != nil {
-		return r, err
-	}
 	var values map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &values); err != nil {
 		return r, activationJournalError("host policy parent invalid")
+	}
+	keys := map[string]bool{"version": true, "intent_type": true, "progress": true, "tunnel_interface": true, "native": true, "core": true, "route": true}
+	var intent string
+	if json.Unmarshal(values["intent_type"], &intent) != nil {
+		return r, activationJournalError("host intent invalid")
+	}
+	if intent == hostRouteSupervisedIntent {
+		keys["supervision"] = true
+		if err := strictHostRouteSupervisionJSON(values["supervision"]); err != nil {
+			return r, err
+		}
+	}
+	if err := requireExactJournalKeys(raw, keys); err != nil {
+		return r, err
 	}
 	for _, v := range values {
 		if bytes.Equal(bytes.TrimSpace(v), []byte("null")) {
@@ -273,7 +283,7 @@ func decodeHostRouteJournal(raw []byte) (hostRouteJournal, error) {
 	// envelope, but a v9 policy ledger can contain route/nft observations.
 	projection := make(map[string]json.RawMessage, len(values)-1)
 	for k, v := range values {
-		if k != "route" {
+		if k != "route" && k != "supervision" {
 			projection[k] = v
 		}
 	}
@@ -341,6 +351,9 @@ func writeHostRouteJournal(store *activationJournalDir, r hostRouteJournal, old 
 func persistHostRouteParent(store *activationJournalDir, r *hostRouteJournal, next hostRouteJournal) error {
 	if store == nil || r == nil {
 		return Fault("guard_unavailable", "missing host routed parent")
+	}
+	if r.Version != next.Version || r.Intent != next.Intent || !hostRouteSupervisionTransition(*r, next) {
+		return Fault("activation_journal_conflict", "host operation intent or supervision authority changed")
 	}
 	if err := store.ensureLockIdentity(); err != nil {
 		return err
@@ -447,6 +460,13 @@ func hostRoutePhasePersist(store *activationJournalDir, r *hostRouteJournal, sta
 	}
 	next := *r
 	next.Route.State = stage
+	if stage == "off_pending" && hostRouteSupervised(next) {
+		next.Supervision.State, next.Supervision.ReconnectStage = "stopped", "none"
+		next.Supervision.Generation++
+		if next.Supervision.Reason == "" {
+			next.Supervision.Reason = "recovery_requested"
+		}
+	}
 	if stage == "effect_possible" && next.Core.Stage == "active_observed" {
 		next.Native.StartupVerified = true
 	}

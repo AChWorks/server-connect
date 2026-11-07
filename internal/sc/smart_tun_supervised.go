@@ -1072,13 +1072,27 @@ func (m *Manager) RunSmartTUNHealthRound(qaKill string) (SmartTUNTrialReceipt, e
 	if m.Dir != DefaultDir || m.Core != DefaultCore || !supervisedKillValid(qaKill, false) {
 		return SmartTUNTrialReceipt{}, Fault("invalid_arguments", "installed supervised health executor required")
 	}
+	version, host, err := m.hostRouteHealthDispatch()
+	if err != nil {
+		return SmartTUNTrialReceipt{}, err
+	}
+	if version == 0 && qaKill == "" {
+		return SmartTUNTrialReceipt{Phase: "absent", ExperimentOnly: true}, nil
+	}
+	if host {
+		if qaKill != "" {
+			return SmartTUNTrialReceipt{}, Fault("invalid_arguments", "legacy QA faults cannot target host supervision")
+		}
+		result, err := m.RunHostRouteHealthRound()
+		return hostRouteTrialReceipt(result), err
+	}
 	if err := smartTUNNativeHostContext(); err != nil {
 		return SmartTUNTrialReceipt{}, err
 	}
 	var snapshot smartTUNTrialJournal
 	var receipt SmartTUNTrialReceipt
 	measure := false
-	err := m.withActivationJournalLock(syscall.Fsync, func(store *activationJournalDir) error {
+	err = m.withActivationJournalLock(syscall.Fsync, func(store *activationJournalDir) error {
 		r, _, err := loadSmartTUNTrialLocked(store)
 		if errors.Is(err, os.ErrNotExist) {
 			receipt = SmartTUNTrialReceipt{Phase: "absent", ExperimentOnly: true}

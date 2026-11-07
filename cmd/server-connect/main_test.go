@@ -1163,3 +1163,40 @@ func TestSelectedHostCheckCLIReadOnlyAndInvalidInputs(t *testing.T) {
 		})
 	}
 }
+
+func TestHostSupervisionCLIRejectsOverridesAndUninstalledUse(t *testing.T) {
+	for _, args := range [][]string{
+		{"smart-tun-host-status", "extra"},
+		{"smart-tun-host-health", "--qa-kill-at", "after-native-rule"},
+		{"smart-tun-host-confirm"},
+		{"smart-tun-host-confirm", "--operation-id", strings.Repeat("a", 32)},
+		{"smart-tun-host-disconnect", "--operation-id", strings.Repeat("a", 32), "--force"},
+		{"smart-tun-host-status"},
+		{"smart-tun-host-health"},
+		{"smart-tun-host-confirm", "--operation-id", strings.Repeat("a", 32), "--challenge", strings.Repeat("b", 64)},
+		{"smart-tun-host-disconnect", "--operation-id", strings.Repeat("a", 32)},
+	} {
+		t.Run(strings.Join(args, "-"), func(t *testing.T) {
+			m := sc.New(filepath.Join(t.TempDir(), "not-created"), "", 0)
+			reader, writer, err := os.Pipe()
+			if err != nil {
+				t.Fatal(err)
+			}
+			old := os.Stdout
+			os.Stdout = writer
+			code := run(true, m, args)
+			writer.Close()
+			os.Stdout = old
+			var response envelope
+			err = json.NewDecoder(reader).Decode(&response)
+			reader.Close()
+			if err != nil || code == 0 || response.OK || response.Error == nil ||
+				(response.Error.Code != "invalid_arguments" && response.Error.Code != "trial_unsupported") {
+				t.Fatalf("unsafe host CLI admission: %v %+v", err, response)
+			}
+			if _, err := os.Stat(m.Dir); !os.IsNotExist(err) {
+				t.Fatal("refused host lifecycle created product state")
+			}
+		})
+	}
+}

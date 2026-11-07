@@ -812,6 +812,9 @@ func recoverSelectedTrialLocked(store *activationJournalDir, selected trialRecov
 		return recoverHostCoreJournalLocked(store, &record, defaultHostCoreRecoveryServices())
 	case hostRouteJournalVersion:
 		record := selected.hostRoute
+		if hostRouteSupervised(record) {
+			return recoverHostSupervisedRouteLocked(store, &record)
+		}
 		return recoverHostRouteJournalLocked(store, &record, defaultHostCoreRecoveryServices())
 	case 2, 3:
 		return recoverLegacyGuardedTrialLocked(store, selected.identity, selected.trial, qaCrashPoint, qaFaultPoint)
