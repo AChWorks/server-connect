@@ -160,12 +160,14 @@ The **current QA-only** bundle is built by `scripts/package.sh` from an independ
 
 The builder accepts exactly these target identities; omitting its optional target argument retains the Debian 13 default. Each artifact has its own target-specific filename and manifest, with the same installer and pinned upstream core.
 
-| QA package target | Installation scope | New native trial admission |
+| QA package target | Installation scope | Legacy v4 `smart-tun-trial-apply` admission |
 | --- | --- | --- |
-| `debian-12-amd64` | Direct/Proxy Only lifecycle on Debian 12 with systemd | Rejected before fixture, profile or host-policy mutation |
-| `debian-13-amd64` | Direct/Proxy Only lifecycle on Debian 13 with systemd | Still restricted to the existing disconnected disposable Docker fixture |
+| `debian-12-amd64` | Direct/Proxy Only lifecycle on Debian 12 with systemd | Legacy v4 activation is rejected before its fixture, profile or host-policy mutation |
+| `debian-13-amd64` | Direct/Proxy Only lifecycle on Debian 13 with systemd | Exact disconnected Docker QA fixture, or the separately admitted isolated Debian 13 US01 QEMU fixture |
 
-After verifying payload ownership and checksums, the installer uses the bundled manager to bind a bounded, unambiguous manifest to the **actual** Debian version and native Linux/amd64 host. Opposite-version, missing, malformed, duplicate and unsupported targets fail before product state or service changes. This read-only check needs no Python dependency or host-version override. It is not publisher authentication or a general ABI/transport support claim. Recovery and inspection of existing native records retain their own ownership checks; the additional Debian 13 restriction applies to new trial activation.
+After verifying payload ownership and checksums, the installer uses the bundled manager to bind a bounded, unambiguous manifest to the **actual** Debian version and native Linux/amd64 host. Opposite-version, missing, malformed, duplicate and unsupported targets fail before product state or service changes. This read-only manager target check itself needs no Python dependency or host-version override. It is not publisher authentication or a general ABI/transport support claim. Recovery and inspection of existing native records retain their own ownership checks; the table's Debian 13 restriction applies specifically to new legacy v4 trial activation.
+
+Separate installed v6 ingress/barrier, v7 link-only and v8 Core-attach preparation commands admit Debian 12/13 under their own explicit disposable-host prerequisites. Their successful preparation does not authorize general-host routing. Experimental v9 native policy evidence remains test-only; ordinary general-host Smart Routing Apply is unavailable. The [support matrix](SUPPORT-MATRIX.md) distinguishes these paths, tested combinations and unresolved release gates.
 
 ### Installed development-release audit
 
