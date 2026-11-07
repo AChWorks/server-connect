@@ -209,10 +209,13 @@ func TestHostIngressNativeStageAndIndependentRollback(t *testing.T) {
 	}
 	_, rawBefore, err := hostIngressRawSnapshot()
 	if err != nil {
-		// The old raw-table probe cannot classify the complete legacy
-		// observer's failure. Keep this a failure until bounded independent
-		// proc/save/path evidence identifies the exact unsupported condition.
-		hostLegacyNativeFailureDiagnostics(t)
+		if hostLegacyNativeVerifyUnsupportedRefusal(t, err, func() (func(*activationJournalDir) error, error) {
+			r, refusal := newHostIngressStage("scing0", 60)
+			return func(store *activationJournalDir) error { return writeHostIngressStage(store, r, nil) }, refusal
+		}) {
+			fmt.Println("INGRESS_UNSUPPORTED_LEGACY_IPV6_CORE_REFUSES_BEFORE_JOURNAL=PASS")
+			t.Skip("NOT_RUN: absent IPv6 legacy core proc inventory; positive ingress requires an observable supported kernel")
+		}
 		t.Fatalf("unclassified complete legacy prerequisite failure: %v", err)
 	}
 

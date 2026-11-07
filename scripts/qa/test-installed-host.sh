@@ -345,22 +345,24 @@ for marker in \
   HOST_SOCKET_BARRIER_REAL_KERNEL_MARK_FILTER; do
   grep -F "$marker=PASS" "$native_host_barrier_log" >/dev/null
 done
-# A runner kernel lacking ip6table_raw is an explicit unsupported-host
-# refusal, NOT evidence of positive protected ingress. On this exact observed
-# condition the product must fail closed before journaling or network Apply.
-# Keep the positive lane mandatory wherever both legacy raw backends work.
-if grep -Fx 'INGRESS_UNSUPPORTED_LEGACY_IPV6_REFUSES_BEFORE_JOURNAL=PASS' "$native_host_barrier_log" >/dev/null; then
+# A missing IPv6 legacy core proc inventory is an unsupported negative lane,
+# never positive protected ingress. Require the exact paired refusal markers:
+# empty successful IPv4 proc reads, IPv6 ENOENT before/after, trusted stable
+# no-table save readers, repeat product refusal and unchanged isolated fixture.
+# Save exit 0 or an absent raw table alone cannot establish this condition.
+# Positive ingress/capture stays mandatory on observable supported kernels.
+if grep -Fx 'INGRESS_UNSUPPORTED_LEGACY_IPV6_CORE_REFUSES_BEFORE_JOURNAL=PASS' "$native_host_barrier_log" >/dev/null; then
   if grep -Eq '^INGRESS_(KERNEL_STAGE_OWNED|IPV4_IPV6_SYNCOOKIE_MARKS|GENERATION_DRAIN_SNAPSHOT|KERNEL_FILTERED_QUIESCENCE|FOREIGN_LISTENER_MARK_REFUSAL|KERNEL_NEGATIVE_PRESERVATION|FOREIGN_RAW_FIB_RPDB_PRESERVED)=PASS$' "$native_host_barrier_log"; then
     echo 'INGRESS_NATIVE_ACCEPTANCE=FAIL (partial positive with unsupported legacy backend)' >&2
     exit 1
   fi
-  echo 'INGRESS_NATIVE_POSITIVE=NOT_RUN (kernel IPv6 legacy raw unavailable; exact product refusal independently proved)'
-  grep -Fx 'HOST_CAPTURE_UNSUPPORTED_LEGACY_IPV6_REFUSES_BEFORE_JOURNAL=PASS' "$native_host_barrier_log" >/dev/null
+  echo 'INGRESS_NATIVE_POSITIVE=NOT_RUN (IPv6 legacy core proc inventory absent; exact product refusal and fixture preservation independently proved)'
+  grep -Fx 'HOST_CAPTURE_UNSUPPORTED_LEGACY_IPV6_CORE_REFUSES_BEFORE_JOURNAL=PASS' "$native_host_barrier_log" >/dev/null
   if grep -Eq '^HOST_CAPTURE_(PREEXISTING_SYSCTL_REQUIRED|FAILED_INTENT_HAS_NO_KERNEL_EFFECT|COMMON_JOURNAL_STAGED_AND_BARRIER_CLOSED|COMMON_JOURNAL_OWNED_OFF|FAILED_BARRIER_RECEIPT_OWNED_OFF|OLD_BOOT_NO_FOREIGN_MUTATION_AND_OWNED_OFF|REAL_SIGKILL_INDEPENDENT_DISPATCH_OWNED_OFF|COMMON_JOURNAL_FOREIGN_NETWORK_PRESERVED|PENDING_CLEAR_REFUSES|CLEAR_FOREIGN_COLLISIONS_REFUSE|RECOVERED_OLD_BOOT_EXACT_TERMINAL_CLEAR|REAL_SIGKILL_RECOVERED_TERMINAL_CLEAR)=PASS$' "$native_host_barrier_log"; then
     echo 'HOST_CAPTURE_NATIVE_ACCEPTANCE=FAIL (partial positive on unsupported legacy kernel)' >&2
     exit 1
   fi
-  echo 'HOST_CAPTURE_NATIVE_POSITIVE=NOT_RUN (unsupported kernel; exact composite refusal proved)'
+  echo 'HOST_CAPTURE_NATIVE_POSITIVE=NOT_RUN (IPv6 legacy core proc inventory absent; exact composite refusal and fixture preservation proved)'
 else
   for marker in \
     INGRESS_KERNEL_STAGE_OWNED \
@@ -373,7 +375,7 @@ else
     grep -Fx "$marker=PASS" "$native_host_barrier_log" >/dev/null
   done
   echo INGRESS_NATIVE_SUPPORTED_KERNEL_POSITIVE=PASS
-  if grep -Fx 'HOST_CAPTURE_UNSUPPORTED_LEGACY_IPV6_REFUSES_BEFORE_JOURNAL=PASS' "$native_host_barrier_log" >/dev/null; then
+  if grep -Fx 'HOST_CAPTURE_UNSUPPORTED_LEGACY_IPV6_CORE_REFUSES_BEFORE_JOURNAL=PASS' "$native_host_barrier_log" >/dev/null; then
     echo 'HOST_CAPTURE_NATIVE_ACCEPTANCE=FAIL (unexpected unsupported result on positive ingress kernel)' >&2
     exit 1
   fi

@@ -52,11 +52,17 @@ func TestHostCaptureGateOneJournalAndOwnedOffNative(t *testing.T) {
 		ingressNativeCommand(t, binary, "-t", "raw", "-A", "PREROUTING", "-p", "tcp", "--dport", "28997", "-j", "NOTRACK")
 		ingressNativeCommand(t, binary, "-t", "raw", "-A", "OUTPUT", "-p", "tcp", "--sport", "28997", "-j", "NOTRACK")
 	}
-	// Missing raw alone cannot classify the complete legacy observer.
-	// Preserve failure; diagnose the actual proc/save/path prerequisite
-	// without probing any absent legacy table or claiming positive capture.
+	// Only independently established missing IPv6 core/proc inventory may
+	// prove unsupported negative QA. Missing raw or save exit 0 alone cannot.
 	if _, _, err := hostIngressRawSnapshot(); err != nil {
-		hostLegacyNativeFailureDiagnostics(t)
+		if hostLegacyNativeVerifyUnsupportedRefusal(t, err, func() (func(*activationJournalDir) error, error) {
+			progress, refusal := newHostCaptureGateProgress("scgate0", 90)
+			r := hostCaptureJournal{Version: hostCaptureJournalVersion, Intent: hostCaptureJournalIntent, Progress: progress}
+			return func(store *activationJournalDir) error { return writeHostCaptureJournal(store, r, nil) }, refusal
+		}) {
+			fmt.Println("HOST_CAPTURE_UNSUPPORTED_LEGACY_IPV6_CORE_REFUSES_BEFORE_JOURNAL=PASS")
+			t.Skip("NOT_RUN: absent IPv6 legacy core proc inventory; positive capture requires an observable supported kernel")
+		}
 		t.Fatalf("unclassified complete legacy prerequisite failure: %v", err)
 	}
 	// An unowned 0->1 sysctl transition is prohibited on real hosts. Prove
