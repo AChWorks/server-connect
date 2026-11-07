@@ -111,6 +111,9 @@ func classifiedExistingHostReplies(raw []byte, sockets map[uint32]smartTUNManage
 }
 
 func runReadOnlyHostNetfilter(binary string, args ...string) ([]byte, error) {
+	if err := verifyHostNetfilterPath("/", binary, 0); err != nil {
+		return nil, err
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, binary, args...)
@@ -148,20 +151,16 @@ func strictEmptyLegacyRawPolicy(raw []byte) bool {
 }
 
 func observedEmptyLegacyRawPolicy() ([]byte, error) {
-	version, err := runReadOnlyHostNetfilter("/usr/sbin/iptables-legacy", "-V")
-	if err != nil || !bytes.HasPrefix(version, []byte("iptables v")) ||
-		!bytes.Contains(version, []byte("(legacy)")) {
-		return nil, errors.New("legacy netfilter backend unavailable")
+	legacy, err := observeHostLegacyPacketPolicy()
+	if err != nil {
+		return nil, err
 	}
-	raw, err := runReadOnlyHostNetfilter("/usr/sbin/iptables-legacy", "-t", "raw", "-S")
-	if err != nil || !strictEmptyLegacyRawPolicy(raw) {
-		return nil, errors.New("legacy raw owner cannot be proven inert")
-	}
-	return raw, nil
+	return legacy.raw[0], nil
 }
 
 // Cross-check the same raw-table semantics around an authenticated kernel
-// inet_diag all-reply-states snapshot. This is a diagnostic only: a new socket can
+// AF_INET inet_diag all-reply-states snapshot. IPv6/mapped sockets are outside
+// this diagnostic scope: a new socket can
 // appear immediately afterwards and an existing socket can close/reuse its
 // tuple. Actual Apply needs generation-aware, independently guarded pinning.
 func observeExistingHostReplySessions(expectedOutputXTCT int) (string, error) {

@@ -563,11 +563,42 @@ This fixture-only evidence does not establish general multi-owner support,
 physical power-loss recovery, permanent `ACTIVE_VERIFIED`, trusted Iranian
 routing data or DNS/domain authority. General-host activation remains blocked.
 
+**Independent legacy packet-policy evidence:** nftables JSON does not enumerate
+the independent legacy IPv4/IPv6 xtables hooks. Even an empty nft ruleset must
+therefore be accompanied by a successful bounded read of each
+`/proc/net/ip_tables_names` / `/proc/net/ip6_tables_names` before and after its
+fixed `iptables-legacy-save` / `ip6tables-legacy-save` dump. The registered-table
+list must remain unchanged, and the complete save must contain every registered
+known `raw`, `mangle`, `nat`, `filter` or `security` table exactly once, with its
+full builtin ACCEPT-only chain set, no rules/custom chains, and complete framing.
+Unknown tables, missing or unreadable proc files/tools, command failure, omitted
+tables or unsupported grammar remain unverified; none means an empty policy.
+
+The fixed root-owned, non-writable Debian alternatives and backend paths are
+validated without changing their selected backend or argv0. A trusted
+`-M /usr/bin/false` suppresses the save tool's userspace module-loader fallback.
+No deliberately absent legacy table is probed with `-t`. Accepted raw-policy
+journal material preserves the old `-S` builtin-chain bytes and order for
+registered tables; a canonical inert representation for an absent table is
+derived only after successful complete evidence. No journal schema migration,
+foreign adoption, table flush or legacy-policy restoration occurs.
+
+This is an IPv4/IPv6 xtables policy snapshot, not complete host-policy evidence:
+ARP/bridge ebtables, tc and BPF are outside its scope. It is observational, not
+an atomic reservation against privileged writers. In particular, Linux table
+lookup can instantiate/autoload a table if another privileged actor removes it
+between enumeration and lookup; suppressing the userspace loader does not remove
+that kernel race. The wider ownership/concurrency and general-host admission
+gates remain blocked.
+
 **Existing NOTRACK TCP hosting sessions:** The root-host read-only boundary may
 identify a possible reply-capable socket match to foreign OUTPUT NOTRACK rules, including half-closed TCP `CLOSE_WAIT` sockets that can still send and conservative `FIN_WAIT`/`TIME_WAIT`/handshake states.
-It independently compares nft/iptables-nft policy counts, requires an empty
-iptables-legacy raw backend and inspects Linux inet_diag socket generations,
-without exposing socket tuples. The snapshot is not a
+It independently compares nft/iptables-nft policy counts, requires the complete
+currently registered IPv4/IPv6 xtables legacy policy to be inert, and inspects
+Linux inet_diag socket generations without exposing socket tuples. The public
+`hosted_reply_scope=ipv4_af_inet_tcp_only` field explicitly limits this diagnostic:
+IPv6 and IPv4-mapped AF_INET6 sockets are not inventoried by it. The separate
+Apply quiescence observer has its own AF_UNSPEC mark/generation gates. The snapshot is not a
 reservation and remains non-atomic: socket churn, new accepted SYNs, stale
 4-tuple exceptions and source-port-only bypasses can undermine safe hosting
 replies. A disposable kernel namespace proves accepted-socket mark

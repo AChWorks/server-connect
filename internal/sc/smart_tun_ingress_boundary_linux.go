@@ -89,11 +89,30 @@ func hostIngressMarkBoundary(r hostIngressStage) error {
 // This is not a reservation: full-host Apply still needs a common journal,
 // verified ingress/egress ordering and its own independently running guard.
 func hostIngressForeignNATBoundary(r hostIngressStage, objects []map[string]any) error {
+	return hostIngressForeignNATBoundaryWithLegacy(r, objects, observeHostLegacyPacketPolicy)
+}
+
+// The argument-local observer exercises the production boundary without
+// requiring unit tests to inspect or modify a real legacy firewall.
+func hostIngressForeignNATBoundaryWithLegacy(r hostIngressStage, objects []map[string]any,
+	readLegacy func() (hostLegacyPacketSnapshot, error)) error {
 	profile, err := generalHostForeignNFTEffects(objects)
 	if err != nil {
 		return ingressFault("foreign firewall inventory is ambiguous")
 	}
-	if profile.ForeignNAT && !observeDockerNATShape(objects, r.Underlay) {
+	// nft absence cannot prove the independent legacy hooks are inert.
+	// Inspect all registered IPv4/IPv6 legacy tables, even without Docker.
+	if readLegacy == nil {
+		return hostLegacyPolicyUnverified()
+	}
+	legacy, err := readLegacy()
+	if err != nil {
+		return err
+	}
+	if !strictEmptyLegacyRawPolicy(legacy.raw[0]) || !strictEmptyLegacyRawPolicy(legacy.raw[1]) || !strictEmptyLegacyNAT(legacy.nat4) {
+		return hostLegacyPolicyUnverified()
+	}
+	if profile.ForeignNAT && !observeDockerNATShapeWithLegacy(objects, r.Underlay, legacy) {
 		return Fault("foreign_nat_unverified", "unverified foreign NAT prevents host ingress preparation")
 	}
 	return nil

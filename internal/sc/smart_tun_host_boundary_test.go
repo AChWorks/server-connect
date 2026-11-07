@@ -203,7 +203,14 @@ func TestGeneralHostForeignNATUnknownExtensionFailsClosed(t *testing.T) {
 			// diagnostic result. The old v6 parent must never stage a table
 			// after seeing a nat-type unknown effect.
 			stage := hostIngressStage{Underlay: "ens3", OperationID: "abababababababababababababababab"}
-			if got := ErrorCode(hostIngressForeignNATBoundary(stage, tc.objects)); got != "foreign_nat_unverified" {
+			if got := ErrorCode(hostIngressForeignNATBoundaryWithLegacy(stage, tc.objects, func() (hostLegacyPacketSnapshot, error) {
+				// Positively inert legacy evidence isolates the independent nft
+				// grammar refusal; absent real backend tools must not steer this test.
+				return hostLegacyPacketSnapshot{
+					raw:  [2][]byte{[]byte("-P PREROUTING ACCEPT\n-P OUTPUT ACCEPT\n"), []byte("-P PREROUTING ACCEPT\n-P OUTPUT ACCEPT\n")},
+					nat4: []byte("-P PREROUTING ACCEPT\n-P INPUT ACCEPT\n-P OUTPUT ACCEPT\n-P POSTROUTING ACCEPT\n"),
+				}, nil
+			})); got != "foreign_nat_unverified" {
 				t.Fatalf("product ingress accepted unknown NAT: %s", got)
 			}
 		})
@@ -309,5 +316,26 @@ func TestGeneralHostBoundaryMarkInheritanceIsReadOnlyAndFailClosed(t *testing.T)
 				t.Fatalf("shared sysctl ownership misreported: %+v", r)
 			}
 		})
+	}
+}
+
+func TestGeneralHostHostedReplyScopeIsExplicitInPublicReceipt(t *testing.T) {
+	for _, status := range []string{hostRepliesNone, hostRepliesPresent, hostRepliesUnverified, hostRepliesNoXT} {
+		o := hostBoundaryFixture()
+		o.hostedReplySessions = status
+		r := assessSmartTUNHostBoundary(o, "ens3")
+		if r.HostedReplyScope != "ipv4_af_inet_tcp_only" {
+			t.Fatalf("socket diagnostic overstates family coverage: %+v", r)
+		}
+		raw, err := json.Marshal(r)
+		if err != nil || !strings.Contains(string(raw), `"hosted_reply_scope":"ipv4_af_inet_tcp_only"`) {
+			t.Fatalf("missing public scope: %s %v", raw, err)
+		}
+		if !strings.Contains(strings.Join(r.Limitations, " "), "IPv4-mapped AF_INET6") {
+			t.Fatal("mapped IPv6 gap hidden")
+		}
+		if r.GeneralHostAdmitted || r.ActivationReady {
+			t.Fatal("diagnostic scope must never grant Apply")
+		}
 	}
 }

@@ -27,6 +27,7 @@ type SmartTUNHostBoundary struct {
 	ForeignNFT          string   `json:"foreign_nft"`
 	DockerNATShape      string   `json:"docker_nat_shape"`
 	HostedReplySessions string   `json:"hosted_reply_sessions"`
+	HostedReplyScope    string   `json:"hosted_reply_scope"`
 	TCPMarkInheritance  string   `json:"tcp_mark_inheritance"`
 	OutOfBandRecovery   string   `json:"out_of_band_recovery"`
 	Reasons             []string `json:"reasons"`
@@ -188,13 +189,14 @@ func assessSmartTUNHostBoundary(o smartTUNHostBoundaryObservations, expectedUnde
 		SSHReturnPath: "unverified", InterfaceInventory: "unverified",
 		IPv4Policy: "unverified", IPv6Policy: "unverified",
 		ForeignNFT: "unverified", DockerNATShape: dockerNATAbsent, HostedReplySessions: hostRepliesUnverified,
+		HostedReplyScope:   "ipv4_af_inet_tcp_only",
 		TCPMarkInheritance: "unverified", OutOfBandRecovery: "not_verified",
 		Reasons: []string{}, Limitations: []string{
 			"A fresh authenticated SSH transport is not proved by this passive kernel route observation.",
 			"An SSH session is not an independent provider-console rescue or host rollback channel.",
 			"Non-atomic kernel observations cannot reserve foreign routes, conntrack, hosting replies or firewall state.",
 			"Safe native Apply, owned-resource rollback, health supervision and selected-VPN egress still require independent evidence.",
-			"A read-only established-TCP socket inventory cannot reserve a session or protect new sockets, old socket generations or tuple reuse.",
+			"Hosted-reply diagnostics observe AF_INET IPv4 TCP only; IPv6 and IPv4-mapped AF_INET6 sockets are not inventoried. No snapshot reserves socket generations or protects tuple reuse.",
 		},
 	}
 	add := func(code string) { r.Reasons = append(r.Reasons, code) }

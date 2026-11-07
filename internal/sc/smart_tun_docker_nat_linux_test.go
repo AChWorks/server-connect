@@ -5,6 +5,7 @@ package sc
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"net/netip"
 	"strings"
 	"testing"
@@ -265,5 +266,83 @@ func TestGeneralHostBoundaryDockerNATShapeStillNeverAuthorizesApply(t *testing.T
 	// xtables, future rules or surviving protected inbound replies are safe.
 	if netip.MustParsePrefix("172.17.0.0/16").Contains(netip.MustParseAddr("8.8.8.8")) {
 		t.Fatal("fixture subnet is not bounded")
+	}
+}
+
+// A clean nft graph says nothing about either independent legacy policy
+// backend. The original fail-first NAT regression now also covers the hidden
+// mangle/filter owners; unknown evidence must not become an empty snapshot.
+func TestHostNATBoundaryAlwaysRequiresBothLegacyInventories(t *testing.T) {
+	for _, tc := range []struct {
+		name, family, table, rule, failedReader string
+		drop, accept                            bool
+	}{
+		{name: "both complete and inert", accept: true},
+		{name: "IPv4 NAT with clean nft", family: "iptables", table: "nat", rule: "-A OUTPUT -p tcp -j DNAT --to-destination 192.0.2.1"},
+		{name: "IPv6 NAT with clean nft", family: "ip6tables", table: "nat", rule: "-A OUTPUT -p tcp -j DNAT --to-destination 2001:db8::1"},
+		{name: "IPv4 mangle MARK", family: "iptables", table: "mangle", rule: "-A OUTPUT -j MARK --set-xmark 0x1/0xffffffff"},
+		{name: "IPv6 mangle CONNMARK", family: "ip6tables", table: "mangle", rule: "-A OUTPUT -j CONNMARK --restore-mark"},
+		{name: "IPv4 filter DROP", family: "iptables", table: "filter", drop: true},
+		{name: "IPv6 filter owner", family: "ip6tables", table: "filter", rule: "-A INPUT -j DROP"},
+		{name: "missing IPv4 inventory", family: "iptables", table: "omit"},
+		{name: "missing IPv6 inventory", family: "ip6tables", table: "omit"},
+		{name: "unknown IPv4 reader", failedReader: "iptables"},
+		{name: "unsupported IPv6 reader", failedReader: "ip6tables"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			calls := map[string]int{}
+			observe := func() (hostLegacyPacketSnapshot, error) {
+				return observeHostLegacyPacketPolicyWith(
+					func(string, int64) ([]byte, error) { return []byte("raw\nnat\nmangle\nfilter\nsecurity\n"), nil },
+					func(binary string, args ...string) ([]byte, error) {
+						if strings.Join(args, " ") != "-M /usr/bin/false" {
+							t.Fatalf("unexpected observation %s %v", binary, args)
+						}
+						family := strings.TrimSuffix(strings.TrimPrefix(binary, "/usr/sbin/"), "-legacy-save")
+						if family != "iptables" && family != "ip6tables" {
+							t.Fatalf("unexpected executable %s", binary)
+						}
+						calls[family]++
+						if family == tc.failedReader {
+							return nil, errors.New("legacy backend unavailable")
+						}
+						var saved []byte
+						for _, table := range []string{"raw", "nat", "mangle", "filter", "security"} {
+							block := hostLegacySaveFixture(family+"-save", table)
+							if family == tc.family && table == tc.table {
+								if tc.drop {
+									block = bytes.Replace(block, []byte(" ACCEPT "), []byte(" DROP "), 1)
+								}
+								if tc.rule != "" {
+									block = bytes.Replace(block, []byte("COMMIT\n"), []byte(tc.rule+"\nCOMMIT\n"), 1)
+								}
+							}
+							saved = append(saved, block...)
+						}
+						if family == tc.family && tc.table == "omit" {
+							return nil, nil
+						}
+						return saved, nil
+					})
+			}
+			err := hostIngressForeignNATBoundaryWithLegacy(hostIngressStage{}, []map[string]any{}, observe)
+			if (err == nil) != tc.accept {
+				t.Fatalf("clean nft accepted=%t want=%t: %v", err == nil, tc.accept, err)
+			}
+			if tc.accept && (calls["iptables"] != 1 || calls["ip6tables"] != 1) {
+				t.Fatalf("empty nft bypassed legacy evidence: %v", calls)
+			}
+			if err != nil && ErrorCode(err) != "foreign_legacy_policy_unverified" {
+				t.Fatalf("unexpected uncertainty: %v", err)
+			}
+		})
+	}
+	if err := hostIngressForeignNATBoundaryWithLegacy(hostIngressStage{}, []map[string]any{}, nil); ErrorCode(err) != "foreign_legacy_policy_unverified" {
+		t.Fatalf("missing observer did not remain uncertain: %v", err)
+	}
+	if err := hostIngressForeignNATBoundaryWithLegacy(hostIngressStage{}, []map[string]any{}, func() (hostLegacyPacketSnapshot, error) {
+		return hostLegacyPacketSnapshot{}, nil
+	}); ErrorCode(err) != "foreign_legacy_policy_unverified" {
+		t.Fatalf("incomplete observer result did not remain uncertain: %v", err)
 	}
 }

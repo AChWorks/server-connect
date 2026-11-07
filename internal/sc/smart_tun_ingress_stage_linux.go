@@ -262,9 +262,13 @@ func hostIngressUnderlay(r hostIngressStage) error {
 // chains, ranges, noncanonical ports, legacy owners and changed snapshots are
 // refused. This inventory is a safety filter only, never an exemption.
 func hostIngressRawSnapshot() (map[uint16]bool, string, error) {
+	legacy, err := observeHostLegacyPacketPolicy()
+	if err != nil {
+		return nil, "", err
+	}
 	ports := map[uint16]bool{}
 	var parts []string
-	for _, binary := range []string{"/usr/sbin/iptables", "/usr/sbin/ip6tables"} {
+	for family, binary := range []string{"/usr/sbin/iptables", "/usr/sbin/ip6tables"} {
 		version, err := runReadOnlyHostNetfilter(binary, "-V")
 		if err != nil || !bytes.Contains(version, []byte("(nf_tables)")) {
 			return nil, "", ingressFault("both nft raw backends must be observable")
@@ -280,14 +284,9 @@ func hostIngressRawSnapshot() (map[uint16]bool, string, error) {
 		for port := range p {
 			ports[port] = true
 		}
-		legacy, err := runReadOnlyHostNetfilter(binary+"-legacy", "-t", "raw", "-S")
-		if err != nil {
-			return nil, "", ingressFault("legacy raw backend inventory unavailable")
-		}
-		if !strictEmptyLegacyRawPolicy(legacy) {
-			return nil, "", ingressFault("legacy raw policy is not empty")
-		}
-		parts = append(parts, string(version), string(raw), string(legacy))
+		// Keep the existing digest representation after complete legacy
+		// policy proof, without probing or loading an absent raw table.
+		parts = append(parts, string(version), string(raw), string(legacy.raw[family]))
 	}
 	if len(ports) == 0 || len(ports) > 128 {
 		return nil, "", ingressFault("stage requires a nonempty verified NOTRACK port inventory")

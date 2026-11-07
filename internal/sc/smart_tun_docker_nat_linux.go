@@ -412,6 +412,16 @@ func dockerNATBridgeFromPolicy(policy []byte) string {
 }
 
 func observeDockerNATShape(objects []map[string]any, underlay string) bool {
+	legacy, err := observeHostLegacyPacketPolicy()
+	return err == nil && observeDockerNATShapeWithLegacy(objects, underlay, legacy)
+}
+
+// Reuse the complete fresh legacy observation already made by the ingress
+// boundary; do not repeat backend reads within that same boundary.
+func observeDockerNATShapeWithLegacy(objects []map[string]any, underlay string, legacy hostLegacyPacketSnapshot) bool {
+	if !strictEmptyLegacyRawPolicy(legacy.raw[0]) || !strictEmptyLegacyRawPolicy(legacy.raw[1]) || !strictEmptyLegacyNAT(legacy.nat4) {
+		return false
+	}
 	nftText, e := runReadOnlyHostNetfilter("/usr/sbin/iptables-nft", "-t", "nat", "-S")
 	if e != nil {
 		return false
@@ -432,15 +442,11 @@ func observeDockerNATShape(objects []map[string]any, underlay string) bool {
 	if e != nil {
 		return false
 	}
-	legacyText, e := runReadOnlyHostNetfilter("/usr/sbin/iptables-legacy", "-t", "nat", "-S")
-	if e != nil {
-		return false
-	}
 	// A second real backend inventory catches ordinary drift while the
 	// bridge and legacy backend are observed. It is still NOT a reservation.
 	after, e := runReadOnlyHostNetfilter("/usr/sbin/iptables-nft", "-t", "nat", "-S")
 	if e != nil || !bytes.Equal(nftText, after) {
 		return false
 	}
-	return strictDockerNATSnapshot(link, addr, routes, objects, nftText, legacyText, bridge, underlay)
+	return strictDockerNATSnapshot(link, addr, routes, objects, nftText, legacy.nat4, bridge, underlay)
 }
