@@ -57,6 +57,29 @@ requires the applicable attribution information, indication of modifications
 and the license text **or URI**. Do not invent a universal requirement to ship
 the complete CC text when its permitted URI route is used.
 
+## Reproducible pinned Core buildinfo inventory (partial evidence)
+
+From a verified extraction of the exact pinned official sing-box v1.14.3
+Linux/amd64 archive, run the read-only inventory script using both shipped
+bytes (not a locally rebuilt Core):
+
+    python3 -B scripts/qa/core-buildinfo-inventory.py --core /verified/sing-box --libcronet /verified/libcronet.so > core-buildinfo.json
+
+The script requires the independently pinned SHA256 for both inputs before
+parsing Go's build information. It checks the Go compiler version,
+main package/module/version, upstream VCS revision and clean-build flag,
+GOOS/GOARCH/CGO, selected tags, and all **140** versioned dependency modules
+and sums. It rejects missing, duplicate, truncated or unexpected metadata;
+the output is deterministic, path- and timestamp-free JSON. The ordinary
+source CI exercises both negative parser cases and the real pinned executable.
+
+The output is **binary buildinfo only**. It does not identify every linked
+native library dependency, determine license compatibility, collect notices,
+provide Corresponding Source, prove installed artifact equivalence, or grant
+publication rights. The three boolean release-clearance flags in its JSON
+must remain false until separately evidenced and approved. Buildinfo cannot
+replace the upstream source/build-graph and license inventory below.
+
 ## Exact Core and libcronet source chain
 
 The official Core's build information records Go `1.26.8`, source revision

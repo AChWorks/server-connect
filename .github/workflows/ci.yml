@@ -66,6 +66,23 @@ jobs:
           SC_TEST_SINGBOX: ${{ github.workspace }}/build/ci/sing-box-1.14.3-linux-amd64/sing-box
         run: |
           set -euo pipefail
+          # Read immutable official Core provenance; do not execute the Core
+          # merely to inventory dependencies. Metadata is not license clearance.
+          python3 -B scripts/qa/test-core-buildinfo-inventory.py
+          python3 -B scripts/qa/core-buildinfo-inventory.py \
+            --core build/ci/sing-box-1.14.3-linux-amd64/sing-box \
+            --libcronet build/ci/sing-box-1.14.3-linux-amd64/libcronet.so \
+            > build/ci/core-buildinfo-inventory.json
+          python3 - <<'PYCORE'
+          import json
+          from pathlib import Path
+          evidence = json.loads(Path("build/ci/core-buildinfo-inventory.json").read_text())
+          assert evidence["dependency_count"] == 140
+          assert evidence["license_notice_audit_complete"] is False
+          assert evidence["corresponding_source_verified"] is False
+          assert evidence["public_redistribution_authorized"] is False
+          print("CORE_BUILDINFO_INVENTORY=PASS (140 pinned Go dependencies; NOT license/source acceptance)")
+          PYCORE
           go vet ./...
           go test ./... -count=1 -timeout=100s -v
           # Report explicit PASS results for both security objectives. These
