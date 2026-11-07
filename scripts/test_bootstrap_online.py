@@ -1048,16 +1048,34 @@ class SignedReleaseTest(unittest.TestCase):
 
     @unittest.skipUnless(os.geteuid() == 0, "real root-owned import ancestry requires CI root")
     def test_signed_guest_imports_preserve_bytes_and_protect_root_trust(self):
+        self.check_signed_guest_import_protection(foreign_owner=False)
+
+    @unittest.skipUnless(os.geteuid() == 0, "foreign-owner imports require real CI root")
+    def test_signed_guest_imports_reject_foreign_owner_with_protected_modes(self):
+        self.check_signed_guest_import_protection(foreign_owner=True)
+
+    def check_signed_guest_import_protection(self, *, foreign_owner):
         trust = self.case / "qa-release-trust"
         trust.mkdir(mode=0o700)
         originals = {"bootstrap-online.sh": self.bootstrap.read_bytes(),
                      "release-auth.py": self.auth.read_bytes(),
                      "release.json": self.metadata.read_bytes(),
                      "archive.tar.gz": self.bundle.read_bytes()}
-        for name in ("bootstrap-online.sh", "release-auth.py", "release.json"):
-            (trust / name).write_bytes(originals[name])
-            (trust / name).chmod(0o666)  # docker cp may preserve an unsafe source mode.
-        self.bundle.chmod(0o666)
+        # Hosted Docker imports were UID/GID 1001 even when modes were safe.
+        # Keep ownership and writable-mode failures as independent cases.
+        imported_modes = {"bootstrap-online.sh": 0o755, "release-auth.py": 0o644,
+                          "release.json": 0o600, "archive.tar.gz": 0o600}
+        for name, mode in imported_modes.items():
+            path = self.bundle if name == "archive.tar.gz" else trust / name
+            if path != self.bundle:
+                path.write_bytes(originals[name])
+            path.chmod(mode if foreign_owner else 0o666)
+            if foreign_owner:
+                os.chown(path, 1001, 1001)
+            self.assertEqual((path.stat().st_uid, path.stat().st_gid,
+                              path.stat().st_mode & 0o777),
+                             (1001, 1001, mode) if foreign_owner else (0, 0, 0o666))
+        original_archive_stat = self.bundle.stat()
         signature = trust / "fixture.sig"
         argv = [
             "/usr/bin/python3", "-I", "-S", str(self.auth), "sign-local-qa",
@@ -1080,15 +1098,23 @@ class SignedReleaseTest(unittest.TestCase):
             env={"PATH": "/usr/sbin:/usr/bin:/sbin:/bin", "LC_ALL": "C"}, timeout=10,
         )
         self.assertEqual(staged.returncode, 0, staged.stdout + staged.stderr)
-        self.assertEqual(staged.stdout.count("mode=666"), 4)
+        if foreign_owner:
+            self.assertEqual(staged.stdout.count("uid=1001 gid=1001"), 4)
+        else:
+            self.assertEqual(staged.stdout.count("mode=666"), 4)
         self.assertIn("SIGNED_QA_IMPORTED_INPUTS_PROTECTED=PASS", staged.stdout)
         for name, raw in originals.items():
             path = trust / name
             self.assertEqual(path.read_bytes(), raw)
-            self.assertEqual((path.stat().st_uid, path.stat().st_mode & 0o777,
-                              path.stat().st_nlink), (0, 0o600, 1))
-        self.assertEqual(self.bundle.stat().st_mode & 0o777, 0o666,
-                         "fixture must not normalize the original external archive")
+            self.assertEqual((path.stat().st_uid, path.stat().st_gid,
+                              path.stat().st_mode & 0o777, path.stat().st_nlink),
+                             (0, 0, 0o600, 1))
+        self.assertEqual(self.bundle.read_bytes(), originals["archive.tar.gz"])
+        self.assertEqual((self.bundle.stat().st_uid, self.bundle.stat().st_gid,
+                          self.bundle.stat().st_mode),
+                         (original_archive_stat.st_uid, original_archive_stat.st_gid,
+                          original_archive_stat.st_mode),
+                         "fixture must not change the original external archive ownership or mode")
         argv[-1] = str(trust / "archive.tar.gz")
         signed = subprocess.run(argv, capture_output=True, text=True, timeout=30)
         self.assertEqual(signed.returncode, 0, signed.stderr)
