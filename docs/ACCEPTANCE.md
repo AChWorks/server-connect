@@ -236,29 +236,77 @@ Under software `TCG` emulation, a 20-second systemd oneshot can time out even wh
 
 ### Installed v9 supervised guest evidence
 
-The [source-bound author checkpoint](https://github.com/AChWorks/server-connect/pull/96#issuecomment-6700582690)
-at `764773b4dba86560b7a851dbb6d6eddb4f7d1ad8` adds a separate installed
-`host_native_supervised_policy_v1` lane in an explicitly authorized Debian 13
-QEMU guest with independently verified QMP reset and restored SSH access.
-A QA factory constructs the operation; the installed Health and Recovery
-executors run the actual parent lifecycle. This is not a public Connect path.
+The [source-bound installed proof](https://github.com/AChWorks/server-connect/issues/3#issuecomment-6701468027)
+records source `ab2d0db5662025b064a06df0a48a10f8749f76e8`, tree
+`fd2eb74fbb19edcd35cd3a8f868fd38ea1158953`, built clean with Go 1.27.1 and
+the official SHA256-pinned sing-box 1.14.3. The shared
+`install.sh --offline --local-qa` installed it in the explicitly authorized,
+independently resettable Debian 13 QEMU guest on IRA-124. The archive SHA256 is
+`5e5eda8ffb664325543e680550a1e1ca45d25b9f37e2811fbc33041a2ddbbef5`;
+the installed manager SHA256 is
+`9118310204eea211fe18e07a497bf5ff84e5e2220b57c64dcfe13ab645db2e81`.
+An explicitly opted-in QA factory constructs the
+`host_native_supervised_policy_v1` operation; installed Health and Recovery
+executors run its actual lifecycle. Public general-host Connect remains
+unavailable. These are author-team results, not independent release approval.
 
-Verified scope: selected real VLESS/TLS/WebSocket, two independently TLS-verified
-IPv4 HTTPS witnesses with distinct Direct and VPN source observations,
-proxy-unaware TCP delivery to both witnesses, rejection of the old SSH
-transport, fresh SSH confirmation and replay rejection. Independently
-stopping the Health timer caused Recovery to finish exact Off with
-`supervisor_unavailable`, preserving the guest's recorded network baseline.
-The exact source/artifact identities, witness nonces and observations belong
-to the linked checkpoint; these results are author-team evidence, not an
-independent release approval.
+**External installed traffic and actual guest reset at this exact source:**
+a transient health failure correctly produced degraded status and refused
+confirmation; a later healthy round and fresh SSH transport confirmed the
+operation. Two proxy-unaware IPv4 TCP/TLS requests reached separate Dev/Test
+HTTPS witnesses through the selected real VLESS/TLS/WebSocket provider.
+Independent origin request/response records corroborated selected VPN egress
+`153.76.112.136`; a response's self-reported IP alone was not the evidence.
+The earlier Direct/VPN comparisons and their nonces remain in the
+[source-bound Master checkpoint](https://github.com/AChWorks/server-connect/pull/96#issuecomment-6700582690).
 
-This lane has not established the full outage/reconnect/health-failure matrix,
-UDP, DNS, IPv6, trusted Iranian public Direct, hosted foreign-client replies,
-reboot/power-loss recovery or safe overlapping-owner cleanup. Successful
-controlled Off does not resolve unreceipted effects or route/rule ABA. QMP
-recovery of the disposable guest does not prove rescue access for the
-underlying physical host. Keep these scopes separate in the
+An independent QMP `system_reset` while the installed operation was healthy
+changed the guest boot ID. Without a manual recovery command or replacement
+payload, installed autonomous executors reached `host_route_stopped`,
+`recovery_verified=true`, `reason=boot_changed`. Core was inactive and the
+old operation's kernel footprint was absent. Operator-owned
+`tcp_fwmark_accept` remained at the new boot's `0`; the product did not
+restore the old fixture's `1`. Normal exact terminal Clear then succeeded:
+journal absent, Core inactive, both timers inactive. Postboot/postclear
+snapshots matched the clean new-boot structure recorded before installation,
+SHA256 `0acff0af472a65062ab6008331a9d9e1ee89ff09abd5545cbf01eda6777f3bca`.
+This establishes absence of the old owned operation after a real guest reset;
+it does not establish preservation of arbitrary pre-reboot host resources or
+physical power-loss recovery.
+
+**Earlier installed source remains separate:** at
+`764773b4dba86560b7a851dbb6d6eddb4f7d1ad8`, old SSH rejection, fresh
+confirmation/replay rejection, Health-timer loss, Recovery-timer loss, selected
+Core SIGKILL and unconfirmed activation expiry had their own same-boot
+controlled Off results and baseline evidence. The initial reset test failed
+because recovery demanded the old scalar value. That failure is retained in
+the checkpoint; the candidate dispatcher was repaired and the automatic
+installed reset was retested at `ab2d0db` as described above. The earlier
+fault results must not be relabeled as executions of the later source.
+
+**Independent native evidence is another lane:** Test Server built exact
+`ab2d0db` and passed eight bounded fresh-namespace cases, including selected
+VLESS relay/client-Core loss with independently witnessed actual TCP/UDP and
+no observed forbidden Direct delivery, unreceipted-effect refusal/preservation,
+legacy-policy refusal/preservation, capture/Off/old-boot/SIGKILL and active
+policy drift. Seventeen raw host captures were byte-identical. These isolated
+TCP/UDP and simulated-boot results are distinct from the external installed
+TCP/TLS witnesses and real QMP reset; they do not establish field UDP.
+
+For the `ab2d0db` checkpoint, [Source CI 42332010936](https://github.com/AChWorks/server-connect/actions/runs/42332010936)
+succeeded 3/3, while [Installed CI 42332008830](https://github.com/AChWorks/server-connect/actions/runs/42332008830)
+failed both lanes: Debian 13 needed complete legacy proc/save/provenance
+diagnostics, and Debian 12's signed QA fixture failed protected input ancestry.
+Those failures require remediation and a new exact-candidate run; the guest
+result does not replace the failing installed matrix or relax product refusal.
+
+The full outage/reconnect/health-failure matrix, installed field UDP, DNS/FakeIP,
+IPv6, trusted Iranian public Direct, hosted foreign-client replies, physical
+power-loss recovery and overlapping-owner safety remain unaccepted. Controlled
+Off and the bounded new-boot result do not resolve unreceipted effects,
+route/RPDB ABA or stale FakeIP reuse. QMP recovery of this disposable guest
+does not prove rescue access for the physical IRA host; its root networking
+was not activated by this test. Keep the scopes separate in the
 [development support matrix](SUPPORT-MATRIX.md).
 
 ## Registry-country data boundary
