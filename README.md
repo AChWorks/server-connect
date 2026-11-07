@@ -113,10 +113,14 @@ In an isolated disposable namespace, a selected synthetic VLESS client/server
 showed actual independent TCP and UDP Direct/VPN delivery, no Direct fallback
 after selected-server outage, preserved foreign-origin hosted replies, and exact
 native route/rule/nftables restoration on graceful stop. A separate independent
-DNS-responder fixture established that the native port-53 hijack rule (rather
-than TUN dns_mode alone) causes third-party-address DNS queries to use the
+DNS-responder fixture established that the native port-53 hijack rule plus
+dns_mode=disabled causes third-party-address DNS queries entering TUN to use the
 selected VPN-detoured resolver, with no Direct DNS fallback on provider outage.
-This is a bounded A/UDP DNS proof, not a full resolver/IPv6 acceptance. A forced Core SIGKILL
+Disabling native platform DNS interception is essential here: with
+dns_mode=hijack, even directly attached DNS peers failed when VPN was down.
+The final native policy preserves the local DNS peer before, during and after
+the provider outage. This is a bounded A/UDP DNS proof, not a full resolver or
+IPv6-DNS acceptance. A forced Core SIGKILL
 left kernel resources behind; restart/normal stop did **not** remove every
 orphan. Therefore the preview is **not** the general-host Smart Routing Apply
 path, and no installed system should run it as an active VPN without a

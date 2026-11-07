@@ -50,8 +50,8 @@ func TestNativeSmartPolicyUsesOfficialSingBox(t *testing.T) {
 			t.Fatalf("%s not enabled", key)
 		}
 	}
-	if inbound["dns_mode"] != "hijack" {
-		t.Fatal("DNS hijack absent")
+	if inbound["dns_mode"] != "disabled" {
+		t.Fatal("platform DNS must remain unmodified; TUN route rule handles nonlocal DNS")
 	}
 	if _, ok := inbound["route_exclude_address_set"]; ok {
 		t.Fatal("kernel IR bypass overrides manual VPN")

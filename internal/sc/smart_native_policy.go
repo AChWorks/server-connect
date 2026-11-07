@@ -77,12 +77,12 @@ func NativeSmartRoutingConfig(profile Profile, opts NativePolicyOptions, operato
 		return nil, err
 	}
 
-	// TUN dns_mode alone did not capture ordinary application DNS in the
-	// independent Linux namespace witness: the original destination was sent
-	// raw through VLESS. An explicit native port-53 hijack must come before
-	// the ordinary destination routing decisions so the chosen VPN-detoured
-	// resolver can answer without a host DNS rewrite or custom netfilter.
-	// This does not prove every local, TCP, or IPv6 resolver path is protected.
+	// The independent Linux namespace witness showed dns_mode=hijack
+	// intercepts even directly attached DNS peers, breaking local DNS when
+	// the VPN provider is unavailable. Keep platform DNS untouched and let
+	// native route pre-match hijack port 53 only when packets enter TUN.
+	// The selected VPN resolver itself remains tunnel-detoured. This is a
+	// bounded UDP DNS proof, not blanket TCP/IPv6/resolver acceptance.
 	rules := []any{
 		map[string]any{"port": 53, "action": "hijack-dns"},
 		map[string]any{"ip_is_private": true, "action": "bypass", "outbound": "direct"},
@@ -159,7 +159,7 @@ func NativeSmartRoutingConfig(profile Profile, opts NativePolicyOptions, operato
 			"type": "tun", "tag": "smart-tun",
 			"interface_name": opts.InterfaceName, "address": address,
 			"mtu": 1400, "auto_route": true, "auto_redirect": true,
-			"strict_route": true, "dns_mode": "hijack",
+			"strict_route": true, "dns_mode": "disabled",
 		}},
 		"dns": map[string]any{
 			"servers": []any{

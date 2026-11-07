@@ -24,11 +24,13 @@ Isolated user/network-namespace testing has positively witnessed genuine
 VLESS TCP/UDP delivery for VPN-required traffic, a Direct exception, and a foreign
 inbound hosted reply while another new outbound to that same foreign IP
 continues through the VPN. An independent UDP DNS responder additionally
-demonstrated that an explicit native port-53 hijack must precede ordinary
-IP/geo rules: TUN dns_mode alone was insufficient in this fixture. The
-third-party-address application DNS query then traversed the VPN to the
-configured resolver; selected-provider outage did not use Direct DNS.
-This is not evidence for untested DNS transports, IPv6 or host-local resolvers.
+demonstrated that an explicit native port-53 route hijack plus
+dns_mode=disabled must be used: TUN dns_mode=hijack in the fixture rerouted
+directly attached DNS peers into the VPN and broke them during provider outage.
+With native DNS interception disabled, the public DNS request still enters TUN
+and is redirected by route rules through the selected VPN resolver, while the
+on-link DNS peer remains Direct even when the VPN provider is down.
+This is not evidence for untested TCP DNS, other DNS transports, or IPv6 DNS.
 Provider shutdown did not otherwise fall back to Direct.
 Graceful Core stop restored exact private-namespace routes, rules and nftables.
 **Hard SIGKILL leaves native sing-box route/RPDB/nftables state behind**;
