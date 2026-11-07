@@ -70,9 +70,10 @@ func verifyHostRouteActivePolicy(r hostRouteJournal) error {
 	if err := hostIngressUnderlay(i); err != nil {
 		return err
 	}
-	if err := hostIngressMarkBoundary(i); err != nil {
-		return err
-	}
+	// hostIngressMarkBoundary is preparation-only: it requires the capture
+	// rule to be absent. Below, use this operation's exact active RPDB/FIB
+	// receipts and the complete ingress/native nft observer instead; these
+	// retain foreign-selector, mark-overlap, NOTRACK/NAT and offload checks.
 	if v, err := readHostIngressSysctl(); err != nil || v != 1 {
 		return ingressFault("host socket mark inheritance changed")
 	}
