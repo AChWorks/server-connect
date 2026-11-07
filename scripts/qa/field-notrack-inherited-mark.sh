@@ -3,15 +3,19 @@
 # SYN mark only when tcp_fwmark_accept is enabled in the same netns.
 # The root host's routing/firewall/sysctl is NEVER modified by this test.
 set -Eeuo pipefail
+umask 077
 export PATH=/usr/sbin:/usr/bin:/sbin:/bin LC_ALL=C
-[[ $EUID -eq 0 ]] || { echo 'NOT_RUN: root is required' >&2; exit 2; }
-command -v unshare >/dev/null && command -v nft >/dev/null && command -v ip >/dev/null || {
-  echo 'NOT_RUN: unshare/ip/nft not installed' >&2; exit 2;
-}
+unset PYTHONOPTIMIZE PYTHONPATH PYTHONHOME PYTHONSTARTUP PYTHONUSERBASE
+[[ $# == 0 && $EUID -eq 0 ]] || { echo 'NOT_RUN: root is required' >&2; exit 2; }
+for name in unshare ip nft python3 sysctl readlink; do
+  command -v "$name" >/dev/null || { echo "NOT_RUN: missing $name" >&2; exit 2; }
+done
 unshare -n /bin/bash <<'GUEST'
 set -Eeuo pipefail
 export PATH=/usr/sbin:/usr/bin:/sbin:/bin LC_ALL=C
-[[ "$(readlink /proc/1/ns/net)" != "$(readlink /proc/self/ns/net)" ]] || {
+root_ns=$(readlink /proc/1/ns/net) || { echo 'REFUSED: root namespace identity unavailable' >&2; exit 3; }
+test_ns=$(readlink /proc/self/ns/net) || { echo 'REFUSED: test namespace identity unavailable' >&2; exit 3; }
+[[ $root_ns =~ ^net:\[[0-9]+\]$ && $test_ns =~ ^net:\[[0-9]+\]$ && "$root_ns" != "$test_ns" ]] || {
   echo 'REFUSED: test namespace is not independent of root' >&2; exit 3;
 }
 ip link set lo up
@@ -25,32 +29,56 @@ nft 'add rule inet scfmarkqa untracked_in tcp dport { 28888, 28889 } notrack'
 nft 'add rule inet scfmarkqa untracked_out tcp sport { 28888, 28889 } notrack'
 nft 'add rule inet scfmarkqa output_witness tcp sport 28889 meta mark 0x00540000 counter'
 sysctl -q -w net.ipv4.tcp_fwmark_accept=0
-python3 - 28888 0 <<'PY'
-import socket,threading,sys
-port=int(sys.argv[1]); expected=int(sys.argv[2]);SO_MARK=36
-server=socket.socket();server.settimeout(4);server.bind(('127.0.0.1',port));server.listen(1)
-def client():
- c=socket.socket();c.settimeout(4);c.connect(('127.0.0.1',port));c.sendall(b'hi');assert c.recv(2)==b'ok';c.close()
-worker=threading.Thread(target=client);worker.start()
-conn,_=server.accept();mark=conn.getsockopt(socket.SOL_SOCKET,SO_MARK)
-assert mark==expected, f'negative control inherited unexpected mark {mark:#x}'
-assert conn.recv(2)==b'hi';conn.sendall(b'ok');conn.close();server.close();worker.join()
+python3 -I -S -B - 28888 0 <<'PY'
+import socket
+import sys
+
+port, expected = int(sys.argv[1]), int(sys.argv[2])
+# The kernel completes connect against the listening socket before accept.
+# Keep both ends on the main thread so every assertion is a process failure.
+with socket.socket() as server, socket.socket() as client:
+    server.settimeout(4)
+    server.bind(('127.0.0.1', port))
+    server.listen(1)
+    client.settimeout(4)
+    client.connect(('127.0.0.1', port))
+    conn, _ = server.accept()
+    with conn:
+        conn.settimeout(4)
+        mark = conn.getsockopt(socket.SOL_SOCKET, socket.SO_MARK)
+        assert mark == expected, f'negative control inherited unexpected mark {mark:#x}'
+        client.sendall(b'hi')
+        assert conn.recv(2) == b'hi'
+        conn.sendall(b'ok')
+        assert client.recv(2) == b'ok'
 print('NOTRACK_MARK_DISABLED_NEGATIVE_CONTROL=PASS')
 PY
 sysctl -q -w net.ipv4.tcp_fwmark_accept=1
-python3 - 28889 5505024 <<'PY'
-import socket,threading,sys
-port=int(sys.argv[1]); expected=int(sys.argv[2]);SO_MARK=36
-server=socket.socket();server.settimeout(4);server.bind(('127.0.0.1',port));server.listen(1)
-def client():
- c=socket.socket();c.settimeout(4);c.connect(('127.0.0.1',port));c.sendall(b'hi');assert c.recv(2)==b'ok';c.close()
-worker=threading.Thread(target=client);worker.start()
-conn,_=server.accept();mark=conn.getsockopt(socket.SOL_SOCKET,SO_MARK)
-assert mark==expected, f'positive control failed to inherit bypass mark {mark:#x}'
-assert conn.recv(2)==b'hi';conn.sendall(b'ok');conn.close();server.close();worker.join()
+python3 -I -S -B - 28889 5505024 <<'PY'
+import socket
+import sys
+
+port, expected = int(sys.argv[1]), int(sys.argv[2])
+# The kernel completes connect against the listening socket before accept.
+# Keep both ends on the main thread so every assertion is a process failure.
+with socket.socket() as server, socket.socket() as client:
+    server.settimeout(4)
+    server.bind(('127.0.0.1', port))
+    server.listen(1)
+    client.settimeout(4)
+    client.connect(('127.0.0.1', port))
+    conn, _ = server.accept()
+    with conn:
+        conn.settimeout(4)
+        mark = conn.getsockopt(socket.SOL_SOCKET, socket.SO_MARK)
+        assert mark == expected, f'positive control failed to inherit bypass mark {mark:#x}'
+        client.sendall(b'hi')
+        assert conn.recv(2) == b'hi'
+        conn.sendall(b'ok')
+        assert client.recv(2) == b'ok'
 print('NOTRACK_ACCEPTED_SOCKET_BYPASS_MARK=PASS')
 PY
-nft -j list chain inet scfmarkqa output_witness | python3 -c '
+nft -j list chain inet scfmarkqa output_witness | python3 -I -S -B -c '
 import json,sys
 rules=[x["rule"] for x in json.load(sys.stdin)["nftables"] if "rule" in x]
 assert len(rules)==1

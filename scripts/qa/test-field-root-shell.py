@@ -57,7 +57,7 @@ print('FIELD_ROOT_PIPEFAIL_OWNERSHIP_CHECK=PASS')
 # This proof must never use or mutate the root host network namespace.
 proof = SESSION.read_text()
 for required in (
-    'unshare -n /usr/bin/python3 -B -',
+    'unshare -n /usr/bin/python3 -I -S -B -',
     "assert os.stat('/proc/self/ns/net').st_ino != os.stat('/proc/1/ns/net').st_ino",
     'NOTRACK_EXISTING_EXACT_SOCKET_REPLY=PASS',
     'NOTRACK_NEW_ACCEPTED_SOCKET_REPLY=PASS',
@@ -73,7 +73,7 @@ drain = DRAIN.read_text()
 # bash -n does not parse the actual Python executed after unshare.
 assert drain.count("<<'PY'\n") == 1
 ast.parse(drain.split("<<'PY'\n", 1)[1].rsplit('\nPY\n', 1)[0])
-assert drain.index("unshare -n /usr/bin/python3 -B -") < drain.index("nft('''")
+assert drain.index("unshare -n /usr/bin/python3 -I -S -B -") < drain.index("nft('''")
 for required in (
     "assert os.stat('/proc/self/ns/net').st_ino != os.stat('/proc/1/ns/net').st_ino",
     "INET_DIAG_MARK",
@@ -124,3 +124,9 @@ print('FIELD_ROOT_PINNED_IRAN_DIRECT_SCOPE=PASS')
 # Execute the actual recovery/finalizer bodies with rootless kernel stand-ins.
 # This checks partial effects and real flock exclusion, beyond text ordering.
 subprocess.run(["python3", "-B", str(ROOT / "scripts/qa/test-field-root-recovery.py")], check=True)
+
+# Exercise the actual helper assertions and inet_diag parser without root or
+# network effects. The installed-host CI lane already runs this entrypoint.
+subprocess.run(['/usr/bin/python3', '-I', '-S', '-B',
+                str(ROOT / 'scripts/qa/test-notrack-evidence.py')], check=True)
+print('FIELD_NOTRACK_EXECUTABLE_EVIDENCE_REGRESSIONS=PASS')

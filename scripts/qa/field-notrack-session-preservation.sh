@@ -4,10 +4,10 @@
 set -Eeuo pipefail
 umask 077
 export PATH=/usr/sbin:/usr/bin:/sbin:/bin LC_ALL=C
-unset PYTHONOPTIMIZE PYTHONPATH PYTHONHOME
+unset PYTHONOPTIMIZE PYTHONPATH PYTHONHOME PYTHONSTARTUP PYTHONUSERBASE
 [[ $# == 0 && $EUID == 0 ]] || { echo 'NOT_RUN: isolated kernel proof needs root with no args' >&2; exit 2; }
 for cmd in unshare nft ip python3; do command -v "$cmd" >/dev/null || { echo 'NOT_RUN: missing tool' >&2; exit 2; }; done
-unshare -n /usr/bin/python3 -B - <<'PY'
+unshare -n /usr/bin/python3 -I -S -B - <<'PY'
 import json
 import os
 import socket
@@ -105,7 +105,7 @@ try:
     received = other_client.recv(1)
 except socket.timeout:
     received = None
-assert received != b'X', 'unmarked hosted response leaked past guard'
+assert received is None, 'unmarked hosted response delivered bytes or EOF past guard'
 assert count('capture') > 0 and count('guard') > 0
 print('NOTRACK_UNPROTECTED_REPLY_FAIL_CLOSED=PASS', flush=True)
 # An already-marked accepted socket continues to receive its replies.

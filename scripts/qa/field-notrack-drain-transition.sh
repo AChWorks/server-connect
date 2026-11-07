@@ -5,12 +5,12 @@
 set -Eeuo pipefail
 umask 077
 export PATH=/usr/sbin:/usr/bin:/sbin:/bin LC_ALL=C
-unset PYTHONPATH PYTHONHOME PYTHONOPTIMIZE
+unset PYTHONOPTIMIZE PYTHONPATH PYTHONHOME PYTHONSTARTUP PYTHONUSERBASE
 [[ $# == 0 && $EUID == 0 ]] || { echo 'NOT_RUN: root with no arguments required' >&2; exit 2; }
 for name in unshare ip nft python3; do
   command -v "$name" >/dev/null || { echo "NOT_RUN: missing $name" >&2; exit 2; }
 done
-unshare -n /usr/bin/python3 -B - <<'PY'
+unshare -n /usr/bin/python3 -I -S -B - <<'PY'
 import json
 import os
 import socket
@@ -65,9 +65,13 @@ def kernel_socket_marks():
                 assert len(buffer) - offset >= 16
                 nlen, kind, flags, seq, pid = struct.unpack_from('=IHHII', buffer, offset)
                 assert nlen >= 16 and offset + nlen <= len(buffer) and seq == 1 and pid in (0, diag.getsockname()[0])
+                # NLM_F_DUMP_INTR may occur on any data message or DONE.
+                # A dump with missing sockets cannot authorize a drain.
+                assert not flags & 0x10, 'interrupted inet_diag dump'
                 raw = buffer[offset + 16:offset + nlen]
                 if kind == 3:  # NLMSG_DONE
                     assert len(raw) >= 4 and struct.unpack_from('=I', raw)[0] == 0
+                    assert offset + ((nlen + 3) & ~3) == len(buffer), 'records after inet_diag DONE'
                     return rows
                 assert kind == 20 and len(raw) >= 72 and raw[0] == socket.AF_INET
                 local, peer = struct.unpack_from('!HH', raw, 4)
@@ -256,7 +260,7 @@ add rule inet sc_drain_qa {chain} meta iif 0 tcp sport {port} meta mark & 0x00ff
                 leaked = client.recv(len(b'cookie-unprotected-reply'))
             except socket.timeout:
                 leaked = None
-            assert leaked != b'cookie-unprotected-reply' and packets(chain) > 0, 'negative cookie control did not drop'
+            assert leaked is None and packets(chain) > 0, 'unprotected cookie reply delivered bytes or EOF, or guard did not drop'
             print('DRAIN_' + label + '_SYN_ONLY_COOKIE_REPLY_LOSS=REPRODUCED', flush=True)
         else:
             exchange(client, accepted, b'cookie-ack-protected-reply')
@@ -314,7 +318,7 @@ try:
     leaked = remote_accepted.recv(len(b'outbound-must-not-bypass'))
 except socket.timeout:
     leaked = None
-assert leaked != b'outbound-must-not-bypass' and packets('capture') > 0 and packets('guard') > 0
+assert leaked is None and packets('capture') > 0 and packets('guard') > 0, 'host-origin payload delivered bytes or EOF'
 print('DRAIN_HOST_ORIGIN_SERVICE_SOURCE_PORT_FAILS_CLOSED=PASS', flush=True)
 for item in (bound_client, remote_accepted, remote_listener):
     item.close()
@@ -335,7 +339,7 @@ try:
     unexpected = bad_client.recv(len(b'failclosed'))
 except socket.timeout:
     unexpected = None
-assert unexpected != b'failclosed', 'missing inherited mark leaked around guard'
+assert unexpected is None, 'missing inherited mark delivered bytes or EOF around guard'
 assert packets('capture') > 0 and packets('guard') > 0
 print('DRAIN_SYSCTL_DRIFT_FAILS_CLOSED=PASS', flush=True)
 for s in (new_client, new_accepted, reused_client, reused_accepted,
