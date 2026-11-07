@@ -18,6 +18,13 @@ type NativePolicyOptions struct {
 	Mode              string // "default" or "bypass_iran"
 }
 
+// NativePolicyTableIndex and NativePolicyRuleIndex reserve predictable native
+// RPDB slots for Server Connect. Admission must verify they are free before
+// the Core starts; sing-tun's auto_redirect also uses a separate random table
+// at priority 1 and requires its own crash-recovery cleanup.
+const NativePolicyTableIndex = 27432
+const NativePolicyRuleIndex = 14200
+
 // NativeSmartRoutingConfig deliberately delegates TUN, routing and nftables to
 // official sing-box. The separate activation/runtime guards and host admission
 // are not implemented by this compiler; callers MUST NOT treat a successful
@@ -159,6 +166,7 @@ func NativeSmartRoutingConfig(profile Profile, opts NativePolicyOptions, operato
 			"type": "tun", "tag": "smart-tun",
 			"interface_name": opts.InterfaceName, "address": address,
 			"mtu": 1400, "auto_route": true, "auto_redirect": true,
+			"iproute2_table_index": NativePolicyTableIndex, "iproute2_rule_index": NativePolicyRuleIndex,
 			"strict_route": true, "dns_mode": "disabled",
 		}},
 		"dns": map[string]any{

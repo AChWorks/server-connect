@@ -53,6 +53,10 @@ func TestNativeSmartPolicyUsesOfficialSingBox(t *testing.T) {
 	if inbound["dns_mode"] != "disabled" {
 		t.Fatal("platform DNS must remain unmodified; TUN route rule handles nonlocal DNS")
 	}
+	if inbound["iproute2_table_index"] != float64(NativePolicyTableIndex) ||
+		inbound["iproute2_rule_index"] != float64(NativePolicyRuleIndex) {
+		t.Fatal("native recovery cannot identify policy-owned RPDB slots")
+	}
 	if _, ok := inbound["route_exclude_address_set"]; ok {
 		t.Fatal("kernel IR bypass overrides manual VPN")
 	}
