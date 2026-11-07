@@ -619,7 +619,7 @@ assert data["active_route_verified"] is False
 assert [(mode["id"],mode["availability"],mode["general_host_activation"]) for mode in data["modes"]]==[
     ("direct","implemented",True),
     ("proxy_only","implemented",True),
-    ("smart_routing","disposable_guest_only",False),
+    ("smart_routing","candidate_not_field_verified",False),
 ]
 '
 printf '18\n0\n' | docker exec -i "$container" /usr/local/bin/server-connect menu >"$scratch/installed-mode-menu.log"
@@ -630,7 +630,7 @@ message=Path(sys.argv[1]).read_text()
 assert "18 Mode Overview" in message
 assert '"observed_mode": "unknown"' in message
 assert '"host_direct_path_proof": "not_run"' in message
-assert '"availability": "disposable_guest_only"' in message
+assert '"availability": "candidate_not_field_verified"' in message
 assert '"general_host_activation": false' in message
 PYMODEMENU
 assert_network_unchanged installed-mode-overview "$offline_before"
