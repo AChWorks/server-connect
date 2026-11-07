@@ -63,7 +63,15 @@ From a verified extraction of the exact pinned official sing-box v1.14.3
 Linux/amd64 archive, run the read-only inventory script using both shipped
 bytes (not a locally rebuilt Core):
 
-    python3 -B scripts/qa/core-buildinfo-inventory.py --core /verified/sing-box --libcronet /verified/libcronet.so > core-buildinfo.json
+    python3 -B scripts/qa/core-buildinfo-inventory.py --core /verified/sing-box --libcronet /verified/libcronet.so --upstream-go-sum /verified/upstream-go.sum > core-buildinfo.json
+
+Obtain the GoSum from the pinned sing-box source revision
+7054cac5124465ffdb145870d7c01885566711b1; its independently checked
+SHA256 is 5fa44177a4219976213e3ce746431d6907b32b183ba9b74f8f7d85044b0028ef.
+At this source identity, **140/140 Core buildinfo dependencies and module sums
+match** the exact upstream GoSum. The source CI verifies the source digest
+before parsing. If the optional GoSum is not provided, the tool reports
+NOT_RUN for that comparison; it does not silently claim source parity.
 
 The script requires the independently pinned SHA256 for both inputs before
 parsing Go's build information. It checks the Go compiler version,

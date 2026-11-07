@@ -60,6 +60,26 @@ class ParserTests(unittest.TestCase):
                 with self.assertRaises(inventory.InventoryError):
                     inventory.parse_buildinfo(broken)
 
+    def test_pinned_upstream_gosum_comparison_and_mutation_refusal(self):
+        rows = "".join(f"example.org/mod{i:03d} v1.2.3 {SUM}\n"
+                       for i in range(inventory.DEP_COUNT))
+        metadata = inventory.parse_buildinfo(sample())
+        with tempfile.TemporaryDirectory(prefix="sc-pinned-sum-negative-") as temporary:
+            path = Path(temporary) / "go.sum"
+            path.write_text(rows)
+            source_sha = hashlib.sha256(rows.encode()).hexdigest()
+            with patch.object(inventory, "PINNED_SOURCE_GOSUM_SHA256", source_sha):
+                result = inventory.compare_pinned_go_sum(path, metadata["dependencies"])
+                self.assertEqual(result["status"], "PASS")
+                self.assertEqual(result["matched_dependencies"], 140)
+            path.write_text(rows.replace("mod001 v1.2.3", "mod001 v1.2.4", 1))
+            with self.assertRaisesRegex(inventory.InventoryError, "digest mismatch"):
+                inventory.compare_pinned_go_sum(path, metadata["dependencies"])
+            altered_sha = hashlib.sha256(path.read_bytes()).hexdigest()
+            with patch.object(inventory, "PINNED_SOURCE_GOSUM_SHA256", altered_sha):
+                with self.assertRaisesRegex(inventory.InventoryError, "not attested"):
+                    inventory.compare_pinned_go_sum(path, metadata["dependencies"])
+
     def test_verify_digest_refuses_before_reading_go(self):
         with tempfile.TemporaryDirectory(prefix="sc-buildinfo-negative-") as temporary:
             tmp = Path(temporary)

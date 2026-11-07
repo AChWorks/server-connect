@@ -58,6 +58,9 @@ jobs:
             --output build/ci/sing-box.tar.gz \
             https://github.com/SagerNet/sing-box/releases/download/v1.14.3/sing-box-1.14.3-linux-amd64.tar.gz
           echo 'e2bdf179c15a3652955dc44867e33ca0965c9c9b91b34267dcc5a5d639a5feee  build/ci/sing-box.tar.gz' | sha256sum --check
+          # SHA-pin the exact upstream source metadata, independent of the binary.
+          curl -qfLsS --proto '=https' --proto-redir '=https' --retry 2 --connect-timeout 15 --max-time 90 --output build/ci/sing-box-upstream-go.sum https://raw.githubusercontent.com/SagerNet/sing-box/7054cac5124465ffdb145870d7c01885566711b1/go.sum
+          echo '5fa44177a4219976213e3ce746431d6907b32b183ba9b74f8f7d85044b0028ef  build/ci/sing-box-upstream-go.sum' | sha256sum --check
           tar -xzf build/ci/sing-box.tar.gz -C build/ci
           build/ci/sing-box-1.14.3-linux-amd64/sing-box version
       - name: Unit tests, pinned-core local VLESS integration, static Go checks
@@ -72,12 +75,15 @@ jobs:
           python3 -B scripts/qa/core-buildinfo-inventory.py \
             --core build/ci/sing-box-1.14.3-linux-amd64/sing-box \
             --libcronet build/ci/sing-box-1.14.3-linux-amd64/libcronet.so \
+            --upstream-go-sum build/ci/sing-box-upstream-go.sum \
             > build/ci/core-buildinfo-inventory.json
           python3 - <<'PYCORE'
           import json
           from pathlib import Path
           evidence = json.loads(Path("build/ci/core-buildinfo-inventory.json").read_text())
           assert evidence["dependency_count"] == 140
+          assert evidence["pinned_upstream_gosum_comparison"]["status"] == "PASS"
+          assert evidence["pinned_upstream_gosum_comparison"]["matched_dependencies"] == 140
           assert evidence["license_notice_audit_complete"] is False
           assert evidence["corresponding_source_verified"] is False
           assert evidence["public_redistribution_authorized"] is False

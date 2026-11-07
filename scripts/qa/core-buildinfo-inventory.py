@@ -18,6 +18,7 @@ import sys
 CORE_SHA256 = "768d31fa7f68debc067bb4626539498a1e8751d36a7b99e1a54bee6a23815f93"
 CRONET_SHA256 = "23109c55b08829bb1a68682a61a64852b1bbf243753b153cbd8f6e4ea2c05294"
 CORE_REVISION = "7054cac5124465ffdb145870d7c01885566711b1"
+PINNED_SOURCE_GOSUM_SHA256 = "5fa44177a4219976213e3ce746431d6907b32b183ba9b74f8f7d85044b0028ef"
 CORE_MODULE = "github.com/sagernet/sing-box"
 CORE_VERSION = "v1.14.3"
 CORE_MAIN = "github.com/sagernet/sing-box/cmd/sing-box"
@@ -120,7 +121,28 @@ def parse_buildinfo(output: str) -> dict:
     }
 
 
-def produce(core: Path, cronet: Path, go: str = "go") -> dict:
+def compare_pinned_go_sum(path: Path, dependencies: list[dict[str, str]]) -> dict:
+    """Compare binary dependencies to exact upstream revision's pinned go.sum."""
+    verified_file(path, PINNED_SOURCE_GOSUM_SHA256)
+    module_sums = {}
+    for line in path.read_text(encoding="utf-8").splitlines():
+        fields = line.split()
+        if len(fields) != 3 or not SUM_PATTERN.fullmatch(fields[2]):
+            raise InventoryError("invalid pinned upstream GoSum record")
+        key = (fields[0], fields[1])
+        if key in module_sums and module_sums[key] != fields[2]:
+            raise InventoryError("conflicting pinned upstream GoSum record")
+        module_sums[key] = fields[2]
+    for dependency in dependencies:
+        key = (dependency["path"], dependency["version"])
+        if module_sums.get(key) != dependency["sum"]:
+            raise InventoryError(f"Core dependency is not attested by pinned upstream GoSum: {key}")
+    return {"status": "PASS", "source_revision": CORE_REVISION,
+            "source_gosum_sha256": PINNED_SOURCE_GOSUM_SHA256,
+            "matched_dependencies": len(dependencies)}
+
+
+def produce(core: Path, cronet: Path, go: str = "go", go_sum: Path | None = None) -> dict:
     verified_file(core, CORE_SHA256)
     verified_file(cronet, CRONET_SHA256)
     try:
@@ -131,6 +153,10 @@ def produce(core: Path, cronet: Path, go: str = "go") -> dict:
     except (OSError, subprocess.SubprocessError) as error:
         raise InventoryError(f"unable to read pinned binary build information: {error}") from error
     details = parse_buildinfo(process.stdout)
+    if go_sum is None:
+        source_comparison = {"status": "NOT_RUN"}
+    else:
+        source_comparison = compare_pinned_go_sum(go_sum, details["dependencies"])
     return {
         "schema": 1,
         "purpose": "pinned Core binary Go build information only; NOT a notice or source-closure audit",
@@ -139,6 +165,7 @@ def produce(core: Path, cronet: Path, go: str = "go") -> dict:
                            "transitive_components_audited": False},
         **details,
         "dependency_count": len(details["dependencies"]),
+        "pinned_upstream_gosum_comparison": source_comparison,
         "license_notice_audit_complete": False,
         "corresponding_source_verified": False,
         "public_redistribution_authorized": False,
@@ -151,9 +178,11 @@ def main() -> int:
                         help="verified, pinned official sing-box executable")
     parser.add_argument("--libcronet", required=True, type=Path,
                         help="verified, pinned official libcronet.so")
+    parser.add_argument("--upstream-go-sum", type=Path,
+                        help="optional SHA-pinned upstream go.sum for 140/140 source comparison")
     args = parser.parse_args()
     try:
-        inventory = produce(args.core, args.libcronet)
+        inventory = produce(args.core, args.libcronet, go_sum=args.upstream_go_sum)
     except InventoryError as error:
         print(f"CORE_BUILDINFO_INVENTORY=REFUSED ({error})", file=sys.stderr)
         return 1
