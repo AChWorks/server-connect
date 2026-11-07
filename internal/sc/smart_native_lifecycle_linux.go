@@ -431,6 +431,29 @@ func (m *Manager) DisconnectNativeSmartRouting() error {
 	if err := m.NativeRecoverInstalled(); err != nil {
 		return err
 	}
+	// SIGKILL leaves systemd's owned service in failed state even after the
+	// independent kernel cleanup has proved Direct/off. Normalize ONLY this
+	// verified, stopped unit now, not at installer time or before recovery.
+	activity, err := m.nativeActivity()
+	if err != nil {
+		return err
+	}
+	if activity == "failed" {
+		if err := m.nativeControl("reset-failed"); err != nil {
+			// A concurrent systemd GC may have already normalized the unit.
+			// Read again rather than treating a failed command as success.
+			if observed, observationErr := m.nativeActivity(); observationErr != nil || observed != "inactive" {
+				return Fault("guard_pending", "native Core recovered but failed service state remains")
+			}
+		}
+		activity, err = m.nativeActivity()
+		if err != nil {
+			return err
+		}
+	}
+	if activity != "inactive" {
+		return Fault("guard_pending", "native Core is not verified inactive after recovery")
+	}
 	return m.withLock(func() error {
 		session, err := m.readNativeSession()
 		if err != nil && !errors.Is(err, os.ErrNotExist) {
