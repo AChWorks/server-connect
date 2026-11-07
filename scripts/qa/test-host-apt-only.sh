@@ -505,9 +505,9 @@ refused("mismatched resumption", {**interrupted, 10: interrupted[10].replace('<.
 refused("standalone resumption", altered(10, 'clone(child_stack=NULL, flags=SIGCHLD) = 11', '<... clone resumed>) = 11'))
 
 # Real strace -n can leave a Go thread with an opaque terminal event despite
-# tracing benign scheduling and synchronization calls. Only vetted x86_64
-# numbers for harmless calls may complete immediately before a verified
-# same-number exit receipt.
+# tracing scheduling/synchronization or its own terminal thread signal.
+# Only vetted x86_64 numbers for calls without network/exec/fork effects
+# may complete immediately before a verified same-number exit receipt.
 # Network, process creation, execution and all other numbers must fail closed.
 def numbered_trace(payload):
     parts = []
@@ -533,7 +533,7 @@ def numbered_tail(replacement):
     payloads[13] = payloads[13].replace(original_end, replacement, 1)
     return payloads
 
-for number in (24, 35, 39, 202, 281):
+for number in (24, 35, 39, 202, 234, 281):
     module.check_payloads(numbered_tail(
         f'[{number:4d}] ???( <unfinished ...>\n'
         f'[{number:4d}] +++ exited with 100 +++\n'))
@@ -551,6 +551,13 @@ for number in (41, 42, 44, 56, 59, 231, 257, 425, 435):
 refused("sched_yield terminal receipt differs",
         numbered_tail('[  24] ???() = ?\n[ 231] +++ exited with 100 +++\n'),
         "opaque terminal syscall receipt mismatch")
+refused("tgkill terminal receipt differs",
+        numbered_tail('[ 234] ???( <unfinished ...>\n[ 231] +++ exited with 100 +++\n'),
+        "opaque terminal syscall not verified")
+refused("tgkill followed by another syscall",
+        numbered_tail('[ 234] ???() = ?\n[ 231] exit_group(100) = ?\n'
+                      '[ 231] +++ exited with 100 +++\n'),
+        "opaque syscall not immediately terminated")
 refused("sched_yield followed by syscall",
         numbered_tail('[  24] ???() = ?\n[ 231] exit_group(100) = ?\n'
                       '[ 231] +++ exited with 100 +++\n'),

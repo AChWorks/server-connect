@@ -30,12 +30,14 @@ DISABLED = ("ftp", "rsh", "ssh", "mirror+ftp")
 DISABLED_PATH = "/usr/lib/apt/methods/false"
 
 # x86_64 Linux UAPI: sched_yield=24, nanosleep=35, getpid=39,
-# futex=202, epoll_pwait=281. These scheduling/wait/query syscalls cannot
-# create sockets, execute a helper or fork. Recognition is restricted to
-# the verified x86_64 ABI and a matching terminal exit receipt; unknown
-# syscalls, missing receipts and every network/exec/fork event still fail.
+# futex=202, tgkill=234, epoll_pwait=281. tgkill signals a specific
+# thread; it cannot create sockets, exec a helper or fork. Only at the
+# thread's terminal exit receipt can strace's hidden tgkill be admitted,
+# under the same strict ABI/number/exit checks as harmless waits. All
+# other opaque syscalls, incomplete receipts and network/exec/fork
+# events still fail closed.
 # https://github.com/torvalds/linux/tree/master/tools/arch/x86/include/uapi/asm
-VERIFIED_TERMINAL_SYSCALLS_X86_64 = frozenset({24, 35, 39, 202, 281})
+VERIFIED_TERMINAL_SYSCALLS_X86_64 = frozenset({24, 35, 39, 202, 234, 281})
 
 
 def verified_opaque_exit(number: int | None) -> bool:
