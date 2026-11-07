@@ -3,8 +3,11 @@
 package sc
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"testing"
@@ -242,12 +245,20 @@ func TestHostCoreObservedServiceRecoveryStopsBeforeRemovingCredential(t *testing
 	inactive := smartTUNCoreObservationExample("inactive")
 	inactive.identity = state.identity
 	calls := 0
+	stopFailure := errors.New("injected owned stop failure")
 	service := hostCoreRecoveryServices{
 		observe: func() (smartTUNTrialUnitObservation, error) { return state, nil },
 		stop: func(original smartTUNTrialUnitObservation, attempted, valid bool) error {
 			calls++
 			if !attempted || !valid {
 				return errors.New("missing durable start/credential authority")
+			}
+			credential, err := os.ReadFile(filepath.Join(m.Dir, smartTUNTrialConfigFile))
+			if err != nil || !bytes.Equal(credential, secret) {
+				return errors.New("credential removed or changed before owned Core stop")
+			}
+			if calls == 1 {
+				return stopFailure
 			}
 			state = inactive
 			return nil
@@ -270,10 +281,17 @@ func TestHostCoreObservedServiceRecoveryStopsBeforeRemovingCredential(t *testing
 		if err := hostCoreAdvance(store, &r, "start_requested"); err != nil {
 			return err
 		}
+		if err := hostCoreStopLocked(store, &r, service); !errors.Is(err, stopFailure) {
+			return errors.New("owned stop failure was swallowed")
+		}
+		credential, err := os.ReadFile(filepath.Join(m.Dir, smartTUNTrialConfigFile))
+		if err != nil || !bytes.Equal(credential, secret) || r.Core.Stage != "stop_requested" {
+			return errors.New("failed Core stop discarded credential or recovery intent")
+		}
 		if err := hostCoreStopLocked(store, &r, service); err != nil {
 			return err
 		}
-		if calls != 1 || r.Core.Stage != "stopped" || !r.Core.StartAttempted {
+		if calls != 2 || r.Core.Stage != "stopped" || !r.Core.StartAttempted {
 			return errors.New("durable core start was not safely stopped")
 		}
 		if present, _, err := hostCoreCredentialState(store, r); err != nil || present {

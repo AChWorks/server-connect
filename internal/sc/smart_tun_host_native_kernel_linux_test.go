@@ -17,6 +17,13 @@ import (
 func prepareHostNativeKernelFixture(t *testing.T) (func() error, hostNativeJournal) {
 	t.Helper()
 	self := requireNativeQANetworkNamespace(t)
+	// Every explicit v7/v8/v9 lane claims this exact NAT/NOTRACK fixture.
+	// Missing prerequisites must fail before the first namespace mutation.
+	for _, binary := range []string{"/usr/sbin/iptables-nft", "/usr/sbin/iptables", "/usr/sbin/ip6tables"} {
+		if _, err := os.Stat(binary); err != nil {
+			t.Fatalf("required isolated Docker NAT/NOTRACK fixture tool %s unavailable: %v", binary, err)
+		}
+	}
 	guard := func() error {
 		now, err := os.Stat("/proc/self/ns/net")
 		if err != nil || !os.SameFile(self, now) {
@@ -30,25 +37,18 @@ func prepareHostNativeKernelFixture(t *testing.T) (func() error, hostNativeJourn
 	ingressNativeCommand(t, "/usr/sbin/ip", "link", "add", "docker0", "type", "bridge")
 	ingressNativeCommand(t, "/usr/sbin/ip", "address", "add", "172.17.0.1/16", "dev", "docker0")
 	ingressNativeCommand(t, "/usr/sbin/ip", "link", "set", "docker0", "up")
-	if _, err := os.Stat("/usr/sbin/iptables-nft"); err == nil {
-		for _, args := range [][]string{
-			{"-t", "nat", "-N", "DOCKER"},
-			{"-t", "nat", "-A", "PREROUTING", "-m", "addrtype", "--dst-type", "LOCAL", "-j", "DOCKER"},
-			{"-t", "nat", "-A", "OUTPUT", "!", "-d", "127.0.0.0/8", "-m", "addrtype", "--dst-type", "LOCAL", "-j", "DOCKER"},
-			{"-t", "nat", "-A", "POSTROUTING", "-s", "172.17.0.0/16", "!", "-o", "docker0", "-j", "MASQUERADE"},
-			{"-t", "nat", "-A", "DOCKER", "-i", "docker0", "-j", "RETURN"},
-		} {
-			ingressNativeCommand(t, "/usr/sbin/iptables-nft", args...)
-		}
-	} else {
-		t.Log("iptables-nft unavailable: isolated bridge and native ownership still tested; Docker NAT coexistence verified on Test Server")
+	for _, args := range [][]string{
+		{"-t", "nat", "-N", "DOCKER"},
+		{"-t", "nat", "-A", "PREROUTING", "-m", "addrtype", "--dst-type", "LOCAL", "-j", "DOCKER"},
+		{"-t", "nat", "-A", "OUTPUT", "!", "-d", "127.0.0.0/8", "-m", "addrtype", "--dst-type", "LOCAL", "-j", "DOCKER"},
+		{"-t", "nat", "-A", "POSTROUTING", "-s", "172.17.0.0/16", "!", "-o", "docker0", "-j", "MASQUERADE"},
+		{"-t", "nat", "-A", "DOCKER", "-i", "docker0", "-j", "RETURN"},
+	} {
+		ingressNativeCommand(t, "/usr/sbin/iptables-nft", args...)
 	}
 	// Preserve representative foreign raw/NOTRACK owners, including both
 	// families, to exercise the same admitted ingress contract as v6.
 	for _, binary := range []string{"/usr/sbin/iptables", "/usr/sbin/ip6tables"} {
-		if _, err := os.Stat(binary); err != nil {
-			continue
-		}
 		ingressNativeCommand(t, binary, "-t", "raw", "-A", "PREROUTING", "-p", "tcp", "--dport", "28997", "-j", "NOTRACK")
 		ingressNativeCommand(t, binary, "-t", "raw", "-A", "OUTPUT", "-p", "tcp", "--sport", "28997", "-j", "NOTRACK")
 	}

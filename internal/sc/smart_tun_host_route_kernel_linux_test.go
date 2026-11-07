@@ -333,6 +333,7 @@ func TestHostRouteV9CrashHelper(t *testing.T) {
 	if os.Getenv("SC_TEST_HOST_ROUTE_CRASH_HELPER") != "isolated-netns" {
 		t.Skip("NOT_RUN: isolated crash helper only")
 	}
+	requireNativeQANetworkNamespace(t)
 	dir := os.Getenv("SC_TEST_HOST_ROUTE_CRASH_DIR")
 	if dir == "" {
 		t.Fatal("crash helper missing the previously staged journal")
@@ -478,6 +479,8 @@ func TestHostRouteV9UnreceiptedSIGKILLEffectFailsClosed(t *testing.T) {
 		t.Fatalf("native effect boundary did not SIGKILL: %v %s", err, out)
 	}
 	present := false
+	var effectSHA string
+	var effectNFT nativeTUNNFTObservation
 	err = m.withActivationJournalLock(syscall.Fsync, func(store *activationJournalDir) error {
 		actual, _, err := loadHostRouteJournal(store)
 		if err != nil {
@@ -490,12 +493,12 @@ func TestHostRouteV9UnreceiptedSIGKILLEffectFailsClosed(t *testing.T) {
 			if actual.Native.IPv4.Route.Stage != "effect_possible" {
 				return errors.New("route intent was not persisted before SIGKILL")
 			}
-			present, _, err = nativeTUNObserveResource(actual.nativeView(), 4, "route")
+			present, effectSHA, err = nativeTUNObserveResource(actual.nativeView(), 4, "route")
 		} else if point == "after-native-rule-effect" {
 			if actual.Native.IPv4.Rule.Stage != "effect_possible" || actual.Native.NFT.Stage != "observed" {
 				return errors.New("RPDB effect occurred without the earlier durable nft guard")
 			}
-			present, _, err = nativeTUNObserveResource(actual.nativeView(), 4, "rule")
+			present, effectSHA, err = nativeTUNObserveResource(actual.nativeView(), 4, "rule")
 			if err != nil || !present {
 				return errors.New("unreceipted RPDB rule did not survive SIGKILL")
 			}
@@ -511,6 +514,7 @@ func TestHostRouteV9UnreceiptedSIGKILLEffectFailsClosed(t *testing.T) {
 			var observed nativeTUNNFTObservation
 			observed, err = hostRouteNFTObserver(&actual)(actual.nativeView())
 			present = observed.Present && observed.Matches
+			effectNFT = observed
 		}
 		return err
 	})
@@ -539,6 +543,23 @@ func TestHostRouteV9UnreceiptedSIGKILLEffectFailsClosed(t *testing.T) {
 		actual, _, err := loadHostRouteJournal(store)
 		if err != nil {
 			return err
+		}
+		// Refusal must preserve the actual ambiguous effect, not only a
+		// truthful journal. Reobserve its identity after independent Off.
+		if point == "after-native-nft-effect" {
+			current, observeErr := hostRouteNFTObserver(&actual)(actual.nativeView())
+			if observeErr != nil || !current.Present || !current.Matches || current != effectNFT {
+				return errors.New("failed recovery removed or changed unreceipted nft evidence")
+			}
+		} else {
+			kind := "route"
+			if point == "after-native-rule-effect" {
+				kind = "rule"
+			}
+			exists, digest, observeErr := nativeTUNObserveResource(actual.nativeView(), 4, kind)
+			if observeErr != nil || !exists || digest == "" || digest != effectSHA {
+				return errors.New("failed recovery removed or changed unreceipted FIB/RPDB evidence")
+			}
 		}
 		if actual.Route.State != "off_pending" || actual.Core.Stage != "stopped" || actual.Progress.Ingress.Phase != "pending" {
 			return errors.New("failed recovery destroyed parent, guard or truthful pending state")

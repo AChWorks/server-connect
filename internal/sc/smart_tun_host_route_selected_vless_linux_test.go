@@ -29,6 +29,8 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -194,35 +196,88 @@ func hostRouteQAUDP(t *testing.T, destination, nonce string, timeout time.Durati
 	return response, nil
 }
 
-func hostRouteQAUDPFixture(t *testing.T, address, prefix, logFile string) {
-	t.Helper()
-	socket, err := net.ListenPacket("udp4", address)
+type hostRouteQAWitnessFile interface {
+	io.Writer
+	Sync() error
+	Close() error
+}
+
+// A negative delivery witness is invalid if its record could not be fully
+// written and synchronized. Always close even after write or sync failure.
+func hostRouteQAWriteWitness(record string, open func() (hostRouteQAWitnessFile, error)) error {
+	file, err := open()
 	if err != nil {
-		t.Fatal(err)
+		return err
 	}
-	t.Cleanup(func() { _ = socket.Close() })
-	go func() {
-		var buf [512]byte
-		for {
-			n, peer, readErr := socket.ReadFrom(buf[:])
-			if readErr != nil {
+	n, writeErr := io.WriteString(file, record)
+	if writeErr == nil && n != len(record) {
+		writeErr = io.ErrShortWrite
+	}
+	syncErr := file.Sync()
+	closeErr := file.Close()
+	return errors.Join(writeErr, syncErr, closeErr)
+}
+
+func hostRouteQAAppendWitness(path, record string) error {
+	return hostRouteQAWriteWitness(record, func() (hostRouteQAWitnessFile, error) {
+		return os.OpenFile(path, os.O_WRONLY|os.O_APPEND, 0600)
+	})
+}
+
+func hostRouteQAUDPReadLoop(socket net.PacketConn, prefix, logFile string, stopping *atomic.Bool, failed func(error)) {
+	var buf [512]byte
+	for {
+		n, peer, readErr := socket.ReadFrom(buf[:])
+		if readErr != nil {
+			if !stopping.Load() || !errors.Is(readErr, net.ErrClosed) {
+				failed(fmt.Errorf("independent UDP witness read: %w", readErr))
+			}
+			return
+		}
+		if logFile != "" {
+			if err := hostRouteQAAppendWitness(logFile, fmt.Sprintf("%s|%q\n", peer.String(), string(buf[:n]))); err != nil {
+				failed(fmt.Errorf("independent UDP witness record: %w", err))
 				return
 			}
-			if logFile != "" {
-				f, openErr := os.OpenFile(logFile, os.O_WRONLY|os.O_APPEND, 0600)
-				if openErr != nil {
-					return
-				}
-				_, writeErr := fmt.Fprintf(f, "%s|%q\n", peer.String(), string(buf[:n]))
-				syncErr := f.Sync()
-				closeErr := f.Close()
-				if writeErr != nil || syncErr != nil || closeErr != nil {
-					return
-				}
-			}
-			_, _ = socket.WriteTo([]byte(prefix+peer.String()+"|"+string(buf[:n])), peer)
 		}
-	}()
+		response := []byte(prefix + peer.String() + "|" + string(buf[:n]))
+		written, writeErr := socket.WriteTo(response, peer)
+		if writeErr == nil && written != len(response) {
+			writeErr = io.ErrShortWrite
+		}
+		if writeErr != nil {
+			if !stopping.Load() || !errors.Is(writeErr, net.ErrClosed) {
+				failed(fmt.Errorf("independent UDP witness reply: %w", writeErr))
+			}
+			return
+		}
+	}
+}
+
+// An exit before our private stop request is a failure even when its status
+// is zero. A requested stop still must return a successful, bounded exit.
+func hostRouteQAFixtureExit(done <-chan error, wait time.Duration, stopRequested bool) (bool, error) {
+	var exit error
+	if wait <= 0 {
+		select {
+		case exit = <-done:
+		default:
+			return false, nil
+		}
+	} else {
+		select {
+		case exit = <-done:
+		case <-time.After(wait):
+			return false, errors.New("independent witness helper exit timed out")
+		}
+	}
+	if exit != nil {
+		return true, fmt.Errorf("independent witness helper failed: %w", exit)
+	}
+	if !stopRequested {
+		return true, errors.New("independent witness helper exited before its stop request")
+	}
+	return true, nil
 }
 
 // The remote helper lives in the second netns, not the test's host netns.
@@ -232,24 +287,44 @@ func TestHostRouteV9SelectedRemoteFixtureHelper(t *testing.T) {
 	if os.Getenv("SC_TEST_HOST_ROUTE_REMOTE_HELPER") != "isolated-relay-netns" {
 		t.Skip("NOT_RUN: private remote relay namespace only")
 	}
+	requireNativeQANetworkNamespace(t)
 	dir := os.Getenv("SC_TEST_HOST_ROUTE_REMOTE_DIR")
-	core := os.Getenv("SC_TEST_SINGBOX")
-	if dir == "" || core == "" {
-		t.Fatal("remote helper admission missing")
+	if dir == "" || !filepath.IsAbs(dir) {
+		t.Fatal("remote helper private directory missing")
 	}
+	directory, err := os.Lstat(dir)
+	if err != nil || !directory.IsDir() || directory.Mode().Perm() != 0700 {
+		t.Fatal("remote helper requires the task-owned private directory")
+	}
+	owner, ok := directory.Sys().(*syscall.Stat_t)
+	if !ok || owner.Uid != uint32(os.Geteuid()) {
+		t.Fatal("remote helper directory owner mismatch")
+	}
+	core := hostRouteQATestCore(t)
+	failures := make(chan error, 1)
+	reportFailure := func(err error) {
+		select {
+		case failures <- err:
+		default:
+		}
+	}
+	checkWitnesses := func() {
+		select {
+		case err := <-failures:
+			t.Fatalf("independent remote witness failed: %v", err)
+		default:
+		}
+	}
+	var stopping atomic.Bool
+	var witnesses sync.WaitGroup
 	originLog := filepath.Join(dir, "foreign-accepts")
 	recordForeign := func(conn net.Conn, state http.ConnState) {
 		if state != http.StateNew {
 			return
 		}
-		f, err := os.OpenFile(originLog, os.O_WRONLY|os.O_APPEND, 0600)
-		if err != nil {
-			t.Error(err)
-			return
+		if err := hostRouteQAAppendWitness(originLog, conn.RemoteAddr().String()+"\n"); err != nil {
+			reportFailure(fmt.Errorf("independent TCP accept witness: %w", err))
 		}
-		_, _ = fmt.Fprintln(f, conn.RemoteAddr().String())
-		_ = f.Sync()
-		_ = f.Close()
 	}
 	originLn, err := net.Listen("tcp", hostRouteQAForeign)
 	if err != nil {
@@ -259,18 +334,73 @@ func TestHostRouteV9SelectedRemoteFixtureHelper(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	origin := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprint(w, "foreign-source="+r.RemoteAddr)
-	}), ConnState: recordForeign}
-	private := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprint(w, "private-source="+r.RemoteAddr)
-	})}
-	defer origin.Close()
-	defer private.Close()
-	go func() { _ = origin.Serve(originLn) }()
-	go func() { _ = private.Serve(privateLn) }()
-	hostRouteQAUDPFixture(t, hostRouteQAForeignUDP, "foreign-udp-source=", filepath.Join(dir, "foreign-udp-accepts"))
-	hostRouteQAUDPFixture(t, hostRouteQAPrivateUDP, "private-udp-source=", "")
+	handler := func(prefix string) http.HandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request) {
+			response := prefix + r.RemoteAddr
+			n, err := io.WriteString(w, response)
+			if err == nil && n != len(response) {
+				err = io.ErrShortWrite
+			}
+			if err != nil {
+				reportFailure(fmt.Errorf("independent HTTP witness reply: %w", err))
+			}
+		}
+	}
+	origin := &http.Server{Handler: handler("foreign-source="), ConnState: recordForeign}
+	private := &http.Server{Handler: handler("private-source=")}
+	var udpSockets []net.PacketConn
+	defer func() {
+		// Only this helper owns these descriptors. Intentional close is the
+		// only context in which listener shutdown errors are expected.
+		stopping.Store(true)
+		if err := errors.Join(origin.Close(), private.Close()); err != nil {
+			t.Errorf("independent HTTP witness close: %v", err)
+		}
+		for _, socket := range udpSockets {
+			if err := socket.Close(); err != nil {
+				t.Errorf("independent UDP witness close: %v", err)
+			}
+		}
+		joined := make(chan struct{})
+		go func() { witnesses.Wait(); close(joined) }()
+		select {
+		case <-joined:
+		case <-time.After(3 * time.Second):
+			t.Error("independent witness shutdown did not complete")
+		}
+		select {
+		case err := <-failures:
+			t.Errorf("independent witness failed before exit: %v", err)
+		default:
+		}
+	}()
+	serveHTTP := func(server *http.Server, listener net.Listener) {
+		witnesses.Add(1)
+		go func() {
+			defer witnesses.Done()
+			err := server.Serve(listener)
+			if !stopping.Load() || !errors.Is(err, http.ErrServerClosed) {
+				reportFailure(fmt.Errorf("independent HTTP witness serve ended: %v", err))
+			}
+		}()
+	}
+	serveHTTP(origin, originLn)
+	serveHTTP(private, privateLn)
+	for _, fixture := range []struct{ address, prefix, log string }{
+		{hostRouteQAForeignUDP, "foreign-udp-source=", filepath.Join(dir, "foreign-udp-accepts")},
+		{hostRouteQAPrivateUDP, "private-udp-source=", ""},
+	} {
+		socket, err := net.ListenPacket("udp4", fixture.address)
+		if err != nil {
+			t.Fatal("independent UDP witness listen:", err)
+		}
+		udpSockets = append(udpSockets, socket)
+		witnesses.Add(1)
+		go func(socket net.PacketConn, prefix, log string) {
+			defer witnesses.Done()
+			hostRouteQAUDPReadLoop(socket, prefix, log, &stopping, reportFailure)
+		}(socket, fixture.prefix, fixture.log)
+	}
 
 	var logs hostRouteCoreOutput
 	relay := exec.Command(core, "run", "-c", filepath.Join(dir, "relay-config.json"))
@@ -314,12 +444,14 @@ func TestHostRouteV9SelectedRemoteFixtureHelper(t *testing.T) {
 	if !ready {
 		t.Fatalf("real VLESS listener not ready: %s", logs.String())
 	}
+	checkWitnesses()
 	if err := os.WriteFile(filepath.Join(dir, "relay-ready"), []byte("ready"), 0600); err != nil {
 		t.Fatal(err)
 	}
 
 	deadline := time.Now().Add(65 * time.Second)
 	for time.Now().Before(deadline) {
+		checkWitnesses()
 		if _, e := os.Stat(filepath.Join(dir, "stop-relay")); e == nil && alive {
 			if err := relay.Process.Kill(); err != nil {
 				t.Fatal(err)
@@ -462,19 +594,48 @@ func TestHostRouteV9SelectedVLESSRealKernelNoDirectLeak(t *testing.T) {
 	fixtureExit := make(chan error, 1)
 	go func() { fixtureExit <- fixture.Wait() }()
 	fixtureActive := true
+	finishFixture := func() error {
+		ended, err := hostRouteQAFixtureExit(fixtureExit, 0, false)
+		if ended {
+			fixtureActive = false
+			return err
+		}
+		if err := os.WriteFile(filepath.Join(dir, "stop-fixture"), []byte("stop"), 0600); err != nil {
+			return fmt.Errorf("request independent witness shutdown: %w", err)
+		}
+		ended, err = hostRouteQAFixtureExit(fixtureExit, 5*time.Second, true)
+		if ended {
+			fixtureActive = false
+		}
+		return err
+	}
+	checkFixture := func() {
+		ended, err := hostRouteQAFixtureExit(fixtureExit, 0, false)
+		if ended {
+			fixtureActive = false
+		}
+		if err != nil {
+			t.Fatalf("remote witness unavailable: %v: %s", err, fixtureLog.String())
+		}
+	}
 	t.Cleanup(func() {
 		if !fixtureActive {
 			return
 		}
-		_ = os.WriteFile(filepath.Join(dir, "stop-fixture"), []byte("stop"), 0600)
-		select {
-		case <-fixtureExit:
-		case <-time.After(5 * time.Second):
-			_ = fixture.Process.Kill()
-			<-fixtureExit
+		if err := finishFixture(); err != nil {
+			t.Errorf("remote witness cleanup failed: %v: %s", err, fixtureLog.String())
+			if fixtureActive {
+				_ = fixture.Process.Kill()
+				ended, waitErr := hostRouteQAFixtureExit(fixtureExit, 3*time.Second, true)
+				fixtureActive = !ended
+				if waitErr != nil {
+					t.Errorf("remote witness forced termination: %v", waitErr)
+				}
+			}
 		}
 	})
 	hostRouteQAWaitFile(t, filepath.Join(dir, "relay-ready"), "ready")
+	checkFixture()
 
 	direct, err := hostRouteQAHTTP(t, hostRouteQAForeign, 3*time.Second)
 	if err != nil || !strings.HasPrefix(direct, "foreign-source=9.9.9.9:") {
@@ -604,8 +765,11 @@ func TestHostRouteV9SelectedVLESSRealKernelNoDirectLeak(t *testing.T) {
 	if err != nil || !strings.HasPrefix(privateUDP, "private-udp-source=10.77.0.1:") {
 		t.Fatalf("VPN diverted private UDP Direct: %q %v", privateUDP, err)
 	}
-	fmt.Println("HOST_ROUTE_V9_SELECTED_REAL_VLESS_FOREIGN_TCP_UDP_TUN_AND_PRIVATE_DIRECT=PASS")
+	// Do not publish success markers until the independent witness exits
+	// successfully; a late observer error invalidates the entire lane.
+	passes := []string{"HOST_ROUTE_V9_SELECTED_REAL_VLESS_FOREIGN_TCP_UDP_TUN_AND_PRIVATE_DIRECT=PASS"}
 
+	checkFixture()
 	// Both failures must retain the independent kernel guard and the
 	// remotely controlled foreign origin. A fresh TCP accept would prove a
 	// Direct leak even if the host request itself timed out.
@@ -640,6 +804,7 @@ func TestHostRouteV9SelectedVLESSRealKernelNoDirectLeak(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	checkFixture()
 	noRoute, err := hostRouteQAHTTP(t, hostRouteQAForeign, 1700*time.Millisecond)
 	if err == nil {
 		t.Fatalf("foreign HTTP unexpectedly succeeded without selected upstream: %q", noRoute)
@@ -651,6 +816,7 @@ func TestHostRouteV9SelectedVLESSRealKernelNoDirectLeak(t *testing.T) {
 	if err != nil || string(acceptedAfter) != string(acceptedBefore) {
 		t.Fatalf("selected VLESS outage leaked fresh Direct TCP to foreign origin; read=%v", err)
 	}
+	checkFixture()
 	noUDP, err := hostRouteQAUDP(t, hostRouteQAForeignUDP, "outage-foreign", 700*time.Millisecond)
 	if err == nil {
 		t.Fatalf("foreign UDP unexpectedly succeeded without selected Core/relay: %q", noUDP)
@@ -662,6 +828,7 @@ func TestHostRouteV9SelectedVLESSRealKernelNoDirectLeak(t *testing.T) {
 	if err != nil || string(acceptedUDPAfter) != string(acceptedUDPBefore) {
 		t.Fatalf("selected outage leaked a foreign UDP datagram to the underlay: %v", err)
 	}
+	checkFixture()
 	privateUDP, err = hostRouteQAUDP(t, hostRouteQAPrivateUDP, "outage-private", 1600*time.Millisecond)
 	if err != nil || !strings.HasPrefix(privateUDP, "private-udp-source=10.77.0.1:") {
 		t.Fatalf("private UDP Direct failed during selected outage: %q %v", privateUDP, err)
@@ -670,10 +837,11 @@ func TestHostRouteV9SelectedVLESSRealKernelNoDirectLeak(t *testing.T) {
 	if err != nil || !strings.HasPrefix(private, "private-source=10.77.0.1:") {
 		t.Fatalf("private Direct did not survive relay outage: %q %v", private, err)
 	}
+	checkFixture()
 	if crashMode == "client-core" {
-		fmt.Println("HOST_ROUTE_V9_SELECTED_CORE_SIGKILL_GUARD_NO_DIRECT_TCP_UDP_AND_PRIVATE_ALIVE=PASS")
+		passes = append(passes, "HOST_ROUTE_V9_SELECTED_CORE_SIGKILL_GUARD_NO_DIRECT_TCP_UDP_AND_PRIVATE_ALIVE=PASS")
 	} else {
-		fmt.Println("HOST_ROUTE_V9_SELECTED_REAL_VLESS_OUTAGE_NO_DIRECT_TCP_UDP_AND_PRIVATE_ALIVE=PASS")
+		passes = append(passes, "HOST_ROUTE_V9_SELECTED_REAL_VLESS_OUTAGE_NO_DIRECT_TCP_UDP_AND_PRIVATE_ALIVE=PASS")
 	}
 
 	state := smartTUNCoreObservationExample("active")
@@ -768,5 +936,171 @@ func TestHostRouteV9SelectedVLESSRealKernelNoDirectLeak(t *testing.T) {
 	if err != nil || !strings.HasPrefix(afterUDP, "foreign-udp-source=9.9.9.9:") {
 		t.Fatalf("foreign UDP ordinary Direct/off not restored: %q %v", afterUDP, err)
 	}
-	fmt.Println("HOST_ROUTE_V9_SELECTED_VLESS_INDEPENDENT_OFF_RESTORES_HOST_DIRECT_TCP_UDP=PASS")
+	if err := finishFixture(); err != nil {
+		t.Fatalf("independent witness did not finish successfully: %v: %s", err, fixtureLog.String())
+	}
+	for _, pass := range append(passes, "HOST_ROUTE_V9_SELECTED_VLESS_INDEPENDENT_OFF_RESTORES_HOST_DIRECT_TCP_UDP=PASS") {
+		fmt.Println(pass)
+	}
+}
+
+type hostRouteQAFaultWitnessFile struct {
+	writeN            int
+	writeErr, syncErr error
+	closeErr          error
+	calls             []string
+	record            string
+}
+
+func (f *hostRouteQAFaultWitnessFile) Write(record []byte) (int, error) {
+	f.calls = append(f.calls, "write")
+	f.record = string(record)
+	if f.writeN >= 0 {
+		return f.writeN, f.writeErr
+	}
+	return len(record), f.writeErr
+}
+func (f *hostRouteQAFaultWitnessFile) Sync() error {
+	f.calls = append(f.calls, "sync")
+	return f.syncErr
+}
+func (f *hostRouteQAFaultWitnessFile) Close() error {
+	f.calls = append(f.calls, "close")
+	return f.closeErr
+}
+
+func TestHostRouteQAWitnessIOFailuresNeverAcknowledgeRecord(t *testing.T) {
+	failure := errors.New("injected witness failure")
+	for _, mode := range []string{"open", "short-write", "write", "sync", "close", "success"} {
+		t.Run(mode, func(t *testing.T) {
+			file := &hostRouteQAFaultWitnessFile{writeN: -1}
+			expected := failure
+			switch mode {
+			case "short-write":
+				file.writeN, expected = 1, io.ErrShortWrite
+			case "write":
+				file.writeN, file.writeErr = 0, failure
+			case "sync":
+				file.syncErr = failure
+			case "close":
+				file.closeErr = failure
+			case "success":
+				expected = nil
+			}
+			record := "203.0.113.10:12345|\"exact-udp-nonce\"\n"
+			err := hostRouteQAWriteWitness(record, func() (hostRouteQAWitnessFile, error) {
+				if mode == "open" {
+					return nil, failure
+				}
+				return file, nil
+			})
+			if expected == nil && err != nil || expected != nil && !errors.Is(err, expected) {
+				t.Fatalf("witness %s outcome: got=%v want=%v", mode, err, expected)
+			}
+			if mode == "open" {
+				if len(file.calls) != 0 {
+					t.Fatal("unopened witness was used")
+				}
+			} else if strings.Join(file.calls, ",") != "write,sync,close" || file.record != record {
+				t.Fatal("witness omitted full payload, synchronization or close after I/O failure")
+			}
+		})
+	}
+}
+
+type hostRouteQAFaultPacketConn struct {
+	readErr, writeErr error
+	writeN            int
+	reads             int
+}
+
+func (p *hostRouteQAFaultPacketConn) ReadFrom(buffer []byte) (int, net.Addr, error) {
+	p.reads++
+	if p.readErr != nil {
+		return 0, nil, p.readErr
+	}
+	if p.reads > 1 {
+		return 0, nil, errors.New("witness failed to stop after injected reply/record failure")
+	}
+	return copy(buffer, "probe"), &net.UDPAddr{IP: net.IPv4(203, 0, 113, 10), Port: 12345}, nil
+}
+func (p *hostRouteQAFaultPacketConn) WriteTo(data []byte, _ net.Addr) (int, error) {
+	if p.writeN >= 0 {
+		return p.writeN, p.writeErr
+	}
+	return len(data), p.writeErr
+}
+func (*hostRouteQAFaultPacketConn) Close() error                     { return nil }
+func (*hostRouteQAFaultPacketConn) LocalAddr() net.Addr              { return &net.UDPAddr{} }
+func (*hostRouteQAFaultPacketConn) SetDeadline(time.Time) error      { return nil }
+func (*hostRouteQAFaultPacketConn) SetReadDeadline(time.Time) error  { return nil }
+func (*hostRouteQAFaultPacketConn) SetWriteDeadline(time.Time) error { return nil }
+
+func TestHostRouteQAUDPFailureCannotBecomeAnEmptyDeliveryLog(t *testing.T) {
+	failure := errors.New("injected UDP witness failure")
+	for _, mode := range []string{"read", "unexpected-close", "reply", "short-reply", "record-open", "requested-close"} {
+		t.Run(mode, func(t *testing.T) {
+			packet := &hostRouteQAFaultPacketConn{writeN: -1}
+			var stopping atomic.Bool
+			logPath := ""
+			switch mode {
+			case "read":
+				packet.readErr = failure
+			case "unexpected-close":
+				packet.readErr = net.ErrClosed
+			case "reply":
+				packet.writeErr = failure
+			case "short-reply":
+				packet.writeN = 1
+			case "record-open":
+				logPath = filepath.Join(t.TempDir(), "missing-parent", "witness")
+			case "requested-close":
+				packet.readErr = net.ErrClosed
+				stopping.Store(true)
+			}
+			var received []error
+			hostRouteQAUDPReadLoop(packet, "source=", logPath, &stopping, func(err error) {
+				received = append(received, err)
+			})
+			if mode == "requested-close" {
+				if len(received) != 0 {
+					t.Fatal("requested witness shutdown became a spurious failure")
+				}
+			} else if len(received) != 1 || received[0] == nil {
+				t.Fatal("missing UDP witness failure could falsely certify an unchanged delivery log")
+			}
+		})
+	}
+}
+
+func TestHostRouteQAFixtureExitFailureAndTimeoutReachParent(t *testing.T) {
+	failure := errors.New("remote witness process failed")
+	for _, tc := range []struct {
+		name                   string
+		queued, requested      bool
+		child                  error
+		wait                   time.Duration
+		wantEnded, wantFailure bool
+	}{
+		{"unexpected-success-exit", true, false, nil, 0, true, true},
+		{"unexpected-failure-exit", true, false, failure, 0, true, true},
+		{"requested-success-exit", true, true, nil, time.Millisecond, true, false},
+		{"requested-failure-exit", true, true, failure, time.Millisecond, true, true},
+		{"still-running", false, false, nil, 0, false, false},
+		{"requested-stop-timeout", false, true, nil, time.Millisecond, false, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			exited := make(chan error, 1)
+			if tc.queued {
+				exited <- tc.child
+			}
+			ended, err := hostRouteQAFixtureExit(exited, tc.wait, tc.requested)
+			if ended != tc.wantEnded || (err != nil) != tc.wantFailure {
+				t.Fatalf("remote process result lost: ended=%v err=%v", ended, err)
+			}
+			if tc.child != nil && !errors.Is(err, tc.child) {
+				t.Fatal("parent lost the actual remote witness failure")
+			}
+		})
+	}
 }
