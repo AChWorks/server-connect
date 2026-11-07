@@ -2,6 +2,43 @@
 
 **Product goal:** [PROJECT-SPEC.md](PROJECT-SPEC.md). This document owns *how components interact*, how traffic is classified, and which host resources Server Connect may change. It does not record active Issues, test runs or the history of experimental implementations.
 
+## Selected implementation direction (2026-11-07)
+
+The Owner selected **simplifying this same Server Connect product**: use the
+**official sing-box native Linux TUN, routing, DNS, and rule-set facilities**
+instead of extending the experimental custom Go route/RPDB/nftables ownership
+stack. Keep the existing CLI, stored profiles/rules, three modes, signed
+official/mirror/offline distribution, and the canonical product requirements.
+Retire old QA-only native machinery only after replacement acceptance, rather
+than breaking Direct/Proxy Only or deleting negative safety evidence.
+
+The bounded new compiler/CLI entry point is
+`smart-routing-rules preview-native`: it reads the selected saved profile and
+operator rules, generates one official-Core-owned `auto_route`/`auto_redirect`
+policy, checks that config against the pinned Core, and reports an opaque
+digest with **activation_ready=false** and **applied=false**. A successful
+preview is **not** an activation, a field safety proof, or authorization to
+remove older experimental safeguards.
+
+Isolated user/network-namespace testing has positively witnessed genuine
+VLESS TCP delivery for VPN-required traffic, a Direct exception, and a foreign
+inbound hosted reply while another new outbound to that same foreign IP
+continues through the VPN. Provider shutdown did not fall back to Direct.
+Graceful Core stop restored exact private-namespace routes, rules and nftables.
+**Hard SIGKILL leaves native sing-box route/RPDB/nftables state behind**;
+a plain Core restart and graceful stop may still retain the earlier orphaned
+rule/route. This is a measured blocker, not permission for the Manager to
+guess at third-party kernel ownership. A narrowly independent crash/recovery
+guard and reliable resource authority still require design and acceptance.
+
+The older detailed native resource-ledger and trial descriptions below
+document the **existing experimental code**, not the selected production
+implementation. The canonical [PROJECT-SPEC.md](PROJECT-SPEC.md) and
+[SAFETY-RECOVERY.md](SAFETY-RECOVERY.md) still govern all hosting, SSH,
+Direct/off, VPN no-leak and third-party ownership claims. Keep the historical
+OWN-ABA and stale FakeIP negative tests. Avoid adding a second generalized
+network framework to solve the new path.
+
 ## Components and lifecycle
 
 ```text

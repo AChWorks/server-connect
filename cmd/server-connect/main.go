@@ -692,6 +692,12 @@ Commands:
   smart-routing-rules import --source ID --as-of YYYY-MM-DD --sha256 HEX --file FILE|-
                              [--replaces-sha256 HEX] for explicit source replacement
   smart-routing-rules remove-source --source ID --sha256 HEX
+  smart-routing-rules preview-native --tunnel-if NAME --underlay-if NAME
+                                     --tunnel-ipv4 CIDR [--tunnel-ipv6 CIDR]
+                                     [--mode default|bypass_iran]
+                                     [--protected-peer IP...]
+                              Compiles saved rules with official sing-box;
+                              checks Core config only, never activates host TUN
   smart-routing-rules preview --tunnel-if NAME --underlay-if NAME --tunnel-ipv4 CIDR
                               --domestic-cidr CIDR [--protected-cidr CIDR...]
                               [--endpoint-pin-ipv4 PUBLIC_IP] (named VLESS TCP only)

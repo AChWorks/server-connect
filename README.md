@@ -87,6 +87,38 @@ network reservation, authenticated VLESS health, fresh SSH/foreign-reply
 protection, or an independent Activation/Runtime Guard. Keep experimental
 native Apply restricted to its existing admitted QA fixtures.
 
+### Simplified native sing-box policy preview (development-only)
+
+To avoid duplicating sing-box's Linux networking code, the simplified candidate
+delegates TUN creation, automatic routing and nftables redirection to the
+**official pinned sing-box**. It reuses selected saved profiles, saved routing
+exceptions and the attributed offline Iranian prefix snapshot. The two proposed
+policy names are `default` (public destinations use VPN unless explicitly
+exempted) and `bypass_iran` (Iran estimates additionally Direct). The CLI
+defaults this preview to `bypass_iran`, consistent with the intended Smart
+Routing country exception. It never applies host routing:
+
+```console
+server-connect --json smart-routing-rules preview-native --tunnel-if sctun0 --underlay-if ens3 --tunnel-ipv4 172.31.99.1/30 --tunnel-ipv6 fd73:99::1/64 --mode bypass_iran
+```
+
+The result contains a SHA-256 of the exact generated secret-bearing config,
+but **not the config or profile secrets**. The official-Core check verifies
+configuration syntax, not end-to-end VPN, truthful country reachability, DNS,
+IPv6, management/hosting safety or safe post-crash recovery. Manual Direct
+domain exceptions remain unsupported until independently safe DNS/identity
+association is established. No FakeIP is used in the new preview.
+
+In an isolated disposable namespace, a selected synthetic VLESS client/server
+showed actual independent Direct/VPN delivery, no Direct fallback after
+selected-server outage, preserved foreign-origin hosted replies, and exact
+native route/rule/nftables restoration on graceful stop. A forced Core SIGKILL
+left kernel resources behind; restart/normal stop did **not** remove every
+orphan. Therefore the preview is **not** the general-host Smart Routing Apply
+path, and no installed system should run it as an active VPN without a
+separately accepted recovery/host admission design. See Issue #2 for the
+exact bounded evidence and remaining gates.
+
 ### Saved Smart Routing rules (not activated)
 
 Use the same CLI and **19 Routing Rules** interactive menu to store explicit routing exceptions without changing Linux routes, DNS, nftables, or TUN. This private, versioned operator configuration does **not** prove selected VPN reachability or general-host Smart Routing admission. `smart-routing-rules list` returns `saved_not_applied`, `activation_ready=false` and `general_host_admitted=false` even when rules have been saved.
