@@ -17,6 +17,7 @@ import os
 from pathlib import Path
 import shlex
 import shutil
+import ssl
 import subprocess
 import sys
 import tarfile
@@ -695,9 +696,68 @@ class SignedReleaseTest(unittest.TestCase):
         cls.server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
         cls.thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
         cls.thread.start()
+        # TLS trust and publisher-signature trust are independent ephemeral QA
+        # identities; neither is installed in the host's trust store.
+        cls.ca = cls.directory / "tls-ca.pem"
+        tls_key, tls_cert = cls.directory / "tls-key.pem", cls.directory / "tls-cert.pem"
+        csr, extensions = cls.directory / "tls.csr", cls.directory / "tls.ext"
+        extensions.write_text(
+            "subjectAltName=DNS:localhost\n"
+            "basicConstraints=critical,CA:FALSE\n"
+            "keyUsage=critical,digitalSignature,keyEncipherment\n"
+            "extendedKeyUsage=serverAuth\n"
+        )
+        for command in (
+            ["req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1",
+             "-subj", "/CN=Server Connect ephemeral QA CA", "-addext", "basicConstraints=critical,CA:TRUE",
+             "-addext", "keyUsage=critical,keyCertSign,cRLSign",
+             "-keyout", str(cls.directory / "tls-ca-key.pem"), "-out", str(cls.ca)],
+            ["req", "-new", "-newkey", "rsa:2048", "-nodes", "-subj", "/CN=localhost",
+             "-keyout", str(tls_key), "-out", str(csr)],
+            ["x509", "-req", "-in", str(csr), "-CA", str(cls.ca),
+             "-CAkey", str(cls.directory / "tls-ca-key.pem"), "-set_serial", "1",
+             "-days", "1", "-extfile", str(extensions), "-out", str(tls_cert)],
+        ):
+            subprocess.run(["/usr/bin/openssl", *command], check=True,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=15)
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        context.load_cert_chain(tls_cert, tls_key)
+
+        class HTTPSHandler(LocalHTTPHandler):
+            def handle(self):
+                self.http_started = False
+                try:
+                    super().handle()
+                except (BrokenPipeError, ConnectionResetError):
+                    # Certificate refusal can close TLS before any HTTP request.
+                    if self.http_started:
+                        raise
+
+            def do_GET(self):
+                self.http_started = True
+                self.server.requests.append((self.path, self.connection.version()))
+                if self.path == "/https-downgrade":
+                    self.send_response(302)
+                    self.send_header("Location", f"http://127.0.0.1:{cls.server.server_port}/redirect-sentinel")
+                    self.end_headers()
+                    return
+                super().do_GET()
+
+        cls.https_servers = []
+        for _ in range(2):  # Official-origin and operator-mirror transport fixtures.
+            server = ThreadingHTTPServer(("127.0.0.1", 0), partial(HTTPSHandler, directory=str(cls.directory)))
+            server.requests = []
+            server.socket = context.wrap_socket(server.socket, server_side=True)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            cls.https_servers.append((server, thread))
 
     @classmethod
     def tearDownClass(cls):
+        for server, thread in cls.https_servers:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=5)
         cls.server.shutdown()
         cls.server.server_close()
         cls.thread.join(timeout=5)
@@ -788,6 +848,67 @@ class SignedReleaseTest(unittest.TestCase):
             self.assertIn("Publisher signature and pinned release identity verified", result.stdout)
             self.assertIn("LOCAL QA ONLY", result.stdout)
             self.assertIn("Installation was not attempted.", result.stdout)
+
+    def run_https(self, origin=0, host="localhost", trusted=True, path=None, **kwargs):
+        server = self.https_servers[origin][0]
+        url = f"https://{host}:{server.server_port}" + (path or f"/{self.case.name}/bundle.tar.gz")
+        argv = self.arguments(**kwargs)
+        argv[2:4] = ["--archive-url", url]
+        argv.insert(1, "-x")  # Observe the real extraction command without a production hook.
+        self.assertNotIn("--local-qa", argv)
+        env = os.environ.copy()
+        for name in ("CURL_CA_BUNDLE", "SSL_CERT_FILE", "SSL_CERT_DIR"):
+            env.pop(name, None)
+        if trusted:
+            env["CURL_CA_BUNDLE"] = str(self.ca)
+        return subprocess.run(argv, env=env, capture_output=True, text=True, timeout=30)
+
+    def assert_https_refused_before_extraction(self, result, message):
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn(message, result.stderr)
+        self.assertNotIn("timeout -s TERM -k 3s 150s python3 -I -S -", result.stderr)
+        self.assertNotIn("Publisher signature and pinned release identity verified", result.stdout)
+        self.assertFalse(self.marker.exists())
+
+    def test_signed_https_origins_and_offline_bind_identical_immutable_bytes(self):
+        expected = self.identity["archive_sha256"]
+        offline = self.run_bootstrap()
+        self.assertEqual(offline.returncode, 0, offline.stderr)
+        for origin, (server, _) in enumerate(self.https_servers):
+            with self.subTest(origin=origin):
+                server.requests.clear()
+                result = self.run_https(origin=origin)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn("Publisher signature and pinned release identity verified", result.stdout)
+                self.assertIn("Installation was not attempted.", result.stdout)
+                self.assertIn("timeout -s TERM -k 3s 150s python3 -I -S -", result.stderr)
+                expected_paths = [f"/{self.case.name}/bundle.tar.gz" + suffix
+                                  for suffix in ("", ".release.json", ".sig")]
+                self.assertEqual([path for path, _ in server.requests], expected_paths)
+                self.assertTrue(all(version in ("TLSv1.2", "TLSv1.3") for _, version in server.requests))
+                self.assertEqual(hashlib.sha256(self.bundle.read_bytes()).hexdigest(), expected)
+
+    def test_signed_https_rejects_untrusted_ca_hostname_and_http_downgrade(self):
+        server = self.https_servers[0][0]
+        for options in ({"trusted": False}, {"host": "127.0.0.1"}):
+            with self.subTest(options=options):
+                server.requests.clear()
+                self.assert_https_refused_before_extraction(
+                    self.run_https(**options), "Online acquisition failed")
+                self.assertEqual(server.requests, [], "untrusted TLS reached HTTP request handling")
+        self.server.redirect_followed = False
+        server.requests.clear()
+        self.assert_https_refused_before_extraction(
+            self.run_https(path="/https-downgrade"), "Online acquisition failed")
+        self.assertEqual([path for path, _ in server.requests], ["/https-downgrade"])
+        self.assertFalse(self.server.redirect_followed, "HTTPS redirected to plaintext HTTP")
+
+    def test_signed_https_rejects_wrong_publisher_and_tampering_before_extraction(self):
+        self.assert_https_refused_before_extraction(
+            self.run_https(public=self.wrong_public), "publisher signature or key validation failed")
+        self.bundle.write_bytes(self.bundle.read_bytes() + b"tampered")
+        self.assert_https_refused_before_extraction(
+            self.run_https(origin=1), "signed archive digest mismatch")
 
     def test_official_default_rejects_digest_only_and_http_without_qa(self):
         for source in (["--archive-file", str(self.bundle)],
