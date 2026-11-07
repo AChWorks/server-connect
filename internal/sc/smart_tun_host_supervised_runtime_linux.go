@@ -106,6 +106,22 @@ func verifyHostRouteActivePolicy(r hostRouteJournal) error {
 			return nativeTUNUncertain("host routed policy receipt changed")
 		}
 	}
+	// A listener's own nonzero SO_MARK overrides accepted-socket mark
+	// inheritance even when it does not overlap the reserved mark field.
+	// Recheck that supported prerequisite on every runtime/confirmation
+	// observation. This is bounded detection, not an atomic reservation of
+	// future privileged socket changes. The nft observer below also repeats
+	// the exact raw inventory after this socket observation.
+	ports, rawDigest, err := hostIngressRawSnapshot()
+	if err != nil {
+		return err
+	}
+	if rawDigest != i.RawSHA256 {
+		return ingressFault("host raw inventory changed before listener observation")
+	}
+	if err := observeForeignMarkedListeners(ports); err != nil {
+		return err
+	}
 	observed, err := hostRouteNFTObserver(&r)(native)
 	if err != nil {
 		return err
@@ -182,7 +198,10 @@ func inspectHostRouteRuntime(store *activationJournalDir, r hostRouteJournal) st
 		path.Index != r.Native.UnderlayIndex {
 		return "management_path_changed"
 	}
-	if verifyHostRouteActivePolicy(r) != nil {
+	if err := verifyHostRouteActivePolicy(r); err != nil {
+		if ErrorCode(err) == "host_ingress_listener_mark" {
+			return "host_ingress_conflict"
+		}
 		return "native_resource_conflict"
 	}
 	// Observations are bounded, but still consume lease time. Recheck the

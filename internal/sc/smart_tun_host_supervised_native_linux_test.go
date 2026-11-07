@@ -47,6 +47,33 @@ func TestHostSupervisorNativeActivePolicyOwnsCaptureAndRejectsDrift(t *testing.T
 	if err := verifyHostRouteActivePolicy(r); err != nil {
 		t.Fatalf("active verification rejected its own durably observed RPDB/FIB/nft policy: %v", err)
 	}
+	// A later foreign listener can violate inheritance without touching
+	// nft, RPDB or even the reserved mark bits. Observe its real socket mark.
+	for _, mark := range []int{1, 0} {
+		func() {
+			fd, err := syscall.Socket(syscall.AF_INET, syscall.SOCK_STREAM|syscall.SOCK_CLOEXEC, syscall.IPPROTO_TCP)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer syscall.Close(fd)
+			if err := syscall.SetsockoptInt(fd, syscall.SOL_SOCKET, syscall.SO_MARK, mark); err != nil {
+				t.Fatal(err)
+			}
+			if err := syscall.Bind(fd, &syscall.SockaddrInet4{Port: 28997}); err != nil {
+				t.Fatal(err)
+			}
+			if err := syscall.Listen(fd, 1); err != nil {
+				t.Fatal(err)
+			}
+			err = verifyHostRouteActivePolicy(r)
+			if mark != 0 && ErrorCode(err) != "host_ingress_listener_mark" {
+				t.Fatalf("later foreign listener mark was not detected: %v", err)
+			}
+			if mark == 0 && err != nil {
+				t.Fatalf("ordinary later listener was refused: %v", err)
+			}
+		}()
+	}
 	for name, change := range map[string]func(*hostRouteJournal){
 		"boot":          func(r *hostRouteJournal) { r.Progress.Ingress.BootID = "22222222-2222-3333-4444-555555555555" },
 		"namespace":     func(r *hostRouteJournal) { r.Progress.Ingress.NamespaceIno++ },
