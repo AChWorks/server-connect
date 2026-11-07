@@ -18,8 +18,8 @@ source = PILOT.read_text()
 necessary = (
     '[[ "$(readlink /proc/1/ns/net)" == "$(readlink /proc/self/ns/net)" ]]',
     '[[ $(nft -a list table inet "$owner" | grep -Fc "table inet $owner {") == 1 ]]',
-    '[[ "$observed" == "$(cat "$work/nft-receipt")" ]]',
-    '[[ "$current_handle" == "$recorded" ]]',
+    'if [[ "$observed" == "$active_digest" ]]; then',
+    'tables[0]["handle"]==int(handle)',
     'systemd-run --quiet --collect --unit="$watch" --on-active=300s',
     'ROOT_CORE_LOSS_NO_DIRECT_FALLBACK=PASS',
 )
@@ -31,7 +31,7 @@ print('FIELD_ROOT_STATIC_GUARD_INVARIANTS=PASS')
 # never publish its first live RPDB selector before the nft leak guard and
 # its ownership receipt are independently durable/observed.
 guard_create = source.index('nft -f "$work/nft.txt"')
-guard_receipt = source.index('sync -f "$work/nft-handle" "$work/nft-receipt" "$work"')
+guard_receipt = source.index('sync -f "$work/nft-handle" "$work/nft-receipt" "$work/nft-retired-receipt" "$work"')
 guard_observation = source.index('nft -j list chain inet "$owner" guard | python3')
 route_selector = source.index('ip -4 rule add priority "$priority" fwmark "$mark"/"$mask" table "$table"')
 assert source.index('systemd-run --quiet --collect --unit="$watch"') < source.index('ip -4 route add default dev "$tun" table "$table"')
@@ -120,3 +120,7 @@ for clause in (
     assert clause in source, f'root-host Direct/VPN QA invariant missing: {clause}'
 assert 'add rule inet $owner capture ip daddr $domestic meta mark set (meta mark & 0xff00ffff) | 0x00530000' not in source
 print('FIELD_ROOT_PINNED_IRAN_DIRECT_SCOPE=PASS')
+
+# Execute the actual recovery/finalizer bodies with rootless kernel stand-ins.
+# This checks partial effects and real flock exclusion, beyond text ordering.
+subprocess.run(["python3", "-B", str(ROOT / "scripts/qa/test-field-root-recovery.py")], check=True)
