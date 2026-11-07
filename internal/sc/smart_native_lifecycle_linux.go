@@ -19,10 +19,10 @@ import (
 	"time"
 )
 
-const nativeSmartUnit = "server-connect-smart-tun.service"
+const nativeSmartUnit = "server-connect-native-tun.service"
 const nativeConfigFile = "native-tun.json"
 const nativeSessionFile = "native-session.json"
-const nativeUnitPath = "/etc/systemd/system/server-connect-smart-tun.service"
+const nativeUnitPath = "/etc/systemd/system/server-connect-native-tun.service"
 
 // This small persisted receipt is written before starting the official Core.
 // It authorizes only the fixed native policy slots, not global route repair.

@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 )
 
@@ -144,5 +145,34 @@ func TestNativePreflightRequiresSavedDesiredProfile(t *testing.T) {
 		if err := nativeDesiredMatchesClaim(state, s); err == nil {
 			t.Fatalf("manual/reboot native restart ignored saved intent: %+v", state)
 		}
+	}
+}
+
+// Both data planes touch the same host networking. A leftover native
+// session must block even the disposable legacy trial before any guard
+// arming or kernel admission is attempted.
+func TestLegacySmartTUNAdmissionRejectsNativeReceipt(t *testing.T) {
+	m := New(filepath.Join(t.TempDir(), "state"), "", 0)
+	if err := m.prepare(); err != nil {
+		t.Fatal(err)
+	}
+	session := NativeSession{
+		Version: 1, Selected: "0123456789abcdef",
+		InterfaceName: "sctun0", UnderlayIF: "eth0",
+		ConfigSHA256: strings.Repeat("a", 64),
+	}
+	raw, err := json.Marshal(session)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := put(filepath.Join(m.Dir, nativeSessionFile), raw); err != nil {
+		t.Fatal(err)
+	}
+	err = m.withActivationJournalLock(syscall.Fsync, func(store *activationJournalDir) error {
+		_, e := m.admitSmartTUNTrialLocked(store, SmartTUNCandidateOptions{}, "")
+		return e
+	})
+	if ErrorCode(err) != "guard_pending" {
+		t.Fatalf("unfinalized native session must block legacy unit: %v", err)
 	}
 }

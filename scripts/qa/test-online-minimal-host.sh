@@ -96,6 +96,7 @@ docker exec -e "SC_QA_DEBIAN_VERSION=$qa_version" "$container" /bin/sh -c '
   test ! -e /etc/systemd/system/server-connect-activation-recover.service
   test ! -e /etc/systemd/system/server-connect-activation-recover.timer
   test ! -e /etc/systemd/system/server-connect-smart-tun.service
+  test ! -e /etc/systemd/system/server-connect-native-tun.service
   test ! -e /etc/systemd/system/server-connect-smart-health.service
   test ! -e /etc/systemd/system/server-connect-smart-health.timer
 '
@@ -165,7 +166,9 @@ docker exec "$container" /bin/sh -c '
   test "$(systemctl is-enabled server-connect-activation-recover.timer)" = disabled
   test "$(systemctl show server-connect-activation-recover.service -p LoadState --value)" = loaded
   test "$(systemctl show server-connect-smart-tun.service -p LoadState --value)" = loaded
-  test "$(systemctl show server-connect-smart-tun.service -p UnitFileState --value)" = disabled
+  test "$(systemctl show server-connect-smart-tun.service -p UnitFileState --value)" = static
+  test "$(systemctl show server-connect-native-tun.service -p UnitFileState --value)" = disabled
+  test "$(systemctl show server-connect-native-tun.service -p ActiveState --value)" = inactive
   test "$(systemctl show server-connect-smart-tun.service -p ActiveState --value)" = inactive
   test "$(systemctl show server-connect-smart-health.service -p LoadState --value)" = loaded
   test "$(systemctl show server-connect-smart-health.service -p UnitFileState --value)" = static
@@ -208,6 +211,7 @@ docker exec "$container" /bin/sh -c '
   test ! -e /etc/systemd/system/server-connect-activation-recover.service
   test ! -e /etc/systemd/system/server-connect-activation-recover.timer
   test ! -e /etc/systemd/system/server-connect-smart-tun.service
+  test ! -e /etc/systemd/system/server-connect-native-tun.service
   test ! -e /etc/systemd/system/server-connect-smart-health.service
   test ! -e /etc/systemd/system/server-connect-smart-health.timer
   test "$(cat /var/lib/server-connect/profiles/qa-retained)" = SC_ONLINE_MINIMAL_PROFILE_RETAINED

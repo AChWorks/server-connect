@@ -124,15 +124,17 @@ Track **desired, observed, pending/uncertain and last verified safe** states sep
 
 ## Inert product units and disposable native integration
 
-The development installer carries a default-disabled, opt-in
-`server-connect-smart-tun.service` distinct from the existing unprivileged
-`server-connect.service` Proxy Only unit. The TUN service has the capabilities
-needed for its narrowly admitted native link and marked sockets, and reads its
-exact staged policy using a systemd `LoadCredential` copy. The ordinary proxy
-unit remains unprivileged. The installer fingerprints and transactionally
-restores the TUN unit, independent recovery service/timer and separate health
-service/timer, and refuses updates while any of them is active. Installation
-alone does not enable either experimental timer.
+The installer temporarily carries two separate TUN units while the
+replacement is being accepted. `server-connect-smart-tun.service` remains
+a static, unenabled legacy disposable-QA trial unit; the native candidate
+uses default-disabled server-connect-native-tun.service. They cannot both
+be activated for one host and neither proves general-host support by
+being installed. The native unit uses systemd `LoadCredential`, independent
+preflight, and a post-stop Core recovery action; the legacy unit retains
+its original operation-specific guard and timer. The ordinary Proxy Only
+service stays unprivileged. Installer digest checks and rollback include
+both units, but this is transitional: retire the old experimental unit and
+its test lane together when native acceptance makes them unnecessary.
 
 `smart-tun-trial-apply` is limited to the known disconnected Docker/systemd
 fixture, with an exact synthetic VLESS endpoint and IPv4 or opt-in IPv4+IPv6

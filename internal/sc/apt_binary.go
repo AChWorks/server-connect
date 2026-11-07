@@ -31,10 +31,14 @@ const (
 // identify the separately loaded libapt-pkg. Acquisition always enforces the
 // wrapper-owned disabled-method policy after rejecting inherited enablers.
 // APT 3 removed the default ftp/rsh/ssh guard, so legacy inventory also remains
-// rejected outside this observed Debian12/2.6.1 layout boundary.
+// rejected outside this observed Debian12/2.6.x verified layout boundary.
 // https://github.com/Debian/apt/blob/a626a66fece0a7d680e40b9e35b66e29fe9ae12c/apt-pkg/acquire-worker.cc
 func aptCompatibilityForVersions(target, nativeVersion, configVersion string) aptCompatibility {
-	if target == "debian-12-amd64" && nativeVersion == "apt 2.6.1 (amd64)" && configVersion == nativeVersion {
+	// Debian 12 stock APT 2.6.2 uses the same native method layout as
+	// 2.6.1 (verified on a fresh Debian 12 guest). An exact-patch pin
+	// incorrectly rejected Debian's own security/point update.
+	if target == "debian-12-amd64" && configVersion == nativeVersion &&
+		(nativeVersion == "apt 2.6.1 (amd64)" || nativeVersion == "apt 2.6.2 (amd64)") {
 		return aptDebian12Native261
 	}
 	return aptStrictNative

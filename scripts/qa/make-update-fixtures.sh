@@ -51,7 +51,7 @@ for variant in valid invalid-unit; do
     cd "$dest"
     sha256sum bin/server-connect bin/sing-box bin/libcronet.so \
       server-connect.service server-connect-activation-recover.service \
-      server-connect-activation-recover.timer server-connect-smart-tun.service \
+      server-connect-activation-recover.timer server-connect-smart-tun.service server-connect-native-tun.service \
       server-connect-smart-health.service server-connect-smart-health.timer install.sh \
       THIRD-PARTY-LICENSES/sing-box-LICENSE manifest.json > checksums.sha256
     sha256sum --quiet --check checksums.sha256

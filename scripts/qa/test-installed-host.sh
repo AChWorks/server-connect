@@ -382,7 +382,9 @@ verify_direct_install() {
     test "$(systemctl is-enabled server-connect.service)" = disabled
     test "$(systemctl is-enabled server-connect-activation-recover.timer)" = disabled
     test "$(systemctl show server-connect-smart-tun.service -p LoadState --value)" = loaded
-    test "$(systemctl show server-connect-smart-tun.service -p UnitFileState --value)" = disabled
+    test "$(systemctl show server-connect-smart-tun.service -p UnitFileState --value)" = static
+    test "$(systemctl show server-connect-native-tun.service -p UnitFileState --value)" = disabled
+    test "$(systemctl show server-connect-native-tun.service -p ActiveState --value)" = inactive
     test "$(systemctl show server-connect-smart-tun.service -p ActiveState --value)" = inactive
     test "$(systemctl show server-connect-smart-health.service -p LoadState --value)" = loaded
     test "$(systemctl show server-connect-smart-health.service -p UnitFileState --value)" = static
@@ -395,16 +397,17 @@ verify_direct_install() {
       test "$(systemctl show "$name" -p FragmentPath --value)" = "/etc/systemd/system/$name"
       test -z "$(systemctl show "$name" -p DropInPaths --value)"
       test "$(systemctl show "$name" -p Transient --value)" = no
-      if [ "$name" = server-connect-smart-tun.service ]; then
-        test "$(systemctl show "$name" -p UnitFileState --value)" = disabled
-      else
-        test "$(systemctl show "$name" -p UnitFileState --value)" = static
-      fi
+      test "$(systemctl show "$name" -p UnitFileState --value)" = static
       test "$(systemctl show "$name" -p ActiveState --value)" = inactive
       test "$(systemctl show "$name" -p MainPID --value)" = 0
       test "$(systemctl show "$name" -p ControlPID --value)" = 0
       test -z "$(systemctl show "$name" -p Job --value)"
     done
+    test "$(systemctl show server-connect-native-tun.service -p FragmentPath --value)" = /etc/systemd/system/server-connect-native-tun.service
+    test -z "$(systemctl show server-connect-native-tun.service -p DropInPaths --value)"
+    test "$(systemctl show server-connect-native-tun.service -p Transient --value)" = no
+    test "$(systemctl show server-connect-native-tun.service -p UnitFileState --value)" = disabled
+    test "$(systemctl show server-connect-native-tun.service -p ActiveState --value)" = inactive
     for name in server-connect-activation-recover.timer server-connect-smart-health.timer; do
       test "$(systemctl show "$name" -p ActiveState --value)" = inactive
       test -z "$(systemctl show "$name" -p Job --value)"
@@ -422,6 +425,7 @@ verify_clean_uninstall() {
     test ! -e /etc/systemd/system/server-connect-activation-recover.service
     test ! -e /etc/systemd/system/server-connect-activation-recover.timer
     test ! -e /etc/systemd/system/server-connect-smart-tun.service
+    test ! -e /etc/systemd/system/server-connect-native-tun.service
     test ! -e /etc/systemd/system/server-connect-smart-health.service
     test ! -e /etc/systemd/system/server-connect-smart-health.timer
     test "$(stat -c %a /var/lib/server-connect)" = 700
