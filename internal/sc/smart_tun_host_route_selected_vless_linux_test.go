@@ -35,11 +35,13 @@ import (
 )
 
 const (
-	hostRouteQAEndpoint = "9.9.9.10"
-	hostRouteQAForeign  = "203.0.113.10:18080"
-	hostRouteQAPrivate  = "10.77.0.2:18081"
-	hostRouteQARelay    = "9.9.9.10:18443"
-	hostRouteQATLSName  = "front.example.org"
+	hostRouteQAEndpoint   = "9.9.9.10"
+	hostRouteQAForeign    = "203.0.113.10:18080"
+	hostRouteQAPrivate    = "10.77.0.2:18081"
+	hostRouteQAForeignUDP = "203.0.113.10:18082"
+	hostRouteQAPrivateUDP = "10.77.0.2:18083"
+	hostRouteQARelay      = "9.9.9.10:18443"
+	hostRouteQATLSName    = "front.example.org"
 )
 
 func hostRouteQATestCore(t *testing.T) string {
@@ -164,6 +166,65 @@ func hostRouteQAHTTP(t *testing.T, target string, timeout time.Duration) (string
 	return string(body), nil
 }
 
+// A new UDP exchange uses the host's unproxied socket and a unique nonce.
+// Its source is recorded by the independent remote namespace. A matching
+// HTTP response cannot substitute for a real selected VPN UDP packet.
+func hostRouteQAUDP(t *testing.T, destination, nonce string, timeout time.Duration) (string, error) {
+	t.Helper()
+	conn, err := net.DialTimeout("udp4", destination, timeout)
+	if err != nil {
+		return "", err
+	}
+	defer conn.Close()
+	if err := conn.SetDeadline(time.Now().Add(timeout)); err != nil {
+		return "", err
+	}
+	if _, err := conn.Write([]byte(nonce)); err != nil {
+		return "", err
+	}
+	var buf [512]byte
+	n, err := conn.Read(buf[:])
+	if err != nil {
+		return "", err
+	}
+	response := string(buf[:n])
+	if !strings.HasSuffix(response, "|"+nonce) {
+		return "", fmt.Errorf("unexpected UDP nonce or foreign response")
+	}
+	return response, nil
+}
+
+func hostRouteQAUDPFixture(t *testing.T, address, prefix, logFile string) {
+	t.Helper()
+	socket, err := net.ListenPacket("udp4", address)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = socket.Close() })
+	go func() {
+		var buf [512]byte
+		for {
+			n, peer, readErr := socket.ReadFrom(buf[:])
+			if readErr != nil {
+				return
+			}
+			if logFile != "" {
+				f, openErr := os.OpenFile(logFile, os.O_WRONLY|os.O_APPEND, 0600)
+				if openErr != nil {
+					return
+				}
+				_, writeErr := fmt.Fprintf(f, "%s|%q\n", peer.String(), string(buf[:n]))
+				syncErr := f.Sync()
+				closeErr := f.Close()
+				if writeErr != nil || syncErr != nil || closeErr != nil {
+					return
+				}
+			}
+			_, _ = socket.WriteTo([]byte(prefix+peer.String()+"|"+string(buf[:n])), peer)
+		}
+	}()
+}
+
 // The remote helper lives in the second netns, not the test's host netns.
 // Its HTTP listeners remain alive when its task-owned VLESS relay dies, so
 // a public-target Direct leak could be observed independently.
@@ -208,6 +269,8 @@ func TestHostRouteV9SelectedRemoteFixtureHelper(t *testing.T) {
 	defer private.Close()
 	go func() { _ = origin.Serve(originLn) }()
 	go func() { _ = private.Serve(privateLn) }()
+	hostRouteQAUDPFixture(t, hostRouteQAForeignUDP, "foreign-udp-source=", filepath.Join(dir, "foreign-udp-accepts"))
+	hostRouteQAUDPFixture(t, hostRouteQAPrivateUDP, "private-udp-source=", "")
 
 	var logs hostRouteCoreOutput
 	relay := exec.Command(core, "run", "-c", filepath.Join(dir, "relay-config.json"))
@@ -379,8 +442,10 @@ func TestHostRouteV9SelectedVLESSRealKernelNoDirectLeak(t *testing.T) {
 
 	// Only the task-owned origin logs its accepted TCP connections. No
 	// privileged global traffic trace, SNAT or host-level packet filtering.
-	if err := os.WriteFile(filepath.Join(dir, "foreign-accepts"), nil, 0600); err != nil {
-		t.Fatal(err)
+	for _, name := range []string{"foreign-accepts", "foreign-udp-accepts"} {
+		if err := os.WriteFile(filepath.Join(dir, name), nil, 0600); err != nil {
+			t.Fatal(err)
+		}
 	}
 	fixture := exec.Command("/usr/bin/nsenter", "-t", peerPID, "-n", os.Args[0],
 		"-test.run=^TestHostRouteV9SelectedRemoteFixtureHelper$", "-test.v", "-test.timeout=80s")
@@ -418,6 +483,14 @@ func TestHostRouteV9SelectedVLESSRealKernelNoDirectLeak(t *testing.T) {
 	private, err := hostRouteQAHTTP(t, hostRouteQAPrivate, 3*time.Second)
 	if err != nil || !strings.HasPrefix(private, "private-source=10.77.0.1:") {
 		t.Fatalf("private baseline failed: %q %v", private, err)
+	}
+	baselineUDP, err := hostRouteQAUDP(t, hostRouteQAForeignUDP, "baseline-foreign", 1800*time.Millisecond)
+	if err != nil || !strings.HasPrefix(baselineUDP, "foreign-udp-source=9.9.9.9:") {
+		t.Fatalf("foreign UDP Direct baseline not actually on underlay: %q %v", baselineUDP, err)
+	}
+	privateUDP, err := hostRouteQAUDP(t, hostRouteQAPrivateUDP, "baseline-private", 1800*time.Millisecond)
+	if err != nil || !strings.HasPrefix(privateUDP, "private-udp-source=10.77.0.1:") {
+		t.Fatalf("private UDP Direct baseline failed: %q %v", privateUDP, err)
 	}
 	hostRouteQAWaitBaselineIPv6(t)
 	before := hostNativeKernelSnapshot(t)
@@ -523,7 +596,15 @@ func TestHostRouteV9SelectedVLESSRealKernelNoDirectLeak(t *testing.T) {
 	if err != nil || !strings.HasPrefix(private, "private-source=10.77.0.1:") {
 		t.Fatalf("VPN diverted protected private Direct: %q %v", private, err)
 	}
-	fmt.Println("HOST_ROUTE_V9_SELECTED_REAL_VLESS_FOREIGN_TUN_AND_PRIVATE_DIRECT=PASS")
+	selectedUDP, err := hostRouteQAUDP(t, hostRouteQAForeignUDP, "selected-foreign", 4*time.Second)
+	if err != nil || !strings.HasPrefix(selectedUDP, "foreign-udp-source=203.0.113.10:") {
+		t.Fatalf("foreign UDP did not emerge from selected VLESS relay: %q %v: %s", selectedUDP, err, clientLog.String())
+	}
+	privateUDP, err = hostRouteQAUDP(t, hostRouteQAPrivateUDP, "selected-private", 1800*time.Millisecond)
+	if err != nil || !strings.HasPrefix(privateUDP, "private-udp-source=10.77.0.1:") {
+		t.Fatalf("VPN diverted private UDP Direct: %q %v", privateUDP, err)
+	}
+	fmt.Println("HOST_ROUTE_V9_SELECTED_REAL_VLESS_FOREIGN_TCP_UDP_TUN_AND_PRIVATE_DIRECT=PASS")
 
 	// Both failures must retain the independent kernel guard and the
 	// remotely controlled foreign origin. A fresh TCP accept would prove a
@@ -555,6 +636,10 @@ func TestHostRouteV9SelectedVLESSRealKernelNoDirectLeak(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	acceptedUDPBefore, err := os.ReadFile(filepath.Join(dir, "foreign-udp-accepts"))
+	if err != nil {
+		t.Fatal(err)
+	}
 	noRoute, err := hostRouteQAHTTP(t, hostRouteQAForeign, 1700*time.Millisecond)
 	if err == nil {
 		t.Fatalf("foreign HTTP unexpectedly succeeded without selected upstream: %q", noRoute)
@@ -566,14 +651,29 @@ func TestHostRouteV9SelectedVLESSRealKernelNoDirectLeak(t *testing.T) {
 	if err != nil || string(acceptedAfter) != string(acceptedBefore) {
 		t.Fatalf("selected VLESS outage leaked fresh Direct TCP to foreign origin; read=%v", err)
 	}
+	noUDP, err := hostRouteQAUDP(t, hostRouteQAForeignUDP, "outage-foreign", 700*time.Millisecond)
+	if err == nil {
+		t.Fatalf("foreign UDP unexpectedly succeeded without selected Core/relay: %q", noUDP)
+	}
+	// A remote UDP witness catches every attempted unproxied Direct
+	// datagram even when the sender times out without a response.
+	time.Sleep(170 * time.Millisecond)
+	acceptedUDPAfter, err := os.ReadFile(filepath.Join(dir, "foreign-udp-accepts"))
+	if err != nil || string(acceptedUDPAfter) != string(acceptedUDPBefore) {
+		t.Fatalf("selected outage leaked a foreign UDP datagram to the underlay: %v", err)
+	}
+	privateUDP, err = hostRouteQAUDP(t, hostRouteQAPrivateUDP, "outage-private", 1600*time.Millisecond)
+	if err != nil || !strings.HasPrefix(privateUDP, "private-udp-source=10.77.0.1:") {
+		t.Fatalf("private UDP Direct failed during selected outage: %q %v", privateUDP, err)
+	}
 	private, err = hostRouteQAHTTP(t, hostRouteQAPrivate, 3*time.Second)
 	if err != nil || !strings.HasPrefix(private, "private-source=10.77.0.1:") {
 		t.Fatalf("private Direct did not survive relay outage: %q %v", private, err)
 	}
 	if crashMode == "client-core" {
-		fmt.Println("HOST_ROUTE_V9_SELECTED_CORE_SIGKILL_GUARD_NO_DIRECT_TCP_AND_PRIVATE_ALIVE=PASS")
+		fmt.Println("HOST_ROUTE_V9_SELECTED_CORE_SIGKILL_GUARD_NO_DIRECT_TCP_UDP_AND_PRIVATE_ALIVE=PASS")
 	} else {
-		fmt.Println("HOST_ROUTE_V9_SELECTED_REAL_VLESS_OUTAGE_NO_DIRECT_TCP_AND_PRIVATE_ALIVE=PASS")
+		fmt.Println("HOST_ROUTE_V9_SELECTED_REAL_VLESS_OUTAGE_NO_DIRECT_TCP_UDP_AND_PRIVATE_ALIVE=PASS")
 	}
 
 	state := smartTUNCoreObservationExample("active")
@@ -664,5 +764,9 @@ func TestHostRouteV9SelectedVLESSRealKernelNoDirectLeak(t *testing.T) {
 	if err != nil || !strings.HasPrefix(afterOff, "foreign-source=9.9.9.9:") {
 		t.Fatalf("ordinary Direct/off was not restored after exact cleanup: %q %v", afterOff, err)
 	}
-	fmt.Println("HOST_ROUTE_V9_SELECTED_VLESS_INDEPENDENT_OFF_RESTORES_HOST_DIRECT=PASS")
+	afterUDP, err := hostRouteQAUDP(t, hostRouteQAForeignUDP, "off-foreign", 1800*time.Millisecond)
+	if err != nil || !strings.HasPrefix(afterUDP, "foreign-udp-source=9.9.9.9:") {
+		t.Fatalf("foreign UDP ordinary Direct/off not restored: %q %v", afterUDP, err)
+	}
+	fmt.Println("HOST_ROUTE_V9_SELECTED_VLESS_INDEPENDENT_OFF_RESTORES_HOST_DIRECT_TCP_UDP=PASS")
 }

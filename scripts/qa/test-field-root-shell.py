@@ -27,6 +27,18 @@ for clause in necessary:
     assert clause in source, f'missing guarded QA invariant: {clause}'
 assert 'nft -a list table inet "$owner" | grep -Fq' not in source
 print('FIELD_ROOT_STATIC_GUARD_INVARIANTS=PASS')
+# Guard-first is a kernel safety property: the root-host field QA must
+# never publish its first live RPDB selector before the nft leak guard and
+# its ownership receipt are independently durable/observed.
+guard_create = source.index('nft -f "$work/nft.txt"')
+guard_receipt = source.index('sync -f "$work/nft-handle" "$work/nft-receipt" "$work"')
+guard_observation = source.index('nft -j list chain inet "$owner" guard | python3')
+route_selector = source.index('ip -4 rule add priority "$priority" fwmark "$mark"/"$mask" table "$table"')
+assert source.index('systemd-run --quiet --collect --unit="$watch"') < source.index('ip -4 route add default dev "$tun" table "$table"')
+assert guard_create < guard_receipt < guard_observation < route_selector
+assert 'ROOT_GUARD_FIRST_RPDB=PASS' in source
+assert source.index('ip -4 route add unreachable default table "$table" metric 100') < guard_create
+print('FIELD_ROOT_GUARD_FIRST_ACTIVATION_ORDER=PASS')
 # Real Bash pattern matching: a namespace string contains literal brackets.
 check = subprocess.run(
     ['bash', '-c', 'set -eu; ns="net:[4026531840]"; '

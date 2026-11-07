@@ -251,9 +251,11 @@ done
 [[ "$ready" == yes && $(systemctl is-active "$coreunit.service") == active ]] || die 'real root TUN did not activate'
 ip -4 addr show dev "$tun" | grep -Fq '172.30.244.1/30' || die 'root TUN address unknown'
 [[ -z $(ip -4 route show table "$table") ]] || die 'race: routing table changed'
+# Only inert FIB entries may exist before the independent final-egress
+# nft guard is durably observed. The RPDB selector is the first operation
+# able to make this test's marked routing live.
 ip -4 route add default dev "$tun" table "$table" metric 10
 ip -4 route add unreachable default table "$table" metric 100
-ip -4 rule add priority "$priority" fwmark "$mark"/"$mask" table "$table"
 # One atomic nft creation packet: route capture and final-egress leak guard.
 cat > "$work/nft.txt" <<NFT
 add table inet $owner
@@ -293,7 +295,22 @@ for item in obj:
     if "counter" in expr: expr["counter"]={}
 raw=json.dumps(obj,sort_keys=True,separators=(",",":"))
 print(hashlib.sha256(raw.encode()).hexdigest())
-' > "$work/nft-receipt"
+' > "$work/nft-receipt" || die 'nft graph ownership receipt could not be written'
+# A completed userspace write does not imply the receipt is durable. Do not
+# admit any RPDB selector while the independently observed nft guard could
+# be lost in a crash. This remains a test-only protocol, not product Apply.
+sync -f "$work/nft-handle" "$work/nft-receipt" "$work" || die 'nft guard receipt durability unavailable'
+nft -j list chain inet "$owner" guard | python3 -c '
+import json,sys
+rules=[x["rule"] for x in json.load(sys.stdin)["nftables"] if "rule" in x]
+assert len(rules)==2
+assert sum(any("drop" in exp for exp in r["expr"]) for r in rules)==1
+' || die 'independent nft final-egress guard incomplete before RPDB'
+# The final-egress guard and its durable graph receipt precede any routing
+# selector. An incomplete or foreign-mutated table must never admit RPDB.
+ip -4 rule add priority "$priority" fwmark "$mark"/"$mask" table "$table" || die 'guarded RPDB activation failed'
+ip -4 rule show | grep -Fq "lookup $table" || die 'guarded RPDB not observed'
+echo 'ROOT_GUARD_FIRST_RPDB=PASS'
 printf 'ROOT_SELECTED_TUN_ACTIVE=PASS\n'
 # Independently verify the two sibling kernel paths; do not mistake a real
 # route-table entry or a Direct IP response for a selected VPN witness.

@@ -136,32 +136,34 @@ general-host admission.
 `unshare --net` and the exact SHA256-verified official
 `SC_TEST_SINGBOX` executable. It creates a **second nested network
 namespace**, a disposable local VLESS/TLS/WebSocket relay with an ephemeral
-test-only certificate, a foreign-target HTTP witness and a private Direct
-witness. The public-looking selected endpoint IP is bound **only inside the
+test-only certificate, independent foreign TCP+UDP witnesses and private Direct TCP+UDP
+witnesses. The public-looking selected endpoint IP is bound **only inside the
 isolated topology**; no traffic to a real external VPN provider occurs.
 The client config is built through the actual pinned selected-profile
 `compileHostCoreAttachConfig` compiler and joins the actual v9 durable
-Core/Ingress/Barrier/TUN/FIB/RPDB/nft parent. A proxy-unaware host HTTP
-request must emerge at the foreign witness from the selected VLESS relay's
-network namespace, **not** from the client's directly reachable underlay;
-private traffic must remain Direct. Two independently repeated failure modes follow the successful
+Core/Ingress/Barrier/TUN/FIB/RPDB/nft parent. Independent proxy-unaware
+host TCP HTTP and UDP echo requests must emerge at the foreign witness from
+the selected VLESS relay's namespace, **not** from the directly reachable
+underlay; protected private TCP and UDP must remain Direct. Two independently repeated failure modes follow the successful
 selected path: the remote relay is SIGKILLed **without stopping the foreign
 HTTP witness**, or the actual selected client Core is SIGKILLed after all
 kernel policy receipts (`SC_TEST_HOST_ROUTE_SELECTED_VLESS_CRASH=client-core`).
-In either case, a new VPN-required request must fail, the foreign witness's
-accepted-TCP inventory must not increase, the independent nft final-egress
-guard must remain effective, and private Direct must still work. Independent
+In either case, new VPN-required TCP and UDP exchanges must fail, the
+foreign witness's accepted TCP connections **and** UDP datagrams must not
+increase (independent logs), the nft final-egress guard must remain
+effective, and private TCP+UDP Direct must still work. Independent
 Core-first Recovery must restore exact foreign route/rule/nft structure,
 never reset foreign counters, clear only owned effects, and return foreign
-HTTP to the original Direct/off path. The isolated VETH and Docker-bridge
+TCP+UDP traffic to the original Direct/off path. The isolated VETH and Docker-bridge
 IPv6 link-local DAD must settle **before** the baseline inventory is taken;
 don't hide a genuine IPv6 route change behind counter normalization.
-This proves one genuine selected **TCP** data path and failure behavior,
-not Iranian public-prefix classification, IPv6/DNS/UDP/MTU coverage,
+This proves genuine selected **TCP and UDP** data paths and fail-closed
+behavior for these bounded remote witnesses, **not** Iranian public-prefix
+classification, actual DNS resolver semantics, IPv6, MTU/PMTUD, broad UDP coverage,
 installed systemd/independent runtime daemon, third-party hosted replies,
 reboot/crash-boundary recovery or general-host Apply.
 
-**Root-host narrow field proof (still not product Apply):** `scripts/qa/field-root-selected-tun.sh` is a manually authorized, disposable Debian 12 field-only canary. It binds hostname, public underlay IPv4 and interface plus one preselected foreign HTTPS `/32`, selected private VLESS outbound, Direct baseline, a dedicated native RPDB/table and nft egress guard. An independent timer is armed before any host network mutation. It verifies a proxy-unaware host `curl`, independent selected-upstream and TUN packet counters, an unrelated Direct route, an opportunity for fresh external SSH checks, deliberate QA-Core loss without Direct fallback, and exact task-owned restoration. A failed cleanup retains recovery evidence and must not be reported as restored. This experiment does **not** activate the installed product, maintain a product Journal/Runtime Guard, route arbitrary foreign traffic, authenticate Iranian geo-IP prefixes, verify hosted ingress/aaPanel replies, or authorize production. Do not infer general-host admission from a field script. The separate `scripts/qa/field-notrack-inherited-mark.sh` proves accepted-TCP socket mark inheritance with NOTRACK under positive and negative controls **inside an isolated network namespace only**. Enabling the kernel sysctl and protecting pre-existing untracked hosting sessions on a real host remain unimplemented product work; never silently exempt a source port from capture as a substitute. Full-host routing must retain native ownership and author-separated review gates.
+**Root-host narrow field proof (still not product Apply):** `scripts/qa/field-root-selected-tun.sh` is a manually authorized, disposable Debian 12 field-only canary. It binds hostname, public underlay IPv4 and interface plus one preselected foreign HTTPS `/32`, selected private VLESS outbound, Direct baseline, a dedicated native RPDB/table and nft egress guard. An independent timer is armed before any host network mutation; the test must **create, fsync and independently observe the nft final-egress guard before publishing its first live RPDB selector**, with a source regression preventing the old guard-after-RPDB ordering. It verifies a proxy-unaware host `curl`, independent selected-upstream and TUN packet counters, an unrelated Direct route, an opportunity for fresh external SSH checks, deliberate QA-Core loss without Direct fallback, and exact task-owned restoration. A failed cleanup retains recovery evidence and must not be reported as restored. This experiment does **not** activate the installed product, maintain a product Journal/Runtime Guard, route arbitrary foreign traffic, authenticate Iranian geo-IP prefixes, verify hosted ingress/aaPanel replies, or authorize production. Do not infer general-host admission from a field script. The separate `scripts/qa/field-notrack-inherited-mark.sh` proves accepted-TCP socket mark inheritance with NOTRACK under positive and negative controls **inside an isolated network namespace only**. Enabling the kernel sysctl and protecting pre-existing untracked hosting sessions on a real host remain unimplemented product work; never silently exempt a source port from capture as a substitute. Full-host routing must retain native ownership and author-separated review gates.
 
 **Optional real-host pinned Iranian Direct/foreign selected-VPN split:** The same authorized root-host QA accepts an optional *single* Iranian HTTPS FQDN and exact `/32` address, backed by a locally staged, SHA-256-pinned copy of the **October 2026 DB-IP Lite country estimate** already bundled in the repository. The supplied address must still appear in a fresh observed DNS resolution and pass an independently TLS-validated Direct HTTPS baseline. During the foreign `/32` selected-VPN capture, a separate explicit Direct mark is set **only for the Iranian witness IP on TCP/443**, and a distinct postrouting counter requires physically observed underlay egress; the foreign selected-TUN packet, selected-upstream and final-egress witnesses remain separate. After deliberate Core loss, the foreign selected-VPN `/32` must still fail closed while the pinned Iranian HTTPS request stays Direct. The original four-argument foreign-only test is preserved. The field operator supplies the exact source file and must independently verify both its digest and task-owned cleanup. Gateway SSH Job launch scripts must use POSIX `sh` syntax and explicitly invoke the Bash field script; `pipefail` belongs inside the Bash script, not in the Job launch wrapper. This evidence is **one observed domestic candidate, not trusted automated geographic classification, country-wide routing or arbitrary-host Smart Routing admission**. It cannot certify CDN geography, website hosting ingress, public IPv6, or legacy NOTRACK session safety.
 
