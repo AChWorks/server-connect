@@ -60,9 +60,12 @@ restores the TUN unit, independent recovery service/timer and separate health
 service/timer, and refuses updates while any of them is active. Installation
 alone does not enable either experimental timer.
 
-`smart-tun-trial-apply` is limited to the known disconnected Docker/systemd
-fixture, with an exact synthetic VLESS endpoint and IPv4 or opt-in IPv4+IPv6
-policy. Its default pending mode uses the v4 journal's distinct
+The legacy v4 `smart-tun-trial-apply` is limited to Debian 13: the known
+disconnected Docker/systemd fixture with its exact synthetic VLESS endpoint
+and IPv4 or opt-in IPv4+IPv6 policy, or the separately admitted exact
+`sc-qa-vm-us01` QEMU fixture with IPv4-only policy. These are distinct
+admission/evidence lanes; see the [support matrix](SUPPORT-MATRIX.md). Its
+default pending mode uses the v4 journal's distinct
 `smart_tun_native_pending_trial_v1` intent with a required typed native ledger;
 it expires without confirmation. The explicit `--supervised` mode adds a
 separate strict lifecycle record for one-use fresh management confirmation,
@@ -135,7 +138,7 @@ recognized. CLI `host-core-preparation-qa` / operation-bound
 proof; `activation_ready` and `general_host_admitted` remain false. A live
 Core-only TUN does not route public host traffic or prove VPN delivery.
 
-**v9 single-parent routed-policy kernel QA (development-only, no installed
+**v9 single-parent routed-policy QA (development-only, no general-host
 Apply command):** A strict new parent joins the exact v8 Core/Ingress/Barrier
 and native Link with individually journaled IPv4/IPv6 FIB, RPDB and nft
 capture/guard effects; it is selected and reconciled under the same
@@ -161,26 +164,39 @@ and journal receipts atomic. The historical v4 trial sequence is unchanged.
 In an isolated real Linux netns with simulated owned Core identity, tests
 install the actual marked RPDB/FIB fallback/route and native inet OUTPUT
 capture/POSTROUTING guard alongside Docker NAT/NOTRACK, then independently
-stop Core, remove exact receipted resources and compare the complete
-foreign route/rule/nft baseline. A true process SIGKILL after all durable
-receipts also recovers. A process SIGKILL *after a kernel route or nft effect
+stop Core, remove receipted resources and compare the complete foreign
+route/rule/nft baseline. A true process SIGKILL after all durable receipts
+also recovers in this controlled fixture without intervening overlapping
+replacement. Attribute receipts alone cannot prove route/rule lifetime.
+A process SIGKILL *after a kernel route or nft effect
 but before its durable receipt* deliberately leaves an **uncertain** parent:
 matching-looking kernel resources are not adoption authority, and Recovery
 must retain the guard/evidence instead of claiming Direct/off. The latter
 is a production readiness blocker, not a successful rollback; its isolated
-namespace is discarded after the negative test. Neither these kernel tests
-nor a v9 journal prove a live selected VPN exit, automated Iranian Direct,
-DNS/UDP/IPv6 capture, preserved real foreign-hosted ingress, a continuously
-operating Runtime Health Guard, or general-host admission. No public v9
-Apply CLI or stable release is enabled.
+namespace is discarded after the negative test. Those simulated-Core tests
+and the journal alone do not prove selected VPN
+delivery, automated Iranian Direct, DNS/UDP/IPv6 capture, preserved real
+foreign-hosted ingress or general-host admission. Separate nested-netns
+selected VLESS/TLS/WS tests prove bounded TCP/UDP delivery and outage behavior;
+their [acceptance limits](ACCEPTANCE.md) remain explicit.
+
+An additional, explicitly constructed `host_native_supervised_policy_v1`
+intent keeps the v9 ownership ledger and operation-bound supervision in the
+same parent. Older v9 preparation records retain immediate-recovery semantics;
+an upgrade does not confer a lease or confirmation authority. Its installed
+Health/Recovery executors have narrowly verified IPv4 HTTPS, fresh SSH and
+supervisor-loss recovery evidence in an independently resettable Debian 13
+QEMU guest. The [installed guest evidence](ACCEPTANCE.md#installed-v9-supervised-guest-evidence)
+does not establish general Connect, the complete fault matrix or stronger
+route/rule ownership. No general-host Apply CLI or stable release is enabled.
 
 The manager validates the selected profile, pinned core, native baseline and
 reserved resource absence, then independently prearms the installed recovery
 oneshot/timer outside the shared journal lock. It repeats admission under the
 lock and persists the operation before any native network mutation. Native ownership binds
 the network namespace, actual interface index, complete addresses and relevant
-dependencies, exact route/rule receipts, and the nftables table and ordered
-child handles. The original host fingerprint remains diagnostic evidence; it
+dependencies, observed route/rule attribute receipts, and the nftables table
+and ordered child handles. The original host fingerprint remains diagnostic evidence; it
 is not a restoration snapshot or permission to delete changed foreign state.
 
 The manager creates an exclusive, initially nonpersistent TUN, configures its
@@ -253,8 +269,12 @@ unreceipted policy is conclusively absent and outstanding mutators are excluded,
 cleanup may proceed without a guard. A present unreceipted graph remains uncertain. It removes the nftables guard last using a stable observed generation
 and an exact table-handle deletion conditioned on that generation. A concurrent
 committed nftables change invalidates deletion instead of allowing recursive
-foreign-child removal. Supported disjoint changes survive Off; overlapping,
-replaced or uninspectable dependencies retain resources and evidence. Only
+foreign-child removal. Supported disjoint changes survive controlled Off;
+observable overlap, changed identities and uninspectable dependencies retain
+resources and evidence. Identical route/rule replacement is a separate,
+[reproduced ownership gap](SAFETY-RECOVERY.md#route-and-rpdb-identity-limits):
+a durable attribute receipt and another observation do not prevent deletion
+of a replacement with the same fields, including a last-observation race. Only
 verified removal and protected underlay observations permit truthful Direct
 finalization. The precise ordering and uncertainty cases are in
 [Safety and recovery](SAFETY-RECOVERY.md#native-ownership-and-containment).
@@ -267,13 +287,16 @@ creates a fresh operation/deadline. Stored policy alone is never authority to
 start a service or restore a prior active state. Unresolved operations block
 Proxy Only and installer transitions and prevent status from claiming Direct.
 
-Supported foreign nftables coexistence is limited to observed non-rewriting
-filtering/counters and the admitted passive statement forms. NAT, packet or
+For legacy v4 trials, supported foreign nftables coexistence is limited to
+observed non-rewriting filtering/counters and the admitted passive statement forms. NAT, packet or
 metadata rewriting, redirection/duplication/forwarding, userspace queueing,
 connection-tracking assignment and offload are unsupported and must remain
 absent while routed. A later privileged path-affecting change can invalidate
 routing assumptions before the periodic executor observes it; stopping the core
-is not instantaneous containment against such a new foreign policy.
+is not instantaneous containment against such a new foreign policy. The
+v9-specific observer additionally admits only its exact cross-checked basic
+Docker NAT and paired NOTRACK grammar described above; that exception is not
+shared with v4 or a general authorization for other foreign writers.
 
 This boundary does not authenticate arbitrary simultaneous privileged writers,
 route/rule generations, geographic data or DNS-to-IP correlation. Fresh root
@@ -292,6 +315,6 @@ The connector must not change aaPanel/Nginx virtual hosts, intercept another tun
 
 ## Packaging and host targets
 
-Target only **tested** Linux OS/kernel/architecture/sing-box combinations with systemd and the required TUN/network capabilities. Acquire immutable verified bytes via official online, operator-hosted HTTPS mirror, or manual offline upload; all invoke one shared installer. Keep host-specific package, signature and installation rules in [OFFLINE-DISTRIBUTION.md](OFFLINE-DISTRIBUTION.md).
+Target only **tested** Linux OS/kernel/architecture/sing-box combinations with systemd and the required TUN/network capabilities. The [development support matrix](SUPPORT-MATRIX.md) separates package targets, command/intent admission and actual evidence; a package target alone grants no routing authority. Acquire immutable verified bytes via official online, operator-hosted HTTPS mirror, or manual offline upload; all invoke one shared installer. Keep host-specific package, signature and installation rules in [OFFLINE-DISTRIBUTION.md](OFFLINE-DISTRIBUTION.md).
 
 Operational safety details live in [SAFETY-RECOVERY.md](SAFETY-RECOVERY.md); real scenario coverage and known limits in [ACCEPTANCE.md](ACCEPTANCE.md). Existing development-only unarmed selective plans and loopback RPDB trials remain code/test diagnostics, **not** release-blocking implementations of Smart Routing.

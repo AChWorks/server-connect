@@ -128,9 +128,11 @@ ownership rather than unlinking it or disabling the timer.
 
 The independently selected version-9 parent is the first development-only
 single durable owner for Ingress/Barrier, selected-Core start/credential,
-native Link and FIB/RPDB/nft policy receipts. Its kernel QA runs only in a
-fresh isolated disposable network namespace, with **simulated Core unit
-state**, not on a general production host. The v9-specific observer admits
+native Link and FIB/RPDB/nft policy receipts. Its initial kernel QA lane runs
+in a fresh isolated disposable network namespace with **simulated Core unit
+state**. Separate genuine-Core, selected-VLESS and installed-supervision lanes
+have their own [evidence boundaries](SUPPORT-MATRIX.md); none authorizes a
+general production host. The v9-specific observer admits
 only the already-receipted same-operation ingress mark graph, exact paired
 nft-backed raw NOTRACK grammar, and independently cross-checked basic Docker
 NAT. Other owners or changed prerequisites refuse before first policy effect.
@@ -148,18 +150,22 @@ A kernel mutation acknowledged **without its durable receipt** remains
 promoted to owned. The journal and relevant kernel evidence must be retained,
 and independent Recovery must never report `DIRECT` or delete foreign state
 as a workaround. Current isolated SIGKILL negative tests prove this refusal,
-not guaranteed automatic recovery from every kernel boundary. A fully
-receipted v9 kernel graph is recoverable after real initiator SIGKILL.
+not guaranteed automatic recovery from every kernel boundary. In the
+controlled fixture with no intervening overlapping replacement, a fully
+receipted v9 kernel graph recovers after real initiator SIGKILL. Receipts do
+not solve the [route/rule lifetime gap](#route-and-rpdb-identity-limits).
 A separate isolated-kernel QA lane starts the actual pinned official sing-box
 Core with a blocked test-only outbound, observes its TUN attachment and
 fully receipted v9 policy guard, then verifies Core-first Off after normal
 stop or actual Core SIGKILL. This is genuine Core/Kernel ownership composition:
 the test's process-bound observer is **not** installed systemd, and the
 blocked outbound is **not** selected-VPN data-plane proof. Neither
-path is product activation: selected VPN and Iranian Direct path validation,
-active Runtime Health Guard, no-Direct-leak outage tests, IPv6 and DNS, field
-SSH/hosting ingress and reboot acceptance remain required before general
-host Apply is exposed.
+path is general-host product activation. Separate selected-VLESS TCP/UDP
+namespace tests and an explicitly constructed installed v9 supervised guest
+have narrower positive evidence in [Acceptance](ACCEPTANCE.md). Trusted Iranian
+Direct, the complete independent Runtime Health/fault matrix, IPv6 and DNS,
+field hosting ingress, reboot and ownership recovery remain required before
+general-host Apply is exposed.
 
 ### Disposable v4 guarded TUN trial (not production acceptance)
 
@@ -393,8 +399,8 @@ unknown intents, partial records or mixed legacy/native/supervised authority
 are rejected. Saved settings never supply deletion rights.
 
 The native ledger binds namespace identity, underlay and TUN indices, observed
-link/address/dependency hashes, route/rule stages and receipts, and the complete
-ordered nftables graph with original handles. Resource labels, route protocols,
+link/address/dependency hashes, route/rule stages and observed attribute
+receipts, and the complete ordered nftables graph with original handles. Resource labels, route protocols,
 priorities and intended configuration identify the scope to inspect; they do
 not authenticate ownership by themselves. Whole-host equality is not used to
 remove objects added by another owner after admission.
@@ -492,7 +498,7 @@ exact guest-owned conflicting resources is explicitly operator-assisted and
 never presented as automatic rollback. The timer remains armed and evidence is
 retained while recovery is incomplete. Status inspection does not perform repair.
 
-Foreign nftables admission accepts only the supported passive matching,
+Legacy v4 foreign nftables admission accepts only the supported passive matching,
 counter/filter/log/limit/quota and jump/goto statement forms, followed by the
 mark/interface dependency checks. NAT, packet/metadata assignment, redirection,
 duplication/forwarding, userspace queueing, notrack/connection-tracking assignment,
@@ -501,14 +507,46 @@ remain absent throughout the pending operation. Later independent privileged
 path rewriting can affect packets before the periodic executor observes the
 conflict. Detection contains the owned core and retains evidence; it does not
 prove instantaneous containment against that newly introduced foreign policy.
+The v9 observer's separately checked basic Docker NAT and paired raw NOTRACK
+grammar is a narrow exception for its own QA lane; it does not relax this v4
+classifier or admit arbitrary foreign packet writers.
 
-The nft generation condition covers committed nftables changes, not an
-unobservable identical route/rule replacement by a concurrent privileged writer.
-Network namespace/boot changes cannot authenticate reused native identifiers.
-This fixture-only boundary does not establish arbitrary multi-owner host
-support, physical power-loss recovery, permanent `ACTIVE_VERIFIED`, trusted
-Iranian routing data or DNS/domain authority. Those remain required gates for
-general Smart Routing.
+##### Route and RPDB identity limits
+
+The nft generation condition covers committed nftables changes, not route/rule
+lifetime. Network namespace/boot identity and matching attribute hashes do not
+authenticate a non-reusable RPDB/FIB generation. Distinguish three cases:
+
+- **Supported disjoint changes:** controlled tests preserve independently owned
+  objects outside the operation's resources through successful Off.
+- **Observable conflicts:** changed attributes, additional overlapping objects,
+  foreign dependencies, changed nft handles/children or failed observations
+  require retained resources/evidence and uncertainty under the existing checks.
+- **Identical replacement and last-observation races:** a concurrent owner can
+  remove a receipted route/rule and recreate the same fields. The current
+  attribute-based remover cannot distinguish that replacement, even after a
+  fresh observation; replacement can also occur between observation and deletion.
+
+The opt-in [native ownership counterexample](../scripts/qa/native-ownership-aba.md)
+executes real IPv4 route and RPDB mutations in disposable namespaces, with an
+independent replacing process and an actual durable parent receipt. Both
+before-recovery and after-last-observation variants delete the replacement and
+record that resource as removed. The safety assertion deliberately **fails**.
+This proves a resource-cleanup defect; it is not a reproduction of a complete
+public CLI transition falsely reporting Direct. The preexisting low-level
+algorithm is reused by v9, so this is not evidence that v9 introduced the gap.
+
+Unreceipted effects and receipted identical replacements are separate unresolved
+release blockers. A matching protocol, priority, table number, namespace or
+journal is not exclusive ownership; neither the manager lock nor repeated
+snapshots exclude another privileged writer. A legitimate overlapping manager
+can replay the same object without being an attacker. These cases must not be
+conflated with supported disjoint managers or silently converted into a new
+exclusive-ownership contract. The future invariants below remain requirements.
+
+This fixture-only evidence does not establish general multi-owner support,
+physical power-loss recovery, permanent `ACTIVE_VERIFIED`, trusted Iranian
+routing data or DNS/domain authority. General-host activation remains blocked.
 
 **Existing NOTRACK TCP hosting sessions:** The root-host read-only boundary may
 identify a possible reply-capable socket match to foreign OUTPUT NOTRACK rules, including half-closed TCP `CLOSE_WAIT` sockets that can still send and conservative `FIN_WAIT`/`TIME_WAIT`/handshake states.
@@ -546,6 +584,15 @@ not route Direct. [Kernel tcp_fwmark_accept semantics](https://www.kernel.org/do
 and [inet_diag mark UAPI](https://github.com/torvalds/linux/blob/master/include/uapi/linux/inet_diag.h)
 are primary implementation references.
 
+**Mark-capable actors are a separate boundary:** setting `SO_MARK` requires
+`CAP_NET_ADMIN`, or `CAP_NET_RAW` since Linux 5.17, in the relevant capability
+context ([socket(7)](https://man7.org/linux/man-pages/man7/socket.7.html)). A
+bypass mark does not authenticate its caller. Admission and coexistence work
+must account for mark-capable services and listeners, including actors without
+`CAP_NET_ADMIN`; observing an expected mark or granting a diagnostic unit
+`CAP_NET_RAW` is not proof that other actors cannot use that mark. The current
+fixtures do not establish general-host safety against such interference.
+
 **SYN-only marking is insufficient:** when SYN cookies reconstruct a request
 from the final ACK, the kernel takes its inherited mark from that ACK. The
 staged rule must cover that packet as well as the SYN. The namespace probe
@@ -559,10 +606,14 @@ and [request mark selection](https://github.com/torvalds/linux/blob/v6.1/include
 This correction does not eliminate the preexisting request/accept-backlog,
 concurrent-listener or atomic drain-barrier requirements below.
 
-This is a **feasibility proof only**: real admission still needs an
-independent *pre-activation* Guard, durable journaling and exact-owned
-rollback of the temporary sysctl + nft ingress-mark stage, complete/atomic
-generation+mark observations (including SYN backlog/closing sockets),
+This is a **feasibility proof only**. Its standalone QA sysctl change belongs
+to the QA operator and requires independently verified restoration. Installed
+v6/v7/v8/v9 preparation instead requires **preexisting operator-owned**
+`tcp_fwmark_accept=1`; it does not acquire authority to change or restore that
+shared scalar. Real admission still needs an independent *pre-activation*
+Guard, durable journaling and exact-owned rollback of the nft ingress stage,
+complete/atomic generation+mark observations (including SYN backlog and
+closing sockets),
 fresh verification that all new accepted sockets actually inherit their
 marks, timeout/refusal for never-draining legacy sessions, foreign NFT/NAT
 ownership validation, and host reply acceptance after activation and
@@ -619,10 +670,13 @@ If an existing resource was replaced or altered by another owner, classify `UNCE
 
 ### Fresh management confirmation evidence
 
-For the disposable supervised native lifecycle, confirmation is deliberately
-limited to a new authenticated root OpenSSH connection over the admitted guest
-management path. An operation challenge is issued only after native capture is
-complete. Its monotonic boot-relative time, operation, configuration and control
+For the disposable supervised native lifecycle, confirmation requires a new
+authenticated SSH transport over the exact admitted guest management path.
+The Docker lane uses root OpenSSH; the narrowly admitted `sc-qa-vm-us01` QEMU
+lane additionally accepts its verified `scqa` session with a root OpenSSH
+parent executing the root manager through `sudo`. These exact fixture paths
+do not authorize arbitrary non-root management sessions. An operation challenge
+is issued only after native capture is complete. Its monotonic boot-relative time, operation, configuration and control
 revision bind the confirmation. The original Apply shell and a new channel on an
 older SSH multiplexed connection cannot satisfy that requirement.
 
@@ -635,8 +689,8 @@ process lifetime, ancestry, descriptor and socket generation are checked again
 before returning evidence. `SSH_CONNECTION`, `SSH_CLIENT`, process names and
 operator-supplied timestamps are not authentication. Ambiguous, missing or
 changed evidence refuses confirmation. Provider-console confirmation and
-non-root/sudo management sessions require their own future accepted proof; they
-are not silently treated as equivalent to this root-only fixture.
+other non-root/sudo management sessions require their own accepted proof;
+they are not silently treated as equivalent to either admitted fixture.
 
 The kernel's [process lifetime documentation](https://www.kernel.org/doc/html/latest/filesystems/proc.html)
 and [socket diagnostic UAPI](https://github.com/torvalds/linux/blob/v6.12/include/uapi/linux/inet_diag.h)
@@ -664,4 +718,4 @@ On confirmed failure, prevent **unobserved** Direct bypass while the Smart Routi
 
 ## Required proof
 
-The exact evidence and negative/physical test matrix lives in [ACCEPTANCE.md](ACCEPTANCE.md). Safety claims require at least authentic fresh SSH/hosting reply preservation, independent Direct versus VPN path evidence, expiry/replay/kill/reboot scenarios, competing host-network rules, and **failure of both the VPN and the guard itself**. Simulated or Docker-reset tests do not establish physical power-loss recovery.
+The exact evidence and negative/physical test matrix lives in [ACCEPTANCE.md](ACCEPTANCE.md); the [development support matrix](SUPPORT-MATRIX.md) distinguishes each command/intent and fixture. Safety claims require at least authentic fresh SSH/hosting reply preservation, independent Direct versus VPN path evidence, expiry/replay/kill/reboot scenarios, competing host-network rules, and **failure of both the VPN and the guard itself**. Simulated or Docker-reset tests do not establish physical power-loss recovery.
