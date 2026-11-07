@@ -175,7 +175,14 @@ func recoverNativeRedirect(parent context.Context, r nativeKernelRunner, p nativ
 				if line == "" {
 					continue
 				}
-				if line != fmt.Sprintf("local %s dev %s scope host", host, p.UnderlayIF) {
+				// Linux reports IPv4 local routes with "scope host"; IPv6
+				// reports its native metric and preference. Match both
+				// exactly, never a foreign additional route in this table.
+				want := fmt.Sprintf("local %s dev %s scope host", host, p.UnderlayIF)
+				if family == "-6" {
+					want = fmt.Sprintf("local %s dev %s metric 1024 pref medium", host, p.UnderlayIF)
+				}
+				if line != want {
 					return errors.New("native recovery: unexpected redirect-table route")
 				}
 				routes = append(routes, nativeAction{"ip", []string{family, "route", "del", "table", strconv.Itoa(redirectTable), "local", host, "dev", p.UnderlayIF}})

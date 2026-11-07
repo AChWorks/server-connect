@@ -39,6 +39,35 @@ rule/route. This is a measured blocker, not permission for the Manager to
 guess at third-party kernel ownership. A narrowly independent crash/recovery
 guard and reliable resource authority still require design and acceptance.
 
+### Native Smart Routing candidate lifecycle (not general-host admitted)
+
+This candidate extends the compile-only native preview with a guarded
+Connect/Disconnect lifecycle. The Manager uses one shared state/journal lock
+to read the saved profile and rules, validates the compiled official sing-box
+config, checks free policy slots, and stages a private digest-bound recovery
+claim before requesting systemd activation. No second Go router is created.
+
+The native systemd unit uses ExecStartPre to check the desired mode, selected
+profile, config receipt, underlay and vacant native policy resources. Its
+ExecStopPost independently invokes scoped recovery after normal stop, failed
+start or unexpected Core termination. The fixed native table/rule indices are
+not enough for SIGKILL recovery: official sing-tun's auto_redirect separately
+creates a random route table and priority-1 lookup. Recovery validates native
+resources before removing them. Unknown foreign objects are retained and
+reported uncertain for operator repair/retry. Verified recovery returns
+desired mode to Direct while retaining the claim until explicit Disconnect.
+A stale claim cannot silently restart the Core on boot or manual systemd
+start. Installation leaves the native unit disabled.
+
+A disposable Debian 13 VM has exercised actual official sing-box 1.14.3
+systemd service, normal CLI Disconnect, SIGKILL-triggered ExecStopPost,
+exact IPv4/IPv6 route/rule/nft baseline restoration and foreign-route
+collision refusal followed by manual recovery. The actual compiled policy
+also passed synthetic independent VLESS/Direct witnesses in a rootless
+namespace. This is candidate evidence, not real Iran/foreign VPN provider
+acceptance, installed artifact parity, domain Direct or runtime health proof.
+The old experimental trial remains until its replacement is accepted.
+
 The older detailed native resource-ledger and trial descriptions below
 document the **existing experimental code**, not the selected production
 implementation. The canonical [PROJECT-SPEC.md](PROJECT-SPEC.md) and
@@ -59,7 +88,7 @@ Operator -> one menu / CLI + structured JSON
 Optional: independent cloudflared connector -> Cloudflare -> approved HTTP(S) origin
 ```
 
-The manager is a small Linux CLI/control plane, not a replacement tunnel protocol or a mandatory hosted dashboard. The current usable development foundation is Direct and opt-in Proxy Only; **production Smart Routing and its guards are not yet implemented/accepted**. Source and CI history must not be confused with a released or field-proven build.
+The manager is a small Linux CLI/control plane, not a replacement tunnel protocol or a mandatory hosted dashboard. Direct and opt-in Proxy Only remain the accepted baseline; native Smart Routing has a VM-tested **candidate lifecycle**, not an accepted production path or complete runtime guard. Source and CI history must not be confused with a released or field-proven build.
 
 Use one authenticated stored-profile identity and **one selected active outbound** for the first version. Keep profile data, rules, runtime state and replaceable binaries separate. A saved profile/rule set is **configuration**, not an active Linux route: explicit Disconnect or guard-confirmed fallback to Direct removes the precisely owned TUN/policy and any VPN-only egress blocks, but preserves stored settings for the next independently guarded Apply. While routing is active or degraded, an unavailable VPN-required path must not silently bypass through Direct. Do not introduce multi-outbound abstractions or a per-job router for possible future features.
 
@@ -95,7 +124,7 @@ Track **desired, observed, pending/uncertain and last verified safe** states sep
 
 ## Inert product units and disposable native integration
 
-The development installer carries a static, unenabled
+The development installer carries a default-disabled, opt-in
 `server-connect-smart-tun.service` distinct from the existing unprivileged
 `server-connect.service` Proxy Only unit. The TUN service has the capabilities
 needed for its narrowly admitted native link and marked sockets, and reads its

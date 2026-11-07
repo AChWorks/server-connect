@@ -43,12 +43,14 @@ func validModeProfileID(id string) bool {
 }
 
 func modeOverviewFromStatus(status sc.Status, observationErr error) (modeOverview, error) {
-	if status.Desired != "direct" && status.Desired != "proxy" {
+	if status.Desired != "direct" && status.Desired != "proxy" && status.Desired != "smart" {
 		return modeOverview{}, sc.Fault("invalid_state", "desired mode cannot be verified")
 	}
 	desired := "direct"
 	if status.Desired == "proxy" {
 		desired = "proxy_only"
+	} else if status.Desired == "smart" {
+		desired = "smart_routing"
 	}
 	overview := modeOverview{
 		DesiredMode: desired, ObservedMode: "unknown",
@@ -58,7 +60,7 @@ func modeOverviewFromStatus(status sc.Status, observationErr error) (modeOvervie
 		Modes: []modeAvailability{
 			{ID: "direct", Availability: "implemented", GeneralHostActivation: true},
 			{ID: "proxy_only", Availability: "implemented", GeneralHostActivation: true},
-			{ID: "smart_routing", Availability: "disposable_guest_only", GeneralHostActivation: false},
+			{ID: "smart_routing", Availability: "candidate_not_field_verified", GeneralHostActivation: false},
 		},
 	}
 	if status.Selected != "" {
@@ -73,7 +75,8 @@ func modeOverviewFromStatus(status sc.Status, observationErr error) (modeOvervie
 	case "not_tested", "core_unavailable", "unexpected_active_service",
 		"historical_proxy_failure_direct_unaffected", "service_state_unavailable",
 		"service_ownership_conflict", "guarded_trial_unconfirmed",
-		"supervised_record_not_freshly_verified":
+		"supervised_record_not_freshly_verified", "native_selected_path_not_tested",
+		"native_recovery_unverified":
 		overview.StatusHealth = status.Health
 	default:
 		if status.Health != "" {
@@ -81,6 +84,16 @@ func modeOverviewFromStatus(status sc.Status, observationErr error) (modeOvervie
 		}
 	}
 	switch status.Observed {
+	case "native_active", "native_inactive", "native_failed", "native_unknown":
+		overview.TrialPhase = ""
+		overview.ProxyServiceState = "not_inspected"
+		overview.EvidenceScope = "native_service_only"
+		if status.Observed == "native_active" && status.Desired == "smart" && observationErr == nil {
+			overview.ObservedMode = "smart_routing"
+		}
+		// Only systemd's active process state is observed, not the selected
+		// VPN path or guard/host-route correctness.
+		return overview, nil
 	case "active", "inactive", "failed", "unknown":
 		overview.ProxyServiceState = status.Observed
 		if observationErr == nil {

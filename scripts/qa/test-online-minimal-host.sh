@@ -165,7 +165,7 @@ docker exec "$container" /bin/sh -c '
   test "$(systemctl is-enabled server-connect-activation-recover.timer)" = disabled
   test "$(systemctl show server-connect-activation-recover.service -p LoadState --value)" = loaded
   test "$(systemctl show server-connect-smart-tun.service -p LoadState --value)" = loaded
-  test "$(systemctl show server-connect-smart-tun.service -p UnitFileState --value)" = static
+  test "$(systemctl show server-connect-smart-tun.service -p UnitFileState --value)" = disabled
   test "$(systemctl show server-connect-smart-tun.service -p ActiveState --value)" = inactive
   test "$(systemctl show server-connect-smart-health.service -p LoadState --value)" = loaded
   test "$(systemctl show server-connect-smart-health.service -p UnitFileState --value)" = static

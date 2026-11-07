@@ -210,9 +210,15 @@ check_guard_units() (
     die 'recovery unit differs from owned manifest'
    [ "$load" = loaded ] && [ "$fragment" = "$target" ] && [ -z "$dropins" ] && [ "$transient" = no ] ||
     die 'effective managed unit identity conflict'
-   if [ "$name" = server-connect-smart-tun.service ] || [ "$name" = server-connect-smart-health.service ]; then
+   if [ "$name" = server-connect-smart-health.service ]; then
     [ "$(systemctl show "$name" -p UnitFileState --value)" = static ] ||
-      die 'TUN and health executors must remain static and unenabled'
+      die 'experimental health executor must remain static'
+   fi
+   if [ "$name" = server-connect-smart-tun.service ]; then
+    case "$(systemctl show "$name" -p UnitFileState --value)" in
+      enabled|disabled) ;;
+      *) die 'native Smart Routing unit has unsupported activation state' ;;
+    esac
    fi
   else
    [ "$load" = not-found ] && [ -z "$fragment" ] && [ -z "$dropins" ] && [ "$transient" = no ] ||

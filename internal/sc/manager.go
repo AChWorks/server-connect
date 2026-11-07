@@ -185,7 +185,7 @@ func (m *Manager) load() (State, error) {
 	if e = json.Unmarshal(b, &s); e != nil {
 		return State{}, errors.New("invalid stored state")
 	}
-	if s.Version != 1 || (s.Desired != "direct" && s.Desired != "proxy") || s.Port < 1024 || s.Port > 65535 {
+	if s.Version != 1 || (s.Desired != "direct" && s.Desired != "proxy" && s.Desired != "smart") || s.Port < 1024 || s.Port > 65535 {
 		return State{}, errors.New("unsupported or invalid stored state")
 	}
 	return s, nil
@@ -272,6 +272,11 @@ func (m *Manager) Select(id string) error {
 		} else if phase != "" {
 			return Fault("guard_pending", "reconcile the guarded TUN trial before changing the selected profile")
 		}
+		if _, e := m.readNativeSession(); e == nil {
+			return Fault("guard_pending", "finish native recovery before profile changes")
+		} else if !os.IsNotExist(e) {
+			return e
+		}
 		if _, e := m.profile(id); e != nil {
 			return e
 		}
@@ -292,6 +297,11 @@ func (m *Manager) Remove(id string) error {
 			return err
 		} else if phase != "" {
 			return Fault("guard_pending", "reconcile the guarded TUN trial before removing a profile")
+		}
+		if _, e := m.readNativeSession(); e == nil {
+			return Fault("guard_pending", "finish native recovery before profile changes")
+		} else if !os.IsNotExist(e) {
+			return e
 		}
 		if _, e := m.profile(id); e != nil {
 			return e
@@ -452,6 +462,41 @@ func (m *Manager) systemctl(args ...string) error {
 	return nil
 }
 func (m *Manager) Status() (Status, error) {
+	var native bool
+	err := m.withLock(func() error {
+		state, err := m.load()
+		if err != nil {
+			return err
+		}
+		native = state.Desired == "smart"
+		_, claimErr := m.readNativeSession()
+		if claimErr == nil {
+			native = true
+		} else if !os.IsNotExist(claimErr) {
+			return claimErr
+		}
+		return nil
+	})
+	if err != nil {
+		return Status{}, err
+	}
+	if native {
+		report, nativeErr := m.NativeStatus()
+		status := Status{
+			Desired: report.Desired, Observed: "native_" + report.Observed,
+			Selected: report.Selected, CoreVersion: CoreVersion,
+			Health: "native_selected_path_not_tested",
+		}
+		if nativeErr != nil {
+			status.Health = "native_recovery_unverified"
+			return status, nativeErr
+		}
+		if report.Observed != "active" {
+			status.Health = "native_recovery_unverified"
+			return status, Fault("guard_pending", "native routing is not verified active")
+		}
+		return status, nil
+	}
 	return m.statusWithService(m.unitActive, m.verifyUnitOwnership)
 }
 
@@ -647,6 +692,14 @@ func (m *Manager) ReconcileDirectUnderInstaller() error {
 	if err != nil {
 		return err
 	}
+	if _, e := m.readNativeSession(); e == nil {
+		return Fault("guard_pending", "native recovery claim must be cleared before installer reconciliation")
+	} else if !os.IsNotExist(e) {
+		return e
+	}
+	if desired.Desired == "smart" {
+		return Fault("guard_pending", "cannot reset native Smart Routing without verified Off")
+	}
 	desired.Desired = "direct"
 	if err = m.save(desired); err != nil {
 		return err
@@ -701,6 +754,14 @@ func (m *Manager) connectLocked(observe func() (string, error)) error {
 	s, err := m.load()
 	if err != nil {
 		return err
+	}
+	if s.Desired == "smart" {
+		return Fault("guard_pending", "disconnect Smart Routing before Proxy Only activation")
+	}
+	if _, claimErr := m.readNativeSession(); claimErr == nil {
+		return Fault("guard_pending", "native recovery claim must be cleared before Proxy Only activation")
+	} else if !os.IsNotExist(claimErr) {
+		return claimErr
 	}
 	if s.Selected == "" {
 		return errors.New("select a profile before connecting")
@@ -779,6 +840,26 @@ func (m *Manager) connectLocked(observe func() (string, error)) error {
 }
 
 func (m *Manager) Disconnect() error {
+	var native bool
+	if err := m.withLock(func() error {
+		state, err := m.load()
+		if err != nil {
+			return err
+		}
+		native = state.Desired == "smart"
+		_, claimErr := m.readNativeSession()
+		if claimErr == nil {
+			native = true
+		} else if !os.IsNotExist(claimErr) {
+			return claimErr
+		}
+		return nil
+	}); err != nil {
+		return err
+	}
+	if native {
+		return m.DisconnectNativeSmartRouting()
+	}
 	return m.withLock(func() error {
 		if phase, err := m.pendingSmartTUNTrial(); err != nil {
 			return err

@@ -382,7 +382,7 @@ verify_direct_install() {
     test "$(systemctl is-enabled server-connect.service)" = disabled
     test "$(systemctl is-enabled server-connect-activation-recover.timer)" = disabled
     test "$(systemctl show server-connect-smart-tun.service -p LoadState --value)" = loaded
-    test "$(systemctl show server-connect-smart-tun.service -p UnitFileState --value)" = static
+    test "$(systemctl show server-connect-smart-tun.service -p UnitFileState --value)" = disabled
     test "$(systemctl show server-connect-smart-tun.service -p ActiveState --value)" = inactive
     test "$(systemctl show server-connect-smart-health.service -p LoadState --value)" = loaded
     test "$(systemctl show server-connect-smart-health.service -p UnitFileState --value)" = static
@@ -395,7 +395,11 @@ verify_direct_install() {
       test "$(systemctl show "$name" -p FragmentPath --value)" = "/etc/systemd/system/$name"
       test -z "$(systemctl show "$name" -p DropInPaths --value)"
       test "$(systemctl show "$name" -p Transient --value)" = no
-      test "$(systemctl show "$name" -p UnitFileState --value)" = static
+      if [ "$name" = server-connect-smart-tun.service ]; then
+        test "$(systemctl show "$name" -p UnitFileState --value)" = disabled
+      else
+        test "$(systemctl show "$name" -p UnitFileState --value)" = static
+      fi
       test "$(systemctl show "$name" -p ActiveState --value)" = inactive
       test "$(systemctl show "$name" -p MainPID --value)" = 0
       test "$(systemctl show "$name" -p ControlPID --value)" = 0

@@ -199,7 +199,7 @@ done
 systemctl daemon-reload
 systemctl is-active --quiet server-connect.service
 [ "$(systemctl show server-connect-activation-recover.timer -p ActiveState --value)" = inactive ]
-[ "$(systemctl show server-connect-smart-tun.service -p UnitFileState --value)" = static ]
+[ "$(systemctl show server-connect-smart-tun.service -p UnitFileState --value)" = disabled ]
 [ "$(systemctl show server-connect-smart-tun.service -p ActiveState --value)" = inactive ]
 [ "$(systemctl show server-connect-smart-health.service -p ActiveState --value)" = inactive ]
 [ "$(systemctl show server-connect-smart-health.timer -p ActiveState --value)" = inactive ]
