@@ -829,7 +829,7 @@ Commands:
                               native TUN link (v7), with independent recovery.
                               NEVER starts VPN, DNS, RPDB, or routing Apply.
   host-capture-preparation-clear --operation-id HEX32
-                              Clear only exactly recovered v6/v7/v8 host preparation
+                              Clear only exactly recovered v6/v7/v8/v9 host preparation
   smart-tun-host-status      Inspect an existing experimental supervised v9 operation
   smart-tun-host-health      Run its independent bounded selected-path health round
   smart-tun-host-confirm --operation-id HEX32 --challenge HEX64

@@ -64,6 +64,8 @@ func TestHostLegacyRealKernelForeignPoliciesRefusedAndPreserved(t *testing.T) {
 		label, binary, table string
 		rule                 []string
 	}{
+		{"IPv4_RAW_NOTRACK", "/usr/sbin/iptables-legacy", "raw", []string{"-p", "tcp", "--dport", "29874", "-j", "CT", "--notrack"}},
+		{"IPv6_RAW_NOTRACK", "/usr/sbin/ip6tables-legacy", "raw", []string{"-p", "tcp", "--dport", "29875", "-j", "CT", "--notrack"}},
 		{"IPv4_NAT", "/usr/sbin/iptables-legacy", "nat", []string{"-p", "tcp", "--dport", "29871", "-j", "DNAT", "--to-destination", "192.0.2.99"}},
 		{"IPv6_NAT", "/usr/sbin/ip6tables-legacy", "nat", []string{"-p", "tcp", "--dport", "29872", "-j", "DNAT", "--to-destination", "2001:db8::99"}},
 		{"IPv4_MANGLE_MARK", "/usr/sbin/iptables-legacy", "mangle", []string{"-j", "MARK", "--set-mark", "4242"}},

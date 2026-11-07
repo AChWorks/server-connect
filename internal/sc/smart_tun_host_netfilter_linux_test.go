@@ -124,6 +124,18 @@ func TestHostNetfilterTrustRefusesUntrustedPrivatePaths(t *testing.T) {
 		{"escaping relative target", func(t *testing.T, root string) {
 			relink(t, root, "etc/alternatives/iptables", "../../../tmp/untrusted-iptables")
 		}},
+		{"noncanonical absolute dot target", func(t *testing.T, root string) {
+			relink(t, root, "etc/alternatives/iptables", "/usr/sbin/./iptables-nft")
+		}},
+		{"noncanonical absolute separator", func(t *testing.T, root string) {
+			relink(t, root, "etc/alternatives/iptables", "/usr//sbin/iptables-nft")
+		}},
+		{"relative dot target", func(t *testing.T, root string) {
+			relink(t, root, "usr/sbin/iptables-nft", "./xtables-nft-multi")
+		}},
+		{"relative parent target", func(t *testing.T, root string) {
+			relink(t, root, "usr/sbin/iptables-nft", "../sbin/xtables-nft-multi")
+		}},
 		{"cross-family target", func(t *testing.T, root string) {
 			relink(t, root, "etc/alternatives/iptables", "/usr/sbin/ip6tables-nft")
 		}},
@@ -186,5 +198,40 @@ func TestHostNetfilterPackagedAliasesActualVersion(t *testing.T) {
 			}
 			t.Log(strings.TrimSpace(text))
 		})
+	}
+}
+
+// A lexical Clean can erase a symlinked component before "..", but the
+// kernel follows that component before walking its parent. Prove the actual
+// private-filesystem resolution differs from the apparently trusted endpoint.
+func TestHostNetfilterTrustRefusesLexicallyEliminatedSymlinkTraversal(t *testing.T) {
+	root := hostNetfilterPathFixture(t)
+	outside := t.TempDir()
+	if err := os.Mkdir(filepath.Join(outside, "subdir"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	untrusted := filepath.Join(outside, "xtables-nft-multi")
+	if err := os.WriteFile(untrusted, []byte("untrusted private endpoint\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(untrusted, 0777); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(outside, "subdir"), filepath.Join(root, "usr/sbin/hop")); err != nil {
+		t.Fatal(err)
+	}
+	alias := filepath.Join(root, "usr/sbin/iptables-nft")
+	if err := os.Remove(alias); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("hop/../xtables-nft-multi", alias); err != nil {
+		t.Fatal(err)
+	}
+	actual, err := filepath.EvalSymlinks(alias)
+	if err != nil || actual != untrusted {
+		t.Fatalf("private bypass fixture did not resolve through the untrusted hop: %q %v", actual, err)
+	}
+	if err := verifyHostNetfilterPath(root, "/usr/sbin/iptables-nft", uint32(os.Getuid())); ErrorCode(err) != "host_netfilter_untrusted" {
+		t.Fatalf("lexical normalization admitted a different executable: real=%q error=%v", actual, err)
 	}
 }

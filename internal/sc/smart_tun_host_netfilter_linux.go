@@ -90,21 +90,21 @@ func verifyHostNetfilterPath(root, binary string, ownerUID uint32) error {
 		if err != nil || target == "" || len(target) > 4096 {
 			return hostNetfilterUntrusted()
 		}
-		if !filepath.IsAbs(target) {
-			target = filepath.Join(filepath.Dir(current), target)
-		}
-		target = filepath.Clean(target)
-		allowed := false
+		// Compare the raw link text, never a lexically cleaned path.
+		// Resolving hop/../backend follows hop before ".."; Clean would
+		// instead erase an unchecked symlink component. Packaged Debian
+		// links use an exact absolute edge or a same-directory basename.
+		resolved := ""
 		for _, candidate := range next {
-			if target == candidate {
-				allowed = true
+			if target == candidate || (filepath.Dir(candidate) == filepath.Dir(current) && target == filepath.Base(candidate)) {
+				resolved = candidate
 				break
 			}
 		}
-		if !allowed {
+		if resolved == "" {
 			return hostNetfilterUntrusted()
 		}
-		current = target
+		current = resolved
 	}
 	return hostNetfilterUntrusted()
 }
