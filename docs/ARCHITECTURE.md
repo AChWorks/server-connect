@@ -21,9 +21,15 @@ preview is **not** an activation, a field safety proof, or authorization to
 remove older experimental safeguards.
 
 Isolated user/network-namespace testing has positively witnessed genuine
-VLESS TCP delivery for VPN-required traffic, a Direct exception, and a foreign
+VLESS TCP/UDP delivery for VPN-required traffic, a Direct exception, and a foreign
 inbound hosted reply while another new outbound to that same foreign IP
-continues through the VPN. Provider shutdown did not fall back to Direct.
+continues through the VPN. An independent UDP DNS responder additionally
+demonstrated that an explicit native port-53 hijack must precede ordinary
+IP/geo rules: TUN dns_mode alone was insufficient in this fixture. The
+third-party-address application DNS query then traversed the VPN to the
+configured resolver; selected-provider outage did not use Direct DNS.
+This is not evidence for untested DNS transports, IPv6 or host-local resolvers.
+Provider shutdown did not otherwise fall back to Direct.
 Graceful Core stop restored exact private-namespace routes, rules and nftables.
 **Hard SIGKILL leaves native sing-box route/RPDB/nftables state behind**;
 a plain Core restart and graceful stop may still retain the earlier orphaned

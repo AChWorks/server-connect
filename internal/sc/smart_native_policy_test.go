@@ -60,6 +60,14 @@ func TestNativeSmartPolicyUsesOfficialSingBox(t *testing.T) {
 	if route["final"] != "upstream" || route["default_interface"] != "ens3" || route["default_domain_resolver"] != "bootstrap" {
 		t.Fatal("wrong selected VPN default or safe endpoint binding")
 	}
+	routeRules := route["rules"].([]any)
+	if len(routeRules) < 2 {
+		t.Fatal("native DNS interception and ordinary traffic routing are missing")
+	}
+	intercept := routeRules[0].(map[string]any)
+	if intercept["port"] != float64(53) || intercept["action"] != "hijack-dns" {
+		t.Fatal("DNS must be intercepted before ordinary IP/geo routing")
+	}
 	sets := route["rule_set"].([]any)
 	if len(sets) != 1 {
 		t.Fatal("expected one inline native IR rule-set")

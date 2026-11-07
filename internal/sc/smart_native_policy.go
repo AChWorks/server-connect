@@ -77,8 +77,14 @@ func NativeSmartRoutingConfig(profile Profile, opts NativePolicyOptions, operato
 		return nil, err
 	}
 
-	// Native kernel pre-match bypass, not a second Go route/RPDB/nft owner.
+	// TUN dns_mode alone did not capture ordinary application DNS in the
+	// independent Linux namespace witness: the original destination was sent
+	// raw through VLESS. An explicit native port-53 hijack must come before
+	// the ordinary destination routing decisions so the chosen VPN-detoured
+	// resolver can answer without a host DNS rewrite or custom netfilter.
+	// This does not prove every local, TCP, or IPv6 resolver path is protected.
 	rules := []any{
+		map[string]any{"port": 53, "action": "hijack-dns"},
 		map[string]any{"ip_is_private": true, "action": "bypass", "outbound": "direct"},
 	}
 
