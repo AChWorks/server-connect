@@ -53,8 +53,11 @@ func smartTUNDomainDNSBaseOptions(o SmartTUNCandidateOptions) SmartTUNCandidateO
 // SmartTUNDNSCorrelatedConfig compiles DNS-name policy for a TUN candidate.
 // A literal real IP is never reverse mapped to a previous DNS query. TUN
 // packets carry numeric destinations; only this core's FakeIP map supplies a
-// destination domain. A missing/stale mapping fails in the core. There is no
-// HTTP/TLS sniff action capable of changing a Direct decision.
+// destination domain. An unknown mapping fails in the core, but the pinned
+// core can reuse a cached synthetic address for another name after restart or
+// pool wrap. This compiler does not establish generation-safe DNS lifecycle or
+// authorize native activation/reconnect. There is no HTTP/TLS sniff action
+// capable of changing a Direct decision.
 func SmartTUNDNSCorrelatedConfig(profile Profile, o SmartTUNCandidateOptions, dns SmartTUNDomainDNS) ([]byte, error) {
 	if err := validateSmartTUNDomainDNS(dns); err != nil {
 		return nil, err

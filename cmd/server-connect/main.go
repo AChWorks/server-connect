@@ -777,10 +777,14 @@ Commands:
                               (--domestic-cidr CIDR... | --domestic-source bundled-ir-estimate)
                               [--protected-cidr CIDR...]
                               [--endpoint-pin-ipv4 PUBLIC_IP] (VLESS TCP or explicit TLS+WS Host)
+                              [--domain-dns-ipv4 PUBLIC_IP --domain-dns-name TLS_HOST
+                               [--domain-dns-port PORT]]
                               Compiles saved rules with selected native VLESS profile;
                               bundled IR data is an unsigned, possibly stale country
-                              estimate; complete bundled IPv6 exceeds safe candidate limits;
+                              estimate; exact bundled IPv4 and opt-in IPv6 compile only;
                               NEVER authenticated Direct/Apply policy;
+                              Direct domains require the explicit DNS/FakeIP preview;
+                              native DNS capture is unverified; FakeIP reconnect is blocked;
                               explicit pins do not prove DNS or underlay reachability;
                               no core execution, route inspection or activation
                              Offline saved settings ONLY, no TUN activation
