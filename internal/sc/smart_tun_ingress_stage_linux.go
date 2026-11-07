@@ -820,11 +820,34 @@ func recoverHostIngressStageWithPersistLocked(store *activationJournalDir, r *ho
 	return receipt, nil
 }
 
+// hostIngressOffSysctl verifies the scalar prerequisite, never ownership of
+// its current value. On the same boot the original baseline must still match.
+// On a different boot only a preenabled baseline is eligible: that operation
+// never wrote the scalar, so a valid current 0 or 1 belongs to the new boot and
+// is left untouched. This proves no old-operation footprint, not restoration
+// of the prior whole-host baseline. Unknown observations remain uncertain.
+func hostIngressOffSysctl(before, current int, sameBoot bool) error {
+	if (before != 0 && before != 1) || (current != 0 && current != 1) {
+		return ingressFault("ingress Off sysctl observation is unsupported")
+	}
+	if !sameBoot {
+		if before != 1 {
+			return ingressFault("old-boot sysctl ownership cannot be restored or attributed")
+		}
+		return nil
+	}
+	if current != before {
+		return ingressFault("preexisting host mark inheritance changed")
+	}
+	return nil
+}
+
 // recoverOldBootHostIngressLocked never mutates Linux networking. A prior
 // boot's nft table handle, namespace inode, and scalar sysctl write receipt
 // cannot authorize deletion or sysctl restoration on the current boot.
 // Only a previously enabled tcp_fwmark_accept=1 is safe to acknowledge;
-// if the earlier operation enabled it from 0, retain uncertainty instead.
+// that operation never wrote it, so the new boot's valid value is preserved.
+// If the earlier operation enabled it from 0, retain uncertainty instead.
 // The caller already holds the exact enclosing journal lock.
 func recoverOldBootHostIngressLocked(r *hostIngressStage, persist hostIngressPersist) (HostIngressStageReceipt, error) {
 	receipt := HostIngressStageReceipt{OperationID: r.OperationID, Phase: r.Phase, Drain: "not_run"}
@@ -839,8 +862,8 @@ func recoverOldBootHostIngressLocked(r *hostIngressStage, persist hostIngressPer
 		if err != nil {
 			return err
 		}
-		if value != 1 {
-			return ingressFault("old-boot ingress sysctl baseline changed")
+		if err := hostIngressOffSysctl(r.SysctlBefore, value, false); err != nil {
+			return err
 		}
 		observed, err := observeHostIngressNFT(*r)
 		if err != nil {
@@ -874,8 +897,8 @@ func recoverOldBootHostIngressLocked(r *hostIngressStage, persist hostIngressPer
 			return receipt, err
 		}
 	}
-	// A competing foreign table or sysctl change after the fsynced journal
-	// can still be detected. No ownership was transferred by this receipt.
+	// A competing foreign table or unreadable scalar after the fsynced
+	// journal still refuses. A valid new-boot scalar is never ours to restore.
 	if err := absent(); err != nil {
 		return receipt, err
 	}

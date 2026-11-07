@@ -181,6 +181,41 @@ func TestHostIngressSysctlRestorationRequiresCurrentAcknowledgedOwnership(t *tes
 		t.Fatal("unknown progress accepted even with matching baseline")
 	}
 }
+
+// A new boot does not transfer ownership of a scalar the old operation
+// never wrote. Same-boot drift and old write authority remain refusals.
+func TestHostIngressOffSysctlDistinguishesNewBootAbsenceFromRestoration(t *testing.T) {
+	for _, tc := range []struct {
+		name             string
+		before, current  int
+		sameBoot, accept bool
+	}{
+		{"new boot preserves zero", 1, 0, false, true},
+		{"new boot preserves one", 1, 1, false, true},
+		{"same boot preenabled", 1, 1, true, true},
+		{"same boot original zero", 0, 0, true, true},
+		{"same boot preenabled drift", 1, 0, true, false},
+		{"same boot original zero drift", 0, 1, true, false},
+		{"old write current zero", 0, 0, false, false},
+		{"old write current one", 0, 1, false, false},
+		{"new boot unknown current", 1, -1, false, false},
+		{"new boot unsupported current", 1, 2, false, false},
+		{"same boot unsupported current", 1, 2, true, false},
+		{"new boot unknown baseline", -1, 0, false, false},
+		{"new boot unsupported baseline", 2, 1, false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := hostIngressOffSysctl(tc.before, tc.current, tc.sameBoot)
+			if (err == nil) != tc.accept {
+				t.Fatalf("accept=%t err=%v", tc.accept, err)
+			}
+			if err != nil && ErrorCode(err) != "host_ingress_unverified" {
+				t.Fatalf("unexpected refusal: %v", err)
+			}
+		})
+	}
+}
+
 func TestHostIngressExpiredStageRefusesBeforeObservationOrGuard(t *testing.T) {
 	now, err := trialUptime()
 	if err != nil || now <= 0 {

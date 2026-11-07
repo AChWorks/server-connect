@@ -187,10 +187,10 @@ func hostCaptureJournalPersist(store *activationJournalDir, current *hostCapture
 }
 
 // verifyHostCapturePreparationOff checks that a recovered v6 operation has
-// no native effect left. The v6 schema owns ONLY preexisting mark inheritance,
-// one exact ingress nft table and the short-lived barrier interface. Do not
-// reuse this clearance for a later general-host journal with TUN/FIB/RPDB
-// effects. A prior boot's namespace or nft handle is never delete authority.
+// no native effect left. The v6 schema binds a preexisting mark-inheritance
+// prerequisite and owns only its ingress nft table and short-lived barrier.
+// Enclosing lifecycles must separately verify their Core/TUN/FIB/RPDB effects.
+// A prior boot's namespace or nft handle is never delete authority.
 func verifyHostCapturePreparationOff(record hostCaptureJournal) error {
 	if err := validateHostCaptureJournal(record); err != nil {
 		return err
@@ -225,10 +225,7 @@ func verifyHostCapturePreparationOff(record hostCaptureJournal) error {
 	if err != nil {
 		return err
 	}
-	if value != record.Progress.Ingress.SysctlBefore {
-		return ingressFault("preexisting host mark inheritance changed")
-	}
-	return nil
+	return hostIngressOffSysctl(record.Progress.Ingress.SysctlBefore, value, boot == record.Progress.Ingress.BootID)
 }
 
 // clearRecoveredHostCapturePreparationLocked is the only terminal v6

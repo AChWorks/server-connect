@@ -25,8 +25,8 @@
 
 ### Experimental v6 host-capture preparation (not Smart Routing Apply)
 
-The v6 `host_capture_preparation_v1` journal owns only a preexisting mark-inheritance
-precondition, one uniquely identified ingress nft table and a transient TUN
+The v6 `host_capture_preparation_v1` journal records a preexisting mark-inheritance
+prerequisite and owns one uniquely identified ingress nft table and a transient TUN
 kernel-grace barrier. It does **not** own a working sing-box core, traffic TUN,
 FIB/RPDB capture, DNS policy or Runtime Guard; an observed v6 barrier never
 permits general-host Apply. Independent Recovery retains this exact journal after
@@ -34,10 +34,20 @@ verified owned Off. A valid v6 record blocks update/uninstall and new activation
 until terminal clearance. Only on the installed host, as root, the explicitly
 requested `server-connect host-capture-preparation-clear --operation-id <exact-id>`
 can remove the recovered journal. It rechecks the same complete durable record,
-boot/namespace ownership (when still on the same boot), absence of the helper
-and ingress table and unchanged preexisting `tcp_fwmark_accept=1`, then removes
-only the CAS-matched journal. Pending/ambiguous records and foreign collisions
-refuse without modifying their effects. Never manually unlink the journal to
+boot/namespace ownership (when still on the same boot), and absence of the helper
+and ingress table, then removes only the CAS-matched journal. On the same boot,
+the preexisting `tcp_fwmark_accept=1` must remain unchanged. On a genuinely
+different boot, a record that began at `1` never wrote that scalar: recovery
+and clearance preserve the new boot's valid `0` or `1` without changing it.
+This reconciles **the old operation's footprint as absent on the new boot**;
+it does not restore or claim equality with the prior whole-host baseline.
+Unreadable or unsupported scalar observations still refuse, and an old-boot
+record that began at `0` retains uncertainty rather than acquiring restoration
+authority. The former blanket old-boot current-`0` refusal incorrectly required
+an external prerequisite to survive reboot after all owned effects were absent;
+the corrected contract keeps the same-boot drift and foreign-collision refusals.
+Pending/ambiguous records and foreign collisions refuse without modifying their
+effects. Never manually unlink the journal to
 bypass an unresolved operation. A later full general-host operation needs a
 **different, complete** lifecycle and effect ledger before this admission is
 expanded.
@@ -143,7 +153,12 @@ unchanged. A crash after the RPDB effect but before its receipt keeps that
 guard and the operation parent uncertain; it cannot mint ownership or Off.
 Both v8 and v9 reuse the same no-adoption Core stop/credential unlink
 semantics; v9 additionally removes the exact native policy before the Link
-and Ingress and only then allows a terminal operation-bound Clear.
+and Ingress and only then allows a terminal operation-bound Clear. Across a
+verified boot change, old handles and indices never authorize removal: the
+current native TUN, reserved RPDB/FIB/nft objects, ingress table and barrier
+must all be independently absent. The preenabled-scalar rule above also
+applies to v9; successful recovery reports absence of that old operation's
+footprint, not restoration of another boot's whole-host networking.
 
 A kernel mutation acknowledged **without its durable receipt** remains
 `UNCERTAIN`; even a same-name, same-shape native route or nft table cannot be

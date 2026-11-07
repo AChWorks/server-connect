@@ -261,6 +261,24 @@ func TestHostCaptureGateOneJournalAndOwnedOffNative(t *testing.T) {
 		}
 		fmt.Println("HOST_CAPTURE_FAILED_BARRIER_RECEIPT_OWNED_OFF=PASS")
 
+		// Same-boot scalar drift still blocks both recovery and terminal
+		// clearance; no new-boot absence argument applies to this record.
+		ingressNativeCommand(t, "/usr/sbin/sysctl", "-q", "-w", "net.ipv4.tcp_fwmark_accept=0")
+		if _, err := recoverHostCaptureGateLocked(store, &progress, persist); ErrorCode(err) != "host_ingress_unverified" {
+			return fmt.Errorf("same-boot scalar drift bypassed recovery refusal: %v", err)
+		}
+		if code := ErrorCode(clearRecoveredHostCapturePreparationLocked(store, progress.Ingress.OperationID)); code != "host_ingress_unverified" {
+			return fmt.Errorf("same-boot scalar drift bypassed terminal refusal: %s", code)
+		}
+		if retained, _, err := get(); err != nil || retained != record {
+			return errors.New("same-boot scalar refusal changed durable parent")
+		}
+		if value, err := readHostIngressSysctl(); err != nil || value != 0 {
+			return errors.New("same-boot refusal wrote the foreign scalar")
+		}
+		ingressNativeCommand(t, "/usr/sbin/sysctl", "-q", "-w", "net.ipv4.tcp_fwmark_accept=1")
+		fmt.Println("HOST_CAPTURE_SAME_BOOT_SCALAR_DRIFT_REFUSES_WITHOUT_WRITE=PASS")
+
 		// Simulate a journal surviving a REAL boot epoch change, while
 		// executing only in this disposable namespace (no host reboot).
 		// Old handles/namespace IDs are never accepted as delete authority.
@@ -318,13 +336,11 @@ func TestHostCaptureGateOneJournalAndOwnedOffNative(t *testing.T) {
 		}
 		ingressNativeCommand(t, "/usr/sbin/nft", "delete", "table", "inet", foreignName)
 
-		// A changed sysctl or occupied helper interface also forbids a
-		// successful old-boot Off receipt.
+		// Contract correction: this operation observed preenabled 1 and
+		// never wrote it. The new boot's valid 0 is foreign state to preserve,
+		// not old-boot restoration authority. An occupied helper must still
+		// refuse even though this scalar is eligible for absence-only Off.
 		ingressNativeCommand(t, "/usr/sbin/sysctl", "-q", "-w", "net.ipv4.tcp_fwmark_accept=0")
-		if code := refusedRecoveryCode(&progress); code != "host_ingress_unverified" {
-			return fmt.Errorf("sysctl drift bypassed old-boot refusal: %s", code)
-		}
-		ingressNativeCommand(t, "/usr/sbin/sysctl", "-q", "-w", "net.ipv4.tcp_fwmark_accept=1")
 		ingressNativeCommand(t, "/usr/sbin/ip", "link", "add", progress.Barrier.Name, "type", "dummy")
 		if code := refusedRecoveryCode(&progress); code != "host_ingress_unverified" {
 			return fmt.Errorf("foreign helper name bypassed old-boot refusal: %s", code)
@@ -355,6 +371,29 @@ func TestHostCaptureGateOneJournalAndOwnedOffNative(t *testing.T) {
 			return errors.New("old-boot absence-only recovery not durable")
 		}
 		progress, record = finalRecord.Progress, finalRecord
+		if value, err := readHostIngressSysctl(); err != nil || value != 0 {
+			return errors.New("old-boot recovery restored an unowned prior scalar")
+		}
+		// Repeated installed dispatch must accept either valid new-boot
+		// value without writing it or replacing historical ownership.
+		for _, value := range []int{1, 0} {
+			ingressNativeCommand(t, "/usr/sbin/sysctl", "-q", "-w", fmt.Sprintf("net.ipv4.tcp_fwmark_accept=%d", value))
+			selected, err := selectTrialRecoveryLocked(store, "", "")
+			if err != nil {
+				return err
+			}
+			result, err := recoverSelectedTrialLocked(store, selected, "", "")
+			if err != nil || !result.RecoveryVerified {
+				return fmt.Errorf("old-boot recovery rejected valid new scalar %d: %v", value, err)
+			}
+			if observed, err := readHostIngressSysctl(); err != nil || observed != value {
+				return errors.New("old-boot recovery changed the current scalar")
+			}
+			if retained, _, err := get(); err != nil || retained != record {
+				return errors.New("old-boot reobservation rewrote historical parent")
+			}
+		}
+		fmt.Println("HOST_CAPTURE_OLD_BOOT_FOREIGN_SCALAR_0_1_PRESERVED=PASS")
 		fmt.Println("HOST_CAPTURE_OLD_BOOT_NO_FOREIGN_MUTATION_AND_OWNED_OFF=PASS")
 		if code := ErrorCode(m.InstallerCheckGuardClear()); code != "guard_pending" {
 			return fmt.Errorf("installer abandoned recovered but uncleared v6 parent: %s", code)
@@ -367,7 +406,7 @@ func TestHostCaptureGateOneJournalAndOwnedOffNative(t *testing.T) {
 		}
 
 		// A returned "recovered" phase alone never grants unlink authority:
-		// foreign same-name interfaces, nft tables and scalar drift all block.
+		// newly present foreign same-name interfaces and nft tables block.
 		foreignName = "scin_" + progress.Ingress.OperationID
 		ingressNativeCommand(t, "/usr/sbin/ip", "link", "add", progress.Barrier.Name, "type", "dummy")
 		if code := ErrorCode(clearRecoveredHostCapturePreparationLocked(store, progress.Ingress.OperationID)); code != "host_ingress_unverified" {
@@ -382,11 +421,15 @@ func TestHostCaptureGateOneJournalAndOwnedOffNative(t *testing.T) {
 			return errors.New("refused clearance modified a foreign same-name nft table")
 		}
 		ingressNativeCommand(t, "/usr/sbin/nft", "delete", "table", "inet", foreignName)
-		ingressNativeCommand(t, "/usr/sbin/sysctl", "-q", "-w", "net.ipv4.tcp_fwmark_accept=0")
-		if code := ErrorCode(clearRecoveredHostCapturePreparationLocked(store, progress.Ingress.OperationID)); code != "host_ingress_unverified" {
-			return fmt.Errorf("foreign sysctl change did not block v6 clear: %s", code)
+		for _, value := range []int{1, 0} {
+			ingressNativeCommand(t, "/usr/sbin/sysctl", "-q", "-w", fmt.Sprintf("net.ipv4.tcp_fwmark_accept=%d", value))
+			if err := verifyHostCapturePreparationOff(record); err != nil {
+				return fmt.Errorf("terminal verifier rejected valid new scalar %d: %w", value, err)
+			}
+			if observed, err := readHostIngressSysctl(); err != nil || observed != value {
+				return errors.New("terminal verifier changed the new boot scalar")
+			}
 		}
-		ingressNativeCommand(t, "/usr/sbin/sysctl", "-q", "-w", "net.ipv4.tcp_fwmark_accept=1")
 		if retained, _, err := get(); err != nil || retained != record {
 			return errors.New("refused v6 clearance discarded durable parent")
 		}
@@ -404,12 +447,19 @@ func TestHostCaptureGateOneJournalAndOwnedOffNative(t *testing.T) {
 		if err := m.InstallerCheckGuardClear(); err != nil {
 			return fmt.Errorf("installer still blocked after verified v6 clear: %w", err)
 		}
+		if value, err := readHostIngressSysctl(); err != nil || value != 0 {
+			return errors.New("terminal clear changed the new boot scalar")
+		}
 		fmt.Println("HOST_CAPTURE_RECOVERED_OLD_BOOT_EXACT_TERMINAL_CLEAR=PASS")
 		return nil
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
+
+	// The QA operator, not product recovery, prepares the separate next
+	// fixture. The old-boot terminal-clear witness above ended at scalar 0.
+	ingressNativeCommand(t, "/usr/sbin/sysctl", "-q", "-w", "net.ipv4.tcp_fwmark_accept=1")
 
 	// A second fresh v6 operation is owned by a real subprocess, which is
 	// deliberately SIGKILLed AFTER its first kernel effect and durable
