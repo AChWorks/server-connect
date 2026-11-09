@@ -3,6 +3,7 @@
 package sc
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -174,5 +175,63 @@ func TestLegacySmartTUNAdmissionRejectsNativeReceipt(t *testing.T) {
 	})
 	if ErrorCode(err) != "guard_pending" {
 		t.Fatalf("unfinalized native session must block legacy unit: %v", err)
+	}
+}
+
+// A verified native stop hook must leave Direct without requiring a CLI
+// Disconnect after a reboot. The packet-filter and routing proof itself is
+// tested separately; this verifies the crash-consistent persistence boundary.
+func TestNativeRecoveryFinalizesOnlyValidatedDirectSession(t *testing.T) {
+	for _, initial := range []string{"smart", "direct"} {
+		t.Run(initial, func(t *testing.T) {
+			m := New(filepath.Join(t.TempDir(), "state"), "", 0)
+			if err := m.prepare(); err != nil {
+				t.Fatal(err)
+			}
+			state := State{Version: 1, Selected: "0123456789abcdef", Desired: initial, Port: m.Port}
+			if err := m.save(state); err != nil {
+				t.Fatal(err)
+			}
+			receipt := []byte(`{"version":1,"selected":"0123456789abcdef"}`)
+			if err := put(filepath.Join(m.Dir, nativeSessionFile), receipt); err != nil {
+				t.Fatal(err)
+			}
+			if err := put(filepath.Join(m.Dir, nativeConfigFile), []byte("private-config")); err != nil {
+				t.Fatal(err)
+			}
+			if err := m.finalizeNativeRecoveryLocked(); err != nil {
+				t.Fatal(err)
+			}
+			got, err := m.load()
+			if err != nil || got.Desired != "direct" || got.Selected != state.Selected {
+				t.Fatalf("native recovery changed saved policy or did not reach Direct: %+v %v", got, err)
+			}
+			if _, err := os.Stat(filepath.Join(m.Dir, nativeSessionFile)); !os.IsNotExist(err) {
+				t.Fatalf("recovered receipt not retired: %v", err)
+			}
+			if b, err := readRegular(filepath.Join(m.Dir, nativeConfigFile)); err != nil || string(b) != "private-config" {
+				t.Fatalf("recovery mutated private config before explicit disconnect: %s %v", b, err)
+			}
+		})
+	}
+}
+
+func TestNativeRecoveryRefusesUnrelatedDesiredModeWithoutRetiringClaim(t *testing.T) {
+	m := New(filepath.Join(t.TempDir(), "state"), "", 0)
+	if err := m.prepare(); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.save(State{Version: 1, Desired: "proxy", Selected: "0123456789abcdef", Port: m.Port}); err != nil {
+		t.Fatal(err)
+	}
+	receipt := []byte(`{"version":1,"selected":"0123456789abcdef"}`)
+	if err := put(filepath.Join(m.Dir, nativeSessionFile), receipt); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.finalizeNativeRecoveryLocked(); ErrorCode(err) != "guard_pending" {
+		t.Fatalf("unrelated mode finalized: %v", err)
+	}
+	if raw, err := readRegular(filepath.Join(m.Dir, nativeSessionFile)); err != nil || !bytes.Equal(raw, receipt) {
+		t.Fatalf("unrelated claim was consumed: %s %v", raw, err)
 	}
 }

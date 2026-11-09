@@ -406,6 +406,22 @@ confirmation, permanent commit, Runtime Health Guard, VPN-bound health
 monitoring or physical crash/reboot tests. A restored guest baseline does
 not certify production rollback safety or authorize public installation.
 
+## Native candidate stop and reboot recovery (not production admission)
+
+The candidate's official sing-box native TUN service is **started per session,
+not enabled for reboot**. Its owned systemd `ExecStopPost` independently
+recovers only proven native route/RPDB/nftables resources after a normal stop,
+Core crash or host shutdown. Once exact recovery succeeds, it persists
+`desired=direct` before durably retiring the one-use recovery claim. A failed
+or unproven native cleanup retains the claim and must not be described as
+Direct/off. The private inactive compiled Core config is removed by the next
+explicit Disconnect. Ordinary systemd failure bookkeeping may still show
+`failed` after a SIGKILL; this is not proof that a VPN path remains active.
+Saved profile and rules persist and the next Smart Routing activation must
+revalidate them. Existing owner-disallowed reboot auto-resume is not a substitute
+for the independent Activation or Runtime Guard; neither successful packet
+routing nor a completed stop hook licenses general-host deployment.
+
 ## Activation Guard
 
 Default confirmation window: **600 seconds**, operator configurable. High-risk route changes require:

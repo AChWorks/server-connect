@@ -54,10 +54,15 @@ start or unexpected Core termination. The fixed native table/rule indices are
 not enough for SIGKILL recovery: official sing-tun's auto_redirect separately
 creates a random route table and priority-1 lookup. Recovery validates native
 resources before removing them. Unknown foreign objects are retained and
-reported uncertain for operator repair/retry. Verified recovery returns
-desired mode to Direct while retaining the claim until explicit Disconnect.
-A stale claim cannot silently restart the Core on boot or manual systemd
-start. Installation leaves the native unit disabled.
+reported uncertain for operator repair/retry. Only after exact kernel
+restoration is verified does the native stop hook persist Direct and retire
+its recovery receipt. A mismatched or unverified receipt remains intact for
+operator investigation; a private inactive Core config may remain until the
+next explicit Disconnect. Connect starts the owned native unit without
+enabling it for future boots: a reboot never blindly reapplies unconfirmed
+Smart Routing. The old service might remain in systemd's failed bookkeeping
+after SIGKILL even when the hook has restored Direct; status must show that
+failed unit, never infer healthy from the missing recovery receipt.
 
 A disposable Debian 13 VM has exercised actual official sing-box 1.14.3
 systemd service, normal CLI Disconnect, SIGKILL-triggered ExecStopPost,

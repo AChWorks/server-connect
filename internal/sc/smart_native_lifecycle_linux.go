@@ -292,19 +292,46 @@ func (m *Manager) NativeRecoverInstalled() error {
 		if err := recoverNativeRedirect(context.Background(), nativeSystemRunner{}, session.recoveryScope()); err != nil {
 			return err
 		}
-		// A failed Core is an independently verified native deactivation,
-		// not an active Smart Routing service. Retain the claim until the
-		// operator's exact Disconnect finishes its durable cleanup.
-		state, err := m.load()
-		if err != nil {
+		// Only after the exact owned network resources are independently
+		// verified absent may the shutdown/crash hook finish the session.
+		// This also avoids an enabled-on-reboot unit inheriting a contradictory
+		// Direct desired state plus a stale recovery receipt.
+		return m.finalizeNativeRecoveryLocked()
+	})
+}
+
+// Called under the native lifecycle lock only AFTER recoverNativeRedirect has
+// proved the exact owned RPDB, route and nftables objects are absent. Save
+// Direct before retiring the one-use receipt: a crash between these writes
+// leaves either a retryable receipt or a verified Direct session, never an
+// unproven Smart session with no recovery identity.
+func (m *Manager) finalizeNativeRecoveryLocked() error {
+	state, err := m.load()
+	if err != nil {
+		return err
+	}
+	if state.Desired != "smart" && state.Desired != "direct" {
+		return Fault("guard_pending", "native cleanup cannot finalize an unrelated desired mode")
+	}
+	if state.Desired == "smart" {
+		state.Desired = "direct"
+		if err := m.save(state); err != nil {
 			return err
 		}
-		if state.Desired == "smart" {
-			state.Desired = "direct"
-			return m.save(state)
-		}
-		return nil
-	})
+	}
+	// The receipt is the only authority to delete native kernel resources.
+	// Remove it only after proven cleanup and a durable Direct state. A
+	// leftover private config is inert and may be removed by exact Disconnect.
+	if err := os.Remove(filepath.Join(m.Dir, nativeSessionFile)); err != nil {
+		return err
+	}
+	dir, err := os.Open(m.Dir)
+	if err != nil {
+		return err
+	}
+	err = dir.Sync()
+	_ = dir.Close()
+	return err
 }
 
 func (m *Manager) ConnectNativeSmartRouting(opts NativePolicyOptions) (NativeConnectionStatus, error) {
@@ -395,8 +422,18 @@ func (m *Manager) ConnectNativeSmartRouting(opts NativePolicyOptions) (NativeCon
 	if err != nil {
 		return result, err
 	}
+	// Keep the host's native unit disabled: boot must never reapply an
+	// unconfirmed host-wide tunnel just because the last CLI connect used it.
+	// Also correct a previously enabled but safely idle candidate unit.
+	// The separate systemd stop hook still owns crash/shutdown cleanup.
+	if err := m.nativeControl("disable"); err != nil {
+		if cleanup := m.DisconnectNativeSmartRouting(); cleanup != nil {
+			return result, Fault("guard_pending", "native activation disable failed and recovery remains uncertain")
+		}
+		return result, Fault("service_state_unavailable", "native unit could not be disabled; Direct restored")
+	}
 	// Never hold Manager lock while systemd's independent stop hook may need it.
-	if err := m.nativeControl("enable", "--now"); err != nil {
+	if err := m.nativeControl("start"); err != nil {
 		if cleanup := m.DisconnectNativeSmartRouting(); cleanup != nil {
 			return result, Fault("guard_pending", "native activation failed and recovery remains uncertain")
 		}
@@ -464,8 +501,19 @@ func (m *Manager) DisconnectNativeSmartRouting() error {
 			if stateErr != nil {
 				return stateErr
 			}
-			if state.Desired == "smart" {
+			if state.Desired != "direct" {
 				return Fault("invalid_state", "native recovery claim missing; cannot verify Direct")
+			}
+			// The systemd stop hook may already have retired the receipt
+			// after proving Direct. Remove only our inert private config;
+			// no kernel cleanup is authorized by a missing receipt.
+			config := filepath.Join(m.Dir, nativeConfigFile)
+			if _, configErr := readRegular(config); configErr == nil {
+				if err := os.Remove(config); err != nil {
+					return err
+				}
+			} else if !errors.Is(configErr, os.ErrNotExist) {
+				return configErr
 			}
 		}
 		if err == nil {
@@ -509,7 +557,17 @@ func (m *Manager) NativeStatus() (NativeConnectionStatus, error) {
 			if s.Desired == "smart" {
 				return Fault("invalid_state", "Smart Routing desired but native recovery claim missing")
 			}
-			result.Observed = "inactive"
+			// A Core crash can leave the exact service failed even though its
+			// independent stop hook already restored Direct. Do not claim
+			// inactive solely because its recovery receipt was removed.
+			observed, stateErr := m.nativeActivity()
+			if stateErr != nil {
+				return stateErr
+			}
+			result.Observed = observed
+			if observed == "active" {
+				return Fault("guard_pending", "native Core unexpectedly active without recovery claim")
+			}
 			return nil
 		}
 		if err != nil {
