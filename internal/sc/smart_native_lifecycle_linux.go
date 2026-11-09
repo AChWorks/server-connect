@@ -41,6 +41,12 @@ type NativeConnectionStatus struct {
 	CoreUnit             string `json:"core_unit"`
 	NativePolicyVerified bool   `json:"native_policy_verified"`
 	SelectedVPNPathProof string `json:"selected_vpn_path_proof"`
+	GuardVerified        bool   `json:"runtime_guard_verified"`
+	HealthPhase          string `json:"health_phase"`
+	HealthReason         string `json:"health_reason"`
+	HealthFailures       int    `json:"health_failures"`
+	HealthRounds         int    `json:"health_rounds"`
+	HealthOperationID    string `json:"health_operation_id,omitempty"`
 }
 
 func (m *Manager) readNativeSession() (NativeSession, error) {
@@ -319,6 +325,21 @@ func (m *Manager) finalizeNativeRecoveryLocked() error {
 			return err
 		}
 	}
+	if health, e := m.readNativeHealth(); e == nil {
+		session, sessionErr := m.readNativeSession()
+		if sessionErr != nil || health.ConfigSHA256 != session.ConfigSHA256 {
+			return Fault("invalid_state", "native health recovery identity mismatch")
+		}
+		health.Phase = "off"
+		if health.Reason == "awaiting_selected_probe" || health.Reason == "selected_https_verified" {
+			health.Reason = "native_core_stopped"
+		}
+		if e = m.saveNativeHealth(health); e != nil {
+			return e
+		}
+	} else if !errors.Is(e, os.ErrNotExist) {
+		return e
+	}
 	// The receipt is the only authority to delete native kernel resources.
 	// Remove it only after proven cleanup and a durable Direct state. A
 	// leftover private config is inert and may be removed by exact Disconnect.
@@ -335,6 +356,15 @@ func (m *Manager) finalizeNativeRecoveryLocked() error {
 }
 
 func (m *Manager) ConnectNativeSmartRouting(opts NativePolicyOptions) (NativeConnectionStatus, error) {
+	if opts.HealthFailureThreshold < 0 || opts.HealthFailureThreshold > 10 {
+		return NativeConnectionStatus{Desired: "smart", Observed: "not_started", CoreUnit: nativeSmartUnit, SelectedVPNPathProof: "not_run"},
+			Fault("invalid_arguments", "native health failure threshold must be 1-10 (or default 0)")
+	}
+	var report NativeConnectionStatus
+	err := m.withNativeTransition(func() error { var e error; report, e = m.connectNativeSmartRoutingUnlocked(opts); return e })
+	return report, err
+}
+func (m *Manager) connectNativeSmartRoutingUnlocked(opts NativePolicyOptions) (NativeConnectionStatus, error) {
 	result := NativeConnectionStatus{Desired: "smart", Observed: "not_started",
 		CoreUnit: nativeSmartUnit, SelectedVPNPathProof: "not_run"}
 	if err := m.nativeUnitOwnership(); err != nil {
@@ -342,6 +372,85 @@ func (m *Manager) ConnectNativeSmartRouting(opts NativePolicyOptions) (NativeCon
 	}
 	if err := m.verifyUnitOwnership(); err != nil {
 		return result, err
+	}
+	// An abnormal Core exit may finish native restoration before the
+	// independent health timer has had a chance to disarm itself. Reconcile
+	// only a proven idle Direct session, retaining last failure evidence.
+	var priorOff bool
+	if err := m.withLock(func() error {
+		s, e := m.readNativeHealth()
+		if errors.Is(e, os.ErrNotExist) {
+			return nil
+		}
+		if e != nil {
+			return e
+		}
+		priorOff = s.Phase == "off"
+		return nil
+	}); err != nil {
+		return result, err
+	}
+	if priorOff {
+		if err := m.cleanupIdleNativeHealthGuardsUnlocked(); err != nil {
+			return result, err
+		}
+		// If an older health oneshot was interrupted AFTER verified Direct,
+		// normalize only that exact stale failed role; keep uncertain or
+		// foreign services untouched. Reuse the existing proven idle gate.
+		if err := m.withActivationJournalLock(syscall.Fsync, func(store *activationJournalDir) error {
+			return normalizeQuiescentSmartTUNHealthUnit(store)
+		}); err != nil {
+			return result, err
+		}
+	}
+	// A previous SIGKILL can leave *this exact* systemd Core in failed
+	// bookkeeping after ExecStopPost has already proved Direct and
+	// retired its one-use claim. Clear only that stale failure BEFORE
+	// arming the independent timers: otherwise their first tick can
+	// mistake the old failed state for a failure of the new session.
+	// An unverified old claim, live process or occupied native policy
+	// must never authorize resetting service state or new activation.
+	previous, e := m.nativeActivity()
+	if e != nil {
+		return result, e
+	}
+	if previous == "failed" {
+		// The installed Core can retain a failed result even when an
+		// older candidate did not record a native health receipt.
+		// Recheck the independent Direct/no-claim condition under the
+		// shared lifecycle lock before touching even systemd bookkeeping.
+		if e = m.withLock(func() error {
+			if _, claimErr := m.readNativeSession(); !errors.Is(claimErr, os.ErrNotExist) {
+				return Fault("guard_pending", "previous native session has not retired its claim")
+			}
+			state, stateErr := m.load()
+			if stateErr != nil {
+				return stateErr
+			}
+			if state.Desired != "direct" {
+				return Fault("guard_pending", "previous native session is not verified Direct")
+			}
+			return nil
+		}); e != nil {
+			return result, e
+		}
+		if e = m.nativeMainPIDZero(); e != nil {
+			return result, e
+		}
+		scope := nativeRedirectRecovery{TunnelIF: opts.InterfaceName, UnderlayIF: opts.UnderlayInterface,
+			Table: NativePolicyTableIndex, Rule: NativePolicyRuleIndex}
+		if e = inspectNativeAdmission(context.Background(), nativeSystemRunner{}, scope); e != nil {
+			return result, e
+		}
+		if e = m.nativeControl("reset-failed"); e != nil {
+			current, readErr := m.nativeActivity()
+			if readErr != nil || current != "inactive" {
+				return result, Fault("guard_pending", "previous native Core failure could not be safely normalized")
+			}
+		}
+		if current, readErr := m.nativeActivity(); readErr != nil || current != "inactive" {
+			return result, Fault("guard_pending", "native Core is not verified idle before health prearm")
+		}
 	}
 	if err := EnsureCore(m.Core); err != nil {
 		return result, err
@@ -393,6 +502,13 @@ func (m *Manager) ConnectNativeSmartRouting(opts NativePolicyOptions) (NativeCon
 		if err := CheckConfig(m.Core, m.Dir, config); err != nil {
 			return err
 		}
+		healthScope := "internet_https"
+		if opts.HealthSyntheticQA {
+			healthScope = "synthetic_https"
+		}
+		if _, e := nativeHealthTargets(config, healthScope); e != nil {
+			return e
+		}
 		scope := nativeRedirectRecovery{TunnelIF: opts.InterfaceName, UnderlayIF: opts.UnderlayInterface,
 			Table: NativePolicyTableIndex, Rule: NativePolicyRuleIndex}
 		if err := inspectNativeAdmission(context.Background(), nativeSystemRunner{}, scope); err != nil {
@@ -407,6 +523,13 @@ func (m *Manager) ConnectNativeSmartRouting(opts NativePolicyOptions) (NativeCon
 		}
 		if err := put(filepath.Join(m.Dir, nativeConfigFile), config); err != nil {
 			return err
+		}
+		threshold := opts.HealthFailureThreshold
+		if threshold == 0 {
+			threshold = 3
+		}
+		if e := m.stageNativeHealth(session, threshold, healthScope); e != nil {
+			return e
 		}
 		if err := put(filepath.Join(m.Dir, nativeSessionFile), claim); err != nil {
 			return err
@@ -427,14 +550,21 @@ func (m *Manager) ConnectNativeSmartRouting(opts NativePolicyOptions) (NativeCon
 	// Also correct a previously enabled but safely idle candidate unit.
 	// The separate systemd stop hook still owns crash/shutdown cleanup.
 	if err := m.nativeControl("disable"); err != nil {
-		if cleanup := m.DisconnectNativeSmartRouting(); cleanup != nil {
+		if cleanup := m.disconnectNativeSmartRoutingUnlocked(); cleanup != nil {
 			return result, Fault("guard_pending", "native activation disable failed and recovery remains uncertain")
 		}
 		return result, Fault("service_state_unavailable", "native unit could not be disabled; Direct restored")
 	}
+	// Both separately authenticated timer roles are prearmed before Core start.
+	if err := m.armNativeHealthGuards(); err != nil {
+		if cleanup := m.disconnectNativeSmartRoutingUnlocked(); cleanup != nil {
+			return result, Fault("guard_pending", "native guard activation failed; rollback uncertain")
+		}
+		return result, Fault("guard_unavailable", "native guard was unavailable; Direct restored")
+	}
 	// Never hold Manager lock while systemd's independent stop hook may need it.
 	if err := m.nativeControl("start"); err != nil {
-		if cleanup := m.DisconnectNativeSmartRouting(); cleanup != nil {
+		if cleanup := m.disconnectNativeSmartRoutingUnlocked(); cleanup != nil {
 			return result, Fault("guard_pending", "native activation failed and recovery remains uncertain")
 		}
 		return result, Fault("service_state_unavailable", "native Core failed to start; Direct restored")
@@ -448,12 +578,15 @@ func (m *Manager) ConnectNativeSmartRouting(opts NativePolicyOptions) (NativeCon
 		}
 		time.Sleep(150 * time.Millisecond)
 	}
-	if cleanup := m.DisconnectNativeSmartRouting(); cleanup != nil {
+	if cleanup := m.disconnectNativeSmartRoutingUnlocked(); cleanup != nil {
 		return result, Fault("guard_pending", "native Core never stabilized and recovery is uncertain")
 	}
 	return result, Fault("service_state_unavailable", "native Core did not stabilize; Direct restored")
 }
 func (m *Manager) DisconnectNativeSmartRouting() error {
+	return m.withNativeTransition(m.disconnectNativeSmartRoutingUnlocked)
+}
+func (m *Manager) disconnectNativeSmartRoutingUnlocked() error {
 	if err := m.nativeUnitOwnership(); err != nil {
 		return err
 	}
@@ -490,6 +623,11 @@ func (m *Manager) DisconnectNativeSmartRouting() error {
 	}
 	if activity != "inactive" {
 		return Fault("guard_pending", "native Core is not verified inactive after recovery")
+	}
+	// Disarm only after ExecStopPost has proven kernel restoration. Neither
+	// a blocked Core nor an unknown resource owner can authorize losing guard.
+	if err := m.disarmNativeHealthGuards(); err != nil {
+		return err
 	}
 	return m.withLock(func() error {
 		session, err := m.readNativeSession()
@@ -543,6 +681,16 @@ func (m *Manager) DisconnectNativeSmartRouting() error {
 		return m.save(s)
 	})
 }
+func nativeSelectedHTTPSProof(health NativeHealthState, desired, observed string, now int64) string {
+	if desired != "smart" || observed != "active" || health.Phase != "healthy" ||
+		health.LastProbeMS <= 0 || now < health.LastProbeMS || now-health.LastProbeMS > nativeHealthLeaseMS {
+		return "not_run"
+	}
+	// Only the specific measured HTTPS scope, never an untested IP/UDP/DNS
+	// protocol or public-provider delivery claim.
+	return "recent_" + health.ProbeScope
+}
+
 func (m *Manager) NativeStatus() (NativeConnectionStatus, error) {
 	result := NativeConnectionStatus{CoreUnit: nativeSmartUnit, SelectedVPNPathProof: "not_run"}
 	err := m.withLock(func() error {
@@ -552,6 +700,16 @@ func (m *Manager) NativeStatus() (NativeConnectionStatus, error) {
 		}
 		result.Desired = s.Desired
 		result.Selected = s.Selected
+		health, healthErr := m.readNativeHealth()
+		if healthErr == nil {
+			result.HealthPhase = health.Phase
+			result.HealthReason = health.Reason
+			result.HealthFailures = health.Failures
+			result.HealthRounds = health.Rounds
+			result.HealthOperationID = health.OperationID
+		} else if !errors.Is(healthErr, os.ErrNotExist) {
+			return healthErr
+		}
 		session, err := m.readNativeSession()
 		if errors.Is(err, os.ErrNotExist) {
 			if s.Desired == "smart" {
@@ -582,9 +740,24 @@ func (m *Manager) NativeStatus() (NativeConnectionStatus, error) {
 			return err
 		}
 		result.Observed = observed
+		if healthErr != nil || health.ConfigSHA256 != session.ConfigSHA256 {
+			return Fault("guard_pending", "native health record missing or unbound")
+		}
+		boot, bootErr := trialBootIdentity()
+		now, timeErr := smartTUNUptimeMillis()
+		if bootErr != nil || timeErr != nil || boot != health.BootID || now < health.HeartbeatMS || now-health.HeartbeatMS > nativeHealthLeaseMS {
+			return Fault("guard_unavailable", "native health supervision is stale or on a different boot")
+		}
+		if guardErr := nativeHealthGuardRoles(); guardErr != nil {
+			return guardErr
+		}
+		// Neither a previously healthy receipt nor live timers may claim a
+		// selected VPN path if the saved mode/Core is no longer active.
 		if s.Desired != "smart" || observed != "active" {
 			return Fault("guard_pending", "native Core is not verified active and consistent")
 		}
+		result.GuardVerified = true
+		result.SelectedVPNPathProof = nativeSelectedHTTPSProof(health, s.Desired, observed, now)
 		return nil
 	})
 	return result, err

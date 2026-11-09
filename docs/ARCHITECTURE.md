@@ -73,6 +73,46 @@ namespace. This is candidate evidence, not real Iran/foreign VPN provider
 acceptance, installed artifact parity, domain Direct or runtime health proof.
 The old experimental trial remains until its replacement is accepted.
 
+The **unreleased native Runtime Health Guard candidate** reuses the two
+previously installed, independently scheduled `server-connect-smart-health`
+and `server-connect-activation-recover` timer/executor roles. The only VPN
+transport is still the **same official sing-box Core**; the Manager never
+installs a competing data plane or a broad network repair layer. Before
+Core start, Connect durably records an operation/boot/config-bound health
+receipt and arms both roles. The health executor tests two fixed HTTPS
+paths with fresh TLS/nonce evidence and a native `SO_MARK=0x2023` socket:
+`auto_route` sends this mark to the owned TUN table. Binding the socket
+with `SO_BINDTODEVICE=sctun0` is **not** valid with sing-box's
+`auto_redirect` on the tested Debian guests (kernel returns
+`ENETUNREACH`); accepting an ordinary unmarked Direct reply would also be
+unsafe. Separate pre/post read-only IPv4/IPv6 RPDB, selected-marked IPv4
+FIB and nftables-capture checks prevent health from treating lost native
+interception as a good VPN path. The synthetic nonce/peer fixture is
+**development-only**. Field-mode HTTPS targets measure authenticated
+IPv4 HTTPS/TLS over the selected Core, not Iranian geography or general
+DNS/UDP/IPv6 policy, and a successful HTTPS endpoint alone cannot certify
+the separate production Activation Guard.
+
+A transient failed round is `degraded`; any other independently healthy
+selected target prevents a one-site false alarm. Short recovered outages
+require fresh selected HTTPS before re-entering `healthy`. A bounded number
+of consecutive failures (default **3**, operator setting **1-10**) or a
+bounded cumulative flapping budget triggers exact Core stop and its
+existing owner-checked `ExecStopPost` Direct restoration. **No blind Core
+restart or unconfirmed boot auto-resume** is introduced: while the Core
+remains active, its transport may reconnect and subsequent independent
+health rounds can prove recovery; otherwise Direct/off is final until a
+new explicit Connect. The second timer detects a stalled/unavailable
+health executor, and the health executor checks the recovery timer. On a
+fresh Connect after Core `SIGKILL` (including an older candidate without a
+native health record), systemd's retained `failed` state is normalized **before** prearming timers, but only after the prior operation
+has proven Direct/off, the old claim is absent, MainPID is zero and the
+new scope's native policy slots are vacant. The timers must never confuse
+old failure bookkeeping with the new operation's actual Core state. The
+saved profile and routing rules are never erased by a health fault.
+This limited native guard candidate is **not** complete field acceptance,
+SSH confirmation, authenticated distribution or production authorization.
+
 The older detailed native resource-ledger and trial descriptions below
 document the **existing experimental code**, not the selected production
 implementation. The canonical [PROJECT-SPEC.md](PROJECT-SPEC.md) and

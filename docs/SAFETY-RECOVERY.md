@@ -418,9 +418,53 @@ Direct/off. The private inactive compiled Core config is removed by the next
 explicit Disconnect. Ordinary systemd failure bookkeeping may still show
 `failed` after a SIGKILL; this is not proof that a VPN path remains active.
 Saved profile and rules persist and the next Smart Routing activation must
-revalidate them. Existing owner-disallowed reboot auto-resume is not a substitute
-for the independent Activation or Runtime Guard; neither successful packet
-routing nor a completed stop hook licenses general-host deployment.
+revalidate them. No native session resumes VPN automatically after reboot. The independently
+scheduled recovery role can retire a verified Direct/off health receipt and
+disarm remaining health timers without adopting a replacement session. This
+candidate lifecycle and its guard do **not** license general-host deployment.
+
+### Native selected-path Runtime Health Guard candidate
+
+Native Connect prearms the existing **two independent systemd timer/oneshot
+roles**, staging a private configuration digest, boot ID, operation nonce,
+monotonic heartbeat and bounded failure counters. Do not mistake process
+`active` for selected-VPN health. Each health round binds IPv4 HTTPS TCP
+to sing-box's reserved native `SO_MARK=0x2023` and requires independent
+pre/post proof that the exact native RPDB rule, selected TUN routing table,
+marked FIB lookup and official nftables OUTPUT capture are still present.
+This is required because a direct `SO_BINDTODEVICE` on the sing-box TUN
+fails to route on supported Debian guests; an unmarked probe could
+wrongly succeed Direct after capture loss. The two fixed target hosts
+use ordinary TLS hostname verification, bounded read/timeout and no
+inherited HTTP proxy; in the synthetic QA scope the pinned test CA and
+fresh nonce/peer-source proof are used instead. No DNS request, arbitrary
+hostname, peer override or operator-selected URL is accepted as health
+proof. **Only IPv4 HTTPS is measured here; UDP, DNS, IPv6 and trusted
+Iranian-country routing need separate acceptance.**
+
+The default fixed health schedule is a five-second post-round timer,
+20-second first-start grace and a **3-round consecutive** failure
+threshold (configurable 1-10). There is also a non-replenishing bounded
+flapping budget of three times the selected threshold. One unreachable
+HTTPS endpoint alone does not mark the VPN down when the other has fresh
+positive selected-path proof. The existing Core stays active for these
+short re-probes, allowing its own transport to recover; there is **no
+blind service restart**, credential rotation or application replay.
+Fresh selected-path verification is mandatory before returning to
+`healthy`. Exhausted failures or critical Core, ownership, health lease or
+supervisor failure call the same exact scoped stop/Direct recovery.
+The second timer monitors the health executor's authenticated role,
+heartbeat and schedule; health checks the recovery role. A missing/failed
+single timer triggers safe Direct recovery from the other.
+
+A failed Off attempt is **not** success: retain recovery claims and
+report `guard_pending`/`UNCERTAIN` as appropriate. A verified Off persists
+`desired=direct`, retires only owned kernel state and both timer roles,
+and preserves the selected profile and saved rules. Last health cause,
+round count and failed-round count remain in private diagnostics, while
+no automatic re-enable occurs after exhaustion. The synthetic installed
+VM health evidence does **not** prove public-provider reachability,
+production route ownership or safe hosted ingress/SSH behavior.
 
 ## Activation Guard
 

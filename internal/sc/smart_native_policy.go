@@ -11,11 +11,13 @@ import (
 // NativePolicyOptions describes a proposed sing-box-owned Linux TUN policy.
 // Compiling it changes no host resources and does not authorize activation.
 type NativePolicyOptions struct {
-	InterfaceName     string
-	UnderlayInterface string
-	IPv4Address       string
-	IPv6Address       string
-	Mode              string // "default" or "bypass_iran"
+	InterfaceName          string
+	UnderlayInterface      string
+	IPv4Address            string
+	IPv6Address            string
+	Mode                   string // "default" or "bypass_iran"
+	HealthFailureThreshold int    // 0 selects conservative default 3 consecutive rounds
+	HealthSyntheticQA      bool   // explicit synthetic HTTPS QA scope, not field acceptance
 }
 
 // NativePolicyTableIndex and NativePolicyRuleIndex reserve predictable native

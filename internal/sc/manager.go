@@ -491,6 +491,26 @@ func (m *Manager) Status() (Status, error) {
 			status.Health = "native_recovery_unverified"
 			return status, nativeErr
 		}
+		if nativeErr == nil {
+			switch report.HealthPhase {
+			case "healthy":
+				if report.SelectedVPNPathProof == "recent_synthetic_https" {
+					status.Health = "native_selected_synthetic_qa_only"
+				} else if report.SelectedVPNPathProof != "not_run" {
+					status.Health = "native_selected_https_recent"
+				} else {
+					status.Health = "native_selected_path_unverified"
+				}
+			case "starting":
+				status.Health = "native_health_starting"
+			case "degraded":
+				status.Health = "native_selected_path_degraded"
+			case "stopping":
+				status.Health = "native_recovery_in_progress"
+			default:
+				status.Health = "native_health_" + report.HealthPhase
+			}
+		}
 		if report.Observed != "active" {
 			status.Health = "native_recovery_unverified"
 			return status, Fault("guard_pending", "native routing is not verified active")

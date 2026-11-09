@@ -22,7 +22,15 @@ The planned distribution offers **official online**, **operator-hosted HTTPS mir
 
 ## Implementation status and development
 
-The existing source includes a Go CLI, secure profile storage, real pinned sing-box **Proxy Only** development tests, a shared offline installer and a developer online bootstrap. **General-host Smart Routing, the production Runtime Health Guard, real foreign-path acceptance and Cloudflare Tunnel integration remain unavailable.** The disposable native trial includes an independent expiry/recovery executor; its explicit supervised mode adds fresh SSH confirmation, selected-path TCP/UDP/DNS and authenticated fixture HTTPS health checks, and bounded recovery inside the same isolated fixture. Target-specific Debian 12/amd64 and Debian 13/amd64 QA bundles support the Direct/Proxy Only installation lifecycle. New native trials additionally require Debian 13 and the existing isolated fixture; installing on Debian 12 does not admit TUN. See [the distribution contract](docs/OFFLINE-DISTRIBUTION.md) for these development targets and their limits; they are not a public support promise.
+The existing source includes a Go CLI, secure profile storage, real pinned sing-box **Proxy Only** development tests, a shared offline installer and a developer online bootstrap. **General-host Smart Routing, the production-approved Runtime Health Guard,
+real Iranian-origin/foreign-provider acceptance and Cloudflare Tunnel
+integration remain unavailable.** The native candidate now includes a
+**VM-tested independent Runtime Health Guard**, using two existing
+systemd timers and selected-marked HTTPS probes: a healthy selected
+path can recover without restarting the Core, while sustained failure or
+lost supervision restores verified Direct/off. Its synthetic fixture
+and current 5-second/3-consecutive-failure policy are **not** a
+production acceptance or general protocol coverage claim. The disposable native trial includes an independent expiry/recovery executor; its explicit supervised mode adds fresh SSH confirmation, selected-path TCP/UDP/DNS and authenticated fixture HTTPS health checks, and bounded recovery inside the same isolated fixture. Target-specific Debian 12/amd64 and Debian 13/amd64 QA bundles support the Direct/Proxy Only installation lifecycle. New native trials additionally require Debian 13 and the existing isolated fixture; installing on Debian 12 does not admit TUN. See [the distribution contract](docs/OFFLINE-DISTRIBUTION.md) for these development targets and their limits; they are not a public support promise.
 
 **Profile URL compatibility (development candidate):** one `vless://` link can
 be imported with `server-connect --json import --file /private/link.txt`
@@ -86,6 +94,28 @@ are changed. This is deliberately **not** general-host admission, a durable
 network reservation, authenticated VLESS health, fresh SSH/foreign-reply
 protection, or an independent Activation/Runtime Guard. Keep experimental
 native Apply restricted to its existing admitted QA fixtures.
+
+### Native Runtime Health Guard (installed test candidate)
+
+On explicitly authorized disposable hosts only, `connect-smart` now stages
+independent supervision **before** starting the selected native TUN. Normal
+health uses fixed HTTPS/TLS targets and verifies that the Linux
+`SO_MARK=0x2023` path reaches the selected native TUN table; there is no
+unmarked Direct fallback for the health probes. A deliberately synthetic
+`--health-synthetic-qa` option uses the fixed public test certificate and
+nonce/source-verifying endpoints from the disconnected test harness; it
+must **not** be treated as a production provider check.
+
+`server-connect --json native-status` reports `runtime_guard_verified`,
+`health_phase` (`starting`, `healthy`, `degraded`, `stopping`, `off`),
+`health_reason`, `health_failures`, `health_rounds` and an operation ID. A
+recent `selected_vpn_path_proof` identifies **only** the measured HTTPS
+scope; `native_policy_verified=false` and untested UDP/DNS/IPv6 remain
+explicit. `--health-failures N` (1-10, default 3) controls consecutive
+failed rounds. A provider can recover while Core remains active; exhaustion
+or a lost guard triggers exact owned Direct recovery, never an automatic
+unconfirmed Core restart. Saved profiles and rules survive. Public release,
+field hosting acceptance and independent review are still gated.
 
 ### Simplified native sing-box policy preview (development-only)
 
