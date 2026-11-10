@@ -86,16 +86,10 @@ func NativeSmartRoutingConfig(profile Profile, opts NativePolicyOptions, operato
 		return nil, err
 	}
 
-	// The independent Linux namespace witness showed dns_mode=hijack
-	// intercepts even directly attached DNS peers, breaking local DNS when
-	// the VPN provider is unavailable. Keep platform DNS untouched and let
-	// native route pre-match hijack port 53 only when packets enter TUN.
-	// The selected VPN resolver itself remains tunnel-detoured. This is a
-	// bounded UDP DNS proof, not blanket TCP/IPv6/resolver acceptance.
-	rules := []any{
-		map[string]any{"port": 53, "action": "hijack-dns"},
-		map[string]any{"ip_is_private": true, "action": "bypass", "outbound": "direct"},
-	}
+	// Keep platform DNS untouched (dns_mode=disabled), and prioritize
+	// directly attached/private destinations before any port-53 hijack.
+	// The route rule sees only DNS that actually entered the native TUN.
+	rules := []any{map[string]any{"ip_is_private": true, "action": "bypass", "outbound": "direct"}}
 
 	// Explicit VPN CIDR rules precede country Direct; no kernel-level country
 	// exclusion is installed, so an operator VPN exception is not overridden.
@@ -122,19 +116,6 @@ func NativeSmartRoutingConfig(profile Profile, opts NativePolicyOptions, operato
 		}
 		rules = append(rules, map[string]any{"ip_cidr": []string{rule.Value}, "action": "route", "outbound": out})
 	}
-	if len(domains) != 0 {
-		rules = append(rules, map[string]any{"action": "sniff", "sniffer": []string{"tls", "http"}, "timeout": "200ms"})
-		for _, rule := range domains {
-			match := map[string]any{"action": "route", "outbound": "upstream"}
-			if rule.Type == "domain" {
-				match["domain"] = []string{rule.Value}
-			} else {
-				match["domain_suffix"] = []string{"." + rule.Value}
-			}
-			rules = append(rules, match)
-		}
-	}
-
 	sets := []any{}
 	if opts.Mode == "bypass_iran" {
 		if opts.IPv6Address == "" {
@@ -155,6 +136,30 @@ func NativeSmartRoutingConfig(profile Profile, opts NativePolicyOptions, operato
 			"type": "inline", "tag": "iran-public",
 			"rules": []any{map[string]any{"ip_cidr": append(append([]string{}, geo.IPv4...), geo.IPv6...)}},
 		})
+		// A pinned domestic DNS destination remains Direct. Operator VPN
+		// CIDRs above it still win, even when the resolver uses port 53.
+		rules = append(rules, map[string]any{
+			"rule_set": []string{"iran-public"}, "port": 53, "action": "route", "outbound": "direct",
+		})
+	}
+
+	// Unmatched DNS continues to use the selected VPN-detoured resolver;
+	// this rule must not preempt operator or domestic IP policy. Keeping it
+	// before TCP sniffing avoids unnecessary TLS/HTTP inspection of DNS.
+	rules = append(rules, map[string]any{"port": 53, "action": "hijack-dns"})
+	if len(domains) != 0 {
+		rules = append(rules, map[string]any{"action": "sniff", "sniffer": []string{"tls", "http"}, "timeout": "200ms"})
+		for _, rule := range domains {
+			match := map[string]any{"action": "route", "outbound": "upstream"}
+			if rule.Type == "domain" {
+				match["domain"] = []string{rule.Value}
+			} else {
+				match["domain_suffix"] = []string{"." + rule.Value}
+			}
+			rules = append(rules, match)
+		}
+	}
+	if opts.Mode == "bypass_iran" {
 		rules = append(rules, map[string]any{"rule_set": []string{"iran-public"}, "action": "route", "outbound": "direct"})
 	}
 
