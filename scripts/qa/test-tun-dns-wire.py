@@ -2,6 +2,10 @@
 """Pure packet-contract tests; no privileged sockets or external DNS."""
 
 import importlib.util
+import errno
+import io
+import socket
+from unittest.mock import MagicMock, patch
 from pathlib import Path
 import struct
 import unittest
@@ -28,6 +32,57 @@ class DNSWireContract(unittest.TestCase):
             reply = PEER.response_for(packet, source)
             self.assertEqual(CLIENT.answer_ipv4(reply, packet), expected)
         self.assertIsNone(PEER.response_for(packet, "203.0.113.7"))
+
+    def test_dual_stack_responder_source_and_selected_dns_detour(self):
+        packet = CLIENT.question("native-ipv6-wire")
+        for source, expected in (("fd73:1::1", "192.0.2.11"),
+                                 ("2606:4700:5::10", "192.0.2.22"),
+                                 ("1.1.1.1", "192.0.2.33"),
+                                 ("5.22.0.11", "192.0.2.22")):
+            with self.subTest(source=source):
+                self.assertEqual(CLIENT.answer_ipv4(PEER.response_for(packet, source), packet), expected)
+        self.assertIsNone(PEER.response_for(packet, "fd73:1::999"))
+
+    def test_native_dual_stack_udp_uses_real_ipv6_socket_and_peer_tuple(self):
+        destination = "2606:4700:5::10"
+        sock = MagicMock()
+        sock.__enter__.return_value = sock
+        sock.recvfrom.return_value = (b"real-reply", (destination, 53, 0, 0))
+        with patch.object(CLIENT.socket, "socket", return_value=sock) as create:
+            self.assertEqual(CLIENT.wire_query(destination, "udp", b"dns-query"), b"real-reply")
+        create.assert_called_once_with(socket.AF_INET6, socket.SOCK_DGRAM)
+        sock.sendto.assert_called_once_with(b"dns-query", (destination, 53))
+        sock.recvfrom.return_value = (b"reply-from-wrong-ip", ("2606:4700:8::8", 53, 0, 0))
+        with patch.object(CLIENT.socket, "socket", return_value=sock):
+            with self.assertRaisesRegex(ValueError, "another endpoint"):
+                CLIENT.wire_query(destination, "udp", b"dns-query")
+
+    def test_native_outage_rejects_success_and_forged_dns_failures(self):
+        packet = CLIENT.question("native-outage")
+        failure = packet[:2] + struct.pack("!HHHHH", 0x8182, 1, 0, 0, 0) + packet[12:]
+        args = ["2606:4700:8::8", "none", "native-outage", "udp", "no-success"]
+        with patch.object(CLIENT, "wire_query", return_value=failure), \
+             patch("sys.stdout", new_callable=io.StringIO) as out:
+            CLIENT.main(args)
+            self.assertEqual(out.getvalue(), "REAL_TUN_DNS_NO_SUCCESS=PASS\n")
+        bad = (
+            PEER.response_for(packet, "2606:4700:8::8"),
+            failure[:2] + struct.pack("!HHHHH", 0x8183, 1, 0, 0, 0) + failure[12:],
+            failure[:-1], failure + b"X", failure[:-1] + b"X",
+            b"XX" + failure[2:],
+            failure[:2] + struct.pack("!HHHHH", 0x8182, 2, 0, 0, 0) + failure[12:],
+        )
+        for response in bad:
+            with self.subTest(response=response), patch.object(CLIENT, "wire_query", return_value=response):
+                with self.assertRaises(ValueError):
+                    CLIENT.main(args)
+        with patch.object(CLIENT, "wire_query", side_effect=OSError(errno.ENETUNREACH, "offline")), \
+             patch("sys.stdout", new_callable=io.StringIO) as out:
+            CLIENT.main(args)
+            self.assertIn("NO_RESPONSE=PASS", out.getvalue())
+        for destination in ("fe80::1", "fd73:1::3", "::1"):
+            with self.assertRaises(ValueError):
+                CLIENT.main([destination, "none", "negative", "udp", "no-success"])
 
     def test_phase_is_necessary_and_non_cacheable(self):
         one = CLIENT.question("phase-a")

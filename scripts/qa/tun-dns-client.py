@@ -49,7 +49,8 @@ def read_exact(sock, count):
 
 
 def wire_query(destination, transport, query):
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM if transport == "tcp" else socket.SOCK_DGRAM) as sock:
+    family = socket.AF_INET6 if ipaddress.ip_address(destination).version == 6 else socket.AF_INET
+    with socket.socket(family, socket.SOCK_STREAM if transport == "tcp" else socket.SOCK_DGRAM) as sock:
         sock.settimeout(TIMEOUT)
         if transport == "tcp":
             sock.connect((destination, 53))
@@ -60,34 +61,47 @@ def wire_query(destination, transport, query):
             return read_exact(sock, length)
         sock.sendto(query, (destination, 53))
         response, source = sock.recvfrom(512)
-        if source != (destination, 53):
+        if ipaddress.ip_address(source[0]) != ipaddress.ip_address(destination) or source[1] != 53:
             raise ValueError("DNS reply came from another endpoint")
         return response
 
 
 def main(args):
     if len(args) != 5:
-        raise ValueError("usage: DEST EXPECTED_IP|none PHASE udp|tcp reply|no-reply")
+        raise ValueError("usage: DEST EXPECTED_IP|none PHASE udp|tcp reply|no-reply|no-success")
     destination, expected, phase, transport, mode = args
-    if transport not in ("udp", "tcp") or mode not in ("reply", "no-reply"):
+    if transport not in ("udp", "tcp") or mode not in ("reply", "no-reply", "no-success"):
         raise ValueError("invalid DNS probe mode")
-    if not ipaddress.IPv4Address(destination).is_global:
-        raise ValueError("DNS target must be a public IPv4 test fixture")
+    address = ipaddress.ip_address(destination)
+    # Only the controlled, disconnected guest needs a private IPv6 DNS
+    # positive control. Never accept unrelated private or link-local probes.
+    if not address.is_global and destination != "fd73:1::2":
+        raise ValueError("DNS target must be a controlled public fixture or the QA IPv6 peer")
     if mode == "reply":
         ipaddress.IPv4Address(expected)
     elif expected != "none":
-        raise ValueError("no-reply mode requires none")
+        raise ValueError("negative DNS mode requires none")
     request = question(phase)
     try:
         response = wire_query(destination, transport, request)
     except (socket.timeout, TimeoutError, ConnectionError, OSError) as exc:
-        if mode != "no-reply" or (isinstance(exc, OSError) and
+        if mode not in ("no-reply", "no-success") or (isinstance(exc, OSError) and
             not isinstance(exc, (socket.timeout, TimeoutError)) and exc.errno not in ALLOWED_FAILURE):
             raise
         print("REAL_TUN_DNS_NO_RESPONSE=PASS")
         return
     if mode == "no-reply":
         raise ValueError("VPN-required DNS unexpectedly returned a response")
+    if mode == "no-success":
+        # A local failure (SERVFAIL/REFUSED) is not a successful resolver
+        # reply, but an independently observed native Direct leak still fails
+        # in the caller's peer-side packet counters.
+        if len(response) == len(request) and response[:2] == request[:2] and response[12:] == request[12:]:
+            flags, qd, an, ns, ar = struct.unpack("!HHHHH", response[2:12])
+            if flags in (0x8182, 0x8185) and qd == 1 and an == 0 and ns == 0 and ar == 0:
+                print("REAL_TUN_DNS_NO_SUCCESS=PASS")
+                return
+        raise ValueError("VPN-required DNS unexpectedly returned a successful or invalid response")
     actual = answer_ipv4(response, request)
     if actual != expected:
         raise ValueError("DNS wire answer proves wrong source path")
