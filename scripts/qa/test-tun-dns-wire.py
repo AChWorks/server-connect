@@ -2,6 +2,8 @@
 """Pure packet-contract tests; no privileged sockets or external DNS."""
 
 import importlib.util
+import json
+import ipaddress
 import errno
 import io
 import socket
@@ -42,6 +44,30 @@ class DNSWireContract(unittest.TestCase):
             with self.subTest(source=source):
                 self.assertEqual(CLIENT.answer_ipv4(PEER.response_for(packet, source), packet), expected)
         self.assertIsNone(PEER.response_for(packet, "fd73:1::999"))
+
+    def test_native_country_fixture_matches_the_bundled_estimate(self):
+        snapshot = json.loads((ROOT.parents[1] / "internal/sc/data/iran-dbip-lite-2026-10.json").read_text())
+        self.assertEqual(snapshot["as_of"], "2026-10-01")
+        for addr in ("2001:470:f486::10", "2001:470:f486::11"):
+            with self.subTest(address=addr):
+                self.assertTrue(any(ipaddress.ip_address(addr) in ipaddress.ip_network(cidr)
+                                    for cidr in snapshot["ipv6"]))
+        for addr in ("2606:4700:5::10", "9.9.9.9"):
+            with self.subTest(address=addr):
+                self.assertFalse(any(ipaddress.ip_address(addr) in ipaddress.ip_network(cidr)
+                                     for cidr in snapshot["ipv6" if ":" in addr else "ipv4"]))
+        self.assertTrue(any(ipaddress.ip_address("5.22.0.11") in ipaddress.ip_network(cidr)
+                            for cidr in snapshot["ipv4"]))
+
+    def test_extended_native_dns_selected_source_v4_v6_fixtures(self):
+        request = CLIENT.question("geo-v6-native")
+        for source, expected in (("10.254.72.1", "192.0.2.11"),
+                                 ("fd73:1::1", "192.0.2.11"),
+                                 ("8.8.8.8", "192.0.2.22"),
+                                 ("1.1.1.1", "192.0.2.33"),
+                                 ("2001:470:f486::11", "192.0.2.22")):
+            with self.subTest(source=source):
+                self.assertEqual(CLIENT.answer_ipv4(PEER.response_for(request, source), request), expected)
 
     def test_core_reencoded_dns_answer_uncompressed_owner_is_valid(self):
         packet = CLIENT.question("unmatched-v6-udp")

@@ -745,6 +745,7 @@ ip -n "$peer" addr add 8.8.8.8/32 dev lo
 if [ "$native_dns_trial" = yes ]; then
   ip -n "$peer" addr add 1.1.1.1/32 dev lo
   ip -n "$peer" addr add 5.22.0.11/32 dev lo
+  ip -n "$peer" addr add 9.9.9.9/32 dev lo
 fi
 ip -n "$peer" addr add 198.51.100.42/32 dev lo
 if [ "$ipv6_trial" = yes ]; then
@@ -758,6 +759,13 @@ if [ "$ipv6_trial" = yes ]; then
   for addr in 2606:4700:5::10 2606:4700:5::11 2606:4700:8::8 2606:4700:8::9; do
     ip -n "$peer" -6 addr add "$addr"/128 dev lo
   done
+  if [ "$native_dns_trial" = yes ]; then
+    # Both aliases are inside the exact pinned October 2026 Iran estimate;
+    # only the second has an explicit native VPN /128 override.
+    for addr in 2001:470:f486::10 2001:470:f486::11; do
+      ip -n "$peer" -6 addr add "$addr"/128 dev lo
+    done
+  fi
   ip -6 route add default via fd73:1::2 dev "$edge" metric 100
   default_v6_added=yes
 fi
@@ -786,6 +794,14 @@ table inet scqawitness {
   counter native_dns_v4_vpn_udp { }
   counter native_dns_v4_vpn_tcp { }
   counter native_dns_v6_direct_udp { }
+  counter native_dns_v4_direct_udp { }
+  counter native_dns_v4_direct_tcp { }
+  counter native_dns_v4_private_udp { }
+  counter native_dns_v4_private_tcp { }
+  counter native_dns_v6_country_udp { }
+  counter native_dns_v6_country_tcp { }
+  counter native_dns_v6_country_override_udp { }
+  counter native_dns_v6_country_override_tcp { }
   counter domestic_tls_direct_packets { }
   counter foreign_tls_direct_packets { }
   counter native_app_direct_packets { }
@@ -813,6 +829,14 @@ table inet scqawitness {
     iifname "scqapeer0" ip daddr 5.22.0.11 udp dport 53 counter name native_dns_v4_vpn_udp
     iifname "scqapeer0" ip daddr 5.22.0.11 tcp dport 53 counter name native_dns_v4_vpn_tcp
     iifname "scqapeer0" ip6 daddr 2606:4700:8::9 udp dport 53 counter name native_dns_v6_direct_udp
+    iifname "scqapeer0" ip daddr 9.9.9.9 udp dport 53 counter name native_dns_v4_direct_udp
+    iifname "scqapeer0" ip daddr 9.9.9.9 tcp dport 53 counter name native_dns_v4_direct_tcp
+    iifname "scqapeer0" ip daddr 10.254.72.2 udp dport 53 counter name native_dns_v4_private_udp
+    iifname "scqapeer0" ip daddr 10.254.72.2 tcp dport 53 counter name native_dns_v4_private_tcp
+    iifname "scqapeer0" ip6 daddr 2001:470:f486::10 udp dport 53 counter name native_dns_v6_country_udp
+    iifname "scqapeer0" ip6 daddr 2001:470:f486::10 tcp dport 53 counter name native_dns_v6_country_tcp
+    iifname "scqapeer0" ip6 daddr 2001:470:f486::11 udp dport 53 counter name native_dns_v6_country_override_udp
+    iifname "scqapeer0" ip6 daddr 2001:470:f486::11 tcp dport 53 counter name native_dns_v6_country_override_tcp
     iifname "scqapeer0" ip daddr 5.22.0.10 tcp dport 19181 counter name domestic_tls_direct_packets
     iifname "scqapeer0" ip daddr 8.8.8.8 tcp dport 19181 counter name foreign_tls_direct_packets
     iifname "scqapeer0" ip daddr 8.8.8.8 tcp dport 19187 counter name native_app_direct_packets

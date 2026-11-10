@@ -16,6 +16,7 @@ ANSWER_BY_SOURCE = {
     "fd73:1::1": ipaddress.IPv4Address("192.0.2.11").packed,
     "1.1.1.1": ipaddress.IPv4Address("192.0.2.33").packed,
     "5.22.0.11": ipaddress.IPv4Address("192.0.2.22").packed,
+    "2001:470:f486::11": ipaddress.IPv4Address("192.0.2.22").packed,
     "2606:4700:5::10": ipaddress.IPv4Address("192.0.2.22").packed,
     "2606:4700:8::8": ipaddress.IPv4Address("192.0.2.22").packed,
 }
@@ -123,14 +124,15 @@ def main():
     with ExitStack() as stack:
         servers = [
             stack.enter_context(kind((address, 53), handler))
-            for address in (("5.22.0.10", "8.8.8.8", "1.1.1.1", "5.22.0.11") if native else ("5.22.0.10", "8.8.8.8"))
+            for address in (("5.22.0.10", "8.8.8.8", "1.1.1.1", "5.22.0.11", "9.9.9.9", "10.254.72.2") if native else ("5.22.0.10", "8.8.8.8"))
             for kind, handler in ((UDPServer, UDPHandler), (TCPServer, TCPHandler))
         ]
         if native:
             servers.extend(
                 stack.enter_context(kind((address, 53), handler))
                 for address in ("fd73:1::2", "2606:4700:5::10", "2606:4700:5::11",
-                                "2606:4700:8::8", "2606:4700:8::9")
+                                "2606:4700:8::8", "2606:4700:8::9",
+                                "2001:470:f486::10", "2001:470:f486::11")
                 for kind, handler in ((UDPServer6, UDPHandler), (TCPServer6, TCPHandler))
             )
         threads = [

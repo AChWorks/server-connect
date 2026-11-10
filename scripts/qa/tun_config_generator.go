@@ -27,6 +27,11 @@ func main() {
 			Mode: mode,
 		}, []sc.SmartRoutingRule{
 			{Type: "cidr", Value: "5.22.0.11/32", Via: "vpn"},
+			{Type: "cidr", Value: "9.9.9.9/32", Via: "direct"},
+			// This /128 is inside the actually bundled October 2026 Iran
+			// IPv6 estimate (2001:470:f486::/48), unlike the original
+			// 2606:4700 fixtures. Still an offline synthetic test address.
+			{Type: "cidr", Value: "2001:470:f486::11/128", Via: "vpn"},
 			{Type: "cidr", Value: "2606:4700:5::10/128", Via: "vpn"},
 			{Type: "cidr", Value: "2606:4700:5::11/128", Via: "direct"},
 			{Type: "cidr", Value: "2606:4700:8::9/128", Via: "direct"},
