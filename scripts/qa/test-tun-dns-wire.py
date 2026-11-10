@@ -43,6 +43,28 @@ class DNSWireContract(unittest.TestCase):
                 self.assertEqual(CLIENT.answer_ipv4(PEER.response_for(packet, source), packet), expected)
         self.assertIsNone(PEER.response_for(packet, "fd73:1::999"))
 
+    def test_core_reencoded_dns_answer_uncompressed_owner_is_valid(self):
+        packet = CLIENT.question("unmatched-v6-udp")
+        compressed = PEER.response_for(packet, "1.1.1.1")
+        # Actual Core hijack-dns can replace the 2-byte compression pointer
+        # with the full QNAME, preserving the exact question and A payload.
+        raw_owner = packet[12:-4]
+        uncompressed = compressed[:len(packet)] + raw_owner + compressed[len(packet) + 2:]
+        self.assertEqual(len(uncompressed), 102)
+        self.assertEqual(CLIENT.answer_ipv4(uncompressed, packet), "192.0.2.33")
+        self.assertEqual(CLIENT.answer_ipv4(compressed, packet), "192.0.2.33")
+        # An unrelated owner, extra bytes, wrong type or wrong question must
+        # still fail. TTL itself is valid metadata and not a path identity.
+        for bad in (
+            uncompressed[:len(packet)] + b"X" + uncompressed[len(packet) + 1:],
+            uncompressed + b"\0",
+            uncompressed[:-1],
+            uncompressed[:len(packet) + len(raw_owner)] + b"\x00\x1c" + uncompressed[len(packet) + len(raw_owner) + 2:],
+            uncompressed[:12] + b"X" + uncompressed[13:],
+        ):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                CLIENT.answer_ipv4(bad, packet)
+
     def test_native_dual_stack_udp_uses_real_ipv6_socket_and_peer_tuple(self):
         destination = "2606:4700:5::10"
         sock = MagicMock()

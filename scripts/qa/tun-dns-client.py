@@ -27,15 +27,30 @@ def question(phase):
 
 
 def answer_ipv4(response, query):
-    if len(response) != len(query) + 16 or response[:2] != query[:2]:
+    if len(response) < len(query) + 16 or response[:2] != query[:2]:
         raise ValueError("unexpected DNS response length or transaction ID")
     if response[2:12] != struct.pack("!HHHHH", 0x8180, 1, 1, 0, 0):
         raise ValueError("unexpected DNS response flags/counts")
     if response[12:len(query)] != query[12:]:
         raise ValueError("DNS answer question mismatch")
-    if response[len(query):len(query) + 12] != b"\xc0\x0c" + struct.pack("!HHIH", 1, 1, 0, 4):
+
+    # The fixture's authoritative DNS server uses an RFC 1035 compression
+    # pointer. The official Core parses and re-serializes hijacked replies,
+    # which may instead write the SAME owner as an uncompressed wire name.
+    # Both are valid; never accept an unrelated owner or a loose DNS suffix.
+    owner_start = len(query)
+    if response[owner_start:owner_start + 2] == b"\xc0\x0c":
+        record_start = owner_start + 2
+    elif response[owner_start:owner_start + len(query[12:-4])] == query[12:-4]:
+        record_start = owner_start + len(query[12:-4])
+    else:
+        raise ValueError("DNS answer owner does not match exact question")
+    if len(response) != record_start + 14:
+        raise ValueError("unexpected DNS response length or transaction ID")
+    rr_type, rr_class, _ttl, size = struct.unpack("!HHIH", response[record_start:record_start + 10])
+    if (rr_type, rr_class, size) != (1, 1, 4):
         raise ValueError("unexpected DNS answer type or metadata")
-    return str(ipaddress.IPv4Address(response[-4:]))
+    return str(ipaddress.IPv4Address(response[record_start + 10:]))
 
 
 def read_exact(sock, count):
