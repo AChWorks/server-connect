@@ -167,7 +167,7 @@ func NativeSmartRoutingConfig(profile Profile, opts NativePolicyOptions, operato
 		"inbounds": []any{map[string]any{
 			"type": "tun", "tag": "smart-tun",
 			"interface_name": opts.InterfaceName, "address": address,
-			"mtu": 1400, "auto_route": true, "auto_redirect": true,
+			"mtu": 1400, "stack": "gvisor", "auto_route": true, "auto_redirect": true,
 			"iproute2_table_index": NativePolicyTableIndex, "iproute2_rule_index": NativePolicyRuleIndex,
 			"strict_route": true, "dns_mode": "disabled",
 		}},
