@@ -235,3 +235,45 @@ func TestNativeRecoveryRefusesUnrelatedDesiredModeWithoutRetiringClaim(t *testin
 		t.Fatalf("unrelated claim was consumed: %s %v", raw, err)
 	}
 }
+
+// A persisted crash-recovery claim is never a boot or manual restart grant.
+// The existing health receipt must belong to this boot, this config and the
+// just-staged Connect operation; failure leaves the receipt for owned cleanup.
+func TestNativeFreshPrearmRejectsRetainedBootAndStaleGuard(t *testing.T) {
+	claim := NativeSession{Selected: "0123456789abcdef", ConfigSHA256: strings.Repeat("b", 64)}
+	health := nativeHealthTestState()
+	boot := health.BootID
+	for _, tc := range []struct {
+		name    string
+		mutate  func(*NativeSession, *NativeHealthState)
+		boot    string
+		now     int64
+		allowed bool
+	}{
+		{"fresh-just-armed", nil, boot, 1000, true},
+		{"fresh-grace-boundary", nil, boot, 1000 + nativeHealthGraceMS, true},
+		{"stale-previous-boot", nil, "22222222-2222-4222-8222-222222222222", 1000, false},
+		{"uptime-rewound-after-boot", nil, boot, 999, false},
+		{"prearm-expired", nil, boot, 1000 + nativeHealthGraceMS + 1, false},
+		{"reused-healthy-state", func(_ *NativeSession, h *NativeHealthState) { h.Phase = "healthy" }, boot, 1100, false},
+		{"reused-degraded-state", func(_ *NativeSession, h *NativeHealthState) { h.Phase = "degraded" }, boot, 1100, false},
+		{"off-claim", func(_ *NativeSession, h *NativeHealthState) { h.Phase = "off" }, boot, 1100, false},
+		{"unrelated-config", func(s *NativeSession, _ *NativeHealthState) { s.ConfigSHA256 = strings.Repeat("c", 64) }, boot, 1100, false},
+		{"heartbeat-future", func(_ *NativeSession, h *NativeHealthState) { h.HeartbeatMS = 1101 }, boot, 1100, false},
+		{"heartbeat-before-start", func(_ *NativeSession, h *NativeHealthState) { h.HeartbeatMS = 999 }, boot, 1100, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s, h := claim, health
+			if tc.mutate != nil {
+				tc.mutate(&s, &h)
+			}
+			err := nativeFreshPrearm(s, h, tc.boot, tc.now)
+			if (err == nil) != tc.allowed {
+				t.Fatalf("fresh authorization mismatch: allowed=%t err=%v", tc.allowed, err)
+			}
+			if !tc.allowed && ErrorCode(err) != "guard_pending" {
+				t.Fatalf("stale prearm was not refused with retained-claim class: %v", err)
+			}
+		})
+	}
+}

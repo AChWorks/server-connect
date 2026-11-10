@@ -225,13 +225,15 @@ func recoverNativeRedirect(parent context.Context, r nativeKernelRunner, p nativ
 			}
 		}
 	}
-	// Preinspect all objects before changing any. The route-first order keeps
-	// the randomized table discoverable via priority 1 if cleanup is interrupted.
+	// Preinspect all objects before changing any. Keep priority-1 redirect
+	// identity until AFTER the nft table is deleted: an interrupted nft delete
+	// must leave the randomized table discoverable for the next exact retry.
+	// A partial priority-1 deletion still leaves the other family's same table.
 	all := append(append(append([]nativeAction{}, routes...), coreRules...), fallbackRules...)
-	all = append(all, priorityOne...)
 	if countTable == 1 {
 		all = append(all, nativeAction{"nft", []string{"delete", "table", "inet", "sing-box"}})
 	}
+	all = append(all, priorityOne...)
 	for _, a := range all {
 		if e := r.run(ctx, a.binary, a.args...); e != nil {
 			return e

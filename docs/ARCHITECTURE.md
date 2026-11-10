@@ -109,12 +109,25 @@ native health record), systemd's retained `failed` state is normalized **before*
 has proven Direct/off, the old claim is absent, MainPID is zero and the
 new scope's native policy slots are vacant. The timers must never confuse
 old failure bookkeeping with the new operation's actual Core state.
+The installed native `ExecStartPre` accepts only the just-staged,
+configuration-bound `starting` health receipt with the **current boot ID**,
+current uptime inside the existing startup grace, and both effective owned
+Health/Recovery timer roles. Retained old-boot or old-phase claims can still be
+used for exact `ExecStopPost` cleanup, but cannot authorize an enabled systemd
+unit to reapply routing on reboot or by an implicit manual restart. No second
+activation receipt or always-on boot service is required.
 Previous timer-driven oneshots can still be exiting after `ExecStopPost`
 has independently finalized Direct; fresh Connect first disarms both old
 schedules, waits a bounded interval for the two exact owned executors to
 become idle, and rechecks the Direct/no-claim/no-legacy-session/native-kernel
 boundary before reusing the existing strict failed-oneshot reconciler. It
 cannot reset an active, foreign or unknown guard merely to force a restart.
+Owned native redirect cleanup removes only preinspected Core-owned routes and
+managed policy rules, deletes the verified sing-box nftables table, and removes
+the exact priority-1 RPDB redirect-table identity **last**. An interrupted
+nftables delete (or one interrupted priority-1 delete) therefore retains the
+randomized redirect-table identity required for safe retry; unknown nftables
+chains, RPDB owners and foreign tables/rules still block or remain untouched.
 Selected-path health aggregation returns on the first authenticated positive
 without letting another slow target replace success with timeout; cancellation
 never upgrades a stale result to healthy. The

@@ -76,7 +76,10 @@ func modeOverviewFromStatus(status sc.Status, observationErr error) (modeOvervie
 		"historical_proxy_failure_direct_unaffected", "service_state_unavailable",
 		"service_ownership_conflict", "guarded_trial_unconfirmed",
 		"supervised_record_not_freshly_verified", "native_selected_path_not_tested",
-		"native_recovery_unverified":
+		"native_recovery_unverified", "native_selected_https_recent",
+		"native_selected_synthetic_qa_only", "native_selected_path_unverified",
+		"native_health_starting", "native_selected_path_degraded",
+		"native_recovery_in_progress", "native_health_off", "native_health_uncertain":
 		overview.StatusHealth = status.Health
 	default:
 		if status.Health != "" {

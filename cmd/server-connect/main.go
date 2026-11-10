@@ -762,7 +762,6 @@ Commands:
   smart-routing-rules preview-native --tunnel-if NAME --underlay-if NAME
                                      --tunnel-ipv4 CIDR [--tunnel-ipv6 CIDR]
                                      [--mode default|bypass_iran]
-                                     [--protected-peer IP...]
                               Compiles saved rules with official sing-box;
                               checks Core config only, never activates host TUN
   smart-routing-rules preview --tunnel-if NAME --underlay-if NAME --tunnel-ipv4 CIDR

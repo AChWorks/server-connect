@@ -255,6 +255,23 @@ func nativeDesiredMatchesClaim(state State, session NativeSession) error {
 	}
 	return nil
 }
+
+// Only the fresh, current-boot Connect prearm receipt can authorize a new
+// systemd ExecStartPre. A retained crash-recovery claim must stay available
+// for the independent ExecStopPost cleanup, but must NEVER become a boot-time
+// or manual implicit Connect. Reuse the already-persisted health receipt;
+// do not introduce a second activation permission or a new durable owner.
+func nativeFreshPrearm(session NativeSession, health NativeHealthState, boot string, now int64) error {
+	if health.ConfigSHA256 != session.ConfigSHA256 || health.BootID != boot ||
+		health.Phase != "starting" || health.StartedMS <= 0 ||
+		now < health.StartedMS || now-health.StartedMS > nativeHealthGraceMS ||
+		health.HeartbeatMS < health.StartedMS || health.HeartbeatMS > now ||
+		now-health.HeartbeatMS > nativeHealthLeaseMS {
+		return Fault("guard_pending", "native activation requires a fresh current-boot prearmed session")
+	}
+	return nil
+}
+
 func (m *Manager) NativePreflightInstalled() error {
 	if err := m.nativeUnitOwnership(); err != nil {
 		return err
@@ -272,6 +289,24 @@ func (m *Manager) NativePreflightInstalled() error {
 			return err
 		}
 		if err := nativeDesiredMatchesClaim(state, session); err != nil {
+			return err
+		}
+		health, err := m.readNativeHealth()
+		if err != nil {
+			return err
+		}
+		boot, err := trialBootIdentity()
+		if err != nil {
+			return Fault("guard_unavailable", "current native boot identity unavailable")
+		}
+		now, err := smartTUNUptimeMillis()
+		if err != nil {
+			return Fault("guard_unavailable", "native uptime unavailable")
+		}
+		if err := nativeFreshPrearm(session, health, boot, now); err != nil {
+			return err
+		}
+		if err := nativeHealthGuardRoles(); err != nil {
 			return err
 		}
 		return inspectNativeAdmission(context.Background(), nativeSystemRunner{}, session.recoveryScope())

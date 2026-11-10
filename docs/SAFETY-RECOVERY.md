@@ -71,6 +71,17 @@ fails. A failed command still returns a nonzero exit and `ok=false` with
 never counts as success. No TUN activation follows.
 A failed/uncertain restoration retains the journal, never presents Direct
 as safely verified and blocks installer/update/profile/Proxy Only transitions.
+For native automatic systemd starts, a **persisted recovery claim is not a
+boot-time activation authorization**. `ExecStartPre` must independently verify
+the configuration-bound health receipt was freshly staged on the current boot,
+is still in its initial short startup window, and both owned independent
+Health/Recovery timers are effective. A stale claim causes refusal without
+preflight deleting it; the already-existing exact owned-resource stop/recovery
+path can still retire it after proving Direct/off. If interrupted during
+managed cleanup, the randomized redirect table remains verifiable via the
+priority-1 RPDB identity until the owned nft table is gone, allowing a later
+narrow retry without adopting unrelated firewall/routing resources.
+
 For the separate *native sing-box lifecycle*, an independently verified
 Direct/off transition may leave either or both of the exact installed Health
 and Recovery oneshots in systemd `failed` bookkeeping. A fresh Connect may
