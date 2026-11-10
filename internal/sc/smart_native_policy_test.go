@@ -45,6 +45,9 @@ func TestNativeSmartPolicyUsesOfficialSingBox(t *testing.T) {
 	}
 	root := nativePolicyJSON(t, raw)
 	inbound := root["inbounds"].([]any)[0].(map[string]any)
+	if inbound["stack"] != "gvisor" {
+		t.Fatal("selected native stack must reassemble fragmented IPv6 UDP rather than write packets back")
+	}
 	for _, key := range []string{"auto_route", "auto_redirect", "strict_route"} {
 		if inbound[key] != true {
 			t.Fatalf("%s not enabled", key)
