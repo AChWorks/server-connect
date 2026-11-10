@@ -30,12 +30,15 @@ DISABLED = ("ftp", "rsh", "ssh", "mirror+ftp")
 DISABLED_PATH = "/usr/lib/apt/methods/false"
 
 # x86_64 Linux UAPI: sched_yield=24, nanosleep=35, getpid=39,
-# futex=202, epoll_pwait=281. These scheduling/wait/query syscalls cannot
-# create sockets, execute a helper or fork. Recognition is restricted to
+# futex=202, clock_gettime=228, epoll_pwait=281. These narrowly named
+# scheduling/wait/read-only time syscalls cannot create sockets, execute a
+# helper or fork. An actual Debian 12 apt-get trace reproduced strace -n
+# rendering a dying Go thread's clock_gettime as an opaque unfinished call.
+# Recognition is restricted to
 # the verified x86_64 ABI and a matching terminal exit receipt; unknown
 # syscalls, missing receipts and every network/exec/fork event still fail.
 # https://github.com/torvalds/linux/tree/master/tools/arch/x86/include/uapi/asm
-VERIFIED_TERMINAL_SYSCALLS_X86_64 = frozenset({24, 35, 39, 202, 281})
+VERIFIED_TERMINAL_SYSCALLS_X86_64 = frozenset({24, 35, 39, 202, 228, 281})
 
 
 def verified_opaque_exit(number: int | None) -> bool:
@@ -146,8 +149,11 @@ def check_payloads(payloads: dict[int, str]) -> None:
                 line = pending + resumed.group(2)
                 pending = ""
                 pending_number = None
-            require(re.fullmatch(r"[a-z0-9_]+\(.*\)\s+=\s+.+", line) is not None,
-                    "unrecognized or incomplete syscall evidence")
+            if re.fullmatch(r"[a-z0-9_]+\(.*\)\s+=\s+.+", line) is None:
+                # The trace line may embed private APT URLs or argv. Return
+                # only the kernel syscall number and a fixed parser stage.
+                raise TraceFailure("unrecognized or incomplete syscall evidence",
+                                   opaque_number=number, opaque_stage="syntax")
             require(not line.startswith("execveat("), "unverifiable alternate execution")
             child = re.fullmatch(r"(?:clone|clone3|fork|vfork)\(.*\)\s+=\s+([1-9][0-9]*)", line)
             if child:
