@@ -968,7 +968,14 @@ while [ "$attempt" -lt 25 ]; do
   kill -0 "$udp_pid" 2>/dev/null || { echo "QA UDP service exited" >&2; exit 1; }
   kill -0 "$tls_pid" 2>/dev/null || { echo "QA TLS service exited" >&2; cat /run/sc-qa-tun-tls.log >&2; exit 1; }
   kill -0 "$native_apps_pid" 2>/dev/null || { echo "QA APT/Git origin exited" >&2; cat /run/sc-qa-tun-native-apps-server.log >&2; exit 1; }
-  kill -0 "$dns_pid" 2>/dev/null || { echo "QA DNS server exited" >&2; exit 1; }
+  kill -0 "$dns_pid" 2>/dev/null || {
+    echo 'QA DNS server exited' >&2
+    # Failure-only root-cause evidence from the strictly disconnected guest.
+    # The synthetic fixture log contains neither operator credentials nor
+    # user DNS traffic, and cleanup still removes its exact owned file.
+    tail -n 30 /run/sc-qa-tun-dns.log >&2 || :
+    exit 1
+  }
   attempt=$((attempt+1))
   sleep 0.2
 done
