@@ -14,6 +14,19 @@ native_dns_vpn_witnesses() {
   done
 }
 
+native_dns_unmatched_diagnostics() {
+  echo "NATIVE_DNS_WIRE=FAIL (mode=$mode stage=unmatched)" >&2
+  # Bounded synthetic guest-only packet counters; exact originals cannot
+  # silently be treated as selected VPN DNS replies.
+  for name in native_dns_v6_foreign_udp native_dns_v6_foreign_tcp \
+              native_dns_resolver_udp native_dns_resolver_tcp \
+              direct_dns_udp_packets direct_dns_tcp_packets; do
+    count=$(peer_counter_packets "$name") || count=unavailable
+    printf 'NATIVE_DNS_COUNTER name=%s packets=%s\n' "$name" "$count" >&2
+  done
+  tail -n 20 /run/sc-qa-tun-client.log >&2 || :
+}
+
 native_dns_policy_trial() {
   mode=$SC_QA_TUN_NATIVE_DNS_MODE
   [ "$native_dns_trial" = yes ] && [ "$ipv6_trial" = yes ] || return 1
@@ -83,8 +96,14 @@ native_dns_policy_trial() {
   echo "NATIVE_DNS_SELECTED_ADDRESS_PRECEDENCE=PASS ($mode)"
 
   for transport in udp tcp; do
-    dns_path 2606:4700:8::8 192.0.2.33 "unmatched-v6-$transport" "$transport" reply
-    dns_path 8.8.8.8 192.0.2.33 "unmatched-v4-$transport" "$transport" reply
+    dns_path 2606:4700:8::8 192.0.2.33 "unmatched-v6-$transport" "$transport" reply || {
+      native_dns_unmatched_diagnostics
+      return 1
+    }
+    dns_path 8.8.8.8 192.0.2.33 "unmatched-v4-$transport" "$transport" reply || {
+      native_dns_unmatched_diagnostics
+      return 1
+    }
     if [ "$mode" = bypass_iran ]; then
       dns_path 5.22.0.10 192.0.2.11 "country-$transport" "$transport" reply
     else

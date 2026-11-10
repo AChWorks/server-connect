@@ -102,8 +102,21 @@ def main(args):
                 print("REAL_TUN_DNS_NO_SUCCESS=PASS")
                 return
         raise ValueError("VPN-required DNS unexpectedly returned a successful or invalid response")
-    actual = answer_ipv4(response, request)
+    try:
+        actual = answer_ipv4(response, request)
+    except ValueError:
+        # Only DNS header metadata from this disconnected synthetic fixture;
+        # never print its query name, wire payload or returned address.
+        if len(response) >= 12:
+            flags, qd, an, ns, ar = struct.unpack("!HHHHH", response[2:12])
+            print(f"REAL_TUN_DNS_REPLY_METADATA flags=0x{flags:04x} rcode={flags & 15} "
+                  f"questions={qd} answers={an} authority={ns} additional={ar} "
+                  f"wire_bytes={len(response)}", file=sys.stderr)
+        raise
     if actual != expected:
+        source = {"192.0.2.11": "native-underlay-direct", "192.0.2.22": "vpn-original-destination",
+                  "192.0.2.33": "vpn-detoured-resolver"}.get(actual, "unrecognized-answer-source")
+        print("REAL_TUN_DNS_SOURCE_CLASSIFICATION=" + source, file=sys.stderr)
         raise ValueError("DNS wire answer proves wrong source path")
     print("REAL_TUN_DNS_WIRE_REPLY=PASS")
 
@@ -112,5 +125,15 @@ if __name__ == "__main__":
     try:
         main(sys.argv[1:])
     except (ValueError, OSError, ConnectionError) as exc:
-        print("REAL_TUN_DNS_WIRE=FAIL (" + type(exc).__name__ + ")", file=sys.stderr)
+        known = {
+            "unexpected DNS response length or transaction ID": "wire-length-or-id",
+            "unexpected DNS response flags/counts": "wire-flags-or-rcode",
+            "DNS answer question mismatch": "wire-question",
+            "unexpected DNS answer type or metadata": "wire-answer-metadata",
+            "DNS wire answer proves wrong source path": "path-source",
+            "DNS reply came from another endpoint": "socket-peer",
+            "VPN-required DNS unexpectedly returned a successful or invalid response": "outage-success",
+        }
+        reason = known.get(str(exc), "unexpected")
+        print(f"REAL_TUN_DNS_WIRE=FAIL ({type(exc).__name__}, reason={reason})", file=sys.stderr)
         raise SystemExit(1)
