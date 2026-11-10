@@ -394,11 +394,14 @@ func (m *Manager) connectNativeSmartRoutingUnlocked(opts NativePolicyOptions) (N
 		if err := m.cleanupIdleNativeHealthGuardsUnlocked(); err != nil {
 			return result, err
 		}
-		// If an older health oneshot was interrupted AFTER verified Direct,
-		// normalize only that exact stale failed role; keep uncertain or
-		// foreign services untouched. Reuse the existing proven idle gate.
+		// An in-flight old guard can still hold systemd's activating state
+		// after ExecStopPost has restored Direct. Wait for its genuine exit
+		// before any new receipt or timer may be staged.
+		if err := awaitNativeGuardExecutors(8*time.Second, nativeGuardExecutorsQuiescent); err != nil {
+			return result, err
+		}
 		if err := m.withActivationJournalLock(syscall.Fsync, func(store *activationJournalDir) error {
-			return normalizeQuiescentSmartTUNHealthUnit(store)
+			return m.reconcileNativeIdleGuardServices(store, opts)
 		}); err != nil {
 			return result, err
 		}

@@ -237,36 +237,61 @@ check_guard_units() (
   fi
  done
 )
-# systemd can retain a FAILED health oneshot long after the independent guard
-# has removed all owned routing. Do not strand verified offline updates solely
-# because systemd garbage collection has not yet normalized that stale result.
-# The installer holds the product .lock and previously checked the journal,
-# all exact unit files and their owner hashes before calling this helper.
+# After a native Core SIGKILL, independently scheduled recovery and health
+# oneshots can both exit FAILED even after exact Direct restoration. The
+# installer holds the shared product journal lock and has already checked the
+# saved desired mode and absence of native/legacy recovery claims. Normalize
+# only these exact idle, manifest-owned oneshots, never a live guard, timer or
+# another service. A failed reset remains an error unless re-observation proves
+# systemd independently garbage-collected the same failed state.
 normalize_idle_health_failure() {
  health_unit_name=server-connect-smart-health.service
- state=$(systemctl show "$health_unit_name" -p ActiveState --value) ||
-   die 'health executor state cannot be inspected'
- [ "$state" = failed ] || return 0
- # A failed oneshot is not sufficient evidence of a cleared operation.
- # Before resetting bookkeeping prove every guard, core and timer inactive,
- # no live health process, and recheck the exact owned role provenance.
- for role in server-connect-activation-recover.timer server-connect-activation-recover.service server-connect-smart-tun.service server-connect-native-tun.service server-connect-smart-health.timer; do
-  [ "$(systemctl show "$role" -p ActiveState --value)" = inactive ] ||
-    die 'cannot normalize health failure while another TUN/guard role is active'
- done
- [ "$(systemctl show "$health_unit_name" -p MainPID --value)" = 0 ] &&
- [ "$(systemctl show "$health_unit_name" -p ControlPID --value)" = 0 ] ||
-   die 'cannot normalize health failure with a live executor'
- check_guard_units
- if ! systemctl reset-failed "$health_unit_name"; then
-  # A collected failed oneshot may become inactive concurrently. Do not
-  # retry an uncertain reset or accept any still-failed/transient state.
-  [ "$(systemctl show "$health_unit_name" -p ActiveState --value)" = inactive ] ||
-    die 'owned health executor failure could not be normalized'
+ recovery_unit_name=server-connect-activation-recover.service
+ health_state=$(systemctl show "$health_unit_name" -p ActiveState --value) ||
+  die 'health executor state cannot be inspected'
+ recovery_state=$(systemctl show "$recovery_unit_name" -p ActiveState --value) ||
+  die 'recovery executor state cannot be inspected'
+ if [ "$health_state" = inactive ] && [ "$recovery_state" = inactive ]; then
+  [ "$(systemctl show "$health_unit_name" -p Result --value)" = success ] &&
+  [ "$(systemctl show "$recovery_unit_name" -p Result --value)" = success ] ||
+   die 'inactive native guard executor has an unresolved failure result'
+  return 0
  fi
- [ "$(systemctl show "$health_unit_name" -p ActiveState --value)" = inactive ] &&
- [ "$(systemctl show "$health_unit_name" -p Result --value)" = success ] ||
-   die 'owned health executor did not return to an inactive healthy state'
+ # Do not reset either failed executor while an independent timer, core or
+ # conflicting legacy role is still active or uncertain.
+ for role in server-connect-activation-recover.timer server-connect-smart-tun.service server-connect-native-tun.service server-connect-smart-health.timer; do
+  [ "$(systemctl show "$role" -p ActiveState --value)" = inactive ] ||
+   die 'cannot normalize guard failure while another TUN/timer role is active'
+ done
+ for guard_unit in "$health_unit_name" "$recovery_unit_name"; do
+  state=$(systemctl show "$guard_unit" -p ActiveState --value) ||
+   die 'independent guard executor state unavailable'
+  outcome=$(systemctl show "$guard_unit" -p Result --value) ||
+   die 'independent guard executor result unavailable'
+  case "$state:$outcome" in
+   inactive:success|failed:exit-code|failed:timeout|failed:signal|failed:core-dump) ;;
+   *) die 'independent guard executor not safely idle for normalization' ;;
+  esac
+  [ "$(systemctl show "$guard_unit" -p MainPID --value)" = 0 ] &&
+  [ "$(systemctl show "$guard_unit" -p ControlPID --value)" = 0 ] &&
+  [ -z "$(systemctl show "$guard_unit" -p Job --value)" ] &&
+  [ -z "$(systemctl show "$guard_unit" -p ControlGroup --value)" ] ||
+   die 'cannot normalize guard failure with a live executor or job'
+ done
+ check_guard_units
+ for guard_unit in "$health_unit_name" "$recovery_unit_name"; do
+  state=$(systemctl show "$guard_unit" -p ActiveState --value) ||
+   die 'independent guard executor changed before normalization'
+  if [ "$state" = failed ]; then
+   if ! systemctl reset-failed "$guard_unit"; then
+    [ "$(systemctl show "$guard_unit" -p ActiveState --value)" = inactive ] ||
+     die 'owned guard executor failure could not be normalized'
+   fi
+  fi
+  [ "$(systemctl show "$guard_unit" -p ActiveState --value)" = inactive ] &&
+  [ "$(systemctl show "$guard_unit" -p Result --value)" = success ] ||
+   die 'owned guard executor did not return to an inactive healthy state'
+ done
  check_guard_units
 }
 

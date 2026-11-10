@@ -267,3 +267,54 @@ func TestNativeHealthProbeAggregationAndCanceledRound(t *testing.T) {
 		t.Fatalf("timed-out round accepted: %+v", deadline)
 	}
 }
+
+// A healthy selected endpoint must not inherit the other endpoint's timeout.
+func TestNativeHealthProbeFastPositiveDoesNotWaitForSlowPeer(t *testing.T) {
+	targets := []nativeProbeTarget{{"1.0.0.1", "good", 443}, {"8.8.8.8", "slow", 443}}
+	start := time.Now()
+	result := runNativeHealthProbes(context.Background(), "sctun0", "synthetic_https", targets,
+		func(ctx context.Context, _ string, target nativeProbeTarget, _ bool) nativeHealthOutcome {
+			if target.IP == "1.0.0.1" {
+				return nativeHealthOutcome{OK: true, Reason: "selected_https_verified"}
+			}
+			<-ctx.Done()
+			return nativeHealthOutcome{Reason: "selected_tls_unavailable"}
+		})
+	if !result.OK || result.Reason != "selected_https_verified" {
+		t.Fatalf("other endpoint erased valid selected-path evidence: %+v", result)
+	}
+	if time.Since(start) > time.Second {
+		t.Fatal("positive selected-path probe waited for a stalled peer")
+	}
+}
+func TestNativeHealthProbeCanceledRoundNeverAcceptsLatePositive(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	got := runNativeHealthProbes(ctx, "sctun0", "synthetic_https",
+		[]nativeProbeTarget{{"1.0.0.1", "a", 443}}, func(context.Context, string, nativeProbeTarget, bool) nativeHealthOutcome {
+			return nativeHealthOutcome{OK: true, Reason: "selected_https_verified"}
+		})
+	if got.OK || got.Reason != "selected_probe_timeout" {
+		t.Fatalf("canceled round accepted stale positive: %+v", got)
+	}
+}
+func TestNativeGuardQuiescentWaitIsBounded(t *testing.T) {
+	calls := 0
+	err := awaitNativeGuardExecutors(time.Second, func() error {
+		calls++
+		if calls < 3 {
+			return Fault("guard_unavailable", "old recovery oneshot still running")
+		}
+		return nil
+	})
+	if err != nil || calls != 3 {
+		t.Fatalf("settled executor rejected: calls=%d err=%v", calls, err)
+	}
+	start := time.Now()
+	err = awaitNativeGuardExecutors(1*time.Millisecond, func() error {
+		return Fault("guard_unavailable", "executor never idle")
+	})
+	if ErrorCode(err) != "guard_unavailable" || time.Since(start) > time.Second {
+		t.Fatalf("hung or foreign executor admitted or wait unbounded: %v", err)
+	}
+}

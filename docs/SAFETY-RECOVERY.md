@@ -71,6 +71,19 @@ fails. A failed command still returns a nonzero exit and `ok=false` with
 never counts as success. No TUN activation follows.
 A failed/uncertain restoration retains the journal, never presents Direct
 as safely verified and blocks installer/update/profile/Proxy Only transitions.
+For the separate *native sing-box lifecycle*, an independently verified
+Direct/off transition may leave either or both of the exact installed Health
+and Recovery oneshots in systemd `failed` bookkeeping. A fresh Connect may
+wait for previously scheduled executors to finish and then normalize **only**
+their proven idle owned records before new prearm. Likewise, the shared offline
+installer checks the cleared private native/legacy claims and Direct intent
+under its existing lifecycle lock, both disabled timers, stopped native/legacy
+cores and no live guard PID, job or cgroup before normalizing either stale
+failed oneshot. Partial reset failures abort installer mutation; unrelated
+systemd services and kernel routing are never reset by this bookkeeping
+repair. This does not grant production admission or assume a failed guard is
+healthy while an operation remains active.
+
 The native fingerprint includes preexisting guest nftables objects. Native
 transactions additionally require durable per-object ownership receipts; legacy
 automatic-policy trials have the narrower ownership limit described below.

@@ -252,14 +252,21 @@ func runNativeHealthProbes(ctx context.Context, iface, scope string, targets []n
 	}
 	outcome := nativeHealthOutcome{Reason: "selected_https_unreachable"}
 	for range targets {
-		r := <-results
-		// A single authenticated selected-path positive is sufficient; a failed
-		// public endpoint alone must not force Direct. Record a specific safe
-		// class when every target fails.
-		if r.OK {
-			outcome = r
-		} else if !outcome.OK && outcome.Reason == "selected_https_unreachable" && r.Reason != "" {
-			outcome.Reason = r.Reason
+		select {
+		case <-ctx.Done():
+			return nativeHealthOutcome{Reason: "selected_probe_timeout"}
+		case r := <-results:
+			// One authenticated selected-path positive suffices. Do not wait
+			// for another target to time out and erase this fresh evidence.
+			if ctx.Err() != nil {
+				return nativeHealthOutcome{Reason: "selected_probe_timeout"}
+			}
+			if r.OK {
+				return r
+			}
+			if outcome.Reason == "selected_https_unreachable" && r.Reason != "" {
+				outcome.Reason = r.Reason
+			}
 		}
 	}
 	if ctx.Err() != nil {
@@ -293,6 +300,105 @@ func nativeHealthGuardRoles() error {
 	}
 	return nil
 }
+
+// A failed Core can finish its owned Direct recovery while two timer-driven
+// oneshots from the old session are still exiting. Disarming timers prevents
+// new dispatches but does not synchronously stop an already running oneshot.
+// Wait outside the Manager journal lock: those executors may still need it.
+// Never interpret a live executor as an idle one or reset its failure status.
+func awaitNativeGuardExecutors(timeout time.Duration, check func() error) error {
+	deadline := time.Now().Add(timeout)
+	for {
+		if check() == nil {
+			return nil
+		}
+		if !time.Now().Before(deadline) {
+			return Fault("guard_unavailable", "previous native guard executor did not settle")
+		}
+		time.Sleep(120 * time.Millisecond)
+	}
+}
+func nativeGuardExecutorsQuiescent() error {
+	if _, _, err := observeSmartTUNIdleRecoveryService(); err != nil {
+		return err
+	}
+	_, _, err := observeSmartTUNIdleHealthService()
+	return err
+}
+
+// Only a proved Direct/off native session may normalize stale FAILED
+// bookkeeping from its two *owned*, completely quiescent timer executors.
+// The existing shared reconciler rechecks provenance, PID, Job, cgroup and
+// post-reset identity. This is not a general guard-failure bypass: pending
+// claims, live cores, foreign units, timers and native kernel policy refuse.
+func (m *Manager) reconcileNativeIdleGuardServices(store *activationJournalDir, opts NativePolicyOptions) error {
+	if _, _, err := store.readJournal(); !errors.Is(err, os.ErrNotExist) {
+		return Fault("guard_pending", "legacy Smart TUN journal blocks native guard reconciliation")
+	}
+	if _, err := m.readNativeSession(); !errors.Is(err, os.ErrNotExist) {
+		return Fault("guard_pending", "native recovery claim blocks guard reconciliation")
+	}
+	h, err := m.readNativeHealth()
+	if err != nil || h.Phase != "off" {
+		return Fault("guard_pending", "previous native health session is not verified off")
+	}
+	state, err := m.load()
+	if err != nil || state.Desired != "direct" {
+		return Fault("guard_pending", "previous native state is not Direct")
+	}
+	activity, err := m.nativeActivity()
+	if err != nil || (activity != "inactive" && activity != "failed") {
+		return Fault("guard_pending", "native Core may still be active")
+	}
+	if err := m.nativeMainPIDZero(); err != nil {
+		return err
+	}
+	legacy, err := observeSmartTUNTrialUnit(context.Background())
+	if err != nil || !legacy.stopped() {
+		return Fault("guard_pending", "legacy Smart TUN Core may still own recovery guards")
+	}
+	_, recoveryTimer, err := observeSmartTUNRecoveryUnit(trialRecoveryTimer)
+	if err != nil || recoveryTimer["ActiveState"] != "inactive" ||
+		recoveryTimer["UnitFileState"] != "disabled" || recoveryTimer["Result"] != "success" ||
+		recoveryTimer["Unit"] != trialRecoveryUnit {
+		return Fault("guard_unavailable", "independent recovery timer not disarmed")
+	}
+	_, healthTimer, err := observeSmartTUNHealthUnit(smartTUNHealthTimer)
+	if err != nil || healthTimer["ActiveState"] != "inactive" ||
+		healthTimer["UnitFileState"] != "disabled" || healthTimer["Result"] != "success" ||
+		healthTimer["Unit"] != smartTUNHealthUnit {
+		return Fault("guard_unavailable", "native health timer not disarmed")
+	}
+	scope := nativeRedirectRecovery{
+		TunnelIF: opts.InterfaceName, UnderlayIF: opts.UnderlayInterface,
+		Table: NativePolicyTableIndex, Rule: NativePolicyRuleIndex,
+	}
+	inspect := func() error {
+		return inspectNativeAdmission(context.Background(), nativeSystemRunner{}, scope)
+	}
+	_, err = reconcileIdleSmartTUNServices(smartTUNIdleReconcileOperations{
+		observeHealth:   observeSmartTUNIdleHealthService,
+		observeRecovery: observeSmartTUNIdleRecoveryService,
+		inspectNative:   inspect,
+		resetFailed: func(unit string) error {
+			return smartTUNTrialSystemctl("reset-failed", unit)
+		},
+		verifyFinal: func() error {
+			if err := trialGuardUnits(false); err != nil {
+				return err
+			}
+			if _, err := smartTUNHealthUnits(false, nil); err != nil {
+				return err
+			}
+			if err := m.nativeMainPIDZero(); err != nil {
+				return err
+			}
+			return inspect()
+		},
+	})
+	return err
+}
+
 func (m *Manager) armNativeHealthGuards() error {
 	for _, name := range []string{trialRecoveryUnit, trialRecoveryTimer, smartTUNHealthUnit, smartTUNHealthTimer} {
 		_, f, e := observeSmartTUNManagedUnit(name)

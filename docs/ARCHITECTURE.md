@@ -108,7 +108,16 @@ fresh Connect after Core `SIGKILL` (including an older candidate without a
 native health record), systemd's retained `failed` state is normalized **before** prearming timers, but only after the prior operation
 has proven Direct/off, the old claim is absent, MainPID is zero and the
 new scope's native policy slots are vacant. The timers must never confuse
-old failure bookkeeping with the new operation's actual Core state. The
+old failure bookkeeping with the new operation's actual Core state.
+Previous timer-driven oneshots can still be exiting after `ExecStopPost`
+has independently finalized Direct; fresh Connect first disarms both old
+schedules, waits a bounded interval for the two exact owned executors to
+become idle, and rechecks the Direct/no-claim/no-legacy-session/native-kernel
+boundary before reusing the existing strict failed-oneshot reconciler. It
+cannot reset an active, foreign or unknown guard merely to force a restart.
+Selected-path health aggregation returns on the first authenticated positive
+without letting another slow target replace success with timeout; cancellation
+never upgrades a stale result to healthy. The
 saved profile and routing rules are never erased by a health fault.
 This limited native guard candidate is **not** complete field acceptance,
 SSH confirmation, authenticated distribution or production authorization.
