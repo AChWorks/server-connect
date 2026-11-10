@@ -322,7 +322,7 @@ func run(j bool, m *sc.Manager, args []string) int {
 		}
 		res, e := m.Probe(*via, *target)
 		return output(j, res, e)
-	case "selective-plan", "selective-stage-intent":
+	case "selective-stage-intent":
 		opts := flag.NewFlagSet(name, flag.ContinueOnError)
 		opts.SetOutput(io.Discard)
 		endpoint := opts.String("endpoint", "", "literal existing VPN endpoint IP")
@@ -337,18 +337,11 @@ func run(j bool, m *sc.Manager, args []string) int {
 			EndpointIP: *endpoint, ManagementPeerIP: *management,
 			TunnelInterface: *tunnel, Destinations: destinations,
 		}
-		if name == "selective-stage-intent" {
-			status, err := m.StageSelectiveIntent(request)
-			if err != nil {
-				return output(j, nil, err)
-			}
-			return output(j, status, nil)
-		}
-		plan, err := sc.PreviewSelectiveRoutes(request)
+		status, err := m.StageSelectiveIntent(request)
 		if err != nil {
 			return output(j, nil, err)
 		}
-		return output(j, plan, nil)
+		return output(j, status, nil)
 	case "selective-verify-intent":
 		opts := flag.NewFlagSet(name, flag.ContinueOnError)
 		opts.SetOutput(io.Discard)
@@ -807,11 +800,9 @@ Commands:
   host-preflight [--endpoint IP] [--management-peer IP] [--with-nftables]
                               Observe routes/rules and optionally native nftables;
                               no activation or firewall ownership
-  selective-plan --endpoint IP --management-peer IP --tunnel-if NAME
-                 --destination CIDR [--destination CIDR...]
-                              Advisory selective routing preview; never applies
-  selective-stage-intent     Same options as selective-plan; privately persist
-                              an unarmed PREPARED intent; never changes routes
+  selective-stage-intent --endpoint IP --management-peer IP --tunnel-if NAME
+                         --destination CIDR [--destination CIDR...]
+                              Legacy QA-only unarmed PREPARED intent; no route changes
   selective-verify-intent --operation-id HEX32 --revision 1
                               Reinspect exact unarmed intent; no activation
   selective-abandon-intent --operation-id HEX32 --revision 1
@@ -1203,30 +1194,6 @@ func menuWithRunner(m *sc.Manager, dispatch func(*sc.Manager, ...string) int) in
 				via = "direct"
 			}
 			dispatch(m, "diagnose-path", "--via", via, "--url", first, "--url", second)
-		case "12":
-			advanced = true
-			endpoint, ok := operatorPrompt(in, "Pinned VPN endpoint literal IP: ", false)
-			if !ok {
-				continue
-			}
-			management, ok := operatorPrompt(in, "Current admin/SSH peer literal IP: ", false)
-			if !ok {
-				continue
-			}
-			tunnel, ok := operatorPrompt(in, "Proposed unused TUN interface name: ", false)
-			if !ok {
-				continue
-			}
-			raw, ok := operatorPrompt(in, "Public destination CIDRs (comma-separated): ", false)
-			if !ok {
-				continue
-			}
-			args := []string{"selective-plan", "--endpoint", strings.TrimSpace(endpoint),
-				"--management-peer", strings.TrimSpace(management), "--tunnel-if", strings.TrimSpace(tunnel)}
-			for _, cidr := range strings.Split(strings.TrimSpace(raw), ",") {
-				args = append(args, "--destination", strings.TrimSpace(cidr))
-			}
-			dispatch(m, args...)
 		case "13":
 			advanced = true
 			address, ok := operatorPrompt(in, "Literal TCP endpoint IP (no DNS): ", false)

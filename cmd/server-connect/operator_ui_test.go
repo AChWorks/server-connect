@@ -33,7 +33,7 @@ func TestOperatorMenuIsReadOnlyOnFirstUseAndHidesLegacyUntilAdvanced(t *testing.
 	out.Reset()
 	p.menu(m, true)
 	advanced := out.String()
-	for _, want := range []string{"Advanced diagnostics", "11 Path Diagnostics", "12 Selective Plan", "20 Guarded Smart TUN"} {
+	for _, want := range []string{"Advanced diagnostics", "11 Path Diagnostics", "20 Guarded Smart TUN"} {
 		if !strings.Contains(advanced, want) {
 			t.Fatalf("advanced tool unavailable: %q", want)
 		}
@@ -241,7 +241,6 @@ func TestOperatorAdvancedMenuRequiresCompleteExplicitInputs(t *testing.T) {
 	const two = "https://two.example.test/"
 	const base = "11\n" + one + "\n" + two + "\n"
 	const endpoint = "198.51.100.17"
-	const admin = "203.0.113.22"
 	const digest = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	cases := []struct {
 		name, input, want string
@@ -257,9 +256,7 @@ func TestOperatorAdvancedMenuRequiresCompleteExplicitInputs(t *testing.T) {
 		{"diagnose-first-incomplete-eof", "11\n" + one, ""},
 		{"diagnose-valid-proxy", base + "1\n0\n", "diagnose-path --via proxy --url " + one + " --url " + two},
 		{"diagnose-valid-direct", base + "2\n0\n", "diagnose-path --via direct --url " + one + " --url " + two},
-		{"selective-plan-cancel-last", "12\n" + endpoint + "\n" + admin + "\nscqavm0\ncancel\n0\n", ""},
-		{"selective-plan-eof", "12\n" + endpoint + "\n" + admin + "\nscqavm0\n1.1.1.0/24", ""},
-		{"selective-plan-valid", "12\n" + endpoint + "\n" + admin + "\nscqavm0\n1.1.1.0/24\n0\n", "selective-plan --endpoint " + endpoint + " --management-peer " + admin + " --tunnel-if scqavm0 --destination 1.1.1.0/24"},
+		{"retired-selective-menu", "12\n0\n", ""},
 		{"dns-back-last", "14\nnode.example.test\n" + endpoint + "\nback\n0\n", ""},
 		{"dns-cancel-first", "14\ncancel\n0\n", ""},
 		{"dns-eof-middle", "14\nnode.example.test\n" + endpoint, ""},

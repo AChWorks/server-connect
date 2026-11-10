@@ -87,12 +87,7 @@ func (p operatorPresenter) menu(m *sc.Manager, advanced bool) {
 	}
 	if advanced {
 		p.section("Advanced diagnostics (read-only unless clearly marked)")
-		if p.width < 66 {
-			fmt.Fprintln(p.out, " 11 Path Diagnostics")
-			fmt.Fprintln(p.out, " 12 Selective Plan (legacy, no Apply)")
-		} else {
-			fmt.Fprintln(p.out, " 11 Path Diagnostics  12 Selective Plan")
-		}
+		fmt.Fprintln(p.out, " 11 Path Diagnostics")
 		fmt.Fprintln(p.out, " 10 Host Preflight   17 Firewall Preflight")
 		fmt.Fprintln(p.out, " 15 Host Drift       16 Activation Journal")
 		fmt.Fprintln(p.out, " 13 Underlay TCP     14 Underlay DNS")
