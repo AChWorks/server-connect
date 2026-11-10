@@ -764,11 +764,17 @@ with tempfile.TemporaryDirectory(prefix="scqa-operator-cancel-", dir="/run") as 
                                 input=request, text=True, capture_output=True, timeout=12)
         assert result.returncode == 0 and not result.stderr, (
             label, result.returncode, result.stderr)
-        assert "Canceled:" in result.stdout and "Running " not in result.stdout, (
-            label, "unexpected command dispatch", result.stdout[-500:])
-        assert not untouched.exists(), (label, "canceled menu created manager state")
+        # Retired option 12 is not a prompt cancellation: it must be rejected
+        # as an unknown choice, with no dispatch or legacy planner prompt.
+        expected = "Unknown option." if label == "retired-selective-menu" else "Canceled:"
+        assert expected in result.stdout and "Running " not in result.stdout, (
+            label, "unexpected command dispatch/refusal", result.stdout[-500:])
+        if label == "retired-selective-menu":
+            assert "Selective Plan" not in result.stdout
+            assert "Pinned VPN endpoint literal IP:" not in result.stdout
+        assert not untouched.exists(), (label, "inert menu created manager state")
     print("INSTALLED_OPERATOR_ADVANCED_CANCEL_NO_DISPATCH=PASS "
-          f"({len(cases)} real stdin cancellations; zero command dispatch; no manager state)",
+          f"({len(cases)} cancellations/refusals; zero command dispatch; no manager state)",
           flush=True)
 
 with tempfile.TemporaryDirectory(prefix="scqa-operator-menu-", dir="/run") as tmp:
