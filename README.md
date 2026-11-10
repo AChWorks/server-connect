@@ -12,7 +12,7 @@ Server Connect is an offline-first Linux server connectivity manager, designed e
 | **Proxy Only** | Optional local HTTP/SOCKS proxy for applications that explicitly use it. |
 | **Smart Routing (TUN)** | One host-level destination policy using official sing-box and Linux TUN: Iran/local/protected paths Direct, other public traffic VPN by default, with operator domain/IP/CIDR and trusted-list exceptions. |
 
-Switching Smart Routing **off** must restore the server's ordinary network paths, without leftover VPN-only blocking, while keeping saved profiles and routing rules for the next guarded activation. The disposable installed TUN trial exercises this lifecycle with an exact-operation Disconnect and saved-policy reapply. **General-host Smart Routing remains unimplemented and unavailable for production.**
+Switching Smart Routing **off** must restore the server's ordinary network paths, without leftover VPN-only blocking, while keeping saved profiles and routing rules for the next guarded activation. Exact clean-source Debian 12/13 installed QA VM trials exercise guarded native Connect, health recovery and owned Disconnect; the older disposable TUN trial is a separate legacy lane. **General-host Smart Routing has not passed field acceptance and remains unavailable for production.**
 
 Smart Routing must protect SSH, aaPanel, website replies, connected networks and the VPN endpoint; it requires independent activation and ongoing recovery safeguards. **Working TUN for all claimed TCP/UDP/DNS/IPv4/IPv6 combinations still needs real evidence.** Optional Cloudflare Tunnel website ingress is a **separate later feature**, not a property of the outbound VPN.
 
@@ -22,15 +22,9 @@ The planned distribution offers **official online**, **operator-hosted HTTPS mir
 
 ## Implementation status and development
 
-The existing source includes a Go CLI, secure profile storage, real pinned sing-box **Proxy Only** development tests, a shared offline installer and a developer online bootstrap. **General-host Smart Routing, the production-approved Runtime Health Guard,
-real Iranian-origin/foreign-provider acceptance and Cloudflare Tunnel
-integration remain unavailable.** The native candidate now includes a
-**VM-tested independent Runtime Health Guard**, using two existing
-systemd timers and selected-marked HTTPS probes: a healthy selected
-path can recover without restarting the Core, while sustained failure or
-lost supervision restores verified Direct/off. Its synthetic fixture
-and current 5-second/3-consecutive-failure policy are **not** a
-production acceptance or general protocol coverage claim. The disposable native trial includes an independent expiry/recovery executor; its explicit supervised mode adds fresh SSH confirmation, selected-path TCP/UDP/DNS and authenticated fixture HTTPS health checks, and bounded recovery inside the same isolated fixture. Target-specific Debian 12/amd64 and Debian 13/amd64 QA bundles support the Direct/Proxy Only installation lifecycle. New native trials additionally require Debian 13 and the existing isolated fixture; installing on Debian 12 does not admit TUN. See [the distribution contract](docs/OFFLINE-DISTRIBUTION.md) for these development targets and their limits; they are not a public support promise.
+The existing source includes a Go CLI, secure profile storage, real pinned sing-box **Proxy Only** tests, a shared offline installer and a developer online bootstrap. The integrated official-sing-box native candidate has been installed from **exact clean-source QA bundles on isolated Debian 12 and 13 VMs**, with independent systemd health/recovery timers, selected-path HTTPS probes, scoped TCP/UDP/DNS/IPv4/IPv6 traffic tests and verified owned Direct/off cleanup. The Runtime Health Guard can recover a transient selected path without restarting the Core; sustained failure or loss of supervision triggers verified Direct/off. Earlier Docker-only/limited-VM trial commands and their recovery journals remain **separate legacy QA paths**, not the current native acceptance claim.
+
+**General-host production admission, actual Iranian-origin/foreign-provider field paths, foreign-client website/SSH replies, authenticated public distribution and optional Cloudflare Tunnel remain unaccepted.** The observed isolated VM and synthetic-provider results do not establish all protocol combinations, public IPv6 egress or production safety. See the [acceptance matrix](docs/ACCEPTANCE.md), [distribution contract](docs/OFFLINE-DISTRIBUTION.md) and [current issue evidence](https://github.com/AChWorks/server-connect/issues/3).
 
 **Profile URL compatibility (development candidate):** one `vless://` link can
 be imported with `server-connect --json import --file /private/link.txt`
@@ -110,12 +104,15 @@ must **not** be treated as a production provider check.
 `health_phase` (`starting`, `healthy`, `degraded`, `stopping`, `off`),
 `health_reason`, `health_failures`, `health_rounds` and an operation ID. A
 recent `selected_vpn_path_proof` identifies **only** the measured HTTPS
-scope; `native_policy_verified=false` and untested UDP/DNS/IPv6 remain
-explicit. `--health-failures N` (1-10, default 3) controls consecutive
+scope; `native_policy_verified=false` remains explicit because an HTTPS health
+check does not certify general-host policy or every UDP/DNS/IPv6 flow. Separate
+isolated protocol results are tracked under [Issue #3](https://github.com/AChWorks/server-connect/issues/3). `--health-failures N` (1-10, default 3) controls consecutive
 failed rounds. A provider can recover while Core remains active; exhaustion
 or a lost guard triggers exact owned Direct recovery, never an automatic
-unconfirmed Core restart. Saved profiles and rules survive. Public release,
-field hosting acceptance and independent review are still gated.
+unconfirmed Core restart. Saved profiles and rules survive. The integrated
+native candidate passed independent review for its exact merge diff; any new
+privileged routing change needs its own current review. Public release and
+field hosting acceptance remain gated.
 
 ### Simplified native sing-box policy preview (development-only)
 
@@ -198,7 +195,7 @@ For source checks, run `go test ./...`. Actual CLI flags and development diagnos
 
 ### Non-Docker Smart TUN: narrowly admitted Debian 13 QA VM
 
-The **unreleased** systemd-managed native Smart TUN can now be experimentally admitted on exactly the isolated `sc-qa-vm-us01` QEMU Debian 13 IPv4 guest, with its fixed `ens3`/`10.0.2.15` underlay and `10.0.2.2` peer. This is not a generic VM, aaPanel or production-host admission and it never sets `general_host_activation=true`. IPv6 must be excluded from this specific fixture because the QEMU NAT's indirect IPv6 nexthop objects are not covered by the native ownership model. Its selected-VPN health evidence checks genuine HTTPS with a TUN-bound socket and a separate protected underlay; the detailed evidence explicitly marks UDP, DNS and IPv6 **not run**. It cannot establish full protocol coverage, trusted Iranian geography or Internet-provider readiness.
+The historical guarded VM-trial lane was admitted on the isolated `sc-qa-vm-us01` QEMU Debian 13 IPv4 guest, with its fixed `ens3`/`10.0.2.15` underlay and `10.0.2.2` peer. That historical fixture is **not** the newer native `connect-smart` lane now exercised on isolated Debian 12/13 Incus VMs. Neither test lane establishes general-host, aaPanel or production admission; neither sets `general_host_activation=true`. IPv6 must be excluded from this specific fixture because the QEMU NAT's indirect IPv6 nexthop objects are not covered by the native ownership model. Its selected-VPN health evidence checks genuine HTTPS with a TUN-bound socket and a separate protected underlay; the detailed evidence explicitly marks UDP, DNS and IPv6 **not run**. It cannot establish full protocol coverage, trusted Iranian geography or Internet-provider readiness.
 
 On the **disposable guest only**, with the offline-pinned development bundle installed and a selected compatible VLESS profile:
 
@@ -215,7 +212,7 @@ If an independent Recovery Guard oneshot remains `failed` **after a separately v
 
 A failed/expired/supervisor-unavailable operation must be reconciled by the independent owned guard **without reboot**. Only after the journal is absent, the recovery timer is disarmed, the core is observed quiescent and the owned health timer is disabled may a stale systemd `smart-health.service` failure status be normalized for a new VM trial or verified offline update. Never disable guards or remove network rules manually merely to bypass a pending/uncertain journal. The test scope, outstanding negative scenarios, provenance requirements and final acceptance remain under [Issue #2](https://github.com/AChWorks/server-connect/issues/2) and [Issue #3](https://github.com/AChWorks/server-connect/issues/3).
 
-The read-only `server-connect smart-routing-data` command works entirely offline and reports a pinned **DB-IP Country Lite geolocation estimate** for Iran (IPv4/IPv6 counts, source, month, age, hashes and license). **Data credit: [IP Geolocation by DB-IP](https://db-ip.com), [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/).** The project extracts IR rows from DB-IP Country Lite (October 2026) and converts the original IP ranges into sorted CIDR prefixes. DB-IP Lite has reduced coverage/accuracy; its country estimates are **not** independent packet-path proof. These entries are deliberately **not automatically used as Direct exemptions** and the report explicitly declares geographic-route safety and activation readiness false. This is not a publisher-signed update, operator rule import or production Apply. Regeneration from a separately downloaded, pinned source archive is supported by `scripts/qa/generate-iran-dbip-lite-snapshot.py`; installation and inspection do not contact DB-IP, GitHub or any outside network. Independent field testing, update/rollback policy and guards remain mandatory.
+The read-only `server-connect smart-routing-data` command works entirely offline and reports a pinned **DB-IP Country Lite geolocation estimate** for Iran (IPv4/IPv6 counts, source, month, age, hashes and license). **Data credit: [IP Geolocation by DB-IP](https://db-ip.com), [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/).** The project extracts IR rows from DB-IP Country Lite (October 2026) and converts the original IP ranges into sorted CIDR prefixes. DB-IP Lite has reduced coverage/accuracy; its country estimates are **not** independent packet-path proof. The read-only data report itself does not apply routing changes. The experimental native `bypass_iran` policy **does** use this bundled IPv4/IPv6 estimate as Direct destination classification; that is not independent evidence of geographic reachability or field-safe activation, and the report retains its `activation_ready=false` boundary. This is not a publisher-signed update, operator rule import or production Apply. Regeneration from a separately downloaded, pinned source archive is supported by `scripts/qa/generate-iran-dbip-lite-snapshot.py`; installation and inspection do not contact DB-IP, GitHub or any outside network. Independent field testing, update/rollback policy and guards remain mandatory.
 
 ## Documentation
 

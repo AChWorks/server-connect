@@ -34,12 +34,12 @@ The **current QA-only** bundle is built by `scripts/package.sh` from an independ
 
 The builder accepts exactly these target identities; omitting its optional target argument retains the Debian 13 default. Each artifact has its own target-specific filename and manifest, with the same installer and pinned upstream core.
 
-| QA package target | Installation scope | New native trial admission |
+| QA package target | Installed development evidence | Native Smart Routing acceptance boundary |
 | --- | --- | --- |
-| `debian-12-amd64` | Direct/Proxy Only lifecycle on Debian 12 with systemd | Rejected before fixture, profile or host-policy mutation |
-| `debian-13-amd64` | Direct/Proxy Only lifecycle on Debian 13 with systemd | Still restricted to the existing disconnected disposable Docker fixture |
+| `debian-12-amd64` | Clean-source offline install, Direct/Proxy Only, retained profiles and exact network baseline | Experimental guarded native `connect-smart`, selected VLESS and recovery proved **only on an isolated disposable Incus VM** |
+| `debian-13-amd64` | Clean-source offline install, Direct/Proxy Only, retained profiles and exact network baseline | Same isolated native QA lane, plus Core-crash, authenticated private SSH and manual route-exception witnesses |
 
-After verifying payload ownership and checksums, the installer uses the bundled manager to bind a bounded, unambiguous manifest to the **actual** Debian version and native Linux/amd64 host. Opposite-version, missing, malformed, duplicate and unsupported targets fail before product state or service changes. This read-only check needs no Python dependency or host-version override. It is not publisher authentication or a general ABI/transport support claim. Recovery and inspection of existing native records retain their own ownership checks; the additional Debian 13 restriction applies to new trial activation.
+After verifying payload ownership and checksums, the installer uses the bundled manager to bind a bounded, unambiguous manifest to the **actual** Debian version and native Linux/amd64 host. Opposite-version, missing, malformed, duplicate and unsupported targets fail before product state or service changes. This read-only check needs no Python dependency or host-version override. It is not publisher authentication or a general ABI/transport support claim. Recovery and inspection of existing native records retain their own ownership checks. Historic Docker-only and fixed-VM trial commands retain their separate environment constraints; the current native `connect-smart` tests on both Debian 12 and 13 do **not** grant general-host activation or production support.
 
 ### Installed development-release audit
 
@@ -58,6 +58,6 @@ For a meaningful source/build claim, independently compare the installed checksu
 
 Online `--verify-only` validates acquisition, digest, archive bounds and required layout only. It neither executes the bundled manager/core/installer nor proves target installability; a layout-valid archive for another target can pass this acquisition check and must still be refused by installation.
 
-Relevant test entry points: `scripts/test_bootstrap_online.py`, `scripts/qa/test-package-targets.py`, `scripts/qa/test-installed-release-provenance.py`, `scripts/qa/test-online-minimal-host.sh`, `scripts/qa/test-installed-host.sh`, and `.github/workflows/installed-host-qa.yml`. The disconnected QA uses Docker/systemd and a local loopback test source; it does **not** establish official publisher authenticity, an Iranian public mirror, field-host access or a stable release. The separately authorized real-host driver and its evidence limits are described in [Acceptance](ACCEPTANCE.md#existing-tests-and-their-limits).
+Relevant test entry points: `scripts/test_bootstrap_online.py`, `scripts/qa/test-package-targets.py`, `scripts/qa/test-installed-release-provenance.py`, `scripts/qa/test-online-minimal-host.sh`, `scripts/qa/test-installed-host.sh`, and `.github/workflows/installed-host-qa.yml`. CI's disconnected Docker/systemd tests and the separately recorded installed Debian 12/13 Incus VM QA are distinct evidence levels. Neither establishes official publisher authenticity, an Iranian public mirror, verified Iranian-origin/foreign-provider field paths or a stable release. The separately authorized real-host driver and its evidence limits are described in [Acceptance](ACCEPTANCE.md#existing-tests-and-their-limits).
 
 A release must publish reproducible per-target archive identity, signature/public-key verification procedure, tested OS/arch and upstream versions, upstream license compliance, installation commands for **all three choices**, and matching user-visible update/uninstall instructions. See [release acceptance](ACCEPTANCE.md).
