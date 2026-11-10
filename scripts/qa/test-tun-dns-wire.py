@@ -128,9 +128,22 @@ class DNSWireContract(unittest.TestCase):
              patch("sys.stdout", new_callable=io.StringIO) as out:
             CLIENT.main(args)
             self.assertIn("NO_RESPONSE=PASS", out.getvalue())
-        for destination in ("fe80::1", "fd73:1::3", "::1"):
+        for destination in ("fe80::1", "fd73:1::3", "::1", "10.254.72.1", "10.254.72.3", "192.168.1.1"):
             with self.assertRaises(ValueError):
                 CLIENT.main([destination, "none", "negative", "udp", "no-success"])
+
+    def test_exact_private_ipv4_dns_positive_control_not_broadly_whitelisted(self):
+        address = "10.254.72.2"
+        phase = "private-v4-positive"
+        request = CLIENT.question(phase)
+        reply = PEER.response_for(request, "10.254.72.1")
+        for transport in ("udp", "tcp"):
+            with self.subTest(transport=transport), \
+                 patch.object(CLIENT, "wire_query", return_value=reply) as wire, \
+                 patch("sys.stdout", new_callable=io.StringIO) as output:
+                CLIENT.main([address, "192.0.2.11", phase, transport, "reply"])
+                wire.assert_called_once_with(address, transport, request)
+                self.assertIn("REAL_TUN_DNS_WIRE_REPLY=PASS", output.getvalue())
 
     def test_outage_accepts_only_specific_tcp_eof_without_leak_witness(self):
         args = ["2606:4700:8::8", "none", "tcp-outage", "tcp", "no-success"]

@@ -88,10 +88,10 @@ def main(args):
     if transport not in ("udp", "tcp") or mode not in ("reply", "no-reply", "no-success"):
         raise ValueError("invalid DNS probe mode")
     address = ipaddress.ip_address(destination)
-    # Only the controlled, disconnected guest needs a private IPv6 DNS
-    # positive control. Never accept unrelated private or link-local probes.
-    if not address.is_global and destination != "fd73:1::2":
-        raise ValueError("DNS target must be a controlled public fixture or the QA IPv6 peer")
+    # Only these two fixed on-link IPv4/IPv6 DNS peers are accepted inside
+    # the disconnected guest. Reject every other private/link-local target.
+    if not address.is_global and destination not in ("fd73:1::2", "10.254.72.2"):
+        raise ValueError("DNS target must be a public fixture or an exact private QA peer")
     if mode == "reply":
         ipaddress.IPv4Address(expected)
     elif expected != "none":
