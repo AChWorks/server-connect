@@ -916,6 +916,27 @@ fi
 
 # The peer answers genuine DNS UDP and TCP messages. The A record identifies
 # the request source observed by an independent authoritative server.
+# The native IPv6 DNS peer binds fd73:1::2 on a fresh VETH. Linux may still
+# label that address tentative during DAD; binding then fails EADDRNOTAVAIL.
+# Wait only for this exact guest-owned address, not all link-local objects.
+if [ "$native_dns_trial" = yes ]; then
+  native_dns_dad_ready=no
+  native_dns_dad_attempts=0
+  while [ "$native_dns_dad_attempts" -lt 60 ]; do
+    if ip -n "$peer" -6 addr show dev scqapeer0 |
+       grep -Eq '^[[:space:]]*inet6 fd73:1::2/64 scope global[[:space:]]*$'; then
+      native_dns_dad_ready=yes
+      break
+    fi
+    native_dns_dad_attempts=$((native_dns_dad_attempts + 1))
+    sleep 0.1
+  done
+  if [ "$native_dns_dad_ready" != yes ]; then
+    echo 'NATIVE_DNS_WIRE=FAIL (peer IPv6 DAD not complete before bind)' >&2
+    exit 1
+  fi
+  echo 'NATIVE_DNS_PEER_DAD_READY=PASS'
+fi
 if [ "$native_dns_trial" = yes ]; then dns_peer_mode=native-v6; else dns_peer_mode=; fi
 ip netns exec "$peer" /usr/bin/python3 -I -B -u /root/qa-tun-dns-peer.py ${dns_peer_mode:+"$dns_peer_mode"} \
   >/run/sc-qa-tun-dns.log 2>&1 &
