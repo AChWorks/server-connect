@@ -342,7 +342,7 @@ func TestDiagnosticPathDriftJSONExitAndSanitization(t *testing.T) {
 	}
 }
 
-func TestSelectivePlanRejectsUnsafeCLIWithoutProductState(t *testing.T) {
+func TestRetiredSelectivePlanCLIRejectsWithoutProductState(t *testing.T) {
 	tests := [][]string{
 		{"selective-plan"},
 		{"selective-plan", "--endpoint", "example.org", "--management-peer", "9.9.9.9",
@@ -376,8 +376,8 @@ func TestSelectivePlanRejectsUnsafeCLIWithoutProductState(t *testing.T) {
 			} `json:"error"`
 		}
 		if err := json.Unmarshal(body, &out); err != nil ||
-			out.OK || len(out.Data) != 0 || out.Error.Code != "invalid_arguments" {
-			t.Fatalf("invalid plan escaped validation: %s err=%v", body, err)
+			out.OK || len(out.Data) != 0 || out.Error.Code != "unknown_command" {
+			t.Fatalf("retired route planner remains callable or leaked state: %s err=%v", body, err)
 		}
 		if _, err := os.Stat(m.Dir); !os.IsNotExist(err) {
 			t.Fatal("invalid preview unexpectedly created product state")
@@ -385,13 +385,13 @@ func TestSelectivePlanRejectsUnsafeCLIWithoutProductState(t *testing.T) {
 	}
 }
 
-func TestSelectivePlanMenuRejectsEmptyInputWithoutTouchingHost(t *testing.T) {
+func TestRetiredSelectivePlanMenuRefusesWithoutTouchingHost(t *testing.T) {
 	manager := sc.New(filepath.Join(t.TempDir(), "missing-product-state"), "", 0)
 	input, writer, err := os.Pipe()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := writer.Write([]byte(strings.Join([]string{"12", "", "", "", "", "0", ""}, string(rune(10))))); err != nil {
+	if _, err := writer.Write([]byte("12\n0\n")); err != nil {
 		t.Fatal(err)
 	}
 	writer.Close()
@@ -402,7 +402,7 @@ func TestSelectivePlanMenuRejectsEmptyInputWithoutTouchingHost(t *testing.T) {
 		t.Fatalf("menu exit=%d", code)
 	}
 	if _, err := os.Stat(manager.Dir); !os.IsNotExist(err) {
-		t.Fatal("preview menu unexpectedly wrote product state")
+		t.Fatal("retired menu option unexpectedly wrote product state")
 	}
 }
 
@@ -412,9 +412,9 @@ func TestDistinctMenuOptionsAfterPathDiagnosticIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Option 11 remains the previously merged diagnostic, while option 12
-	// is the new read-only selective planner. Neither accepts empty inputs.
-	lines := []string{"11", "", "12", "", "0", ""}
+	// The path diagnostic remains reachable; retired option 12 must not
+	// dispatch a legacy planner or modify the host.
+	lines := []string{"11", "", "12", "0", ""}
 	if _, err := inputWriter.Write([]byte(strings.Join(lines, "\n"))); err != nil {
 		t.Fatal(err)
 	}
@@ -433,12 +433,13 @@ func TestDistinctMenuOptionsAfterPathDiagnosticIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	if code != 0 || !strings.Contains(string(raw), "First independent HTTP(S) target:") ||
-		!strings.Contains(string(raw), "Pinned VPN endpoint literal IP:") ||
-		!strings.Contains(string(raw), "11 Path Diagnostics  12 Selective Plan") {
-		t.Fatalf("interactive option 11/12 reconciliation failed: exit=%d", code)
+		!strings.Contains(string(raw), "Unknown option.") ||
+		!strings.Contains(string(raw), "11 Path Diagnostics") ||
+		strings.Contains(string(raw), "12 Selective Plan") {
+		t.Fatalf("path diagnostics/retired option 12 reconciliation failed: exit=%d", code)
 	}
 	if _, err := os.Stat(manager.Dir); !os.IsNotExist(err) {
-		t.Fatal("invalid interactive diagnostics/planner unexpectedly created product state")
+		t.Fatal("invalid interactive diagnostics/retired menu unexpectedly created product state")
 	}
 }
 
@@ -569,7 +570,7 @@ func TestUnderlayTCPMenu13PreservesExistingOptions(t *testing.T) {
 		t.Fatal(err)
 	}
 	// 13: literal IP, invalid port and omitted hostname; no TCP socket
-	// is opened and no manager state is created. Keep 11/12 intact.
+	// is opened and no manager state is created. Keep diagnostic option 11 intact.
 	if _, err := writer.Write([]byte("13\n127.0.0.1\n0\n\n0\n")); err != nil {
 		t.Fatal(err)
 	}
@@ -591,7 +592,7 @@ func TestUnderlayTCPMenu13PreservesExistingOptions(t *testing.T) {
 	}
 	if code != 0 ||
 		!strings.Contains(string(raw), "11 Path Diagnostics") ||
-		!strings.Contains(string(raw), "12 Selective Plan") ||
+		strings.Contains(string(raw), "12 Selective Plan") ||
 		!strings.Contains(string(raw), "13 Underlay TCP") ||
 		!strings.Contains(string(raw), "Literal TCP endpoint IP (no DNS):") ||
 		!strings.Contains(string(raw), "Endpoint TCP port:") {
@@ -698,7 +699,7 @@ func TestUnderlayDNSMenu14RetainsOtherDiagnostics(t *testing.T) {
 	}
 	if exit != 0 ||
 		!strings.Contains(string(content), "11 Path Diagnostics") ||
-		!strings.Contains(string(content), "12 Selective Plan") ||
+		strings.Contains(string(content), "12 Selective Plan") ||
 		!strings.Contains(string(content), "13 Underlay TCP") ||
 		!strings.Contains(string(content), "14 Underlay DNS") ||
 		!strings.Contains(string(content), "Endpoint DNS hostname:") ||

@@ -752,7 +752,7 @@ with tempfile.TemporaryDirectory(prefix="scqa-operator-cancel-", dir="/run") as 
         "diagnose-cancel": "11\nhttps://one.example.test/\nhttps://two.example.test/\ncancel\n0\n",
         "diagnose-invalid": "11\nhttps://one.example.test/\nhttps://two.example.test/\n3\n0\n",
         "diagnose-incomplete-eof": "11\nhttps://one.example.test/\nhttps://two.example.test/\n1",
-        "selective-plan-cancel": "12\n198.51.100.17\n203.0.113.22\nscqavm0\ncancel\n0\n",
+        "retired-selective-menu": "12\n0\n",
         "dns-cancel": "14\nnode.example.test\n198.51.100.17\ncancel\n0\n",
         "tcp-optional-host-cancel": "13\n198.51.100.17\n443\nback\n0\n",
         "rule-via-cancel": "19\n2\n1.1.1.0/24\nback\n0\n",
@@ -1156,13 +1156,23 @@ PYNFTRESTORED
 echo 'HOST_NFTABLES_PREFLIGHT=PASS (installed CLI, actual foreign table drift, exact cleanup, private evidence)'
 assert_network_unchanged first-install "$offline_before"
 verify_host_services first-install
-# The trusted-base CI workflow still syntax-checks the old fixture pathname.
-# This installed-guest negative proves the retired command is actually gone.
-docker cp "$root/scripts/qa/host-workload-descendants.sh" "$container:/root/qa-retired-workload.sh"
-docker exec "$container" /bin/sh /root/qa-retired-workload.sh
+# Keep the installed negative CLI contract, without a separate transitional
+# script, container copy or an extra historical process-scanning fixture.
+if docker exec "$container" /usr/local/bin/server-connect --json workload-observe \
+    --pid 2 --descendants --sockets >"$scratch/qa-retired-workload.json"; then
+  echo 'INSTALLED_RETIRED_WORKLOAD_COMMAND=FAIL (legacy action still available)' >&2
+  exit 1
+fi
+python3 - "$scratch/qa-retired-workload.json" <<'PYRETIRED'
+import json,sys
+with open(sys.argv[1],encoding='utf-8') as source:
+    response=json.load(source)
+assert response.get('ok') is False
+assert response.get('error',{}).get('code')=='unknown_command'
+PYRETIRED
+echo 'INSTALLED_RETIRED_WORKLOAD_COMMAND=PASS (unknown command, no per-job routing)'
 assert_network_unchanged retired-workload-command "$offline_before"
 verify_host_services retired-workload-command
-docker exec "$container" /bin/rm -f /root/qa-retired-workload.sh
 docker exec "$container" /bin/sh -c '
   printf "SC_QA_RETAIN_PROFILE_BYTES\n" > /var/lib/server-connect/profiles/qa-retained
   chmod 0600 /var/lib/server-connect/profiles/qa-retained
