@@ -71,10 +71,11 @@ func TestNativeSmartPolicyUsesOfficialSingBox(t *testing.T) {
 	if len(routeRules) < 2 {
 		t.Fatal("native DNS interception and ordinary traffic routing are missing")
 	}
-	intercept := routeRules[0].(map[string]any)
-	if intercept["port"] != float64(53) || intercept["action"] != "hijack-dns" {
-		t.Fatal("DNS must be intercepted before ordinary IP/geo routing")
+	if routeRules[0].(map[string]any)["ip_is_private"] != true {
+		t.Fatal("private destinations must be matched before DNS hijack")
 	}
+	// See TestNativeSmartPolicyDNSAddressPrecedence for explicit IP/geo
+	// ordering and the unmatched-DNS resolver fallback.
 	sets := route["rule_set"].([]any)
 	if len(sets) != 1 {
 		t.Fatal("expected one inline native IR rule-set")
@@ -196,5 +197,84 @@ func TestNativeSmartPolicyForeignDefaultIsVPN(t *testing.T) {
 	}
 	if _, ok := last["rule_set"]; !ok {
 		t.Fatal("final Direct rule lacks IR selector")
+	}
+}
+
+// The official Core evaluates route rules in order. In particular, a
+// port-53 hijack must not preempt explicit Direct/VPN CIDRs, local DNS, or
+// the domestic Direct rule while leaving unmatched DNS on the selected VPN.
+func TestNativeSmartPolicyDNSAddressPrecedence(t *testing.T) {
+	p, base := nativePolicyFixture()
+	operator := []SmartRoutingRule{
+		{Type: "cidr", Value: "8.8.8.8/32", Via: "direct"},
+		{Type: "cidr", Value: "9.9.9.9/32", Via: "vpn"},
+		{Type: "cidr", Value: "2001:4860:4860::8888/128", Via: "direct"},
+		{Type: "domain", Value: "example.org", Via: "vpn"},
+	}
+	for _, mode := range []string{"default", "bypass_iran"} {
+		t.Run(mode, func(t *testing.T) {
+			o := base
+			o.Mode = mode
+			config, err := NativeSmartRoutingConfig(p, o, operator)
+			if err != nil {
+				t.Fatal(err)
+			}
+			rules := nativePolicyJSON(t, config)["route"].(map[string]any)["rules"].([]any)
+			index := func(match func(map[string]any) bool) int {
+				t.Helper()
+				found := -1
+				for n, raw := range rules {
+					if match(raw.(map[string]any)) {
+						if found != -1 {
+							t.Fatal("ambiguous native rule selector")
+						}
+						found = n
+					}
+				}
+				return found
+			}
+			isCIDR := func(cidr, outbound string) func(map[string]any) bool {
+				return func(rule map[string]any) bool {
+					values, ok := rule["ip_cidr"].([]any)
+					return ok && len(values) == 1 && values[0] == cidr && rule["outbound"] == outbound
+				}
+			}
+			hijack := index(func(r map[string]any) bool { return r["action"] == "hijack-dns" && r["port"] == float64(53) })
+			private := index(func(r map[string]any) bool { return r["ip_is_private"] == true && r["action"] == "bypass" })
+			if hijack < 0 || private < 0 || private >= hijack {
+				t.Fatal("local or private DNS could be intercepted by selected VPN DNS")
+			}
+			for _, tc := range []struct{ cidr, outbound string }{
+				{"8.8.8.8/32", "direct"}, {"9.9.9.9/32", "upstream"}, {"2001:4860:4860::8888/128", "direct"},
+			} {
+				i := index(isCIDR(tc.cidr, tc.outbound))
+				if i < 0 || i >= hijack {
+					t.Fatalf("DNS to operator %s %s preempted by hijack-dns", tc.outbound, tc.cidr)
+				}
+			}
+			countryDNS := index(func(r map[string]any) bool {
+				_, ok := r["rule_set"]
+				return ok && r["port"] == float64(53) && r["outbound"] == "direct"
+			})
+			countryOther := index(func(r map[string]any) bool {
+				_, ok := r["rule_set"]
+				return ok && r["port"] == nil && r["outbound"] == "direct"
+			})
+			if mode == "bypass_iran" {
+				if countryDNS <= private || countryDNS >= hijack || countryOther <= hijack {
+					t.Fatal("domestic DNS Direct must precede hijack, other domestic Direct must follow VPN-domain policy")
+				}
+			} else if countryDNS != -1 || countryOther != -1 {
+				t.Fatal("default mode must not silently bypass Iranian public DNS")
+			}
+			if index(func(r map[string]any) bool { return r["action"] == "sniff" }) <= hijack {
+				t.Fatal("unmatched DNS should not pay the TCP TLS/HTTP sniff timeout")
+			}
+			if core := os.Getenv("SC_TEST_SINGBOX"); core != "" {
+				if err := CheckConfig(core, t.TempDir(), config); err != nil {
+					t.Fatal(err)
+				}
+			}
+		})
 	}
 }

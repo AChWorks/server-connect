@@ -145,9 +145,12 @@ dns_mode=disabled causes third-party-address DNS queries entering TUN to use the
 selected VPN-detoured resolver, with no Direct DNS fallback on provider outage.
 Disabling native platform DNS interception is essential here: with
 dns_mode=hijack, even directly attached DNS peers failed when VPN was down.
-The final native policy preserves the local DNS peer before, during and after
-the provider outage. This is a bounded A/UDP DNS proof, not a full resolver or
-IPv6-DNS acceptance. A forced Core SIGKILL
+The native compiler orders private paths, operator IP/CIDR exceptions and
+(in `bypass_iran`) the Iranian prefix **estimate** for port 53 ahead of the
+VPN-detoured fallback DNS hijack. Neither the estimate nor correct rule
+ordering proves real Iranian DNS reachability, IPv6 DNS or fail-closed field
+behavior. The isolated historical fixture proved only a bounded A/UDP DNS
+path, not complete resolver acceptance. A forced Core SIGKILL
 left kernel resources behind; restart/normal stop did **not** remove every
 orphan. Therefore the preview is **not** the general-host Smart Routing Apply
 path, and no installed system should run it as an active VPN without a

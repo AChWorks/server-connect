@@ -73,6 +73,17 @@ namespace. This is candidate evidence, not real Iran/foreign VPN provider
 acceptance, installed artifact parity, domain Direct or runtime health proof.
 The old experimental trial remains until its replacement is accepted.
 
+Native port-53 traffic uses the same address policy as other transports: the
+Core first honors private/local destinations and validated operator IP/CIDR
+Direct/VPN choices. In `bypass_iran`, the bundled country-estimate Direct
+rule also matches port 53 before the fallback DNS hijack; otherwise a broad
+DNS hijack would silently override those address decisions. Unmatched port-53
+traffic is hijacked to the explicitly VPN-detoured resolver, before TCP
+Host/SNI sniffing. Operator VPN-domain rules still precede the remaining
+(non-DNS) country-estimate Direct decision. The estimate is **not** proof
+of authentic Iranian geography, and compiling/checking these ordered rules
+does not establish selected DNS packet-path or failure/leak acceptance.
+
 The **unreleased native Runtime Health Guard candidate** reuses the two
 previously installed, independently scheduled `server-connect-smart-health`
 and `server-connect-activation-recover` timer/executor roles. The only VPN
