@@ -32,6 +32,7 @@ FILE_NAMES = [
     "server-connect/server-connect-activation-recover.service",
     "server-connect/server-connect-activation-recover.timer",
     "server-connect/server-connect-smart-tun.service",
+    "server-connect/server-connect-native-tun.service",
     "server-connect/server-connect-smart-health.service",
     "server-connect/server-connect-smart-health.timer",
     "server-connect/manifest.json",
@@ -88,6 +89,7 @@ def archive(path: Path, *, abnormal: str | None = None,
         for name in FILE_NAMES:
             missing_unit = {
                 "missing_recovery_timer": "server-connect-activation-recover.timer",
+                "missing_native_unit": "server-connect-native-tun.service",
                 "missing_health_service": "server-connect-smart-health.service",
                 "missing_health_timer": "server-connect-smart-health.timer",
             }.get(abnormal)
@@ -280,6 +282,7 @@ class BootstrapSecurityTest(unittest.TestCase):
         for name, abnormal in [
             ("valid.tar.gz", None),
             ("missing_recovery_timer.tar.gz", "missing_recovery_timer"),
+            ("missing_native_unit.tar.gz", "missing_native_unit"),
             ("missing_health_service.tar.gz", "missing_health_service"),
             ("missing_health_timer.tar.gz", "missing_health_timer"),
             ("duplicate.tar.gz", "duplicate"),
@@ -440,7 +443,8 @@ class BootstrapSecurityTest(unittest.TestCase):
 
     def test_rejects_unsafe_members_and_parser_resource_abuse(self):
         for filename in (
-            "missing_recovery_timer.tar.gz", "missing_health_service.tar.gz",
+            "missing_recovery_timer.tar.gz", "missing_native_unit.tar.gz",
+            "missing_health_service.tar.gz",
             "missing_health_timer.tar.gz", "duplicate.tar.gz", "traversal.tar.gz", "symlink.tar.gz",
             "hardlink.tar.gz", "expanded.tar.gz", "members.tar.gz",
             "pax_metadata.tar.gz", "compressed_oversized.tar.gz",

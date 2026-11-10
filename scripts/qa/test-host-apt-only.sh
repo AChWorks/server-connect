@@ -533,7 +533,7 @@ def numbered_tail(replacement):
     payloads[13] = payloads[13].replace(original_end, replacement, 1)
     return payloads
 
-for number in (24, 35, 39, 202, 281):
+for number in (24, 35, 39, 202, 228, 281):
     module.check_payloads(numbered_tail(
         f'[{number:4d}] ???( <unfinished ...>\n'
         f'[{number:4d}] +++ exited with 100 +++\n'))
@@ -541,11 +541,18 @@ for number in (24, 35, 39, 202, 281):
         f'[{number:4d}] ???()                         = ?\n'
         f'[{number:4d}] +++ exited with 100 +++\n'))
 
-for number in (41, 42, 44, 56, 59, 231, 257, 425, 435):
+for number in (41, 42, 44, 56, 59, 227, 229, 231, 257, 425, 435):
     refused("unsafe opaque terminal syscall " + str(number),
             numbered_tail(f'[{number:4d}] ???( <unfinished ...>\n'
                           f'[{number:4d}] +++ exited with 100 +++\n'),
             "opaque terminal syscall not verified")
+# A clock_gettime event is accepted ONLY with its exact same-number
+# terminal receipt. Neither clock_settime (227), an unknown nearby clock
+# syscall (229), nor a mismatched completion can be treated as time-read.
+refused("clock_gettime interrupted by unrelated exit",
+        numbered_tail('[ 228] ???( <unfinished ...>\n'
+                      '[ 231] +++ exited with 100 +++\n'),
+        "opaque terminal syscall not verified")
 # sched_yield is harmless only on the x86_64 ABI with a same-number
 # terminal receipt. An unrelated syscall or mismatched receipt stays unsafe.
 refused("sched_yield terminal receipt differs",
@@ -595,6 +602,22 @@ except module.TraceFailure as error:
         raise SystemExit("Missing mismatched opaque exit diagnostic")
 else:
     raise SystemExit("Unverifiable terminal receipt accepted")
+
+# An unparseable strace record must still reject the complete trace, but
+# diagnostics may expose only fixed stage and syscall number, not raw argv.
+secret = "qa-secret-must-not-appear-in-trace-result"
+try:
+    module.check_payloads(numbered_tail(
+        f'[ 228] clock_gettime({secret} <truncated syscall>\n'
+        '[ 231] +++ exited with 100 +++\n'))
+except module.TraceFailure as error:
+    message = module.failure_label(error)
+    if (str(error) != "unrecognized or incomplete syscall evidence" or
+            message != "unrecognized or incomplete syscall evidence; stage=syntax; syscall=228" or
+            secret in message):
+        raise SystemExit("Unrecognized trace stage failed safe numeric-only diagnostics")
+else:
+    raise SystemExit("Unparseable trace line was accepted")
 
 trace_dir = Path(sys.argv[2]) / "trace-reader-fixture"
 trace_dir.mkdir(mode=0o700)

@@ -205,6 +205,43 @@ func run(j bool, m *sc.Manager, args []string) int {
 		return output(j, report, err)
 	case "status":
 		return runStatus(j, m.Status)
+	case "connect-smart":
+		opts := flag.NewFlagSet(name, flag.ContinueOnError)
+		opts.SetOutput(io.Discard)
+		underlay := opts.String("underlay-if", "", "the host network underlay interface")
+		tun := opts.String("tunnel-if", "sctun0", "dedicated Server Connect TUN name")
+		ipv4 := opts.String("tunnel-ipv4", "172.31.99.1/30", "dedicated private IPv4 TUN CIDR")
+		ipv6 := opts.String("tunnel-ipv6", "fd73:99::1/64", "dedicated private IPv6 TUN CIDR")
+		mode := opts.String("mode", "bypass_iran", "default|bypass_iran")
+		healthThreshold := opts.Int("health-failures", 3, "consecutive selected HTTPS failure rounds before Direct/off (1-10)")
+		healthQA := opts.Bool("health-synthetic-qa", false, "synthetic-only HTTPS fixture; not field proof")
+		if e := opts.Parse(args); e != nil || len(opts.Args()) != 0 || *underlay == "" {
+			return output(j, nil, sc.Fault("invalid_arguments", "connect-smart requires --underlay-if"))
+		}
+		report, e := m.ConnectNativeSmartRouting(sc.NativePolicyOptions{
+			InterfaceName: *tun, UnderlayInterface: *underlay,
+			IPv4Address: *ipv4, IPv6Address: *ipv6, Mode: *mode,
+			HealthFailureThreshold: *healthThreshold, HealthSyntheticQA: *healthQA,
+		})
+		return output(j, report, e)
+	case "native-status":
+		if len(args) != 0 {
+			return output(j, nil, sc.Fault("invalid_arguments", "native-status takes no options"))
+		}
+		report, e := m.NativeStatus()
+		return output(j, report, e)
+	case "native-preflight":
+		if len(args) != 0 {
+			return output(j, nil, sc.Fault("invalid_arguments", "installed native service preflight takes no options"))
+		}
+		e := m.NativePreflightInstalled()
+		return output(j, map[string]bool{"native_preflight_ok": e == nil}, e)
+	case "native-recover":
+		if len(args) != 0 {
+			return output(j, nil, sc.Fault("invalid_arguments", "installed native service recovery takes no options"))
+		}
+		e := m.NativeRecoverInstalled()
+		return output(j, map[string]bool{"native_recovery_verified": e == nil}, e)
 	case "smart-routing-rules":
 		return runSmartRoutingRules(j, m, args)
 	case "mode-overview":
@@ -271,7 +308,7 @@ func run(j bool, m *sc.Manager, args []string) int {
 		return output(j, "Proxy Only connection requested; use probe to verify upstream reachability", e)
 	case "disconnect":
 		e := m.Disconnect()
-		return output(j, "Direct mode restored; no host routes or firewall settings were touched", e)
+		return output(j, "Direct mode restored after owned-service cleanup", e)
 	case "probe", "test":
 		opts := flag.NewFlagSet(name, flag.ContinueOnError)
 		opts.SetOutput(io.Discard)
@@ -422,6 +459,21 @@ func run(j bool, m *sc.Manager, args []string) int {
 		if e := opts.Parse(args); e != nil || len(opts.Args()) != 0 {
 			return output(j, nil, sc.Fault("invalid_arguments", "invalid supervised TUN health options"))
 		}
+		mode, err := m.NativeHealthGuardMode()
+		if err != nil {
+			return output(j, nil, err)
+		}
+		if mode == "native" {
+			if *qaKill != "" {
+				return output(j, nil, sc.Fault("invalid_arguments", "legacy QA crash injection cannot operate on native guard"))
+			}
+			report, e := m.RunNativeHealthRound()
+			return output(j, report, e)
+		}
+		if mode == "native_off" {
+			e := m.CleanupIdleNativeHealthGuards()
+			return output(j, map[string]string{"native_health": "off"}, e)
+		}
 		result, err := m.RunSmartTUNHealthRound(*qaKill)
 		return output(j, result, err)
 	case "smart-tun-trial-policy":
@@ -479,6 +531,21 @@ func run(j bool, m *sc.Manager, args []string) int {
 			return output(j, nil, sc.Fault("invalid_arguments", "rule-trial status accepts no options"))
 		}
 		if name == "activation-trial-recover" {
+			mode, modeErr := m.NativeHealthGuardMode()
+			if modeErr != nil {
+				return output(j, nil, modeErr)
+			}
+			if mode == "native" {
+				if qaPoint != "" || qaFaultPoint != "" {
+					return output(j, nil, sc.Fault("invalid_arguments", "legacy trial fault injection cannot operate on native supervisor"))
+				}
+				report, e := m.SuperviseNativeHealth()
+				return output(j, report, e)
+			}
+			if mode == "native_off" {
+				e := m.CleanupIdleNativeHealthGuards()
+				return output(j, map[string]string{"native_health": "off"}, e)
+			}
 			receipt, err := m.RecoverGuardedRuleTrial(qaPoint, qaFaultPoint)
 			status := output(j, receipt, err)
 			if sc.ErrorCode(err) == "trial_resource_conflict" {
@@ -692,6 +759,11 @@ Commands:
   smart-routing-rules import --source ID --as-of YYYY-MM-DD --sha256 HEX --file FILE|-
                              [--replaces-sha256 HEX] for explicit source replacement
   smart-routing-rules remove-source --source ID --sha256 HEX
+  smart-routing-rules preview-native --tunnel-if NAME --underlay-if NAME
+                                     --tunnel-ipv4 CIDR [--tunnel-ipv6 CIDR]
+                                     [--mode default|bypass_iran]
+                              Compiles saved rules with official sing-box;
+                              checks Core config only, never activates host TUN
   smart-routing-rules preview --tunnel-if NAME --underlay-if NAME --tunnel-ipv4 CIDR
                               --domestic-cidr CIDR [--protected-cidr CIDR...]
                               [--endpoint-pin-ipv4 PUBLIC_IP] (named VLESS TCP only)
@@ -708,9 +780,17 @@ Commands:
   select ID                  Select a saved profile (disconnect first)
   remove ID                  Remove an inactive profile
   connect                    Start authenticated loopback Proxy Only
+  connect-smart --underlay-if NAME [--tunnel-if NAME] [--tunnel-ipv4 CIDR]
+                [--tunnel-ipv6 CIDR] [--mode default|bypass_iran]
+                [--health-failures 1..10] [--health-synthetic-qa]
+                             Start guarded native sing-box Smart Routing
+                             Synthetic health only on isolated test hosts
+  native-status              Read native service, guard and HTTPS health scope
+  native-preflight           Installed systemd ExecStartPre only
+  native-recover             Installed systemd ExecStopPost only
   ready                      Verify owned authenticated listener (not upstream)
-  disconnect                 Stop and disable product-owned local proxy service
-  status [--json]            Desired/observed service state, not fake VPN health
+  disconnect                 Restore Direct from owned Proxy Only/Native TUN
+  status [--json]            Desired/observed state, bounded native HTTPS health
   activation-journal-status  Private intent state/operation ID only; no host mutation
   smart-routing-data        Inspect bundled IR country geolocation estimate offline
                               Country geolocation is estimated, not verified;

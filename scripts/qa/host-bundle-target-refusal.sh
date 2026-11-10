@@ -28,7 +28,7 @@ assert_absent() {
  done
  for name in server-connect.service server-connect-activation-recover.service \
    server-connect-activation-recover.timer server-connect-smart-tun.service \
-   server-connect-smart-health.service server-connect-smart-health.timer; do
+   server-connect-native-tun.service server-connect-smart-health.service server-connect-smart-health.timer; do
   [ ! -e "/etc/systemd/system/$name" ] && [ ! -L "/etc/systemd/system/$name" ]
   [ "$(systemctl show "$name" -p LoadState --value)" = not-found ]
  done

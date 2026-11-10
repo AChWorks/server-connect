@@ -79,6 +79,24 @@ func runSmartRoutingRules(jsonMode bool, m *sc.Manager, args []string) int {
 		}
 		report, err := m.RemoveSmartRoutingRule(kind, value)
 		return output(jsonMode, report, err)
+	case "preview-native":
+		opts := flag.NewFlagSet(action, flag.ContinueOnError)
+		opts.SetOutput(io.Discard)
+		tunnel := opts.String("tunnel-if", "", "proposed TUN interface")
+		underlay := opts.String("underlay-if", "", "proposed underlay interface")
+		v4 := opts.String("tunnel-ipv4", "", "private IPv4 TUN interface")
+		v6 := opts.String("tunnel-ipv6", "", "optional private IPv6 TUN interface")
+		mode := opts.String("mode", "bypass_iran", "default or bypass_iran")
+		if err := opts.Parse(args); err != nil || len(opts.Args()) != 0 ||
+			*tunnel == "" || *underlay == "" || *v4 == "" {
+			return output(jsonMode, nil, routingOptionsError())
+		}
+		report, err := m.PreviewNativeSmartRouting(sc.NativePolicyOptions{
+			InterfaceName: *tunnel, UnderlayInterface: *underlay,
+			IPv4Address: *v4, IPv6Address: *v6,
+			Mode: *mode,
+		})
+		return output(jsonMode, report, err)
 	case "preview":
 		opts := flag.NewFlagSet(action, flag.ContinueOnError)
 		opts.SetOutput(io.Discard)

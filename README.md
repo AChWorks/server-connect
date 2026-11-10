@@ -22,7 +22,15 @@ The planned distribution offers **official online**, **operator-hosted HTTPS mir
 
 ## Implementation status and development
 
-The existing source includes a Go CLI, secure profile storage, real pinned sing-box **Proxy Only** development tests, a shared offline installer and a developer online bootstrap. **General-host Smart Routing, the production Runtime Health Guard, real foreign-path acceptance and Cloudflare Tunnel integration remain unavailable.** The disposable native trial includes an independent expiry/recovery executor; its explicit supervised mode adds fresh SSH confirmation, selected-path TCP/UDP/DNS and authenticated fixture HTTPS health checks, and bounded recovery inside the same isolated fixture. Target-specific Debian 12/amd64 and Debian 13/amd64 QA bundles support the Direct/Proxy Only installation lifecycle. New native trials additionally require Debian 13 and the existing isolated fixture; installing on Debian 12 does not admit TUN. See [the distribution contract](docs/OFFLINE-DISTRIBUTION.md) for these development targets and their limits; they are not a public support promise.
+The existing source includes a Go CLI, secure profile storage, real pinned sing-box **Proxy Only** development tests, a shared offline installer and a developer online bootstrap. **General-host Smart Routing, the production-approved Runtime Health Guard,
+real Iranian-origin/foreign-provider acceptance and Cloudflare Tunnel
+integration remain unavailable.** The native candidate now includes a
+**VM-tested independent Runtime Health Guard**, using two existing
+systemd timers and selected-marked HTTPS probes: a healthy selected
+path can recover without restarting the Core, while sustained failure or
+lost supervision restores verified Direct/off. Its synthetic fixture
+and current 5-second/3-consecutive-failure policy are **not** a
+production acceptance or general protocol coverage claim. The disposable native trial includes an independent expiry/recovery executor; its explicit supervised mode adds fresh SSH confirmation, selected-path TCP/UDP/DNS and authenticated fixture HTTPS health checks, and bounded recovery inside the same isolated fixture. Target-specific Debian 12/amd64 and Debian 13/amd64 QA bundles support the Direct/Proxy Only installation lifecycle. New native trials additionally require Debian 13 and the existing isolated fixture; installing on Debian 12 does not admit TUN. See [the distribution contract](docs/OFFLINE-DISTRIBUTION.md) for these development targets and their limits; they are not a public support promise.
 
 **Profile URL compatibility (development candidate):** one `vless://` link can
 be imported with `server-connect --json import --file /private/link.txt`
@@ -40,7 +48,7 @@ sing-box JSON inputs. Saved profiles are secrets and require private
 operator-controlled state. This URL compatibility is separate from general-host
 TUN admission and does not make the project production-ready.
 
-For operator inspection, `server-connect --json mode-overview` (or menu option **18 Mode Overview**) reports the **desired** mode, the observed Proxy Only service state and whether the experimental Smart Routing trial blocks an ordinary Direct claim. It exposes three mode choices but explicitly marks general-host Smart Routing as **unavailable**: neither an inactive Proxy Only service nor an experimental journal proves baseline Direct routes, selected VPN egress or safe production TUN. `not_run` is retained for real path evidence until measured separately; a guard/service error remains a nonzero, structured failure. This diagnostic may initialize private manager state/locks, as the existing `status` command does, but never changes host routing.
+For operator inspection, `server-connect --json mode-overview` (or menu option **18 Mode Overview**) reports the **desired** mode, the observed Proxy Only service state and whether the experimental Smart Routing trial blocks an ordinary Direct claim. It exposes three mode choices but explicitly marks general-host Smart Routing as **unavailable**: neither an inactive Proxy Only service nor an experimental journal proves baseline Direct routes, selected VPN egress or safe production TUN. `not_run` is retained for real path evidence until measured separately; a guard/service error remains a nonzero, structured failure. During the isolated native candidate, it also displays the bounded native Health phase classifications (`starting`, fresh selected HTTPS, synthetic QA-only, `degraded`, recovery pending) without inventing general-host admission or marking a native selected VPN path as independently field-proven. This diagnostic may initialize private manager state/locks, as the existing `status` command does, but never changes host routing.
 
 The interactive `server-connect menu` starts with everyday Connection, Profiles and Routing Rules actions. Press **a** to reveal advanced/legacy diagnostics and the explicitly isolated **20 Guarded Smart TUN (QA VM)** workflow. Existing numeric entries are retained for compatibility but never bypass the existing native host/guard admission. The header distinguishes requested from observed state; opening a fresh, never-configured menu does not create state or a lock. Terminal emphasis uses semantic colors only on a real TTY and honors `NO_COLOR`, `TERM=dumb`, redirects and narrow `COLUMNS`. Text-command errors include their stable code, an explicit uncertainty/consequence and a safe next action; `--json` field names and exit-status semantics remain unchanged. Enter `cancel`/`back` or provide incomplete input to abort profile, probe, routing-rule and advanced-diagnostic prompts without dispatching an action; required empty inputs also cancel, while explicitly optional blank inputs retain their stated meaning. Network-path choices require an explicit `1` or `2`. Profile removal additionally requires an explicit `REMOVE` confirmation. This is an operator UX improvement, **not** general-host Smart Routing admission or verified selected-VPN transport.
 
@@ -86,6 +94,68 @@ are changed. This is deliberately **not** general-host admission, a durable
 network reservation, authenticated VLESS health, fresh SSH/foreign-reply
 protection, or an independent Activation/Runtime Guard. Keep experimental
 native Apply restricted to its existing admitted QA fixtures.
+
+### Native Runtime Health Guard (installed test candidate)
+
+On explicitly authorized disposable hosts only, `connect-smart` now stages
+independent supervision **before** starting the selected native TUN. Normal
+health uses fixed HTTPS/TLS targets and verifies that the Linux
+`SO_MARK=0x2023` path reaches the selected native TUN table; there is no
+unmarked Direct fallback for the health probes. A deliberately synthetic
+`--health-synthetic-qa` option uses the fixed public test certificate and
+nonce/source-verifying endpoints from the disconnected test harness; it
+must **not** be treated as a production provider check.
+
+`server-connect --json native-status` reports `runtime_guard_verified`,
+`health_phase` (`starting`, `healthy`, `degraded`, `stopping`, `off`),
+`health_reason`, `health_failures`, `health_rounds` and an operation ID. A
+recent `selected_vpn_path_proof` identifies **only** the measured HTTPS
+scope; `native_policy_verified=false` and untested UDP/DNS/IPv6 remain
+explicit. `--health-failures N` (1-10, default 3) controls consecutive
+failed rounds. A provider can recover while Core remains active; exhaustion
+or a lost guard triggers exact owned Direct recovery, never an automatic
+unconfirmed Core restart. Saved profiles and rules survive. Public release,
+field hosting acceptance and independent review are still gated.
+
+### Simplified native sing-box policy preview (development-only)
+
+To avoid duplicating sing-box's Linux networking code, the simplified candidate
+delegates TUN creation, automatic routing and nftables redirection to the
+**official pinned sing-box**. It reuses selected saved profiles, saved routing
+exceptions and the attributed offline Iranian prefix snapshot. The two proposed
+policy names are `default` (public destinations use VPN unless explicitly
+exempted) and `bypass_iran` (Iran estimates additionally Direct). The CLI
+defaults this preview to `bypass_iran`, consistent with the intended Smart
+Routing country exception. It never applies host routing:
+
+```console
+server-connect --json smart-routing-rules preview-native --tunnel-if sctun0 --underlay-if ens3 --tunnel-ipv4 172.31.99.1/30 --tunnel-ipv6 fd73:99::1/64 --mode bypass_iran
+```
+
+The result contains a SHA-256 of the exact generated secret-bearing config,
+but **not the config or profile secrets**. The official-Core check verifies
+configuration syntax, not end-to-end VPN, truthful country reachability, DNS,
+IPv6, management/hosting safety or safe post-crash recovery. Manual Direct
+domain exceptions remain unsupported until independently safe DNS/identity
+association is established. No FakeIP is used in the new preview.
+
+In an isolated disposable namespace, a selected synthetic VLESS client/server
+showed actual independent TCP and UDP Direct/VPN delivery, no Direct fallback
+after selected-server outage, preserved foreign-origin hosted replies, and exact
+native route/rule/nftables restoration on graceful stop. A separate independent
+DNS-responder fixture established that the native port-53 hijack rule plus
+dns_mode=disabled causes third-party-address DNS queries entering TUN to use the
+selected VPN-detoured resolver, with no Direct DNS fallback on provider outage.
+Disabling native platform DNS interception is essential here: with
+dns_mode=hijack, even directly attached DNS peers failed when VPN was down.
+The final native policy preserves the local DNS peer before, during and after
+the provider outage. This is a bounded A/UDP DNS proof, not a full resolver or
+IPv6-DNS acceptance. A forced Core SIGKILL
+left kernel resources behind; restart/normal stop did **not** remove every
+orphan. Therefore the preview is **not** the general-host Smart Routing Apply
+path, and no installed system should run it as an active VPN without a
+separately accepted recovery/host admission design. See Issue #2 for the
+exact bounded evidence and remaining gates.
 
 ### Saved Smart Routing rules (not activated)
 

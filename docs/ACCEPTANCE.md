@@ -9,6 +9,8 @@
 - Evidence levels differ: **source/unit**, **disposable installed Linux guest**, **independently observed real Iran/foreign field path**, **authenticated distributable artifact**, and **separately authorized production rollout**. A lower level never implies a higher one.
 - Privileged/network-affecting implementation needs exact-candidate fault and safety tests and **fresh author-separated high-assurance review**. Production server changes and publication require their own applicable Owner approval. No real customer server is an initial test host.
 
+Owner-approved **proportional recovery** requires representative evidence for normal Disconnect, unexpected Core exit, safe restoration of Direct/off, and common selected-path failures. It does not demand exhaustive fault permutations or a guarantee against arbitrary simultaneous privileged host writers. Unknown ownership still preserves third-party resources and is reported uncertain; unsupported paths are not labeled PASS.
+
 ## Required release matrix
 
 | Area | Observable acceptance | Evidence |
@@ -25,6 +27,20 @@
 | Hosting and foreign owners | Current/new SSH, aaPanel, inbound HTTP(S) replies to **foreign-client IPs**, Iranian/local networks, Docker/Fail2Ban/other rules survive connect, disconnect, crash and reboot | Live connections plus exact network ownership diff |
 | Activation Guard | Independent guard **armed before mutation**; wrong/replayed confirmation, no fresh SSH/console approval, 600-second deadline, crash, reboot and foreign object collisions recover exact owned state without deleting other owners' resources | Systemd/journal/route evidence and new management connection; fault injection at each mutation phase |
 | Runtime Health Guard | Actual VPN path failure, core exit, broken DNS, one-site false alarms, dead/masked/hung watchdog and reboot lead to honest state and independently verified safe recovery. On confirmed recoverable failure, bounded backoff/reconnect (initial candidate maximum 3 attempts, configurable) either proves real VPN recovery or ends in Direct/off with no automatic retry loop. Unsafe guard/SSH scenarios bypass retries. No silent Direct bypass **while routed**, no VPN-only blocking **after confirmed Direct/off**, and local failure/attempt/result evidence; external notifications deferred | Separate normal/negative supervisor and selected-route tests, transient recovery/exhaustion/flapping/fatal-stop cases and local status/log inspection |
+
+The independent **native candidate** health checks only fixed IPv4 HTTPS
+paths. Two existing checked systemd timers independently watch the Core,
+the selected-marked TUN/FIB/nftables path and each other's service/lease.
+The current bounded retries are **path re-probes**, not restarting or
+recreating a VPN Core after its one-use `ExecStopPost` recovery identity is
+retired. Sustained failure deactivates to verified Direct/off; transient
+transport recovery requires new positive evidence. On the dedicated Debian
+12/13 Incus QA lane, verify ordinary TLS/nonce success, a single-target
+failure, provider exhaustion, loss of health timer and standalone Core
+SIGKILL; compare exact pre/post routes, IPv4/IPv6 RPDB and nftables, plus
+private HTTP and native systemd state. These synthetic results are not
+proof of broad DNS, IPv6, UDP, field SSH/hosting replies, or trusted foreign
+provider identity; the full acceptance row remains open.
 | Performance | Measure Direct versus Proxy Only versus Smart Routing CPU/RAM, throughput/latency and guard overhead for representative host workloads | Same controlled host/workload before/after |
 | Optional foreign Direct-first probing | **Not a prerequisite** for initial static exception support. If shipped, Direct success is path-bound and failures affect only **new** flows, without replaying transactions or flapping | Separate opted-in functional and negative cases |
 | Optional Cloudflare website ingress | **Not a first outbound-only release gate.** If advertised later: approved hostname/origin, official cloudflared identity, reachable Cloudflare egress (Direct or verified VPN), fresh uncached **origin** request, independent connector failure/credentials/DNS/TLS checks | Actual external origin receipt plus separated cloudflared/outbound health |

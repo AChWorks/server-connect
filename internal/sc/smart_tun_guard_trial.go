@@ -621,6 +621,14 @@ type smartTUNTrialAdmission struct {
 // Repeat the same admission under the lifecycle lock AFTER independently
 // prearming the timer. Never start/enable a guard for an invalid request.
 func (m *Manager) admitSmartTUNTrialLocked(store *activationJournalDir, opts SmartTUNCandidateOptions, managementPeer string) (smartTUNTrialAdmission, error) {
+	// The new native candidate uses a different unit on the same host.
+	// Refuse concurrent or unfinished native sessions. The legacy admission
+	// runs under the same Manager lock before and after guard prearming.
+	if _, err := m.readNativeSession(); err == nil {
+		return smartTUNTrialAdmission{}, Fault("guard_pending", "complete native Smart Routing Disconnect before TUN trial")
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return smartTUNTrialAdmission{}, err
+	}
 	if _, _, err := store.readJournal(); err == nil {
 		return smartTUNTrialAdmission{}, Fault("activation_journal_conflict", "existing operation must be reconciled before TUN trial")
 	} else if !errors.Is(err, os.ErrNotExist) {

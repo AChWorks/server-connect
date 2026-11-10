@@ -32,6 +32,7 @@ PAYLOAD_FILES = (
     "server-connect-activation-recover.service",
     "server-connect-activation-recover.timer",
     "server-connect-smart-tun.service",
+    "server-connect-native-tun.service",
     "server-connect-smart-health.service",
     "server-connect-smart-health.timer",
     "install.sh",
@@ -208,6 +209,11 @@ class InstallerIdleHealthNormalizationTests(unittest.TestCase):
         env.update({
             "SC_QA_RESET_LOG": str(self.log),
             "SC_HEALTH_STATE": "failed",
+            "SC_RECOVERY_STATE": "inactive",
+            "SC_HEALTH_RESULT_OVERRIDE": "",
+            "SC_RECOVERY_MAIN_PID": "0",
+            "SC_JOB": "",
+            "SC_CONTROL_GROUP": "",
             "SC_OTHER_ROLE_STATE": "inactive",
             "SC_HEALTH_TIMER_STATE": "inactive",
             "SC_MAIN_PID": "0",
@@ -227,19 +233,38 @@ systemctl() {
     case "$2" in
      server-connect-smart-health.service) printf '%s\n' "$SC_HEALTH_STATE" ;;
      server-connect-smart-health.timer) printf '%s\n' "$SC_HEALTH_TIMER_STATE" ;;
+     server-connect-activation-recover.service) printf '%s\n' "$SC_RECOVERY_STATE" ;;
      *) printf '%s\n' "$SC_OTHER_ROLE_STATE" ;;
     esac ;;
-   Result) printf '%s\n' success ;;
-   MainPID) printf '%s\n' "$SC_MAIN_PID" ;;
+   Result)
+    case "$2" in
+     server-connect-smart-health.service)
+      if [ -n "$SC_HEALTH_RESULT_OVERRIDE" ]; then printf '%s\n' "$SC_HEALTH_RESULT_OVERRIDE"; else
+       [ "$SC_HEALTH_STATE" = failed ] && printf 'exit-code\n' || printf 'success\n'
+      fi ;;
+     server-connect-activation-recover.service) [ "$SC_RECOVERY_STATE" = failed ] && printf 'exit-code\n' || printf 'success\n' ;;
+     *) printf 'success\n' ;;
+    esac ;;
+   Job) printf '%s\n' "$SC_JOB" ;;
+   ControlGroup) printf '%s\n' "$SC_CONTROL_GROUP" ;;
+   MainPID) if [ "$2" = server-connect-activation-recover.service ]; then printf '%s\n' "$SC_RECOVERY_MAIN_PID"; else printf '%s\n' "$SC_MAIN_PID"; fi ;;
    ControlPID) printf '%s\n' "$SC_CONTROL_PID" ;;
    *) exit 90 ;;
   esac ;;
  reset-failed)
-  [ "$2" = server-connect-smart-health.service ] || exit 91
-  printf 'reset\n' >> "$SC_QA_RESET_LOG"
+  case "$2" in
+   server-connect-smart-health.service) printf 'health\n' >> "$SC_QA_RESET_LOG" ;;
+   server-connect-activation-recover.service) printf 'recovery\n' >> "$SC_QA_RESET_LOG" ;;
+   *) exit 91 ;;
+  esac
   case "$SC_QA_RESET_BEHAVIOR" in
-   success) SC_HEALTH_STATE=inactive;export SC_HEALTH_STATE; return 0 ;;
-   gc) SC_HEALTH_STATE=inactive;export SC_HEALTH_STATE; return 1 ;;
+   success|gc)
+    if [ "$2" = server-connect-smart-health.service ]; then
+     SC_HEALTH_STATE=inactive; export SC_HEALTH_STATE
+    else
+     SC_RECOVERY_STATE=inactive; export SC_RECOVERY_STATE
+    fi
+    [ "$SC_QA_RESET_BEHAVIOR" = success ]; return $? ;;
    fail) return 1 ;;
    *) return 2 ;;
   esac ;;
@@ -266,25 +291,41 @@ check_guard_units() {
         self.assertEqual(run.returncode, 0, run.stderr)
         self.assertEqual(calls, [])
 
+    def test_inactive_executor_with_unresolved_failed_result_blocks_update(self):
+        run, calls = self.invoke(SC_HEALTH_STATE="inactive", SC_HEALTH_RESULT_OVERRIDE="exit-code")
+        self.assertNotEqual(run.returncode, 0)
+        self.assertEqual(calls, [])
+        self.assertIn("unresolved failure result", run.stderr)
+
     def test_stale_failed_owned_executor_is_reconciled_only_when_quiescent(self):
         run, calls = self.invoke()
         self.assertEqual(run.returncode, 0, run.stderr)
-        self.assertEqual(calls, ["reset"])
+        self.assertEqual(calls, ["health"])
+
+    def test_both_failed_native_executors_are_reconciled_without_routing_changes(self):
+        run, calls = self.invoke(SC_RECOVERY_STATE="failed")
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertEqual(calls, ["health", "recovery"])
+
+    def test_recovery_only_failed_service_is_reconciled(self):
+        run, calls = self.invoke(SC_HEALTH_STATE="inactive", SC_RECOVERY_STATE="failed")
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertEqual(calls, ["recovery"])
 
     def test_nested_guard_helper_cannot_redirect_failed_service_reset_to_timer(self):
         run, calls = self.invoke(SC_QA_CLOBBER_GUARD_NAME="yes")
         self.assertEqual(run.returncode, 0, run.stderr)
-        self.assertEqual(calls, ["reset"])
+        self.assertEqual(calls, ["health"])
 
     def test_garbage_collected_failure_is_not_retried(self):
         run, calls = self.invoke(SC_QA_RESET_BEHAVIOR="gc")
         self.assertEqual(run.returncode, 0, run.stderr)
-        self.assertEqual(calls, ["reset"])
+        self.assertEqual(calls, ["health"])
 
     def test_failed_reset_does_not_weaken_refusal(self):
         run, calls = self.invoke(SC_QA_RESET_BEHAVIOR="fail")
         self.assertNotEqual(run.returncode, 0)
-        self.assertEqual(calls, ["reset"])
+        self.assertEqual(calls, ["health"])
         self.assertIn("could not be normalized", run.stderr)
 
     def test_active_or_unowned_roles_and_live_executors_are_refused(self):

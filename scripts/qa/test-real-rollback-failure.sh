@@ -28,6 +28,7 @@ docker exec "$container" /bin/sh -c '
 previous_service_sha=$(docker exec "$container" sha256sum /etc/systemd/system/server-connect-activation-recover.service | cut -d' ' -f1)
 previous_timer_sha=$(docker exec "$container" sha256sum /etc/systemd/system/server-connect-activation-recover.timer | cut -d' ' -f1)
 previous_tun_sha=$(docker exec "$container" sha256sum /etc/systemd/system/server-connect-smart-tun.service | cut -d' ' -f1)
+previous_native_sha=$(docker exec "$container" sha256sum /etc/systemd/system/server-connect-native-tun.service | cut -d' ' -f1)
 previous_health_service_sha=$(docker exec "$container" sha256sum /etc/systemd/system/server-connect-smart-health.service | cut -d' ' -f1)
 previous_health_timer_sha=$(docker exec "$container" sha256sum /etc/systemd/system/server-connect-smart-health.timer | cut -d' ' -f1)
 previous_unit_sha=$(docker exec "$container" sha256sum /etc/systemd/system/server-connect.service | cut -d' ' -f1)
@@ -48,11 +49,13 @@ docker exec "$container" /bin/sh -c '
  grep -qx "ExecStartPost=/usr/bin/false" server-connect.service
  printf "\n# QA-only changed recovery service bytes (not a release)\n" >> server-connect-activation-recover.service
  printf "\n# QA-only changed TUN service bytes (not a release)\n" >> server-connect-smart-tun.service
+ printf "\n# QA-only changed native service bytes (not a release)\n" >> server-connect-native-tun.service
  printf "\n# QA-only changed health service bytes (not a release)\n" >> server-connect-smart-health.service
  printf "\n# QA-only changed health timer bytes (not a release)\n" >> server-connect-smart-health.timer
  sha256sum bin/server-connect bin/sing-box bin/libcronet.so \
    server-connect.service server-connect-activation-recover.service \
    server-connect-activation-recover.timer server-connect-smart-tun.service \
+      server-connect-native-tun.service \
       server-connect-smart-health.service server-connect-smart-health.timer install.sh \
    THIRD-PARTY-LICENSES/sing-box-LICENSE manifest.json > checksums.sha256
  sha256sum --quiet --check checksums.sha256
@@ -141,9 +144,9 @@ echo 'RESTORE_FAILURE_OPERATION=install(previous recovery service unit -> read-o
 # service unit still differs from those bytes. This cannot pass based solely
 # on an EXIT-hook test double or an already-successful restoration.
 docker exec -i "$container" /bin/sh -s "$previous_service_sha" "$previous_timer_sha" \
- "$previous_tun_sha" "$previous_unit_sha" "$previous_release" "$previous_health_service_sha" "$previous_health_timer_sha" <<'VERIFY'
+ "$previous_tun_sha" "$previous_unit_sha" "$previous_release" "$previous_health_service_sha" "$previous_health_timer_sha" "$previous_native_sha" <<'VERIFY'
 set -eu
-expect_service=$1 expect_timer=$2 expect_tun=$3 expect_unit=$4 expect_release=$5 expect_health_service=$6 expect_health_timer=$7
+expect_service=$1 expect_timer=$2 expect_tun=$3 expect_unit=$4 expect_release=$5 expect_health_service=$6 expect_health_timer=$7 expect_native=$8
 set -- /opt/server-connect/.guard-backup.*
 [ "$#" -eq 1 ] && [ -d "$1" ]
 backup=$1
@@ -153,9 +156,11 @@ unit_backup=$1
 [ "$(sha256sum "$backup/server-connect-activation-recover.service" | cut -d' ' -f1)" = "$expect_service" ]
 [ "$(sha256sum "$backup/server-connect-activation-recover.timer" | cut -d' ' -f1)" = "$expect_timer" ]
 [ "$(sha256sum "$backup/server-connect-smart-tun.service" | cut -d' ' -f1)" = "$expect_tun" ]
+[ "$(sha256sum "$backup/server-connect-native-tun.service" | cut -d' ' -f1)" = "$expect_native" ]
 [ "$(sha256sum "$backup/server-connect-smart-health.service" | cut -d' ' -f1)" = "$expect_health_service" ]
 [ "$(sha256sum "$backup/server-connect-smart-health.timer" | cut -d' ' -f1)" = "$expect_health_timer" ]
 [ "$(sha256sum /etc/systemd/system/server-connect-smart-tun.service | cut -d' ' -f1)" = "$expect_tun" ]
+[ "$(sha256sum /etc/systemd/system/server-connect-native-tun.service | cut -d' ' -f1)" = "$expect_native" ]
 [ "$(sha256sum /etc/systemd/system/server-connect-smart-health.service | cut -d' ' -f1)" = "$expect_health_service" ]
 [ "$(sha256sum /etc/systemd/system/server-connect-smart-health.timer | cut -d' ' -f1)" = "$expect_health_timer" ]
 [ "$(sha256sum "$unit_backup" | cut -d' ' -f1)" = "$expect_unit" ]
@@ -166,6 +171,7 @@ unit_backup=$1
 printf 'REAL_ROLLBACK_BACKUP_SERVICE_SHA256=%s\n' "$expect_service"
 printf 'REAL_ROLLBACK_BACKUP_TIMER_SHA256=%s\n' "$expect_timer"
 printf 'REAL_ROLLBACK_BACKUP_TUN_UNIT_SHA256=%s\n' "$expect_tun"
+printf 'REAL_ROLLBACK_BACKUP_NATIVE_UNIT_SHA256=%s\n' "$expect_native"
 printf 'REAL_ROLLBACK_BACKUP_MAIN_UNIT_SHA256=%s\n' "$expect_unit"
 printf 'REAL_ROLLBACK_AFTER_FAILURE=previous_release:%s service:%s guard_unit:CONFLICT\n' \
  "$expect_release" "$(systemctl is-active server-connect.service || true)"
@@ -176,22 +182,23 @@ VERIFY
 # previous service, then clear only this scenario's verified obsolete backups.
 docker exec "$container" umount /etc/systemd/system/server-connect-activation-recover.service
 docker exec -i "$container" /bin/sh -s "$previous_service_sha" "$previous_timer_sha" \
- "$previous_tun_sha" "$previous_unit_sha" "$previous_release" "$bad_release" "$previous_health_service_sha" "$previous_health_timer_sha" <<'REPAIR'
+ "$previous_tun_sha" "$previous_unit_sha" "$previous_release" "$bad_release" "$previous_health_service_sha" "$previous_health_timer_sha" "$previous_native_sha" <<'REPAIR'
 set -eu
-expect_service=$1 expect_timer=$2 expect_tun=$3 expect_unit=$4 expect_release=$5 bad_release=$6 expect_health_service=$7 expect_health_timer=$8
+expect_service=$1 expect_timer=$2 expect_tun=$3 expect_unit=$4 expect_release=$5 bad_release=$6 expect_health_service=$7 expect_health_timer=$8 expect_native=$9
 set -- /opt/server-connect/.guard-backup.*
 [ "$#" -eq 1 ] && [ -d "$1" ]
 backup=$1
 set -- /opt/server-connect/.unit-backup.*
 [ "$#" -eq 1 ] && [ -f "$1" ]
 unit_backup=$1
-for name in server-connect-activation-recover.service server-connect-activation-recover.timer server-connect-smart-tun.service server-connect-smart-health.service server-connect-smart-health.timer;do
+for name in server-connect-activation-recover.service server-connect-activation-recover.timer server-connect-smart-tun.service server-connect-native-tun.service server-connect-smart-health.service server-connect-smart-health.timer;do
  install -m 0644 "$backup/$name" "/etc/systemd/system/$name"
  install -m 0644 "$backup/$name.sha256" "/opt/server-connect/$name.sha256"
 done
 [ "$(sha256sum /etc/systemd/system/server-connect-activation-recover.service | cut -d' ' -f1)" = "$expect_service" ]
 [ "$(sha256sum /etc/systemd/system/server-connect-activation-recover.timer | cut -d' ' -f1)" = "$expect_timer" ]
 [ "$(sha256sum /etc/systemd/system/server-connect-smart-tun.service | cut -d' ' -f1)" = "$expect_tun" ]
+[ "$(sha256sum /etc/systemd/system/server-connect-native-tun.service | cut -d' ' -f1)" = "$expect_native" ]
 [ "$(sha256sum /etc/systemd/system/server-connect-smart-health.service | cut -d' ' -f1)" = "$expect_health_service" ]
 [ "$(sha256sum /etc/systemd/system/server-connect-smart-health.timer | cut -d' ' -f1)" = "$expect_health_timer" ]
 [ "$(sha256sum /etc/systemd/system/server-connect.service | cut -d' ' -f1)" = "$expect_unit" ]
@@ -200,6 +207,8 @@ systemctl daemon-reload
 systemctl is-active --quiet server-connect.service
 [ "$(systemctl show server-connect-activation-recover.timer -p ActiveState --value)" = inactive ]
 [ "$(systemctl show server-connect-smart-tun.service -p UnitFileState --value)" = static ]
+[ "$(systemctl show server-connect-native-tun.service -p UnitFileState --value)" = disabled ]
+[ "$(systemctl show server-connect-native-tun.service -p ActiveState --value)" = inactive ]
 [ "$(systemctl show server-connect-smart-tun.service -p ActiveState --value)" = inactive ]
 [ "$(systemctl show server-connect-smart-health.service -p ActiveState --value)" = inactive ]
 [ "$(systemctl show server-connect-smart-health.timer -p ActiveState --value)" = inactive ]

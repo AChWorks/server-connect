@@ -56,6 +56,7 @@ FILES = (
     "server-connect-activation-recover.service",
     "server-connect-activation-recover.timer",
     "server-connect-smart-tun.service",
+    "server-connect-native-tun.service",
     "server-connect-smart-health.service",
     "server-connect-smart-health.timer",
     "install.sh",
@@ -245,6 +246,29 @@ class ReleasePayloadTests(unittest.TestCase):
         renamed = self.prefix / "releases" / ("0.1.0-dev-" + "f" * 16)
         release.rename(renamed)
         self.owned_current(renamed, expected=21)
+
+    def test_previous_twelve_file_installed_release_remains_updatable(self):
+        # Existing 12-file packages remain valid prior *installed* releases
+        # after introducing the native unit. An incoming 12-file candidate
+        # must still fail the newer complete-payload verification.
+        release = self.publish()
+        former = tuple(name for name in FILES
+                       if name != "server-connect-native-tun.service")
+        assert len(former) == 12
+        (release / "server-connect-native-tun.service").unlink()
+        lines = "".join(
+            hashlib.sha256((release / name).read_bytes()).hexdigest()
+            + "  " + name + "\n" for name in former
+        )
+        (release / "checksums.sha256").write_text(lines)
+        suffix = hashlib.sha256(lines.encode()).hexdigest()[:16]
+        previous = release.with_name("0.1.0-dev-" + suffix)
+        release.rename(previous)
+        self.installed_audit(previous)
+        self.audit(previous, expected=21)
+        self.owned_current(previous)
+        (previous / "server-connect-smart-tun.service").write_text("tampered previous unit")
+        self.installed_audit(previous, expected=21)
 
     def test_genuine_legacy_identity_and_exact_layout_remain_accepted(self):
         release = self.make_historic_legacy_release()

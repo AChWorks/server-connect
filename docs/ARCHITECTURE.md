@@ -2,6 +2,147 @@
 
 **Product goal:** [PROJECT-SPEC.md](PROJECT-SPEC.md). This document owns *how components interact*, how traffic is classified, and which host resources Server Connect may change. It does not record active Issues, test runs or the history of experimental implementations.
 
+## Selected implementation direction (2026-11-07)
+
+The Owner selected **simplifying this same Server Connect product**: use the
+**official sing-box native Linux TUN, routing, DNS, and rule-set facilities**
+instead of extending the experimental custom Go route/RPDB/nftables ownership
+stack. Keep the existing CLI, stored profiles/rules, three modes, signed
+official/mirror/offline distribution, and the canonical product requirements.
+Retire old QA-only native machinery only after replacement acceptance, rather
+than breaking Direct/Proxy Only or deleting negative safety evidence.
+
+The bounded new compiler/CLI entry point is
+`smart-routing-rules preview-native`: it reads the selected saved profile and
+operator rules, generates one official-Core-owned `auto_route`/`auto_redirect`
+policy, checks that config against the pinned Core, and reports an opaque
+digest with **activation_ready=false** and **applied=false**. A successful
+preview is **not** an activation, a field safety proof, or authorization to
+remove older experimental safeguards.
+
+Isolated user/network-namespace testing has positively witnessed genuine
+VLESS TCP/UDP delivery for VPN-required traffic, a Direct exception, and a foreign
+inbound hosted reply while another new outbound to that same foreign IP
+continues through the VPN. An independent UDP DNS responder additionally
+demonstrated that an explicit native port-53 route hijack plus
+dns_mode=disabled must be used: TUN dns_mode=hijack in the fixture rerouted
+directly attached DNS peers into the VPN and broke them during provider outage.
+With native DNS interception disabled, the public DNS request still enters TUN
+and is redirected by route rules through the selected VPN resolver, while the
+on-link DNS peer remains Direct even when the VPN provider is down.
+This is not evidence for untested TCP DNS, other DNS transports, or IPv6 DNS.
+Provider shutdown did not otherwise fall back to Direct.
+Graceful Core stop restored exact private-namespace routes, rules and nftables.
+**Hard SIGKILL leaves native sing-box route/RPDB/nftables state behind**;
+a plain Core restart and graceful stop may still retain the earlier orphaned
+rule/route. This is a measured blocker, not permission for the Manager to
+guess at third-party kernel ownership. A narrowly independent crash/recovery
+guard and reliable resource authority still require design and acceptance.
+
+### Native Smart Routing candidate lifecycle (not general-host admitted)
+
+This candidate extends the compile-only native preview with a guarded
+Connect/Disconnect lifecycle. The Manager uses one shared state/journal lock
+to read the saved profile and rules, validates the compiled official sing-box
+config, checks free policy slots, and stages a private digest-bound recovery
+claim before requesting systemd activation. No second Go router is created.
+
+The native systemd unit uses ExecStartPre to check the desired mode, selected
+profile, config receipt, underlay and vacant native policy resources. Its
+ExecStopPost independently invokes scoped recovery after normal stop, failed
+start or unexpected Core termination. The fixed native table/rule indices are
+not enough for SIGKILL recovery: official sing-tun's auto_redirect separately
+creates a random route table and priority-1 lookup. Recovery validates native
+resources before removing them. Unknown foreign objects are retained and
+reported uncertain for operator repair/retry. Only after exact kernel
+restoration is verified does the native stop hook persist Direct and retire
+its recovery receipt. A mismatched or unverified receipt remains intact for
+operator investigation; a private inactive Core config may remain until the
+next explicit Disconnect. Connect starts the owned native unit without
+enabling it for future boots: a reboot never blindly reapplies unconfirmed
+Smart Routing. The old service might remain in systemd's failed bookkeeping
+after SIGKILL even when the hook has restored Direct; status must show that
+failed unit, never infer healthy from the missing recovery receipt.
+
+A disposable Debian 13 VM has exercised actual official sing-box 1.14.3
+systemd service, normal CLI Disconnect, SIGKILL-triggered ExecStopPost,
+exact IPv4/IPv6 route/rule/nft baseline restoration and foreign-route
+collision refusal followed by manual recovery. The actual compiled policy
+also passed synthetic independent VLESS/Direct witnesses in a rootless
+namespace. This is candidate evidence, not real Iran/foreign VPN provider
+acceptance, installed artifact parity, domain Direct or runtime health proof.
+The old experimental trial remains until its replacement is accepted.
+
+The **unreleased native Runtime Health Guard candidate** reuses the two
+previously installed, independently scheduled `server-connect-smart-health`
+and `server-connect-activation-recover` timer/executor roles. The only VPN
+transport is still the **same official sing-box Core**; the Manager never
+installs a competing data plane or a broad network repair layer. Before
+Core start, Connect durably records an operation/boot/config-bound health
+receipt and arms both roles. The health executor tests two fixed HTTPS
+paths with fresh TLS/nonce evidence and a native `SO_MARK=0x2023` socket:
+`auto_route` sends this mark to the owned TUN table. Binding the socket
+with `SO_BINDTODEVICE=sctun0` is **not** valid with sing-box's
+`auto_redirect` on the tested Debian guests (kernel returns
+`ENETUNREACH`); accepting an ordinary unmarked Direct reply would also be
+unsafe. Separate pre/post read-only IPv4/IPv6 RPDB, selected-marked IPv4
+FIB and nftables-capture checks prevent health from treating lost native
+interception as a good VPN path. The synthetic nonce/peer fixture is
+**development-only**. Field-mode HTTPS targets measure authenticated
+IPv4 HTTPS/TLS over the selected Core, not Iranian geography or general
+DNS/UDP/IPv6 policy, and a successful HTTPS endpoint alone cannot certify
+the separate production Activation Guard.
+
+A transient failed round is `degraded`; any other independently healthy
+selected target prevents a one-site false alarm. Short recovered outages
+require fresh selected HTTPS before re-entering `healthy`. A bounded number
+of consecutive failures (default **3**, operator setting **1-10**) or a
+bounded cumulative flapping budget triggers exact Core stop and its
+existing owner-checked `ExecStopPost` Direct restoration. **No blind Core
+restart or unconfirmed boot auto-resume** is introduced: while the Core
+remains active, its transport may reconnect and subsequent independent
+health rounds can prove recovery; otherwise Direct/off is final until a
+new explicit Connect. The second timer detects a stalled/unavailable
+health executor, and the health executor checks the recovery timer. On a
+fresh Connect after Core `SIGKILL` (including an older candidate without a
+native health record), systemd's retained `failed` state is normalized **before** prearming timers, but only after the prior operation
+has proven Direct/off, the old claim is absent, MainPID is zero and the
+new scope's native policy slots are vacant. The timers must never confuse
+old failure bookkeeping with the new operation's actual Core state.
+The installed native `ExecStartPre` accepts only the just-staged,
+configuration-bound `starting` health receipt with the **current boot ID**,
+current uptime inside the existing startup grace, and both effective owned
+Health/Recovery timer roles. Retained old-boot or old-phase claims can still be
+used for exact `ExecStopPost` cleanup, but cannot authorize an enabled systemd
+unit to reapply routing on reboot or by an implicit manual restart. No second
+activation receipt or always-on boot service is required.
+Previous timer-driven oneshots can still be exiting after `ExecStopPost`
+has independently finalized Direct; fresh Connect first disarms both old
+schedules, waits a bounded interval for the two exact owned executors to
+become idle, and rechecks the Direct/no-claim/no-legacy-session/native-kernel
+boundary before reusing the existing strict failed-oneshot reconciler. It
+cannot reset an active, foreign or unknown guard merely to force a restart.
+Owned native redirect cleanup removes only preinspected Core-owned routes and
+managed policy rules, deletes the verified sing-box nftables table, and removes
+the exact priority-1 RPDB redirect-table identity **last**. An interrupted
+nftables delete (or one interrupted priority-1 delete) therefore retains the
+randomized redirect-table identity required for safe retry; unknown nftables
+chains, RPDB owners and foreign tables/rules still block or remain untouched.
+Selected-path health aggregation returns on the first authenticated positive
+without letting another slow target replace success with timeout; cancellation
+never upgrades a stale result to healthy. The
+saved profile and routing rules are never erased by a health fault.
+This limited native guard candidate is **not** complete field acceptance,
+SSH confirmation, authenticated distribution or production authorization.
+
+The older detailed native resource-ledger and trial descriptions below
+document the **existing experimental code**, not the selected production
+implementation. The canonical [PROJECT-SPEC.md](PROJECT-SPEC.md) and
+[SAFETY-RECOVERY.md](SAFETY-RECOVERY.md) still govern all hosting, SSH,
+Direct/off, VPN no-leak and third-party ownership claims. Keep the historical
+OWN-ABA and stale FakeIP negative tests. Avoid adding a second generalized
+network framework to solve the new path.
+
 ## Components and lifecycle
 
 ```text
@@ -14,7 +155,7 @@ Operator -> one menu / CLI + structured JSON
 Optional: independent cloudflared connector -> Cloudflare -> approved HTTP(S) origin
 ```
 
-The manager is a small Linux CLI/control plane, not a replacement tunnel protocol or a mandatory hosted dashboard. The current usable development foundation is Direct and opt-in Proxy Only; **production Smart Routing and its guards are not yet implemented/accepted**. Source and CI history must not be confused with a released or field-proven build.
+The manager is a small Linux CLI/control plane, not a replacement tunnel protocol or a mandatory hosted dashboard. Direct and opt-in Proxy Only remain the accepted baseline; native Smart Routing has a VM-tested **candidate lifecycle**, not an accepted production path or complete runtime guard. Source and CI history must not be confused with a released or field-proven build.
 
 Use one authenticated stored-profile identity and **one selected active outbound** for the first version. Keep profile data, rules, runtime state and replaceable binaries separate. A saved profile/rule set is **configuration**, not an active Linux route: explicit Disconnect or guard-confirmed fallback to Direct removes the precisely owned TUN/policy and any VPN-only egress blocks, but preserves stored settings for the next independently guarded Apply. While routing is active or degraded, an unavailable VPN-required path must not silently bypass through Direct. Do not introduce multi-outbound abstractions or a per-job router for possible future features.
 
@@ -50,15 +191,17 @@ Track **desired, observed, pending/uncertain and last verified safe** states sep
 
 ## Inert product units and disposable native integration
 
-The development installer carries a static, unenabled
-`server-connect-smart-tun.service` distinct from the existing unprivileged
-`server-connect.service` Proxy Only unit. The TUN service has the capabilities
-needed for its narrowly admitted native link and marked sockets, and reads its
-exact staged policy using a systemd `LoadCredential` copy. The ordinary proxy
-unit remains unprivileged. The installer fingerprints and transactionally
-restores the TUN unit, independent recovery service/timer and separate health
-service/timer, and refuses updates while any of them is active. Installation
-alone does not enable either experimental timer.
+The installer temporarily carries two separate TUN units while the
+replacement is being accepted. `server-connect-smart-tun.service` remains
+a static, unenabled legacy disposable-QA trial unit; the native candidate
+uses default-disabled server-connect-native-tun.service. They cannot both
+be activated for one host and neither proves general-host support by
+being installed. The native unit uses systemd `LoadCredential`, independent
+preflight, and a post-stop Core recovery action; the legacy unit retains
+its original operation-specific guard and timer. The ordinary Proxy Only
+service stays unprivileged. Installer digest checks and rollback include
+both units, but this is transitional: retire the old experimental unit and
+its test lane together when native acceptance makes them unnecessary.
 
 `smart-tun-trial-apply` is limited to the known disconnected Docker/systemd
 fixture, with an exact synthetic VLESS endpoint and IPv4 or opt-in IPv4+IPv6
