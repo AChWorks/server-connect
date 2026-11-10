@@ -100,8 +100,16 @@ def main(args):
     try:
         response = wire_query(destination, transport, request)
     except (socket.timeout, TimeoutError, ConnectionError, OSError) as exc:
-        if mode not in ("no-reply", "no-success") or (isinstance(exc, OSError) and
-            not isinstance(exc, (socket.timeout, TimeoutError)) and exc.errno not in ALLOWED_FAILURE):
+        # On a failed selected path, Core can close a DNS-over-TCP stream
+        # before sending its length-prefixed response. The precise EOF from
+        # read_exact() is a valid no-success outcome, but an arbitrary
+        # ConnectionError or a UDP framing error must remain a test failure.
+        expected_timeout = isinstance(exc, (socket.timeout, TimeoutError))
+        expected_tcp_eof = (transport == "tcp" and type(exc) is ConnectionError and
+                            str(exc) == "incomplete DNS TCP response")
+        expected_errno = isinstance(exc, OSError) and exc.errno in ALLOWED_FAILURE
+        if mode not in ("no-reply", "no-success") or not (
+                expected_timeout or expected_tcp_eof or expected_errno):
             raise
         print("REAL_TUN_DNS_NO_RESPONSE=PASS")
         return

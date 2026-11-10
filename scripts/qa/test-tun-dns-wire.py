@@ -106,6 +106,19 @@ class DNSWireContract(unittest.TestCase):
             with self.assertRaises(ValueError):
                 CLIENT.main([destination, "none", "negative", "udp", "no-success"])
 
+    def test_outage_accepts_only_specific_tcp_eof_without_leak_witness(self):
+        args = ["2606:4700:8::8", "none", "tcp-outage", "tcp", "no-success"]
+        with patch.object(CLIENT, "wire_query", side_effect=ConnectionError("incomplete DNS TCP response")), \
+             patch("sys.stdout", new_callable=io.StringIO) as out:
+            CLIENT.main(args)
+            self.assertIn("NO_RESPONSE=PASS", out.getvalue())
+        for transport, message in (("udp", "incomplete DNS TCP response"),
+                                   ("tcp", "unrelated socket exception")):
+            with self.subTest(transport=transport), patch.object(
+                    CLIENT, "wire_query", side_effect=ConnectionError(message)):
+                with self.assertRaises(ConnectionError):
+                    CLIENT.main(args[:3] + [transport, "no-success"])
+
     def test_phase_is_necessary_and_non_cacheable(self):
         one = CLIENT.question("phase-a")
         two = CLIENT.question("phase-b")
