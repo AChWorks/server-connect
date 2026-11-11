@@ -160,6 +160,7 @@ func recoverNativeRedirect(parent context.Context, r nativeKernelRunner, p nativ
 		}
 	}
 	var routes []nativeAction
+	seenRoutes := make(map[string]bool)
 	if redirectTable != 0 {
 		for _, family := range []string{"-4", "-6"} {
 			raw, e := r.output(ctx, "ip", family, "route", "show", "table", strconv.Itoa(redirectTable))
@@ -182,10 +183,22 @@ func recoverNativeRedirect(parent context.Context, r nativeKernelRunner, p nativ
 				if family == "-6" {
 					want = fmt.Sprintf("local %s dev %s metric 1024 pref medium", host, p.UnderlayIF)
 				}
+				dev := p.UnderlayIF
 				if line != want {
-					return errors.New("native recovery: unexpected redirect-table route")
+					// sing-box 1.14.3 also creates this exact loopback
+					// redirect for Docker's standard bridge when it exists.
+					// Do not accept arbitrary extra interfaces or routes.
+					if family != "-4" || line != "local 127.0.0.1 dev docker0 scope host" {
+						return errors.New("native recovery: unexpected redirect-table route")
+					}
+					dev = "docker0"
 				}
-				routes = append(routes, nativeAction{"ip", []string{family, "route", "del", "table", strconv.Itoa(redirectTable), "local", host, "dev", p.UnderlayIF}})
+				identity := family + ":" + dev
+				if seenRoutes[identity] {
+					return errors.New("native recovery: duplicate redirect-table route")
+				}
+				seenRoutes[identity] = true
+				routes = append(routes, nativeAction{"ip", []string{family, "route", "del", "table", strconv.Itoa(redirectTable), "local", host, "dev", dev}})
 			}
 		}
 	} else if len(coreRules) > 0 || len(fallbackRules) > 0 {
@@ -196,9 +209,26 @@ func recoverNativeRedirect(parent context.Context, r nativeKernelRunner, p nativ
 		return e
 	}
 	countTable := 0
+	countDockerTable := 0
 	for _, line := range strings.Split(tables, "\n") {
-		if strings.TrimSpace(line) == "table inet sing-box" {
+		switch strings.TrimSpace(line) {
+		case "table inet sing-box":
 			countTable++
+		case "table ip filter":
+			countDockerTable++
+		}
+	}
+	if countDockerTable > 1 {
+		return errors.New("native recovery: ambiguous Docker filter table")
+	}
+	var dockerActions []nativeAction
+	if countDockerTable == 1 {
+		dockerActions, e = inspectNativeDockerRecovery(ctx, r, p.TunnelIF)
+		if e != nil {
+			return e
+		}
+		if len(dockerActions) > 0 && redirectTable == 0 {
+			return errors.New("native recovery: Docker rules lack redirect identity")
 		}
 	}
 	if countTable > 1 {
@@ -233,8 +263,22 @@ func recoverNativeRedirect(parent context.Context, r nativeKernelRunner, p nativ
 	if countTable == 1 {
 		all = append(all, nativeAction{"nft", []string{"delete", "table", "inet", "sing-box"}})
 	}
-	all = append(all, priorityOne...)
+	// Docker compatibility rules belong to a foreign-owned chain. Remove
+	// only the two exact Core-created TUN rules, before retiring the
+	// randomized-table identity. Failure leaves the identity for retry.
+	all = append(all, dockerActions...)
 	for _, a := range all {
+		if e := r.run(ctx, a.binary, a.args...); e != nil {
+			return e
+		}
+	}
+	if countDockerTable == 1 {
+		remaining, err := inspectNativeDockerRecovery(ctx, r, p.TunnelIF)
+		if err != nil || len(remaining) != 0 {
+			return errors.New("native recovery: Docker compatibility cleanup unverified")
+		}
+	}
+	for _, a := range priorityOne {
 		if e := r.run(ctx, a.binary, a.args...); e != nil {
 			return e
 		}

@@ -146,10 +146,17 @@ boundary before reusing the existing strict failed-oneshot reconciler. It
 cannot reset an active, foreign or unknown guard merely to force a restart.
 Owned native redirect cleanup removes only preinspected Core-owned routes and
 managed policy rules, deletes the verified sing-box nftables table, and removes
-the exact priority-1 RPDB redirect-table identity **last**. An interrupted
-nftables delete (or one interrupted priority-1 delete) therefore retains the
-randomized redirect-table identity required for safe retry; unknown nftables
-chains, RPDB owners and foreign tables/rules still block or remain untouched.
+the exact priority-1 RPDB redirect-table identity **last**. On Docker
+hosts, the official Core can leave one extra `local 127.0.0.1 dev docker0`
+route in this **already identified private table** and two TUN-specific
+`!sing-box` rules in Docker's `ip filter DOCKER-USER` chain after SIGKILL.
+Recovery prevalidates exact route shape and the two nft JSON rule bodies and
+unique handles, deleting only these Core-origin effects without changing
+Docker's chain, other rules or ordinary bridge routes. Unsupported additional
+bridges, routes or ambiguous rules refuse cleanup and preserve the claim.
+An interrupted route, nftables or priority-1 delete still retains the
+randomized redirect-table identity for safe retry; unrelated native network
+owners remain protected.
 Selected-path health aggregation returns on the first authenticated positive
 without letting another slow target replace success with timeout; cancellation
 never upgrades a stale result to healthy. The
