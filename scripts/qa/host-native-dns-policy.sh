@@ -95,6 +95,13 @@ native_dns_policy_trial() {
       echo 'NATIVE_DNS_WIRE=FAIL (missing IPv4 Direct/private or IPv6 country positive witness)' >&2
       return 1
     }
+  # Independent positive large-datagram control on the actual peer and
+  # underlay before TUN: a missing or broken responder must not make an
+  # outgoing VPN-only timeout look like an acceptable negative result.
+  ipv6_path udp 2606:4700:5::10 fd73:1::1 reply 1353
+  ipv6_path udp 2606:4700:5::10 fd73:1::1 reply 2400
+  native_ipv6_payload_direct_before=$(peer_counter_packets ipv6_override_udp_packets)
+  test "$native_ipv6_payload_direct_before" -gt 0 || return 1
   echo "NATIVE_DNS_PRE_TUN_POSITIVE_CONTROL=PASS ($mode)"
 
   SC_QA_TUN_NATIVE_DNS=yes SC_QA_TUN_IPV6=yes SC_QA_TUN_NATIVE_DNS_MODE="$mode" \
@@ -151,6 +158,48 @@ native_dns_policy_trial() {
   }
   echo "NATIVE_DNS_SELECTED_ADDRESS_PRECEDENCE=PASS ($mode)"
 
+  # Prior 1400-byte virtual MTU fragmented the 1353-byte UDP application
+  # payload (40 IPv6 + 8 UDP), and the selected gVisor/VLESS path silently
+  # lost it. Verify both sides of that cutoff and a larger application
+  # datagram on the CURRENT native compiler, never the retired candidate.
+  test "$(cat /sys/class/net/sctunqa0/mtu)" = 9000 || {
+    echo 'NATIVE_IPV6_UDP_MTU=FAIL (native TUN virtual MTU drift)' >&2
+    return 1
+  }
+  for size in 1352 1353 2400; do
+    ipv6_path udp 2606:4700:5::10 2606:4700:5::10 reply "$size"
+  done
+  test "$(peer_counter_packets ipv6_override_udp_packets)" = "$native_ipv6_payload_direct_before" &&
+    assert_tun_policy_active || {
+      echo 'NATIVE_IPV6_UDP_MTU=FAIL (selected IPv6 reply or native Direct leak)' >&2
+      return 1
+    }
+  echo "NATIVE_IPV6_UDP_MTU=PASS ($mode)"
+
+  # Real selected VLESS TCP underlay may have a smaller MTU than the TUN.
+  # Lower the exclusive QA VETH to IPv6's minimum, prove a 2400-byte IPv6
+  # UDP exchange still reaches the selected peer, then restore both ends.
+  edge_mtu=$(cat "/sys/class/net/$edge/mtu")
+  peer_mtu=$(ip -n "$peer" -j link show dev scqapeer0 |
+    python3 -c 'import json,sys;print(json.load(sys.stdin)[0]["mtu"])')
+  test "$edge_mtu" -gt 1280 && test "$peer_mtu" -gt 1280 || return 1
+  ip link set dev "$edge" mtu 1280
+  ip -n "$peer" link set dev scqapeer0 mtu 1280
+  test "$(cat "/sys/class/net/$edge/mtu")" = 1280 || return 1
+  ipv6_path udp 2606:4700:5::10 2606:4700:5::10 reply 2400
+  dns_path 10.254.72.2 192.0.2.11 'small-underlay-private-v4' udp reply
+  ip link set dev "$edge" mtu "$edge_mtu"
+  ip -n "$peer" link set dev scqapeer0 mtu "$peer_mtu"
+  test "$(cat "/sys/class/net/$edge/mtu")" = "$edge_mtu" &&
+    test "$(ip -n "$peer" -j link show dev scqapeer0 |
+      python3 -c 'import json,sys;print(json.load(sys.stdin)[0]["mtu"])')" = "$peer_mtu" &&
+    test "$(peer_counter_packets ipv6_override_udp_packets)" = "$native_ipv6_payload_direct_before" &&
+    assert_tun_policy_active || {
+      echo 'NATIVE_IPV6_UDP_REDUCED_UNDERLAY=FAIL (selected path, leak or MTU restoration)' >&2
+      return 1
+    }
+  echo "NATIVE_IPV6_UDP_REDUCED_UNDERLAY=PASS ($mode)"
+
   for transport in udp tcp; do
     dns_path 2606:4700:8::8 192.0.2.33 "unmatched-v6-$transport" "$transport" reply || {
       native_dns_unmatched_diagnostics
@@ -196,6 +245,14 @@ native_dns_policy_trial() {
       echo 'NATIVE_DNS_WIRE=FAIL (selected DNS escaped Direct during outage)' >&2
       return 1
     }
+  # The same large selected datagram must NOT escape Direct when the peer
+  # transport fails; the separate positive control preceded this outage.
+  ipv6_path udp 2606:4700:5::10 none no-reply 2400
+  test "$(peer_counter_packets ipv6_override_udp_packets)" = "$native_ipv6_payload_direct_before" || {
+    echo 'NATIVE_IPV6_UDP_OUTAGE=FAIL (selected IPv6 leaked native Direct)' >&2
+    return 1
+  }
+  echo "NATIVE_IPV6_UDP_OUTAGE=PASS ($mode)"
   echo "NATIVE_DNS_OUTAGE_FAIL_CLOSED=PASS ($mode)"
 
   for transport in udp tcp; do
@@ -218,5 +275,7 @@ native_dns_policy_trial() {
       echo 'NATIVE_DNS_WIRE=FAIL (protected Direct or VPN-only witness changed)' >&2
       return 1
     }
+  ipv6_path udp 2606:4700:5::11 fd73:1::1 reply 2400
+  test "$(peer_counter_packets ipv6_override_udp_packets)" = "$native_ipv6_payload_direct_before" || return 1
   echo "NATIVE_DNS_DIRECT_OUTAGE_CONTROL=PASS ($mode)"
 }

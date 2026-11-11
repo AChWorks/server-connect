@@ -27,6 +27,18 @@ type NativePolicyOptions struct {
 const NativePolicyTableIndex = 27432
 const NativePolicyRuleIndex = 14200
 
+// NativePolicyTunMTU is a virtual TUN MTU, not an underlay-path MTU.
+// Official sing-box tunnels datagrams over the selected transport; limiting
+// the TUN to 1400 forced local IPv6 UDP fragmentation at 1353 payload bytes,
+// which the pinned gVisor receive path did not deliver to the selected peer.
+// 9000 is the official Core's normal virtual-TUN default. An underlay below
+// this MTU must still pass independent selected-path and no-leak tests.
+const NativePolicyTunMTU = 9000
+
+// NativePolicyLegacyTunMTU remains recognized ONLY for journal-bound cleanup
+// of installations created before the virtual-MTU change.
+const NativePolicyLegacyTunMTU = 1400
+
 // NativeSmartRoutingConfig deliberately delegates TUN, routing and nftables to
 // official sing-box. The separate activation/runtime guards and host admission
 // are not implemented by this compiler; callers MUST NOT treat a successful
@@ -172,7 +184,7 @@ func NativeSmartRoutingConfig(profile Profile, opts NativePolicyOptions, operato
 		"inbounds": []any{map[string]any{
 			"type": "tun", "tag": "smart-tun",
 			"interface_name": opts.InterfaceName, "address": address,
-			"mtu": 1400, "stack": "gvisor", "auto_route": true, "auto_redirect": true,
+			"mtu": NativePolicyTunMTU, "stack": "gvisor", "auto_route": true, "auto_redirect": true,
 			"iproute2_table_index": NativePolicyTableIndex, "iproute2_rule_index": NativePolicyRuleIndex,
 			"strict_route": true, "dns_mode": "disabled",
 		}},

@@ -147,6 +147,49 @@ class IPv6WireTests(unittest.TestCase):
             destinations.append(destination)
         self.assertEqual(set(destinations), set(m.UDP_BIND_ADDRESSES))
 
+    def test_bounded_large_udp_payloads_and_tamper_refusal(self):
+        token = b"0123456789abcdef"
+        for size in (1352, 1353, 2400, m.UDP_MAX_BYTES):
+            with self.subTest(size=size):
+                payload = m.request(token, size)
+                self.assertEqual(m.udp_request_size(payload), size)
+                reply = m.response(payload, "2606:4700:5::10", size)
+                m.verify(reply, token, "2606:4700:5::10", size)
+                for bad in (payload[:-1], payload + b"x", payload[:m.HEADER - 1],
+                            payload[:m.HEADER - 4] + (size + 1).to_bytes(4, "big") + payload[m.HEADER:]):
+                    with self.assertRaises(ValueError):
+                        m.udp_request_size(bad)
+        for invalid in (0, 63, m.UDP_MAX_BYTES + 1):
+            with self.assertRaises(ValueError):
+                m.udp_request_size(m.request(token, invalid))
+        for invalid in ("0", "63", "4097", "01", "-1", "text", "1353.0", "1353 ", "١٣٥٣"):
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                m.probe("udp", "2606:4700:5::10", "2606:4700:5::10", "reply", invalid)
+        with self.assertRaises(ValueError):
+            m.probe("tcp", "2606:4700:5::10", "2606:4700:5::10", "reply", "1353")
+
+    def test_large_udp_positive_and_negative_are_source_bound(self):
+        destination = "2606:4700:5::10"
+        token = b"0123456789abcdef"
+        large = 2400
+        answer = m.response(m.request(token, large), destination, large)
+        with patch.object(m.secrets, "token_hex", return_value=token.decode()), \
+             patch.object(m, "udp_probe", return_value=answer) as probe, \
+             patch("sys.stdout", io.StringIO()) as out:
+            m.probe("udp", destination, destination, "reply", str(large))
+            probe.assert_called_once_with(destination, token, large)
+            self.assertIn("UDP_PAYLOAD=PASS", out.getvalue())
+        with patch.object(m.secrets, "token_hex", return_value=token.decode()), \
+             patch.object(m, "udp_probe", return_value=answer), \
+             patch("sys.stderr", io.StringIO()) as err:
+            with self.assertRaisesRegex(ValueError, "unexpectedly reached"):
+                m.probe("udp", destination, "none", "no-reply", str(large))
+            self.assertIn("classification=authenticated-peer-vpn-source", err.getvalue())
+        with patch.object(m.secrets, "token_hex", return_value=token.decode()), \
+             patch.object(m, "udp_probe", return_value=answer):
+            with self.assertRaises(ValueError):
+                m.probe("udp", destination, "fd73:1::1", "reply", str(large))
+
     def test_address_is_binary_canonicalized(self):
         token = b"0123456789abcdef"
         answer = m.response(m.request(token, m.UDP_BYTES), "2606:4700:5:0:0:0:0:10", m.UDP_BYTES)

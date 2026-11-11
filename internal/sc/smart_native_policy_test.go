@@ -45,8 +45,11 @@ func TestNativeSmartPolicyUsesOfficialSingBox(t *testing.T) {
 	}
 	root := nativePolicyJSON(t, raw)
 	inbound := root["inbounds"].([]any)[0].(map[string]any)
+	if inbound["mtu"] != float64(NativePolicyTunMTU) {
+		t.Fatalf("native virtual TUN MTU must accommodate ordinary IPv6 UDP without premature fragmentation: %v", inbound["mtu"])
+	}
 	if inbound["stack"] != "gvisor" {
-		t.Fatal("selected native stack must reassemble fragmented IPv6 UDP rather than write packets back")
+		t.Fatal("selected native stack changed without independent UDP/DNS/no-leak acceptance")
 	}
 	for _, key := range []string{"auto_route", "auto_redirect", "strict_route"} {
 		if inbound[key] != true {

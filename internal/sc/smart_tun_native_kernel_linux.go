@@ -244,6 +244,13 @@ type nativeTUNLinkObservation struct {
 	LinkSHA256, AddressSHA256, Dependent4, Dependent6 string
 }
 
+// An upgraded recovery helper must still identify the old journal-bound
+// 1400 link by its complete LinkSHA256. A changed MTU produces a different
+// hash and remains a conflict regardless of this narrow compatibility.
+func nativeTUNMTUCompatible(mtu int) bool {
+	return mtu == NativePolicyTunMTU || mtu == NativePolicyLegacyTunMTU
+}
+
 func nativeTUNObserveLink(record smartTUNTrialJournal) (nativeTUNLinkObservation, error) {
 	n := record.Native
 	rows, err := nativeTUNRows("-d", "-j", "link", "show")
@@ -295,7 +302,7 @@ func nativeTUNObserveLink(record smartTUNTrialJournal) (nativeTUNLinkObservation
 		return nativeTUNLinkObservation{}, nativeTUNConflict("native TUN alias changed")
 	}
 	mtu, ok := selectiveInt(selected["mtu"])
-	if !ok || mtu != 1400 {
+	if !ok || !nativeTUNMTUCompatible(mtu) {
 		return nativeTUNLinkObservation{}, nativeTUNConflict("native TUN MTU changed")
 	}
 	hash, persistent, err := nativeTUNLinkHash(selected)
@@ -612,7 +619,7 @@ func nativeTUNCreateEphemeral(store *activationJournalDir, record smartTUNTrialJ
 	if errno != 0 {
 		return fail(nativeTUNUncertain("exclusive TUN creation failed; existing links are never adopted"))
 	}
-	for _, args := range [][]string{{"link", "set", "dev", record.TunnelInterface, "mtu", "1400", "alias", "server-connect:" + record.OperationID}, {"link", "set", "dev", record.TunnelInterface, "addrgenmode", "none"}} {
+	for _, args := range [][]string{{"link", "set", "dev", record.TunnelInterface, "mtu", strconv.Itoa(NativePolicyTunMTU), "alias", "server-connect:" + record.OperationID}, {"link", "set", "dev", record.TunnelInterface, "addrgenmode", "none"}} {
 		if err := nativeTUNRunIP(store, args...); err != nil {
 			return fail(err)
 		}
