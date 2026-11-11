@@ -27,17 +27,13 @@ type NativePolicyOptions struct {
 const NativePolicyTableIndex = 27432
 const NativePolicyRuleIndex = 14200
 
-// NativePolicyTunMTU is a virtual TUN MTU, not an underlay-path MTU.
-// Official sing-box tunnels datagrams over the selected transport; limiting
-// the TUN to 1400 forced local IPv6 UDP fragmentation at 1353 payload bytes,
-// which the pinned gVisor receive path did not deliver to the selected peer.
-// 9000 is the official Core's normal virtual-TUN default. An underlay below
-// this MTU must still pass independent selected-path and no-leak tests.
+// NativePolicyTunMTU is the virtual TUN MTU for the current official-Core
+// native policy, not the physical underlay MTU. The separately retained
+// experimental manager-owned native trial has its own fixed 1400-byte link
+// and journal; do not alter that trial while its recovery path is needed.
+// A 1400-byte current-native TUN fragmented IPv6 UDP above a 1352-byte
+// application body, and those fragments did not reach the selected peer.
 const NativePolicyTunMTU = 9000
-
-// NativePolicyLegacyTunMTU remains recognized ONLY for journal-bound cleanup
-// of installations created before the virtual-MTU change.
-const NativePolicyLegacyTunMTU = 1400
 
 // NativeSmartRoutingConfig deliberately delegates TUN, routing and nftables to
 // official sing-box. The separate activation/runtime guards and host admission

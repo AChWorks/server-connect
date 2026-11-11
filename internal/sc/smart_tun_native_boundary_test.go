@@ -129,38 +129,6 @@ func TestSmartTUNNativeFailedStartDoesNotUnlockManager(t *testing.T) {
 // both queue-count attributes when IFF_MULTI_QUEUE is clear.
 const nativeSingleQueueLinkJSON = `{"ifindex":7,"ifname":"sctunqa0","flags":["POINTOPOINT","MULTICAST","NOARP","UP","LOWER_UP"],"mtu":1400,"operstate":"UNKNOWN","ifalias":"server-connect:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","linkinfo":{"info_kind":"tun","info_data":{"type":"tun","persist":true,"multi_queue":false}}}`
 
-func TestNativeMTUUpgradeRetainsExactOldLinkRecoveryIdentity(t *testing.T) {
-	for _, tc := range []struct {
-		mtu  int
-		want bool
-	}{
-		{NativePolicyLegacyTunMTU, true},
-		{NativePolicyTunMTU, true},
-		{1280, false}, {1350, false}, {1500, false}, {20000, false},
-	} {
-		if nativeTUNMTUCompatible(tc.mtu) != tc.want {
-			t.Fatalf("native MTU compatibility=%v for %d; expected %v", nativeTUNMTUCompatible(tc.mtu), tc.mtu, tc.want)
-		}
-	}
-	var original map[string]json.RawMessage
-	if err := json.Unmarshal([]byte(nativeSingleQueueLinkJSON), &original); err != nil {
-		t.Fatal(err)
-	}
-	oldHash, _, err := nativeTUNLinkShape(original, "2")
-	if err != nil {
-		t.Fatal(err)
-	}
-	var current map[string]json.RawMessage
-	now := strings.Replace(nativeSingleQueueLinkJSON, `"mtu":1400`, `"mtu":9000`, 1)
-	if err := json.Unmarshal([]byte(now), &current); err != nil {
-		t.Fatal(err)
-	}
-	newHash, _, err := nativeTUNLinkShape(current, "2")
-	if err != nil || newHash == oldHash {
-		t.Fatal("native MTU upgrade hid journal-bound link identity change", err)
-	}
-}
-
 func TestSmartTUNNativeCarrierDoesNotHideIdentityChanges(t *testing.T) {
 	before := nativeSingleQueueLinkJSON
 	after := strings.Replace(before, `"LOWER_UP"`, `"NO-CARRIER"`, 1)
