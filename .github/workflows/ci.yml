@@ -501,7 +501,7 @@ jobs:
             test ! -e "$held"
             /usr/bin/mv "/usr/bin/$tool" "$held"
             if /usr/bin/env -i HOME=/root PATH=/usr/sbin:/usr/bin:/sbin:/bin LC_ALL=C \
-              /bin/sh scripts/bootstrap-online.sh --archive-url "$archive" --sha256 "$digest" \
+              /bin/sh scripts/bootstrap-online.sh --local-qa --archive-url "$archive" --sha256 "$digest" \
               > "/tmp/sc-native-qa-$tool.log" 2>&1; then
               echo "Damaged native Debian base unexpectedly accepted: $tool" >&2; exit 1
             fi
@@ -537,7 +537,7 @@ jobs:
           chmod g+w "$os_metadata_path"
           test "$(stat -c %a "$os_metadata_path")" = "$os_writable_mode"
           if /usr/bin/env -i HOME=/root PATH=/usr/sbin:/usr/bin:/sbin:/bin LC_ALL=C \
-            /bin/sh scripts/bootstrap-online.sh --archive-url "$archive" --sha256 "$digest" \
+            /bin/sh scripts/bootstrap-online.sh --local-qa --archive-url "$archive" --sha256 "$digest" \
             > /tmp/sc-native-qa-os-mode.log 2>&1; then
             echo 'Writable native OS metadata unexpectedly accepted' >&2; exit 1
           else
@@ -569,7 +569,7 @@ jobs:
           archive=https://127.0.0.1:19/qa-no-listener
           # --verify-only is a strict nonmutating path even when root.
           if /usr/bin/env -i HOME=/root PATH=/usr/sbin:/usr/bin:/sbin:/bin LC_ALL=C \
-            /bin/sh scripts/bootstrap-online.sh --archive-url "$archive" --sha256 "$digest" \
+            /bin/sh scripts/bootstrap-online.sh --local-qa --archive-url "$archive" --sha256 "$digest" \
             --verify-only > /tmp/sc-pre-verify.log 2>&1; then
             echo 'Missing Python unexpectedly passed --verify-only' >&2; exit 1
           fi
@@ -580,7 +580,7 @@ jobs:
           # Curl must fail at the deliberately closed loopback port AFTER
           # the prerequisite and bounded archive prerequisites are ready.
           if /usr/bin/env -i HOME=/root PATH=/usr/sbin:/usr/bin:/sbin:/bin LC_ALL=C \
-            /bin/sh scripts/bootstrap-online.sh --archive-url "$archive" --sha256 "$digest" \
+            /bin/sh scripts/bootstrap-online.sh --local-qa --archive-url "$archive" --sha256 "$digest" \
             > /tmp/sc-pre-actual.log 2>&1; then
             echo 'Nonexistent archive unexpectedly installed' >&2; exit 1
           fi

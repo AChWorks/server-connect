@@ -149,7 +149,7 @@ printf '=== Install genuine QA artifact from missing-tools Debian %s via native 
 docker exec "$container" /usr/bin/env -i \
   HOME=/root PATH=/usr/sbin:/usr/bin:/sbin:/bin LC_ALL=C \
   /bin/sh /root/sc-qa-bootstrap.sh \
-  --archive-url http://localhost:19179/bundle.tar.gz --sha256 "$digest"
+  --local-qa --archive-url http://localhost:19179/bundle.tar.gz --sha256 "$digest"
 
 # No partial success: assert actual installed manager, immutable release
 # identity, Direct state, and complete network+DNS preservation.
