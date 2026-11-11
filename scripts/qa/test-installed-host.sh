@@ -1182,6 +1182,52 @@ done
 docker exec "$container" rm -f /root/qa-native-recovery-test /root/qa-native-docker-recovery.sh
 assert_network_unchanged native-docker-crash-recovery "$offline_before"
 verify_host_services native-docker-crash-recovery
+# A real Core SIGKILL can complete its kernel cleanup, retire the receipt,
+# and leave failed systemd bookkeeping plus an inert private Core config.
+# Recreate ONLY those installed-host artifacts in the disconnected guest:
+# starting the disabled native unit without a claim must fail in ExecStartPre
+# before Core/kernel mutation. Explicit Disconnect must then select native
+# cleanup, not falsely return success from the Proxy Only branch.
+docker exec -i "$container" /bin/sh -s <<'QANATIVEDISCONNECT'
+set -eu
+test "$(systemctl is-active server-connect-native-tun.service || :)" = inactive
+test "$(systemctl is-enabled server-connect-native-tun.service)" = disabled
+test ! -e /var/lib/server-connect/native-session.json
+test ! -e /var/lib/server-connect/native-tun.json
+printf 'qa-only-inert-config\n' > /var/lib/server-connect/native-tun.json
+chmod 0600 /var/lib/server-connect/native-tun.json
+if systemctl start server-connect-native-tun.service >/root/qa-native-direct-failed-start.log 2>&1; then
+  echo 'NATIVE_DIRECT_DISCONNECT_FIXTURE=FAIL (unclaimed Core started)' >&2
+  exit 1
+fi
+test "$(systemctl is-active server-connect-native-tun.service || :)" = failed
+/usr/local/bin/server-connect --json native-status > /root/qa-native-direct-before.json
+python3 -c 'import json
+r=json.load(open("/root/qa-native-direct-before.json"))
+d=r["data"]
+assert r["ok"] and d["desired"]=="direct" and d["observed"]=="failed" and not d["recovery_claim_present"]'
+/usr/local/bin/server-connect --json disconnect > /root/qa-native-direct-disconnect.json
+python3 -c 'import json
+r=json.load(open("/root/qa-native-direct-disconnect.json"))
+assert r["ok"],r.get("error")'
+test ! -e /var/lib/server-connect/native-tun.json
+test ! -e /var/lib/server-connect/native-session.json
+test "$(systemctl is-active server-connect-native-tun.service || :)" = inactive
+/usr/local/bin/server-connect --json native-status > /root/qa-native-direct-after.json
+python3 -c 'import json
+r=json.load(open("/root/qa-native-direct-after.json"))
+d=r["data"]
+assert r["ok"] and d["desired"]=="direct" and d["observed"]=="inactive" and not d["recovery_claim_present"]'
+for unit in server-connect-smart-health.timer server-connect-activation-recover.timer; do
+  test "$(systemctl is-active "$unit" || :)" = inactive
+done
+rm -f -- /root/qa-native-direct-failed-start.log /root/qa-native-direct-before.json /root/qa-native-direct-after.json /root/qa-native-direct-disconnect.json
+echo 'NATIVE_RECOVERED_CRASH_EXPLICIT_DISCONNECT=PASS (no claim, failed unit and inert config fully reconciled)'
+QANATIVEDISCONNECT
+assert_network_unchanged native-recovered-crash-explicit-disconnect "$offline_before"
+test "$(docker exec "$container" /usr/sbin/nft -j list ruleset)" = "$nft_before"
+verify_host_services native-recovered-crash-explicit-disconnect
+echo 'NATIVE_RECOVERED_CRASH_DISCONNECT_BASELINE=PASS (kernel/nft and SSH/HTTP unaffected)'
 # Keep the installed negative CLI contract, without a separate transitional
 # script, container copy or an extra historical process-scanning fixture.
 if docker exec "$container" /usr/local/bin/server-connect --json workload-observe \
@@ -2131,6 +2177,136 @@ if [[ $qa_version == 13 ]]; then docker exec "$container" /bin/sh /root/qa-wp-fp
 docker exec "$container" /bin/sh /root/qa-apt-only.sh verify-host-policy
 assert_network_unchanged disconnect "$offline_before"
 verify_host_services disconnect
+# Cross-mode recovery regression on the ALREADY configured real Proxy Only
+# guest profile. The earlier native-only test proved Direct+residue cleanup;
+# now prove the legacy Proxy+residue and partial failure-after-proxy-stop paths.
+# The guest has --network none; no host or external service is touched.
+docker exec -i "$container" /bin/sh -s <<'QANATIVEPROXY'
+set -eu
+sc=/usr/local/bin/server-connect
+config=/var/lib/server-connect/native-tun.json
+claim=/var/lib/server-connect/native-session.json
+proxy=/var/lib/server-connect/runtime.json
+unit=server-connect-native-tun.service
+test ! -e "$config" && test ! -e "$claim" && test ! -e "$proxy"
+test "$(systemctl is-active "$unit" || :)" = inactive
+test "$(systemctl is-active server-connect.service || :)" = inactive
+find /var/lib/server-connect/profiles -maxdepth 1 -type f -print0 |
+  sort -z | xargs -0 sha256sum > /root/qa-native-proxy-profile-hashes
+
+# A safe new Proxy Only Connect refuses the unresolved residual before
+# writing any runtime credential or starting either owned service.
+printf 'qa-inert-native-config\n' > "$config"
+chmod 0600 "$config"
+if "$sc" --json connect >/root/qa-native-proxy-connect-refusal.json; then
+  echo 'NATIVE_PROXY_RESIDUE_CONNECT_REFUSAL=FAIL' >&2
+  exit 1
+fi
+python3 -c 'import json
+d=json.load(open("/root/qa-native-proxy-connect-refusal.json"))
+assert d["ok"] is False and d["error"]["code"]=="guard_pending"'
+test "$(systemctl is-active server-connect.service || :)" = inactive
+test ! -e "$proxy" && test -e "$config"
+echo 'NATIVE_PROXY_RESIDUE_CONNECT_REFUSAL=PASS'
+"$sc" --json disconnect >/dev/null
+test ! -e "$config"
+
+# Recreate the PRE-PATCH reachable state with real Proxy Only active and a
+# retained inert native config, without replaying the crash or networking.
+"$sc" --json connect >/dev/null
+test "$(systemctl is-active server-connect.service)" = active
+printf 'qa-inert-native-config\n' > "$config"
+chmod 0600 "$config"
+if systemctl start "$unit" >/root/qa-native-proxy-failed-start.log 2>&1; then
+  echo 'NATIVE_PROXY_FAILED_SERVICE=FAIL (unclaimed Core started)' >&2
+  exit 1
+fi
+test "$(systemctl is-active "$unit" || :)" = failed
+"$sc" --json disconnect >/dev/null
+test "$(systemctl is-active server-connect.service || :)" = inactive
+test "$(systemctl is-active "$unit" || :)" = inactive
+test ! -e "$config" && test ! -e "$claim" && test ! -e "$proxy"
+"$sc" --json native-status | python3 -c 'import json,sys
+d=json.load(sys.stdin)["data"]
+assert d["desired"]=="direct" and d["observed"]=="inactive" and not d["recovery_claim_present"]'
+"$sc" --json disconnect >/dev/null
+echo 'NATIVE_PROXY_RESIDUE_SINGLE_DISCONNECT=PASS (both owned units fully reconciled)'
+
+# A failure AFTER Proxy Only systemctl start but BEFORE Desired=proxy was
+# persisted can leave a genuinely ACTIVE owned proxy under saved Direct.
+# Stage precisely that partial-write aftermath without trying to make the
+# state directory unwritable (which would also sabotage safe Disconnect).
+"$sc" --json connect >/dev/null
+test "$(systemctl is-active server-connect.service)" = active
+python3 - <<'PYPROXYSTATE'
+import json,os
+path="/var/lib/server-connect/state.json"
+with open(path,encoding="utf-8") as f:
+    state=json.load(f)
+assert state["desired"]=="proxy"
+state["desired"]="direct"
+tmp=path+".qa-partial-write"
+with open(tmp,"w",encoding="utf-8") as f:
+    json.dump(state,f)
+    f.flush()
+    os.fsync(f.fileno())
+os.chmod(tmp,0o600)
+os.replace(tmp,path)
+PYPROXYSTATE
+printf 'qa-inert-native-config\n' > "$config"
+chmod 0600 "$config"
+if systemctl start "$unit" >/root/qa-native-proxy-failed-start.log 2>&1; then
+  echo 'NATIVE_PROXY_FAILURE_BEFORE_MODE_SAVE=FAIL (unclaimed Core started)' >&2
+  exit 1
+fi
+test "$(systemctl is-active "$unit" || :)" = failed
+"$sc" --json disconnect >/dev/null
+test "$(systemctl is-active server-connect.service || :)" = inactive
+test "$(systemctl is-active "$unit" || :)" = inactive
+test ! -e "$config" && test ! -e "$claim" && test ! -e "$proxy"
+echo 'NATIVE_PROXY_FAILURE_BEFORE_MODE_SAVE=PASS (active Proxy retired despite saved Direct)'
+
+# Failure of the SECOND owned cleanup must not be reported as success. The
+# tamper is confined to the disposable guest; exact native unit bytes are
+# restored before retry. No private profile or external resource is changed.
+"$sc" --json connect >/dev/null
+test "$(systemctl is-active server-connect.service)" = active
+printf 'qa-inert-native-config\n' > "$config"
+chmod 0600 "$config"
+if systemctl start "$unit" >/root/qa-native-proxy-failed-start.log 2>&1; then
+  echo 'NATIVE_PROXY_PARTIAL_FAILURE_SETUP=FAIL' >&2
+  exit 1
+fi
+test "$(systemctl is-active "$unit" || :)" = failed
+cp -p /etc/systemd/system/"$unit" /root/qa-native-proxy-original-unit
+printf '\n#disconnected-qa-untrusted-unit-change\n' >> /etc/systemd/system/"$unit"
+if "$sc" --json disconnect >/root/qa-native-proxy-partial.json; then
+  echo 'NATIVE_PROXY_PARTIAL_FAILURE_REFUSED=FAIL (incorrect complete success)' >&2
+  exit 1
+fi
+python3 -c 'import json
+d=json.load(open("/root/qa-native-proxy-partial.json"))
+assert d["ok"] is False and d["error"]["code"]=="service_conflict"'
+test "$(systemctl is-active server-connect.service || :)" = inactive
+test -e "$config" && test ! -e "$proxy"
+cp -p /root/qa-native-proxy-original-unit /etc/systemd/system/"$unit"
+"$sc" --json disconnect >/dev/null
+test "$(systemctl is-active "$unit" || :)" = inactive
+test "$(systemctl is-active server-connect.service || :)" = inactive
+test ! -e "$config" && test ! -e "$claim" && test ! -e "$proxy"
+(cd / && sha256sum --quiet -c /root/qa-native-proxy-profile-hashes)
+for timer in server-connect-smart-health.timer server-connect-activation-recover.timer; do
+  test "$(systemctl is-active "$timer" || :)" = inactive
+done
+rm -f /root/qa-native-proxy-connect-refusal.json /root/qa-native-proxy-failed-start.log \
+      /root/qa-native-proxy-partial.json /root/qa-native-proxy-original-unit \
+      /root/qa-native-proxy-profile-hashes
+echo 'NATIVE_PROXY_PARTIAL_FAILURE_RETRY=PASS (error before complete cleanup, then safe retry)'
+QANATIVEPROXY
+assert_network_unchanged native-proxy-recovery "$offline_before"
+test "$(docker exec "$container" /usr/sbin/nft -j list ruleset)" = "$nft_before"
+verify_host_services native-proxy-recovery
+echo 'NATIVE_PROXY_RECOVERY_BASELINE=PASS (unchanged kernel/nft and SSH/HTTP)'
 if [[ $qa_version == 13 ]]; then docker exec "$container" /bin/sh /root/qa-wp-fpm.sh cleanup; fi
 run_offline uninstall --uninstall
 verify_clean_uninstall

@@ -754,13 +754,17 @@ func checkedConnectActivity(observe func() (string, error)) (string, error) {
 }
 
 func (m *Manager) Connect() error {
-	if err := m.verifyUnitOwnership(); err != nil {
-		return err
-	}
-	if err := EnsureCore(m.Core); err != nil {
-		return err
-	}
-	return m.withLock(func() error { return m.connectLocked(m.unitActive) })
+	// Use the same outer transition as Native Connect/Disconnect. The
+	// Manager lock must stay nested: systemd native stop hooks need .lock.
+	return m.withNativeTransition(func() error {
+		if err := m.verifyUnitOwnership(); err != nil {
+			return err
+		}
+		if err := EnsureCore(m.Core); err != nil {
+			return err
+		}
+		return m.withLock(func() error { return m.connectLocked(m.unitActive) })
+	})
 }
 
 // connectLocked holds the existing exclusive Manager lock. Only its
@@ -782,6 +786,14 @@ func (m *Manager) connectLocked(observe func() (string, error)) error {
 		return Fault("guard_pending", "native recovery claim must be cleared before Proxy Only activation")
 	} else if !os.IsNotExist(claimErr) {
 		return claimErr
+	}
+	// ExecStopPost retains the inert native config after a verified crash
+	// recovery. Never start Proxy Only across that unresolved native
+	// lifecycle; explicit Disconnect must finish it first.
+	if _, configErr := readRegular(filepath.Join(m.Dir, nativeConfigFile)); configErr == nil {
+		return Fault("guard_pending", "finish native recovery with Disconnect before starting Proxy Only")
+	} else if !os.IsNotExist(configErr) {
+		return configErr
 	}
 	if s.Selected == "" {
 		return errors.New("select a profile before connecting")
@@ -859,58 +871,121 @@ func (m *Manager) connectLocked(observe func() (string, error)) error {
 	return nil
 }
 
-func (m *Manager) Disconnect() error {
-	var native bool
-	if err := m.withLock(func() error {
+// A crashed native Core can restore Direct and retire its one-use claim while
+// retaining an inert private config and systemd failure evidence. Explicit
+// Disconnect must account for BOTH owned services, even if saved mode did not
+// match a partial service start. Called only under the shared transition lock.
+type disconnectPlan struct {
+	native   bool
+	hasClaim bool
+}
+
+func (m *Manager) planDisconnect() (disconnectPlan, error) {
+	var plan disconnectPlan
+	err := m.withLock(func() error {
 		state, err := m.load()
 		if err != nil {
 			return err
 		}
-		native = state.Desired == "smart"
-		_, claimErr := m.readNativeSession()
-		if claimErr == nil {
-			native = true
+		plan.native = state.Desired == "smart"
+		if _, claimErr := m.readNativeSession(); claimErr == nil {
+			plan.hasClaim = true
+			plan.native = true
 		} else if !os.IsNotExist(claimErr) {
 			return claimErr
 		}
-		return nil
-	}); err != nil {
-		return err
-	}
-	if native {
-		return m.DisconnectNativeSmartRouting()
-	}
-	return m.withLock(func() error {
-		if phase, err := m.pendingSmartTUNTrial(); err != nil {
-			return err
-		} else if phase != "" {
-			return Fault("guard_pending", "cannot claim Direct while a guarded TUN trial remains")
-		}
-		// Stop first: never claim Direct if our proxy process is still active.
-		if e := m.systemctl("stop"); e != nil {
-			return e
-		}
-		if e := m.systemctl("disable"); e != nil {
-			return e
-		}
-		s, e := m.load()
-		if e != nil {
-			return e
-		}
-		s.Desired = "direct"
-		if e = m.save(s); e != nil {
-			return e
-		}
-		path := filepath.Join(m.Dir, "runtime.json")
-		if _, e := readRegular(path); e == nil {
-			if e = os.Remove(path); e != nil {
-				return e
+		if !plan.hasClaim {
+			if _, configErr := readRegular(filepath.Join(m.Dir, nativeConfigFile)); configErr == nil {
+				plan.native = true
+			} else if !os.IsNotExist(configErr) {
+				return configErr
 			}
-		} else if !os.IsNotExist(e) {
-			return e
+		}
+		// A claim cannot be silently retired while a different mode is
+		// committed; a Smart mode without its claim has no cleanup identity.
+		if state.Desired == "proxy" && plan.hasClaim ||
+			state.Desired == "smart" && !plan.hasClaim {
+			return Fault("guard_pending", "conflicting or missing native recovery claim")
 		}
 		return nil
 	})
+	return plan, err
+}
+
+// Kept as a small injectable lifecycle sequence so partial-success and
+// cross-mode transitions are tested without invoking privileged systemd.
+func (m *Manager) disconnectWith(proxyCleanup, nativeCleanup func() error) error {
+	return m.withNativeTransition(func() error {
+		plan, err := m.planDisconnect()
+		if err != nil {
+			return err
+		}
+		// An outstanding native claim owns kernel restoration: recover
+		// before any other path can persist a new Direct state.
+		if plan.hasClaim {
+			if err := nativeCleanup(); err != nil {
+				return err
+			}
+			return proxyCleanup()
+		}
+		// Without a claim, Proxy Only may already be active despite a
+		// failed state save. Stop it first; report errors, never success
+		// with an active proxy or remaining inert native config.
+		if err := proxyCleanup(); err != nil {
+			return err
+		}
+		if plan.native {
+			return nativeCleanup()
+		}
+		return nil
+	})
+}
+
+func (m *Manager) Disconnect() error {
+	return m.disconnectWith(
+		func() error { return m.withLock(m.disconnectProxyOnlyLocked) },
+		m.disconnectNativeSmartRoutingUnlocked,
+	)
+}
+
+// Caller holds .lock (possibly inside .native-transition.lock).
+// Proxy Only has no native ExecStopPost; its systemctl transitions may safely
+// retain .lock, unlike the native cleanup above.
+func (m *Manager) disconnectProxyOnlyLocked() error {
+	if phase, err := m.pendingSmartTUNTrial(); err != nil {
+		return err
+	} else if phase != "" {
+		return Fault("guard_pending", "cannot claim Direct while a guarded TUN trial remains")
+	}
+	if e := m.systemctl("stop"); e != nil {
+		return e
+	}
+	if e := m.systemctl("disable"); e != nil {
+		return e
+	}
+	// An acknowledged stop is not a license to claim Direct if the owned
+	// proxy remained active or systemd could not give a reliable observation.
+	activity, activityErr := m.unitActive()
+	if activityErr != nil || (activity != "inactive" && activity != "failed") {
+		return Fault("guard_pending", "Proxy Only stop could not be verified")
+	}
+	s, e := m.load()
+	if e != nil {
+		return e
+	}
+	s.Desired = "direct"
+	if e = m.save(s); e != nil {
+		return e
+	}
+	path := filepath.Join(m.Dir, "runtime.json")
+	if _, e := readRegular(path); e == nil {
+		if e := os.Remove(path); e != nil {
+			return e
+		}
+	} else if !os.IsNotExist(e) {
+		return e
+	}
+	return nil
 }
 func (m *Manager) proxyURL() (*url.URL, error) {
 	var raw string
