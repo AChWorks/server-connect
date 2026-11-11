@@ -17,6 +17,7 @@ from contextlib import ExitStack
 MAGIC = b"SCQA-V6-WIRE"
 TCP_BYTES = 128 * 1024
 UDP_BYTES = 900
+UDP_MAX_BYTES = 4096  # bounded isolated QA datagram, not a public echo service
 TCP_PORT = 19192
 UDP_PORT = 19193
 # Explicitly bind one independent UDP socket per loopback destination.
@@ -118,11 +119,21 @@ class UDP6(socketserver.ThreadingUDPServer):
     daemon_threads = True
 
 
+def udp_request_size(payload):
+    if len(payload) < HEADER:
+        raise ValueError("truncated UDP request header")
+    size = struct.unpack("!I", payload[HEADER - 4:HEADER])[0]
+    if not (64 <= size <= UDP_MAX_BYTES) or len(payload) != HEADER + size:
+        raise ValueError("untrusted UDP request size")
+    return size
+
+
 class UDPHandler(socketserver.BaseRequestHandler):
     def handle(self):
         payload, sock = self.request
         try:
-            sock.sendto(response(payload, self.client_address[0], UDP_BYTES), self.client_address)
+            size = udp_request_size(payload)
+            sock.sendto(response(payload, self.client_address[0], size), self.client_address)
         except (OSError, ValueError):
             return
 
@@ -150,17 +161,17 @@ def tcp_probe(destination, token):
         return recv_exact(sock, len(MAGIC) + 16 + 16 + TCP_BYTES)
 
 
-def udp_probe(destination, token):
+def udp_probe(destination, token, size=UDP_BYTES):
     with socket.socket(socket.AF_INET6, socket.SOCK_DGRAM) as sock:
         sock.settimeout(2)
-        sock.sendto(request(token, UDP_BYTES), (destination, UDP_PORT))
-        reply, source = sock.recvfrom(1500)
+        sock.sendto(request(token, size), (destination, UDP_PORT))
+        reply, source = sock.recvfrom(UDP_MAX_BYTES + 128)
         if source[0] != destination:
             raise ValueError("UDP reply came from a different IPv6 destination")
         return reply
 
 
-def probe(transport, destination, expected_source, mode):
+def probe(transport, destination, expected_source, mode, payload_size=None):
     if transport not in ("tcp", "udp") or mode not in ("reply", "no-reply"):
         raise ValueError("invalid IPv6 QA mode")
     if destination not in UDP_BIND_ADDRESSES:
@@ -170,9 +181,23 @@ def probe(transport, destination, expected_source, mode):
             raise ValueError("invalid IPv6 positive source expectation")
     elif expected_source != "none":
         raise ValueError("negative IPv6 expectation requires no source")
+    size = UDP_BYTES
+    if payload_size is not None:
+        if (transport != "udp" or not isinstance(payload_size, str) or
+                not payload_size.isascii() or not payload_size.isdecimal() or
+                str(int(payload_size)) != payload_size):
+            raise ValueError("invalid UDP payload size argument")
+        size = int(payload_size)
+        if not 64 <= size <= UDP_MAX_BYTES:
+            raise ValueError("UDP payload size outside bounded fixture")
     token = secrets.token_hex(8).encode("ascii")
     try:
-        value = tcp_probe(destination, token) if transport == "tcp" else udp_probe(destination, token)
+        if transport == "tcp":
+            value = tcp_probe(destination, token)
+        elif payload_size is None:
+            value = udp_probe(destination, token)
+        else:
+            value = udp_probe(destination, token, size)
     except (OSError, ConnectionError) as exc:
         if mode != "no-reply":
             raise
@@ -182,21 +207,24 @@ def probe(transport, destination, expected_source, mode):
         return
     if mode == "no-reply":
         kind = unexpected_response_kind(value, token, destination,
-                                        TCP_BYTES if transport == "tcp" else UDP_BYTES)
+                                        TCP_BYTES if transport == "tcp" else size)
         print(f"REAL_TUN_IPV6_UNEXPECTED_RESPONSE transport={transport} classification={kind}",
               file=sys.stderr, flush=True)
         raise ValueError("VPN-required IPv6 connection unexpectedly reached peer")
-    verify(value, token, expected_source, TCP_BYTES if transport == "tcp" else UDP_BYTES)
-    print(f"REAL_TUN_IPV6_{transport.upper()}=PASS (source={expected_source})", flush=True)
+    verify(value, token, expected_source, TCP_BYTES if transport == "tcp" else size)
+    if payload_size is None:
+        print(f"REAL_TUN_IPV6_{transport.upper()}=PASS (source={expected_source})", flush=True)
+    else:
+        print(f"REAL_TUN_IPV6_UDP_PAYLOAD=PASS (size={size} source={expected_source})", flush=True)
 
 
 def main(args):
     if args == ["serve"]:
         serve()
-    elif len(args) == 4:
+    elif len(args) in (4, 5):
         probe(*args)
     else:
-        raise ValueError("usage: serve | tcp|udp DEST EXPECTED_SOURCE reply|no-reply")
+        raise ValueError("usage: serve | tcp|udp DEST EXPECTED_SOURCE reply|no-reply [UDP_SIZE]")
 
 
 if __name__ == "__main__":

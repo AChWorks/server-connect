@@ -1554,6 +1554,7 @@ for native_mode in default bypass_iran; do
     -e "SC_QA_TUN_NATIVE_DNS_MODE=$native_mode" \
     "$container" /bin/sh /root/qa-host-tun-path.sh | tee "$native_dns_log"
   for marker in NATIVE_DNS_PRE_TUN_POSITIVE_CONTROL NATIVE_DNS_SELECTED_ADDRESS_PRECEDENCE \
+                NATIVE_IPV6_UDP_MTU NATIVE_IPV6_UDP_REDUCED_UNDERLAY NATIVE_IPV6_UDP_OUTAGE \
                 NATIVE_DNS_UNMATCHED_VPN_RESOLVER NATIVE_DNS_OUTAGE_FAIL_CLOSED \
                 NATIVE_DNS_DIRECT_OUTAGE_CONTROL; do
     grep -Fx "$marker=PASS ($native_mode)" "$native_dns_log" >/dev/null

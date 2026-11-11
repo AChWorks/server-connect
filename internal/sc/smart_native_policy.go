@@ -27,6 +27,14 @@ type NativePolicyOptions struct {
 const NativePolicyTableIndex = 27432
 const NativePolicyRuleIndex = 14200
 
+// NativePolicyTunMTU is the virtual TUN MTU for the current official-Core
+// native policy, not the physical underlay MTU. The separately retained
+// experimental manager-owned native trial has its own fixed 1400-byte link
+// and journal; do not alter that trial while its recovery path is needed.
+// A 1400-byte current-native TUN fragmented IPv6 UDP above a 1352-byte
+// application body, and those fragments did not reach the selected peer.
+const NativePolicyTunMTU = 9000
+
 // NativeSmartRoutingConfig deliberately delegates TUN, routing and nftables to
 // official sing-box. The separate activation/runtime guards and host admission
 // are not implemented by this compiler; callers MUST NOT treat a successful
@@ -172,7 +180,7 @@ func NativeSmartRoutingConfig(profile Profile, opts NativePolicyOptions, operato
 		"inbounds": []any{map[string]any{
 			"type": "tun", "tag": "smart-tun",
 			"interface_name": opts.InterfaceName, "address": address,
-			"mtu": 1400, "stack": "gvisor", "auto_route": true, "auto_redirect": true,
+			"mtu": NativePolicyTunMTU, "stack": "gvisor", "auto_route": true, "auto_redirect": true,
 			"iproute2_table_index": NativePolicyTableIndex, "iproute2_rule_index": NativePolicyRuleIndex,
 			"strict_route": true, "dns_mode": "disabled",
 		}},

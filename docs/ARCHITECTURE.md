@@ -47,6 +47,17 @@ to read the saved profile and rules, validates the compiled official sing-box
 config, checks free policy slots, and stages a private digest-bound recovery
 claim before requesting systemd activation. No second Go router is created.
 
+The current official-Core native TUN config uses a 9000-byte **virtual**
+MTU, not a statement about the physical underlay MTU. The previous 1400-byte
+native setting fragmented ordinary IPv6 UDP application bodies above 1352
+bytes, and the selected pinned gVisor path did not deliver those fragments.
+Avoiding premature fragmentation at this bounded payload size does not prove
+arbitrary IPv6 fragment reassembly or PMTUD. The **separate, older experimental
+manager-owned TUN trial** still creates a 1400-byte link: its existing exact
+journal/alias/link-hash recovery and collision checks must remain unchanged
+until that obsolete trial is safely retired. The official-Core native path
+uses its own compile/Apply lifecycle rather than that legacy link creator.
+
 The native systemd unit uses ExecStartPre to check the desired mode, selected
 profile, config receipt, underlay and vacant native policy resources. Its
 ExecStopPost independently invokes scoped recovery after normal stop, failed
