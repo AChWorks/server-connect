@@ -21,6 +21,10 @@ refuse() {
 # Only this disconnected QA guest's route text may be logged; the fixture
 # must never print a physical host's network configuration or profile data.
 actual_default=$(ip -4 route show default) || refuse 'cannot inspect isolated default route'
+# iproute2 can render a semantically identical default with trailing blanks;
+# normalize ONLY line-end blanks, not route tokens, links or extra routes.
+actual_default=$(printf '%s\n' "$actual_default" | sed 's/[[:blank:]]*$//') ||
+  refuse 'cannot normalize isolated default route'
 [ "$actual_default" = "default dev lo scope link metric 4242" ] ||
   refuse "unexpected isolated default route (observed: ${actual_default:-<none>})"
 for name in scouter0 docker0 br-foreign sctun0; do
