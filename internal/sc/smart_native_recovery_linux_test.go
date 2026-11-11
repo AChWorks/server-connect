@@ -12,8 +12,9 @@ import (
 	"testing"
 )
 
-// Rootless E2E is explicitly injected into a fresh network namespace with
-// the real official sing-box Core; never run recovery on the test host.
+// Run only in the disconnected disposable installed-host guest against an
+// exact staged post-Core-crash kernel layout. This exercises real ip/nft
+// cleanup, not the Core process or a live VPN/production host.
 func TestNativeRedirectStoppedCoreGuest(t *testing.T) {
 	if os.Getenv("SC_NATIVE_RECOVERY_GUEST") != "yes" {
 		t.Skip("requires isolated, owned network namespace")

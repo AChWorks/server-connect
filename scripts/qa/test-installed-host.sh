@@ -92,6 +92,7 @@ sh -n scripts/qa/host-native-dns-policy.sh
 sh -n scripts/qa/host-product-tun-trial.sh
 sh -n scripts/qa/host-supervised-product-tun.sh
 sh -n scripts/qa/host-native-product-tun.sh
+sh -n scripts/qa/host-native-docker-recovery.sh
 sh -n scripts/qa/host-owned-tun-boundary.sh
 sh -n scripts/qa/tun-guard-unit-lab.sh
 bash scripts/qa/test-installer-rollback-backups.sh
@@ -145,9 +146,9 @@ trap 'exit 143' TERM
 
 # Compile only on the build host. Privileged native tests execute solely in
 # the explicitly gated disconnected guest below, never on the runner/Dev.
-if [[ $qa_version == 13 ]]; then
-  CGO_ENABLED=0 go test -c -o "$scratch/qa-native-nft-cas-test" ./internal/sc
-fi
+# One candidate-built test executable serves the Debian12/13 native Docker
+# crash-recovery kernel fixture; Debian13 also runs the existing nft CAS lab.
+CGO_ENABLED=0 go test -c -o "$scratch/qa-native-nft-cas-test" ./internal/sc
 
 printf '=== Disposable Debian %s preparation (network permitted BEFORE isolation) ===\n' "$qa_version"
 docker build --pull -f scripts/qa/Dockerfile.host-systemd \
@@ -1163,6 +1164,24 @@ PYNFTRESTORED
 echo 'HOST_NFTABLES_PREFLIGHT=PASS (installed CLI, actual foreign table drift, exact cleanup, private evidence)'
 assert_network_unchanged first-install "$offline_before"
 verify_host_services first-install
+# This post-SIGKILL kernel footprint came from a real Docker-enabled IRA-124
+# field failure. Execute the actual native recovery binary against matching
+# Linux/nft objects inside this disconnected Debian12/13 systemd guest.
+# It does NOT claim an actual Core crash or selected-VPN field proof.
+docker cp "$scratch/qa-native-nft-cas-test" "$container:/root/qa-native-recovery-test"
+docker cp "$root/scripts/qa/host-native-docker-recovery.sh" "$container:/root/qa-native-docker-recovery.sh"
+docker exec -e SC_QA_NATIVE_DOCKER_GUEST=yes "$container" \
+  /bin/sh /root/qa-native-docker-recovery.sh |
+  tee "$scratch/native-docker-recovery.log"
+for marker in NATIVE_DOCKER_SIGKILL_LAYOUT_RECOVERY \
+              NATIVE_DOCKER_FOREIGN_BRIDGE_REFUSAL \
+              NATIVE_DOCKER_FOREIGN_REFUSAL_RETRY \
+              NATIVE_DOCKER_GUEST_FULL_BASELINE_RESTORED; do
+  grep -F "$marker=PASS" "$scratch/native-docker-recovery.log" >/dev/null
+done
+docker exec "$container" rm -f /root/qa-native-recovery-test /root/qa-native-docker-recovery.sh
+assert_network_unchanged native-docker-crash-recovery "$offline_before"
+verify_host_services native-docker-crash-recovery
 # Keep the installed negative CLI contract, without a separate transitional
 # script, container copy or an extra historical process-scanning fixture.
 if docker exec "$container" /usr/local/bin/server-connect --json workload-observe \
