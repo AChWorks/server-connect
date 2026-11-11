@@ -382,8 +382,8 @@ jobs:
           HTTP_PID=$!
           trap 'kill "$HTTP_PID" 2>/dev/null || true' EXIT
           sleep 1
-          scripts/bootstrap-online.sh --archive-url http://127.0.0.1:19179/bundle.tar.gz --sha256 "$DIGEST" --verify-only
-          if scripts/bootstrap-online.sh --archive-url http://127.0.0.1:19179/bundle.tar.gz --sha256 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa --verify-only;then
+          scripts/bootstrap-online.sh --local-qa --archive-url http://127.0.0.1:19179/bundle.tar.gz --sha256 "$DIGEST" --verify-only
+          if scripts/bootstrap-online.sh --local-qa --archive-url http://127.0.0.1:19179/bundle.tar.gz --sha256 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa --verify-only;then
             echo 'Digest mismatch unexpectedly accepted' >&2
             exit 1
           fi
@@ -397,7 +397,7 @@ jobs:
               tar.addfile(entry,io.BytesIO(body))
           PYQA
           BAD_DIGEST=$(sha256sum build/ci/http/traversal.tar.gz | cut -d' ' -f1)
-          if scripts/bootstrap-online.sh --archive-url http://127.0.0.1:19179/traversal.tar.gz --sha256 "$BAD_DIGEST" --verify-only;then
+          if scripts/bootstrap-online.sh --local-qa --archive-url http://127.0.0.1:19179/traversal.tar.gz --sha256 "$BAD_DIGEST" --verify-only;then
             echo 'Unsafe archive traversal unexpectedly accepted' >&2
             exit 1
           fi
