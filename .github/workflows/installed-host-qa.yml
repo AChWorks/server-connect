@@ -46,7 +46,11 @@ jobs:
       github.event.pull_request.head.repo.id == github.event.repository.id &&
       github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: ubuntu-24.04
-    timeout-minutes: 25
+    # Debian 13 completed signed offline install/verify/uninstall and legacy
+    # lifecycle checks but exceeded the old 25-minute ceiling during the
+    # final Docker restart acceptance (run 43105394796). Preserve all tests;
+    # budget for normal hosted-runner variance without changing the trust gate.
+    timeout-minutes: 35
     strategy:
       fail-fast: false
       matrix:
