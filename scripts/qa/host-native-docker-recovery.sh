@@ -18,7 +18,11 @@ refuse() {
 [ -x /root/qa-native-recovery-test ] || refuse 'missing executable recovery test binary'
 [ "$(systemctl is-active server-connect-native-tun.service || :)" != active ] || refuse 'native TUN service active'
 [ "$(systemctl is-active server-connect.service || :)" != active ] || refuse 'proxy service active'
-[ "$(ip -4 route show default)" = "default dev lo scope link metric 4242" ] || refuse 'unexpected isolated default route'
+# Only this disconnected QA guest's route text may be logged; the fixture
+# must never print a physical host's network configuration or profile data.
+actual_default=$(ip -4 route show default) || refuse 'cannot inspect isolated default route'
+[ "$actual_default" = "default dev lo scope link metric 4242" ] ||
+  refuse "unexpected isolated default route (observed: ${actual_default:-<none>})"
 for name in scouter0 docker0 br-foreign sctun0; do
   if ip link show dev "$name" >/dev/null 2>&1; then
     refuse "unexpected existing interface $name"
