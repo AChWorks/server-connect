@@ -535,6 +535,25 @@ case "${SC_QA_TUN_IPV6-}" in
 esac
 
 # Exclusive IPv4-only live IPv6 drift test within the disconnected QA guest.
+# This is a distinct packet lab for the integrated native policy compiler,
+# never the older SmartTUNCandidateConfig or production Apply.
+case "${SC_QA_TUN_NATIVE_DNS-}" in
+  '') native_dns_trial=no ;;
+  yes)
+    if [ "$ipv6_trial" != yes ] || [ -n "${SC_QA_TUN_PRODUCT_LAB-}" ] ||
+       [ -n "${SC_QA_TUN_OWNED_BOUNDARY-}" ] || [ -n "${SC_QA_TUN_SUPERVISED-}" ] ||
+       [ -n "${SC_QA_TUN_GUARD_LAB-}" ] || [ -n "${SC_QA_TUN_OUTAGE_FAULT-}" ] ||
+       [ -n "${SC_QA_TUN_CLEANUP_FAULT-}" ]; then
+      echo 'NATIVE_DNS_WIRE=FAIL (requires exclusive dual-stack disconnected guest)' >&2
+      exit 2
+    fi
+    case "${SC_QA_TUN_NATIVE_DNS_MODE-}" in
+      default|bypass_iran) native_dns_trial=yes ;;
+      *) echo 'NATIVE_DNS_WIRE=FAIL (invalid native policy mode)' >&2; exit 2 ;;
+    esac ;;
+  *) echo 'NATIVE_DNS_WIRE=FAIL (unsupported mode)' >&2; exit 2 ;;
+esac
+
 case "${SC_QA_TUN_IPV6_DRIFT-}" in
   '') ;;
   yes)
@@ -723,6 +742,11 @@ ip -n "$peer" link set scqapeer0 up
 # Internet connectivity. Only source-path choice is under test.
 ip -n "$peer" addr add 5.22.0.10/32 dev lo
 ip -n "$peer" addr add 8.8.8.8/32 dev lo
+if [ "$native_dns_trial" = yes ]; then
+  ip -n "$peer" addr add 1.1.1.1/32 dev lo
+  ip -n "$peer" addr add 5.22.0.11/32 dev lo
+  ip -n "$peer" addr add 9.9.9.9/32 dev lo
+fi
 ip -n "$peer" addr add 198.51.100.42/32 dev lo
 if [ "$ipv6_trial" = yes ]; then
   # Disconnected guest only. No claimed Iranian IPv6 geolocation or
@@ -735,6 +759,13 @@ if [ "$ipv6_trial" = yes ]; then
   for addr in 2606:4700:5::10 2606:4700:5::11 2606:4700:8::8 2606:4700:8::9; do
     ip -n "$peer" -6 addr add "$addr"/128 dev lo
   done
+  if [ "$native_dns_trial" = yes ]; then
+    # Both aliases are inside the exact pinned October 2026 Iran estimate;
+    # only the second has an explicit native VPN /128 override.
+    for addr in 2001:470:f486::10 2001:470:f486::11; do
+      ip -n "$peer" -6 addr add "$addr"/128 dev lo
+    done
+  fi
   ip -6 route add default via fd73:1::2 dev "$edge" metric 100
   default_v6_added=yes
 fi
@@ -754,6 +785,23 @@ table inet scqawitness {
   counter payload_udp_direct_packets { }
   counter direct_dns_udp_packets { }
   counter direct_dns_tcp_packets { }
+  counter native_dns_v6_vpn_udp { }
+  counter native_dns_v6_vpn_tcp { }
+  counter native_dns_v6_foreign_udp { }
+  counter native_dns_v6_foreign_tcp { }
+  counter native_dns_resolver_udp { }
+  counter native_dns_resolver_tcp { }
+  counter native_dns_v4_vpn_udp { }
+  counter native_dns_v4_vpn_tcp { }
+  counter native_dns_v6_direct_udp { }
+  counter native_dns_v4_direct_udp { }
+  counter native_dns_v4_direct_tcp { }
+  counter native_dns_v4_private_udp { }
+  counter native_dns_v4_private_tcp { }
+  counter native_dns_v6_country_udp { }
+  counter native_dns_v6_country_tcp { }
+  counter native_dns_v6_country_override_udp { }
+  counter native_dns_v6_country_override_tcp { }
   counter domestic_tls_direct_packets { }
   counter foreign_tls_direct_packets { }
   counter native_app_direct_packets { }
@@ -772,6 +820,23 @@ table inet scqawitness {
     iifname "scqapeer0" ip daddr 8.8.8.8 udp dport 19189 counter name payload_udp_direct_packets
     iifname "scqapeer0" ip daddr 8.8.8.8 udp dport 53 counter name direct_dns_udp_packets
     iifname "scqapeer0" ip daddr 8.8.8.8 tcp dport 53 counter name direct_dns_tcp_packets
+    iifname "scqapeer0" ip6 daddr 2606:4700:5::10 udp dport 53 counter name native_dns_v6_vpn_udp
+    iifname "scqapeer0" ip6 daddr 2606:4700:5::10 tcp dport 53 counter name native_dns_v6_vpn_tcp
+    iifname "scqapeer0" ip6 daddr 2606:4700:8::8 udp dport 53 counter name native_dns_v6_foreign_udp
+    iifname "scqapeer0" ip6 daddr 2606:4700:8::8 tcp dport 53 counter name native_dns_v6_foreign_tcp
+    iifname "scqapeer0" ip daddr 1.1.1.1 udp dport 53 counter name native_dns_resolver_udp
+    iifname "scqapeer0" ip daddr 1.1.1.1 tcp dport 53 counter name native_dns_resolver_tcp
+    iifname "scqapeer0" ip daddr 5.22.0.11 udp dport 53 counter name native_dns_v4_vpn_udp
+    iifname "scqapeer0" ip daddr 5.22.0.11 tcp dport 53 counter name native_dns_v4_vpn_tcp
+    iifname "scqapeer0" ip6 daddr 2606:4700:8::9 udp dport 53 counter name native_dns_v6_direct_udp
+    iifname "scqapeer0" ip daddr 9.9.9.9 udp dport 53 counter name native_dns_v4_direct_udp
+    iifname "scqapeer0" ip daddr 9.9.9.9 tcp dport 53 counter name native_dns_v4_direct_tcp
+    iifname "scqapeer0" ip daddr 10.254.72.2 udp dport 53 counter name native_dns_v4_private_udp
+    iifname "scqapeer0" ip daddr 10.254.72.2 tcp dport 53 counter name native_dns_v4_private_tcp
+    iifname "scqapeer0" ip6 daddr 2001:470:f486::10 udp dport 53 counter name native_dns_v6_country_udp
+    iifname "scqapeer0" ip6 daddr 2001:470:f486::10 tcp dport 53 counter name native_dns_v6_country_tcp
+    iifname "scqapeer0" ip6 daddr 2001:470:f486::11 udp dport 53 counter name native_dns_v6_country_override_udp
+    iifname "scqapeer0" ip6 daddr 2001:470:f486::11 tcp dport 53 counter name native_dns_v6_country_override_tcp
     iifname "scqapeer0" ip daddr 5.22.0.10 tcp dport 19181 counter name domestic_tls_direct_packets
     iifname "scqapeer0" ip daddr 8.8.8.8 tcp dport 19181 counter name foreign_tls_direct_packets
     iifname "scqapeer0" ip daddr 8.8.8.8 tcp dport 19187 counter name native_app_direct_packets
@@ -875,7 +940,29 @@ fi
 
 # The peer answers genuine DNS UDP and TCP messages. The A record identifies
 # the request source observed by an independent authoritative server.
-ip netns exec "$peer" /usr/bin/python3 -I -B -u /root/qa-tun-dns-peer.py \
+# The native IPv6 DNS peer binds fd73:1::2 on a fresh VETH. Linux may still
+# label that address tentative during DAD; binding then fails EADDRNOTAVAIL.
+# Wait only for this exact guest-owned address, not all link-local objects.
+if [ "$native_dns_trial" = yes ]; then
+  native_dns_dad_ready=no
+  native_dns_dad_attempts=0
+  while [ "$native_dns_dad_attempts" -lt 60 ]; do
+    if ip -n "$peer" -6 addr show dev scqapeer0 |
+       grep -Eq '^[[:space:]]*inet6 fd73:1::2/64 scope global[[:space:]]*$'; then
+      native_dns_dad_ready=yes
+      break
+    fi
+    native_dns_dad_attempts=$((native_dns_dad_attempts + 1))
+    sleep 0.1
+  done
+  if [ "$native_dns_dad_ready" != yes ]; then
+    echo 'NATIVE_DNS_WIRE=FAIL (peer IPv6 DAD not complete before bind)' >&2
+    exit 1
+  fi
+  echo 'NATIVE_DNS_PEER_DAD_READY=PASS'
+fi
+if [ "$native_dns_trial" = yes ]; then dns_peer_mode=native-v6; else dns_peer_mode=; fi
+ip netns exec "$peer" /usr/bin/python3 -I -B -u /root/qa-tun-dns-peer.py ${dns_peer_mode:+"$dns_peer_mode"} \
   >/run/sc-qa-tun-dns.log 2>&1 &
 dns_pid=$!
 
@@ -926,7 +1013,14 @@ while [ "$attempt" -lt 25 ]; do
   kill -0 "$udp_pid" 2>/dev/null || { echo "QA UDP service exited" >&2; exit 1; }
   kill -0 "$tls_pid" 2>/dev/null || { echo "QA TLS service exited" >&2; cat /run/sc-qa-tun-tls.log >&2; exit 1; }
   kill -0 "$native_apps_pid" 2>/dev/null || { echo "QA APT/Git origin exited" >&2; cat /run/sc-qa-tun-native-apps-server.log >&2; exit 1; }
-  kill -0 "$dns_pid" 2>/dev/null || { echo "QA DNS server exited" >&2; exit 1; }
+  kill -0 "$dns_pid" 2>/dev/null || {
+    echo 'QA DNS server exited' >&2
+    # Failure-only root-cause evidence from the strictly disconnected guest.
+    # The synthetic fixture log contains neither operator credentials nor
+    # user DNS traffic, and cleanup still removes its exact owned file.
+    tail -n 30 /run/sc-qa-tun-dns.log >&2 || :
+    exit 1
+  }
   attempt=$((attempt+1))
   sleep 0.2
 done
@@ -1092,6 +1186,14 @@ if [ "${SC_QA_TUN_PRODUCT_LAB-}" = yes ]; then
 fi
 if [ "${SC_QA_TUN_OWNED_BOUNDARY-}" = yes ]; then
   owned_tun_boundary_trial
+  exit 0
+fi
+
+# The current native policy/DNS route-order witness is a separate, strictly
+# disconnected packet trial; it exits through this same exact guest cleanup.
+if [ "$native_dns_trial" = yes ]; then
+  . /root/qa-native-dns-policy.sh
+  native_dns_policy_trial
   exit 0
 fi
 

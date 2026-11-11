@@ -88,6 +88,7 @@ sh -n scripts/qa/tun-wordpress-fpm.sh
 sh -n scripts/qa/host-activation-guard.sh
 sh -n scripts/qa/host-product-guard-trial.sh
 sh -n scripts/qa/host-tun-path.sh
+sh -n scripts/qa/host-native-dns-policy.sh
 sh -n scripts/qa/host-product-tun-trial.sh
 sh -n scripts/qa/host-supervised-product-tun.sh
 sh -n scripts/qa/host-native-product-tun.sh
@@ -1294,6 +1295,7 @@ docker cp "$root/scripts/qa/tun-ipv6-wire.py" "$container:/root/qa-tun-ipv6-wire
 docker cp "$root/scripts/qa/tun-wordpress-fpm.sh" "$container:/root/qa-tun-wordpress-fpm.sh"
 docker cp "$root/scripts/qa/tun-wp-check.py" "$container:/root/qa-tun-wp-check.py"
 docker cp "$root/scripts/qa/host-tun-path.sh" "$container:/root/qa-host-tun-path.sh"
+docker cp "$root/scripts/qa/host-native-dns-policy.sh" "$container:/root/qa-native-dns-policy.sh"
 docker cp "$root/scripts/qa/host-product-tun-trial.sh" "$container:/root/qa-product-tun-trial.sh"
 docker cp "$root/scripts/qa/host-supervised-product-tun.sh" "$container:/root/qa-supervised-product-tun.sh"
 docker cp "$root/scripts/qa/supervised-product-tun.py" "$container:/root/qa-supervised-product-tun.py"
@@ -1540,6 +1542,25 @@ grep -Fx 'REAL_TUN_IPV6_OVERRIDE_UDP_OUTAGE=PASS (no reply and unchanged native 
 grep -Fx 'REAL_TUN_IPV6_OUTAGE=PASS (VPN-required TCP/UDP failed closed, native Direct preserved)' "$ipv6_tun_log" >/dev/null
 grep -F 'REAL_TUN_LAB_CLEANUP=PASS' "$ipv6_tun_log" >/dev/null
 assert_tun_native_cleanup real-tun-ipv6-candidate-cleanup
+
+# The integrated native compiler, unlike the earlier SmartTUNCandidate
+# laboratory above, intercepts unmatched port-53 via its VPN-detoured DNS
+# server. Exercise the SAME Core and independent dual-stack wire witnesses in
+# both native modes. Every run uses a fresh disconnected network namespace.
+for native_mode in default bypass_iran; do
+  echo "NATIVE_DNS_LAB_STAGE=$native_mode"
+  native_dns_log="$scratch/native-dns-$native_mode.log"
+  docker exec -e SC_QA_TUN_IPV6=yes -e SC_QA_TUN_NATIVE_DNS=yes \
+    -e "SC_QA_TUN_NATIVE_DNS_MODE=$native_mode" \
+    "$container" /bin/sh /root/qa-host-tun-path.sh | tee "$native_dns_log"
+  for marker in NATIVE_DNS_PRE_TUN_POSITIVE_CONTROL NATIVE_DNS_SELECTED_ADDRESS_PRECEDENCE \
+                NATIVE_DNS_UNMATCHED_VPN_RESOLVER NATIVE_DNS_OUTAGE_FAIL_CLOSED \
+                NATIVE_DNS_DIRECT_OUTAGE_CONTROL; do
+    grep -Fx "$marker=PASS ($native_mode)" "$native_dns_log" >/dev/null
+  done
+  grep -F 'REAL_TUN_LAB_CLEANUP=PASS' "$native_dns_log" >/dev/null
+  assert_tun_native_cleanup "native-dns-$native_mode-cleanup"
+done
 
 # First native feasibility gate for an explicit manager-owned TUN boundary.
 # It reuses the disconnected topology; no production Apply is enabled.
@@ -1868,7 +1889,7 @@ if __name__ == "__main__":
 PYTLSCLEANUP
 )"
 echo 'SMART_HEALTH_QA_TLS_FIXTURE_EXACT_CLEANUP=PASS'
-docker exec "$container" /bin/rm -f /root/qa-tun-config-qa /root/qa-host-tun-path.sh \
+docker exec "$container" /bin/rm -f /root/qa-tun-config-qa /root/qa-host-tun-path.sh /root/qa-native-dns-policy.sh \
   /root/qa-tun-guard-unit-lab.sh /root/qa-product-tun-trial.sh /root/qa-tun-sni-client.py /root/qa-tun-native-apps.py \
   /root/qa-owned-tun-boundary.sh \
   /root/qa-native-product-tun.sh /root/qa-supervised-product-tun.sh \

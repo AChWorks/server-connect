@@ -2,6 +2,12 @@
 """Pure packet-contract tests; no privileged sockets or external DNS."""
 
 import importlib.util
+import json
+import ipaddress
+import errno
+import io
+import socket
+from unittest.mock import MagicMock, patch
 from pathlib import Path
 import struct
 import unittest
@@ -28,6 +34,129 @@ class DNSWireContract(unittest.TestCase):
             reply = PEER.response_for(packet, source)
             self.assertEqual(CLIENT.answer_ipv4(reply, packet), expected)
         self.assertIsNone(PEER.response_for(packet, "203.0.113.7"))
+
+    def test_dual_stack_responder_source_and_selected_dns_detour(self):
+        packet = CLIENT.question("native-ipv6-wire")
+        for source, expected in (("fd73:1::1", "192.0.2.11"),
+                                 ("2606:4700:5::10", "192.0.2.22"),
+                                 ("1.1.1.1", "192.0.2.33"),
+                                 ("5.22.0.11", "192.0.2.22")):
+            with self.subTest(source=source):
+                self.assertEqual(CLIENT.answer_ipv4(PEER.response_for(packet, source), packet), expected)
+        self.assertIsNone(PEER.response_for(packet, "fd73:1::999"))
+
+    def test_native_country_fixture_matches_the_bundled_estimate(self):
+        snapshot = json.loads((ROOT.parents[1] / "internal/sc/data/iran-dbip-lite-2026-10.json").read_text())
+        self.assertEqual(snapshot["as_of"], "2026-10-01")
+        for addr in ("2001:470:f486::10", "2001:470:f486::11"):
+            with self.subTest(address=addr):
+                self.assertTrue(any(ipaddress.ip_address(addr) in ipaddress.ip_network(cidr)
+                                    for cidr in snapshot["ipv6"]))
+        for addr in ("2606:4700:5::10", "9.9.9.9"):
+            with self.subTest(address=addr):
+                self.assertFalse(any(ipaddress.ip_address(addr) in ipaddress.ip_network(cidr)
+                                     for cidr in snapshot["ipv6" if ":" in addr else "ipv4"]))
+        self.assertTrue(any(ipaddress.ip_address("5.22.0.11") in ipaddress.ip_network(cidr)
+                            for cidr in snapshot["ipv4"]))
+
+    def test_extended_native_dns_selected_source_v4_v6_fixtures(self):
+        request = CLIENT.question("geo-v6-native")
+        for source, expected in (("10.254.72.1", "192.0.2.11"),
+                                 ("fd73:1::1", "192.0.2.11"),
+                                 ("8.8.8.8", "192.0.2.22"),
+                                 ("1.1.1.1", "192.0.2.33"),
+                                 ("2001:470:f486::11", "192.0.2.22")):
+            with self.subTest(source=source):
+                self.assertEqual(CLIENT.answer_ipv4(PEER.response_for(request, source), request), expected)
+
+    def test_core_reencoded_dns_answer_uncompressed_owner_is_valid(self):
+        packet = CLIENT.question("unmatched-v6-udp")
+        compressed = PEER.response_for(packet, "1.1.1.1")
+        # Actual Core hijack-dns can replace the 2-byte compression pointer
+        # with the full QNAME, preserving the exact question and A payload.
+        raw_owner = packet[12:-4]
+        uncompressed = compressed[:len(packet)] + raw_owner + compressed[len(packet) + 2:]
+        self.assertEqual(len(uncompressed), 102)
+        self.assertEqual(CLIENT.answer_ipv4(uncompressed, packet), "192.0.2.33")
+        self.assertEqual(CLIENT.answer_ipv4(compressed, packet), "192.0.2.33")
+        # An unrelated owner, extra bytes, wrong type or wrong question must
+        # still fail. TTL itself is valid metadata and not a path identity.
+        for bad in (
+            uncompressed[:len(packet)] + b"X" + uncompressed[len(packet) + 1:],
+            uncompressed + b"\0",
+            uncompressed[:-1],
+            uncompressed[:len(packet) + len(raw_owner)] + b"\x00\x1c" + uncompressed[len(packet) + len(raw_owner) + 2:],
+            uncompressed[:12] + b"X" + uncompressed[13:],
+        ):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                CLIENT.answer_ipv4(bad, packet)
+
+    def test_native_dual_stack_udp_uses_real_ipv6_socket_and_peer_tuple(self):
+        destination = "2606:4700:5::10"
+        sock = MagicMock()
+        sock.__enter__.return_value = sock
+        sock.recvfrom.return_value = (b"real-reply", (destination, 53, 0, 0))
+        with patch.object(CLIENT.socket, "socket", return_value=sock) as create:
+            self.assertEqual(CLIENT.wire_query(destination, "udp", b"dns-query"), b"real-reply")
+        create.assert_called_once_with(socket.AF_INET6, socket.SOCK_DGRAM)
+        sock.sendto.assert_called_once_with(b"dns-query", (destination, 53))
+        sock.recvfrom.return_value = (b"reply-from-wrong-ip", ("2606:4700:8::8", 53, 0, 0))
+        with patch.object(CLIENT.socket, "socket", return_value=sock):
+            with self.assertRaisesRegex(ValueError, "another endpoint"):
+                CLIENT.wire_query(destination, "udp", b"dns-query")
+
+    def test_native_outage_rejects_success_and_forged_dns_failures(self):
+        packet = CLIENT.question("native-outage")
+        failure = packet[:2] + struct.pack("!HHHHH", 0x8182, 1, 0, 0, 0) + packet[12:]
+        args = ["2606:4700:8::8", "none", "native-outage", "udp", "no-success"]
+        with patch.object(CLIENT, "wire_query", return_value=failure), \
+             patch("sys.stdout", new_callable=io.StringIO) as out:
+            CLIENT.main(args)
+            self.assertEqual(out.getvalue(), "REAL_TUN_DNS_NO_SUCCESS=PASS\n")
+        bad = (
+            PEER.response_for(packet, "2606:4700:8::8"),
+            failure[:2] + struct.pack("!HHHHH", 0x8183, 1, 0, 0, 0) + failure[12:],
+            failure[:-1], failure + b"X", failure[:-1] + b"X",
+            b"XX" + failure[2:],
+            failure[:2] + struct.pack("!HHHHH", 0x8182, 2, 0, 0, 0) + failure[12:],
+        )
+        for response in bad:
+            with self.subTest(response=response), patch.object(CLIENT, "wire_query", return_value=response):
+                with self.assertRaises(ValueError):
+                    CLIENT.main(args)
+        with patch.object(CLIENT, "wire_query", side_effect=OSError(errno.ENETUNREACH, "offline")), \
+             patch("sys.stdout", new_callable=io.StringIO) as out:
+            CLIENT.main(args)
+            self.assertIn("NO_RESPONSE=PASS", out.getvalue())
+        for destination in ("fe80::1", "fd73:1::3", "::1", "10.254.72.1", "10.254.72.3", "192.168.1.1"):
+            with self.assertRaises(ValueError):
+                CLIENT.main([destination, "none", "negative", "udp", "no-success"])
+
+    def test_exact_private_ipv4_dns_positive_control_not_broadly_whitelisted(self):
+        address = "10.254.72.2"
+        phase = "private-v4-positive"
+        request = CLIENT.question(phase)
+        reply = PEER.response_for(request, "10.254.72.1")
+        for transport in ("udp", "tcp"):
+            with self.subTest(transport=transport), \
+                 patch.object(CLIENT, "wire_query", return_value=reply) as wire, \
+                 patch("sys.stdout", new_callable=io.StringIO) as output:
+                CLIENT.main([address, "192.0.2.11", phase, transport, "reply"])
+                wire.assert_called_once_with(address, transport, request)
+                self.assertIn("REAL_TUN_DNS_WIRE_REPLY=PASS", output.getvalue())
+
+    def test_outage_accepts_only_specific_tcp_eof_without_leak_witness(self):
+        args = ["2606:4700:8::8", "none", "tcp-outage", "tcp", "no-success"]
+        with patch.object(CLIENT, "wire_query", side_effect=ConnectionError("incomplete DNS TCP response")), \
+             patch("sys.stdout", new_callable=io.StringIO) as out:
+            CLIENT.main(args)
+            self.assertIn("NO_RESPONSE=PASS", out.getvalue())
+        for transport, message in (("udp", "incomplete DNS TCP response"),
+                                   ("tcp", "unrelated socket exception")):
+            with self.subTest(transport=transport), patch.object(
+                    CLIENT, "wire_query", side_effect=ConnectionError(message)):
+                with self.assertRaises(ConnectionError):
+                    CLIENT.main(args[:3] + [transport, "no-success"])
 
     def test_phase_is_necessary_and_non_cacheable(self):
         one = CLIENT.question("phase-a")

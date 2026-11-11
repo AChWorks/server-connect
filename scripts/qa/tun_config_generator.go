@@ -13,6 +13,39 @@ import (
 
 func main() {
 	profile := sc.Profile{Outbound: json.RawMessage(`{"type":"vless","tag":"upstream","server":"10.254.72.2","server_port":19182,"uuid":"c2902f3a-1c25-41ef-a8dc-760b483aa247"}`)}
+	// A separate, packet-proved laboratory exercises the *current native*
+	// compiler, not the historical SmartTUNCandidateConfig fixture.
+	if os.Getenv("SC_QA_TUN_NATIVE_DNS") == "yes" {
+		mode := os.Getenv("SC_QA_TUN_NATIVE_DNS_MODE")
+		if os.Getenv("SC_QA_TUN_IPV6") != "yes" || (mode != "default" && mode != "bypass_iran") {
+			fmt.Fprintln(os.Stderr, "Native DNS QA requires dual-stack and an explicit native mode")
+			os.Exit(2)
+		}
+		raw, err := sc.NativeSmartRoutingConfig(profile, sc.NativePolicyOptions{
+			InterfaceName: "sctunqa0", UnderlayInterface: "scqaedge0",
+			IPv4Address: "172.31.99.1/30", IPv6Address: "fd73:99::1/64",
+			Mode: mode,
+		}, []sc.SmartRoutingRule{
+			{Type: "cidr", Value: "5.22.0.11/32", Via: "vpn"},
+			{Type: "cidr", Value: "9.9.9.9/32", Via: "direct"},
+			// This /128 is inside the actually bundled October 2026 Iran
+			// IPv6 estimate (2001:470:f486::/48), unlike the original
+			// 2606:4700 fixtures. Still an offline synthetic test address.
+			{Type: "cidr", Value: "2001:470:f486::11/128", Via: "vpn"},
+			{Type: "cidr", Value: "2606:4700:5::10/128", Via: "vpn"},
+			{Type: "cidr", Value: "2606:4700:5::11/128", Via: "direct"},
+			{Type: "cidr", Value: "2606:4700:8::9/128", Via: "direct"},
+		})
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "Native DNS QA compiler failed:", err)
+			os.Exit(1)
+		}
+		if _, err = os.Stdout.Write(raw); err != nil {
+			fmt.Fprintln(os.Stderr, "Native DNS QA output failed")
+			os.Exit(1)
+		}
+		return
+	}
 	opts := sc.SmartTUNCandidateOptions{
 		TunnelInterface:   "sctunqa0",
 		UnderlayInterface: "scqaedge0",

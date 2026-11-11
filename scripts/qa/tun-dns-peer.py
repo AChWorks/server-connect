@@ -6,11 +6,19 @@ from contextlib import ExitStack
 import socketserver
 import struct
 import threading
+import socket
+import sys
 
 SUFFIX = (b"scqa", b"example", b"test")
 ANSWER_BY_SOURCE = {
     "10.254.72.1": ipaddress.IPv4Address("192.0.2.11").packed,
     "8.8.8.8": ipaddress.IPv4Address("192.0.2.22").packed,
+    "fd73:1::1": ipaddress.IPv4Address("192.0.2.11").packed,
+    "1.1.1.1": ipaddress.IPv4Address("192.0.2.33").packed,
+    "5.22.0.11": ipaddress.IPv4Address("192.0.2.22").packed,
+    "2001:470:f486::11": ipaddress.IPv4Address("192.0.2.22").packed,
+    "2606:4700:5::10": ipaddress.IPv4Address("192.0.2.22").packed,
+    "2606:4700:8::8": ipaddress.IPv4Address("192.0.2.22").packed,
 }
 
 
@@ -58,6 +66,10 @@ class UDPServer(socketserver.ThreadingUDPServer):
     daemon_threads = True
 
 
+class UDPServer6(UDPServer):
+    address_family = socket.AF_INET6
+
+
 class UDPHandler(socketserver.BaseRequestHandler):
     def handle(self):
         query, sock = self.request
@@ -84,6 +96,10 @@ def read_exact(sock, count):
     return data
 
 
+class TCPServer6(TCPServer):
+    address_family = socket.AF_INET6
+
+
 class TCPHandler(socketserver.BaseRequestHandler):
     def handle(self):
         self.request.settimeout(3)
@@ -99,15 +115,26 @@ class TCPHandler(socketserver.BaseRequestHandler):
 
 
 def main():
+    if sys.argv[1:] not in ([], ["native-v6"]):
+        raise ValueError("invalid disconnected DNS peer mode")
+    native = sys.argv[1:] == ["native-v6"]
     # A wildcard-bound UDP socket can reply using the VETH's primary source
     # even when its query arrived at a synthetic public IP. Bind each
     # authoritative endpoint explicitly so the reply source is genuine.
     with ExitStack() as stack:
         servers = [
             stack.enter_context(kind((address, 53), handler))
-            for address in ("5.22.0.10", "8.8.8.8")
+            for address in (("5.22.0.10", "8.8.8.8", "1.1.1.1", "5.22.0.11", "9.9.9.9", "10.254.72.2") if native else ("5.22.0.10", "8.8.8.8"))
             for kind, handler in ((UDPServer, UDPHandler), (TCPServer, TCPHandler))
         ]
+        if native:
+            servers.extend(
+                stack.enter_context(kind((address, 53), handler))
+                for address in ("fd73:1::2", "2606:4700:5::10", "2606:4700:5::11",
+                                "2606:4700:8::8", "2606:4700:8::9",
+                                "2001:470:f486::10", "2001:470:f486::11")
+                for kind, handler in ((UDPServer6, UDPHandler), (TCPServer6, TCPHandler))
+            )
         threads = [
             threading.Thread(target=server.serve_forever, daemon=True)
             for server in servers
