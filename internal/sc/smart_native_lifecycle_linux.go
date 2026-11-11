@@ -219,10 +219,26 @@ func inspectNativeAdmission(ctx context.Context, r nativeKernelRunner, p nativeR
 	if err != nil {
 		return err
 	}
+	dockerFilter := false
 	for _, line := range strings.Split(tables, "\n") {
 		f := strings.Fields(line)
-		if len(f) == 3 && f[0] == "table" && f[2] == "sing-box" {
+		if len(f) != 3 || f[0] != "table" {
+			continue
+		}
+		if f[2] == "sing-box" {
 			return Fault("service_conflict", "sing-box nft table is already occupied")
+		}
+		if f[1] == "ip" && f[2] == "filter" {
+			dockerFilter = true
+		}
+	}
+	// Never adopt pre-existing Core-like Docker compatibility rules as our
+	// own effects on a later crash. The dedicated recovery path can only
+	// delete them after this fresh, empty-state admission.
+	if dockerFilter {
+		candidate, e := inspectNativeDockerRecovery(ctx, r, p.TunnelIF)
+		if e != nil || len(candidate) != 0 {
+			return Fault("service_conflict", "native Docker compatibility rules occupy the selected TUN")
 		}
 	}
 	links, err := r.output(ctx, "ip", "-o", "link", "show")
