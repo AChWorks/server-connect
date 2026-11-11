@@ -1182,6 +1182,52 @@ done
 docker exec "$container" rm -f /root/qa-native-recovery-test /root/qa-native-docker-recovery.sh
 assert_network_unchanged native-docker-crash-recovery "$offline_before"
 verify_host_services native-docker-crash-recovery
+# A real Core SIGKILL can complete its kernel cleanup, retire the receipt,
+# and leave failed systemd bookkeeping plus an inert private Core config.
+# Recreate ONLY those installed-host artifacts in the disconnected guest:
+# starting the disabled native unit without a claim must fail in ExecStartPre
+# before Core/kernel mutation. Explicit Disconnect must then select native
+# cleanup, not falsely return success from the Proxy Only branch.
+docker exec -i "$container" /bin/sh -s <<'QANATIVEDISCONNECT'
+set -eu
+test "$(systemctl is-active server-connect-native-tun.service || :)" = inactive
+test "$(systemctl is-enabled server-connect-native-tun.service)" = disabled
+test ! -e /var/lib/server-connect/native-session.json
+test ! -e /var/lib/server-connect/native-tun.json
+printf 'qa-only-inert-config\n' > /var/lib/server-connect/native-tun.json
+chmod 0600 /var/lib/server-connect/native-tun.json
+if systemctl start server-connect-native-tun.service >/root/qa-native-direct-failed-start.log 2>&1; then
+  echo 'NATIVE_DIRECT_DISCONNECT_FIXTURE=FAIL (unclaimed Core started)' >&2
+  exit 1
+fi
+test "$(systemctl is-active server-connect-native-tun.service || :)" = failed
+/usr/local/bin/server-connect --json native-status > /root/qa-native-direct-before.json
+python3 -c 'import json
+r=json.load(open("/root/qa-native-direct-before.json"))
+d=r["data"]
+assert r["ok"] and d["desired"]=="direct" and d["observed"]=="failed" and not d["recovery_claim_present"]'
+/usr/local/bin/server-connect --json disconnect > /root/qa-native-direct-disconnect.json
+python3 -c 'import json
+r=json.load(open("/root/qa-native-direct-disconnect.json"))
+assert r["ok"],r.get("error")'
+test ! -e /var/lib/server-connect/native-tun.json
+test ! -e /var/lib/server-connect/native-session.json
+test "$(systemctl is-active server-connect-native-tun.service || :)" = inactive
+/usr/local/bin/server-connect --json native-status > /root/qa-native-direct-after.json
+python3 -c 'import json
+r=json.load(open("/root/qa-native-direct-after.json"))
+d=r["data"]
+assert r["ok"] and d["desired"]=="direct" and d["observed"]=="inactive" and not d["recovery_claim_present"]'
+for unit in server-connect-smart-health.timer server-connect-activation-recover.timer; do
+  test "$(systemctl is-active "$unit" || :)" = inactive
+done
+rm -f -- /root/qa-native-direct-failed-start.log /root/qa-native-direct-before.json /root/qa-native-direct-after.json /root/qa-native-direct-disconnect.json
+echo 'NATIVE_RECOVERED_CRASH_EXPLICIT_DISCONNECT=PASS (no claim, failed unit and inert config fully reconciled)'
+QANATIVEDISCONNECT
+assert_network_unchanged native-recovered-crash-explicit-disconnect "$offline_before"
+test "$(docker exec "$container" /usr/sbin/nft -j list ruleset)" = "$nft_before"
+verify_host_services native-recovered-crash-explicit-disconnect
+echo 'NATIVE_RECOVERED_CRASH_DISCONNECT_BASELINE=PASS (kernel/nft and SSH/HTTP unaffected)'
 # Keep the installed negative CLI contract, without a separate transitional
 # script, container copy or an extra historical process-scanning fixture.
 if docker exec "$container" /usr/local/bin/server-connect --json workload-observe \

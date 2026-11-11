@@ -15,6 +15,69 @@ import (
 	"testing"
 )
 
+// A real Core SIGKILL leaves an inert private config after autonomous
+// restoration, but removes the one-use recovery claim. Explicit Disconnect
+// must still route to the native cleanup, never report a Proxy Only no-op.
+func TestExplicitDisconnectSelectsNativeAfterRecoveredCrash(t *testing.T) {
+	m := New(filepath.Join(t.TempDir(), "state"), "", 0)
+	if err := m.withLock(func() error {
+		return m.save(State{Version: 1, Desired: "direct", Selected: "0123456789abcdef", Port: m.Port})
+	}); err != nil {
+		t.Fatal(err)
+	}
+	check := func(want bool) {
+		t.Helper()
+		got, err := m.disconnectRequiresNative()
+		if err != nil || got != want {
+			t.Fatalf("native Disconnect decision: got=%v want=%v err=%v", got, want, err)
+		}
+	}
+	check(false) // ordinary Direct
+	config := filepath.Join(m.Dir, nativeConfigFile)
+	if err := put(config, []byte("inert-private-core-config")); err != nil {
+		t.Fatal(err)
+	}
+	check(true) // Direct restored, claim retired, inert config remains
+	if err := os.Chmod(config, 0644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.disconnectRequiresNative(); err == nil {
+		t.Fatal("insecure private config silently bypassed native cleanup")
+	}
+	if err := os.Chmod(config, 0600); err != nil {
+		t.Fatal(err)
+	}
+	check(true)
+	if err := os.Remove(config); err != nil {
+		t.Fatal(err)
+	}
+	check(false) // native cleanup already completed
+	if err := os.Symlink("foreign", config); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.disconnectRequiresNative(); err == nil {
+		t.Fatal("symlinked native config silently bypassed native cleanup")
+	}
+	if err := os.Remove(config); err != nil {
+		t.Fatal(err)
+	}
+	receipt, err := json.Marshal(NativeSession{Version: 1, Selected: "0123456789abcdef",
+		InterfaceName: "sctun0", UnderlayIF: "eth0", ConfigSHA256: strings.Repeat("a", 64)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := put(filepath.Join(m.Dir, nativeSessionFile), receipt); err != nil {
+		t.Fatal(err)
+	}
+	check(true) // retained claim still takes native path
+	if err := put(filepath.Join(m.Dir, nativeSessionFile), []byte("invalid-claim")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.disconnectRequiresNative(); err == nil {
+		t.Fatal("malformed native claim silently bypassed recovery")
+	}
+}
+
 func TestNativeSessionClaimStrictAndConfigBound(t *testing.T) {
 	m := New(filepath.Join(t.TempDir(), "state"), "", 0)
 	if err := m.prepare(); err != nil {

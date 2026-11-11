@@ -859,9 +859,12 @@ func (m *Manager) connectLocked(observe func() (string, error)) error {
 	return nil
 }
 
-func (m *Manager) Disconnect() error {
+// A crashed native Core can autonomously restore Direct and retire its
+// recovery claim while intentionally retaining private, inert Core config.
+// Explicit Disconnect must finish the native cleanup in this state.
+func (m *Manager) disconnectRequiresNative() (bool, error) {
 	var native bool
-	if err := m.withLock(func() error {
+	err := m.withLock(func() error {
 		state, err := m.load()
 		if err != nil {
 			return err
@@ -873,8 +876,23 @@ func (m *Manager) Disconnect() error {
 		} else if !os.IsNotExist(claimErr) {
 			return claimErr
 		}
+		if !native && state.Desired == "direct" {
+			// A verified private config distinguishes a recovered native
+			// session from an ordinary Direct/Proxy Only session.
+			if _, configErr := readRegular(filepath.Join(m.Dir, nativeConfigFile)); configErr == nil {
+				native = true
+			} else if !os.IsNotExist(configErr) {
+				return configErr
+			}
+		}
 		return nil
-	}); err != nil {
+	})
+	return native, err
+}
+
+func (m *Manager) Disconnect() error {
+	native, err := m.disconnectRequiresNative()
+	if err != nil {
 		return err
 	}
 	if native {
