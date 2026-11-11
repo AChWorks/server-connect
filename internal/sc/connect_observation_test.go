@@ -58,6 +58,45 @@ func connectObservationFixture(t *testing.T, desired string, existingAuth bool) 
 	return m, state, runtime, auth
 }
 
+func TestProxyOnlyConnectRefusesRecoveredNativeConfigWithoutMutation(t *testing.T) {
+	for _, desired := range []string{"direct", "proxy"} {
+		t.Run(desired, func(t *testing.T) {
+			m, originalState, originalRuntime, originalAuth := connectObservationFixture(t, desired, desired == "proxy")
+			config := filepath.Join(m.Dir, nativeConfigFile)
+			if err := put(config, []byte("inert-private-native-config")); err != nil {
+				t.Fatal(err)
+			}
+			observed := false
+			err := m.withLock(func() error {
+				return m.connectLocked(func() (string, error) {
+					observed = true
+					return "inactive", nil
+				})
+			})
+			if ErrorCode(err) != "guard_pending" || observed {
+				t.Fatalf("Proxy Only must refuse native residue before service actions: %v, observed=%v", err, observed)
+			}
+			if current, e := os.ReadFile(filepath.Join(m.Dir, "state.json")); e != nil || !bytes.Equal(current, originalState) {
+				t.Fatalf("prior mode changed on refusal: %v", e)
+			}
+			if current, e := os.ReadFile(filepath.Join(m.Dir, "runtime.json")); e != nil || !bytes.Equal(current, originalRuntime) {
+				t.Fatalf("proxy runtime changed on refusal: %v", e)
+			}
+			if configBytes, e := readRegular(config); e != nil || string(configBytes) != "inert-private-native-config" {
+				t.Fatalf("native residue was modified during refused Connect: %v", e)
+			}
+			if _, e := os.Stat(filepath.Join(m.Dir, "check-witness")); !os.IsNotExist(e) {
+				t.Fatalf("configuration validation unexpectedly started: %v", e)
+			}
+			if desired == "proxy" {
+				if auth, e := os.ReadFile(filepath.Join(m.Dir, "proxy-auth")); e != nil || !bytes.Equal(auth, originalAuth) {
+					t.Fatalf("Proxy Only auth changed on refusal: %v", e)
+				}
+			}
+		})
+	}
+}
+
 func TestConnectRejectsUnverifiedServiceBeforeRuntimeMutation(t *testing.T) {
 	type observation struct {
 		activity string
