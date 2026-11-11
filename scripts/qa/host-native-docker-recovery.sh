@@ -67,7 +67,10 @@ stage_stopped_core() {
   # The Core is deliberately not started: reproduce its exact residual
   # kernel footprint after loss, with a fixed unique QA-only table.
   ip -4 route add table "$table" local 127.0.0.1 dev scouter0
-  ip -4 route add table "$table" local 127.0.0.1 dev docker0
+  # IRA-124 retained two equal-prefix/equal-metric local routes in the same
+  # Core table. A second 'add' is rejected as EEXIST; 'append' reconstructs
+  # the distinct Docker bridge alias without replacing the underlay route.
+  ip -4 route append table "$table" local 127.0.0.1 dev docker0
   ip -6 route add table "$table" local ::1 dev scouter0 metric 1024
   for family in -4 -6; do
     ip "$family" rule add pref 1 table "$table"
