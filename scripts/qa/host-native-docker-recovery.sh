@@ -4,27 +4,32 @@
 # sing-box 1.14.3 Docker-enabled post-SIGKILL layout seen on IRA-124.
 # This is a Core-layout fixture, NOT a real Core SIGKILL or host field proof.
 set -eu
-[ "${SC_QA_NATIVE_DOCKER_GUEST-}" = yes ] || exit 2
-[ "$(id -u)" = 0 ] || exit 2
-[ -f /.dockerenv ] || exit 2
-[ -d /run/systemd/system ] || exit 2
-[ "$(ps -p 1 -o comm= | tr -d ' ')" = systemd ] || exit 2
-[ -x /root/qa-native-recovery-test ] || exit 2
-[ "$(systemctl is-active server-connect-native-tun.service || :)" != active ] || exit 2
-[ "$(systemctl is-active server-connect.service || :)" != active ] || exit 2
-[ "$(ip -4 route show default)" = "default dev lo scope link metric 4242" ] || exit 2
+# A precondition failure must identify the exact refused guest assumption;
+# product routing is never exercised when an isolation or ownership check fails.
+refuse() {
+  printf 'NATIVE_DOCKER_GUEST_REFUSAL: %s\n' "$1" >&2
+  exit 2
+}
+[ "${SC_QA_NATIVE_DOCKER_GUEST-}" = yes ] || refuse 'missing explicit guest opt-in'
+[ "$(id -u)" = 0 ] || refuse 'not guest root'
+[ -f /.dockerenv ] || refuse 'not a Docker guest'
+[ -d /run/systemd/system ] || refuse 'missing systemd runtime'
+[ "$(ps -p 1 -o comm= | tr -d ' ')" = systemd ] || refuse 'PID 1 is not systemd'
+[ -x /root/qa-native-recovery-test ] || refuse 'missing executable recovery test binary'
+[ "$(systemctl is-active server-connect-native-tun.service || :)" != active ] || refuse 'native TUN service active'
+[ "$(systemctl is-active server-connect.service || :)" != active ] || refuse 'proxy service active'
+[ "$(ip -4 route show default)" = "default dev lo scope link metric 4242" ] || refuse 'unexpected isolated default route'
 for name in scouter0 docker0 br-foreign sctun0; do
   if ip link show dev "$name" >/dev/null 2>&1; then
-    echo "NATIVE_DOCKER_GUEST_REFUSAL: unexpected existing interface $name" >&2
-    exit 2
+    refuse "unexpected existing interface $name"
   fi
 done
 if nft list table ip filter >/dev/null 2>&1 || nft list table inet sing-box >/dev/null 2>&1; then
-  echo 'NATIVE_DOCKER_GUEST_REFUSAL: existing fixture nft table' >&2
-  exit 2
+  refuse 'existing fixture nft table'
 fi
-[ -z "$(ip -4 rule show | grep -E '^1:|^1420[0-9]:|^32768:' || :)" ] || exit 2
-[ -z "$(ip -6 rule show | grep -E '^1:|^1420[0-9]:|^32768:' || :)" ] || exit 2
+[ -z "$(ip -4 rule show | grep -E '^1:|^1420[0-9]:|^32768:' || :)" ] || refuse 'preexisting managed IPv4 RPDB priorities'
+[ -z "$(ip -6 rule show | grep -E '^1:|^1420[0-9]:|^32768:' || :)" ] || refuse 'preexisting managed IPv6 RPDB priorities'
+echo 'NATIVE_DOCKER_GUEST_PRECONDITIONS=PASS'
 
 scratch=$(mktemp -d /run/sc-qa-native-docker.XXXXXXXX)
 # Failure cleanup is the outer harness's strictly test-owned --network none
