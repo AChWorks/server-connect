@@ -14,6 +14,10 @@ case "$package_target" in
  *) echo 'Unsupported package target; choose debian-12-amd64 or debian-13-amd64' >&2;exit 2 ;;
 esac
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)
+artifact="$ROOT/dist/server-connect-0.1.0-dev-$artifact_target-local-qa.tar.gz"
+[ ! -e "$artifact.sig" ] && [ ! -L "$artifact.sig" ] || {
+ echo 'Refusing to overwrite an already signed QA artifact; use a fresh output checkout' >&2;exit 1;
+}
 CORE_ARCHIVE=$(realpath "$CORE_ARCHIVE")
 EXPECTED=e2bdf179c15a3652955dc44867e33ca0965c9c9b91b34267dcc5a5d639a5feee
 printf '%s  %s\n' "$EXPECTED" "$CORE_ARCHIVE" | sha256sum --quiet -c - || { echo 'Pinned upstream core archive digest mismatch' >&2;exit 1; }
@@ -32,23 +36,33 @@ GOTOOLCHAIN=local GOPROXY=off CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -tr
 cp "$up/sing-box" "$work/server-connect/bin/sing-box"
 cp "$up/libcronet.so" "$work/server-connect/bin/libcronet.so"
 cp "$up/LICENSE" "$work/server-connect/THIRD-PARTY-LICENSES/sing-box-LICENSE"
+
 cp bundle/install.sh bundle/server-connect.service bundle/server-connect-activation-recover.service bundle/server-connect-activation-recover.timer bundle/server-connect-smart-tun.service bundle/server-connect-native-tun.service bundle/server-connect-smart-health.service bundle/server-connect-smart-health.timer "$work/server-connect/"
+cp scripts/release-auth.py "$work/server-connect/release-auth.py"
 chmod 0755 "$work/server-connect/install.sh" "$work/server-connect/bin/server-connect" "$work/server-connect/bin/sing-box"
 source_revision=$(git rev-parse HEAD)
 if git diff --quiet && git diff --cached --quiet && [ -z "$(git ls-files --others --exclude-standard)" ]; then source_state=clean;else source_state=dirty;fi
 printf '{"schema":1,"manager":"0.1.0-dev","core":"sing-box 1.14.3","core_archive_sha256":"%s","source_revision":"%s","source_state":"%s","target":"%s","redistribution":"not authorized; local QA only"}\n' "$EXPECTED" "$source_revision" "$source_state" "$package_target" > "$work/server-connect/manifest.json"
 (
  cd "$work/server-connect"
- sha256sum bin/server-connect bin/sing-box bin/libcronet.so server-connect.service server-connect-activation-recover.service server-connect-activation-recover.timer server-connect-smart-tun.service server-connect-native-tun.service server-connect-smart-health.service server-connect-smart-health.timer install.sh THIRD-PARTY-LICENSES/sing-box-LICENSE manifest.json > checksums.sha256
+
+ sha256sum bin/server-connect bin/sing-box bin/libcronet.so server-connect.service server-connect-activation-recover.service server-connect-activation-recover.timer server-connect-smart-tun.service server-connect-native-tun.service server-connect-smart-health.service server-connect-smart-health.timer install.sh release-auth.py THIRD-PARTY-LICENSES/sing-box-LICENSE manifest.json > checksums.sha256
  sha256sum --quiet -c checksums.sha256
  ./bin/server-connect version --json
  ./bin/sing-box version | head -n 1
 )
-artifact="$ROOT/dist/server-connect-0.1.0-dev-$artifact_target-local-qa.tar.gz"
 # Normalize archive order, ownership and timestamps. A QA reviewer can
 # independently rebuild the same byte-identical artifact from pinned inputs.
 source_date_epoch=$(git show -s --format=%ct HEAD)
 LC_ALL=C TZ=UTC tar --format=gnu --sort=name --mtime="@$source_date_epoch" --owner=0 --group=0 --numeric-owner -cf - -C "$work" server-connect | gzip -n > "$artifact"
 tar -tzf "$artifact" >/dev/null || { echo 'Generated QA archive is malformed' >&2;exit 1; }
+archive_digest=$(sha256sum "$artifact" | cut -d' ' -f1)
+checksums_digest=$(sha256sum "$work/server-connect/checksums.sha256" | cut -d' ' -f1)
+manifest_digest=$(sha256sum "$work/server-connect/manifest.json" | cut -d' ' -f1)
+# This unsigned sidecar describes exact immutable inputs. Creating it never
+# chooses a publisher key or grants redistribution permission.
+printf '{"schema":1,"purpose":"server-connect-release","version":"0.1.0-dev","target":"%s","archive_sha256":"%s","checksums_sha256":"%s","manifest_sha256":"%s","source_revision":"%s","source_state":"%s","core":"sing-box 1.14.3","core_archive_sha256":"%s"}\n' \
+ "$package_target" "$archive_digest" "$checksums_digest" "$manifest_digest" "$source_revision" "$source_state" "$EXPECTED" > "$artifact.release.json"
 sha256sum "$artifact"
-echo 'LOCAL QA ONLY: no publisher signature, no product license, no public binary release authorization.'
+echo 'LOCAL QA ONLY: unsigned identity sidecar produced; no product license or public release authorization.'
+echo 'Explicit local QA signatures may be tested with scripts/release-auth.py sign-local-qa and an ephemeral key.'

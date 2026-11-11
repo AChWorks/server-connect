@@ -78,7 +78,7 @@ PYMANIFEST
  if /usr/bin/strace -ff -qq -yy -s 128 -e trace=%network,%process \
      -o "/root/qa-strace/$label" /usr/bin/env -i \
      PATH=/usr/sbin:/usr/bin:/sbin:/bin LC_ALL=C \
-     /bin/sh "$fixture/install.sh" --offline \
+     /bin/sh "$fixture/install.sh" --offline --local-qa \
      >"$fixture_root/$label.stdout" 2>"$fixture_root/$label.stderr"; then
   echo "BUNDLE_TARGET_REFUSAL=FAIL ($variant accepted)" >&2
   exit 1

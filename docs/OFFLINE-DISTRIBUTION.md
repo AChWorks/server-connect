@@ -16,13 +16,139 @@ An official source, an Iranian mirror and an offline copy differ only in **acqui
 
 A mirror is an **untrusted byte host, not a signing authority**: even valid HTTPS or a checksum delivered alongside the archive cannot independently establish publisher identity. Verify a trusted publisher key/signed digest obtained through an independent channel **before privileged code executes**. Pin version/artifact/architecture; validate TLS, redirects, archive format and manifest. Never publish a `curl | sh` command that executes an unverified arbitrary mirror script.
 
-**Current truth:** source includes developer offline packaging and an online bootstrap, but no authenticated public release, official/mirror one-liner, approved publisher key/licensing decision or accepted physical support matrix is available. Examples are **not** safe public installation instructions until those gates pass.
+**Current truth:** the source now includes a shared signed-acquisition verifier, a signed-aware installer and ephemeral LOCAL QA signing tests, but **no publisher-approved public key, licensing/redistribution clearance, real published official or Iranian mirror, or accepted complete support matrix**. Signature verification against an ephemeral QA key is not publisher authentication. Do not advertise these examples as public installation commands before the remaining release gates pass.
+
+## Authenticated acquisition interface
+
+The trusted entrypoint and its adjacent authentication helper must themselves
+arrive through an independently authenticated channel. A script or public key
+downloaded from the same untrusted mirror as an archive does not supply that
+trust. For privileged use, place the trusted tools and public key under
+protected root-owned ancestry and enter through a trusted launcher that clears
+loader and shell startup variables before the interpreter starts. The bootstrap
+never fetches a public key and never executes a downloaded verifier.
+
+The archive has two detached siblings: `<archive>.release.json` and
+`<archive>.sig`. The signature covers the exact bounded JSON bytes using
+[OpenSSL SHA-256 signature verification](https://docs.openssl.org/3.0/man1/openssl-dgst/), with a public key supplied by the
+operator. Duplicate/extra JSON fields, noncanonical identities, an unclean
+source revision, a different version/target or a different pinned Core are
+rejected. The signed identity binds the complete archive digest, full checksum
+manifest digest, package manifest digest, manager version, exact source revision,
+source state, target and upstream Core identity. It is never interpreted as
+shell code.
+
+All three acquisition paths authenticate the archive before extraction. The
+same bounded extractor rejects links, traversal, duplicates, special files,
+decompression abuse and a missing/corrupt gzip trailer. After extraction the
+trusted helper checks that the actual package manifest and every covered file
+match the signed identity before any bundle executable can run. The same
+installer then rechecks authentication, ownership and actual-host target
+admission before lifecycle changes. There is no CLI acknowledgement that
+substitutes for a signature. A verified signature proves control of the
+independently supplied key; it does not choose the Owner's publisher identity,
+license, key rotation/revocation policy or production promotion decision.
+
+For an already trusted tool directory and independently installed public key,
+the interface for an authorized signed QA artifact is:
+
+```console
+sudo /usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin LC_ALL=C \
+  /bin/sh /root/trusted-sc-tools/bootstrap-online.sh \
+  --archive-url https://mirror.example/immutable/bundle.tar.gz \
+  --publisher-key /root/sc-trust/publisher.pem \
+  --version 0.1.0-dev --target debian-13-amd64 --verify-only
+```
+
+Official and operator mirror URLs use exactly this path and the same immutable
+archive/metadata/signature bytes. The URL above is a placeholder, not an
+available official channel. HTTPS redirects remain HTTPS; plain HTTP is limited
+to loopback and requires explicit `--local-qa` for disposable tests.
+The bootstrap appends the sidecar suffixes to the URL path, preserving its
+query, and applies separate bounded transfers. Operators may instead supply
+both `--metadata-file` and `--signature-file` from local storage.
+
+The fully offline acquisition interface uses those same bytes:
+
+```console
+sudo /usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin LC_ALL=C \
+  /bin/sh /root/trusted-sc-tools/bootstrap-online.sh \
+  --archive-file /root/incoming/bundle.tar.gz \
+  --publisher-key /root/sc-trust/publisher.pem \
+  --version 0.1.0-dev --target debian-13-amd64 --verify-only
+```
+
+The sibling metadata/signature files are read locally; no DNS, downloader, APT
+or other dependency fetch is attempted. Omitting `--verify-only` runs the
+shared installer after the same checks. Signed verification uses trusted Python 3 and OpenSSL. Online installation can
+acquire missing native prerequisites through the existing verified Debian APT
+policy, while offline mode requires them to be preinstalled and refuses clearly
+when they are missing. Supplying an
+authenticated verifier/prerequisite set for a completely minimal disconnected
+Debian target remains a release packaging gate. An offline transfer of bytes
+authenticated elsewhere remains legitimate authenticated manual acquisition;
+it must preserve the verified identity and trusted staging through execution,
+and must not rely on an unverified extracted script to authenticate itself.
+
+`scripts/package.sh` produces the archive and unsigned identity sidecar.
+It refuses to overwrite a sibling signature, preserving signed artifact
+immutability. Its manifest still declares **LOCAL QA ONLY**. For isolated
+cryptographic tests, `scripts/release-auth.py sign-local-qa` accepts an
+explicit ephemeral private key, exact archive/metadata paths and version/target
+pins; it generates no key, never replaces an existing signature and grants no
+redistribution permission. Production signing identity, approved product license,
+third-party redistribution compliance and immutable publication remain blocked.
+No private key belongs in source, CI output or release assets.
+
+A signed installation persists `authentication.json` as root-owned mode 0600
+inside the exact immutable installed release. It contains the signed identity,
+signature and canonical **public** key plus its SHA-256 SPKI fingerprint. The
+key comes from the independently supplied input after successful verification;
+the archive cannot carry a trust receipt, and an incoming bundle cannot borrow
+authority merely by placing a key beside itself. File and directory fsyncs
+precede release publication; the parent rename is fsynced before selection.
+Retries re-establish durability even when a failed write left readable bytes.
+
+Later signed preflight, update, rollback and uninstall revalidate the receipt's
+strict schema, protected ownership, exact release binding, signature, key
+fingerprint and payload. Missing, mixed, tampered or cross-release receipts
+fail closed before lifecycle mutation. The installer retains the previous
+release's receipt on update/rollback and removes only validated owned receipts
+during cleanup. No signature/key downloads are needed to inspect or remove an
+installed signed release after acquisition staging has disappeared.
+
+For an already authenticated installed release, canonical offline uninstall is:
+
+```console
+sudo /usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin LC_ALL=C \
+  /bin/sh "$(/usr/bin/readlink -f /opt/server-connect/current/install.sh)" --uninstall
+```
+
+A fresh incoming update still supplies its own signed metadata/signature and
+an independent trust anchor through the trusted bootstrap. Reusing an existing
+installed identity requires the same receipt; implicit key replacement or
+promotion of an unsigned installation is refused. Deliberate key rotation and
+trust recovery remain separate Owner-controlled procedures.
+
+New unsigned QA installations instead retain an explicit `local-qa.sha256`
+marker bound to the full checksum manifest. They still require `--local-qa`;
+absence of a signed receipt never authorizes unsigned fallback. Previous
+12-entry development releases retain their earlier verified rollback/uninstall
+format and are never relabelled as publisher-authenticated.
+
+Unsigned development use is deliberately explicit:
+`bootstrap-online.sh --local-qa --sha256 TRUSTED_DIGEST ...` and the
+already independently inspected local bundle's
+`install.sh --offline --local-qa` (similarly for verify-only/uninstall).
+These commands cannot report publisher authentication. Existing QA workflows
+use these flags; passing a local-QA flag alongside signed inputs never suppresses
+a bad signature.
 
 ## Lifecycle and offline guarantees
 
 - Check exact distro/kernel/architecture/ABI, systemd/TUN/network primitives, local dependency availability, package signatures and resource conflicts **before host-network activation**. Never claim arbitrary Debian/Ubuntu versions are supported without tests.
 - **Offline acquisition/install/update and inactive first launch** must not attempt implicit DNS, HTTP(S), APT, GitHub or other network **dependency downloads**. Local profile/rule import, offline recovery, disable and uninstall must not fetch missing components either: supply all required runtime and rule data or fail with a concrete missing-file diagnostic. This is **not** a ban on an operator's later explicit **Connect**: contacting the selected VPN endpoint, its required bootstrap DNS and deliberate path-bound health probes is intentional VPN traffic, **not a packaging fetch**. Never use VPN activation as a pretext for implicit dependency acquisition.
-- Verified online prerequisites may be acquired through the host's existing trusted OS package system. On the Debian 12/13 QA installation targets, the current root online bootstrap may install missing `curl`, Python 3 or CA certificates **before bundle acquisition**; those OS packages can remain if a later fetch/verification fails. `--verify-only` must never perform that mutation; offline install never uses APT. Do not claim a full host transaction rollback here.
+- Verified online prerequisites may be acquired through the host's existing trusted OS package system. On the Debian 12/13 QA installation targets, the current root online bootstrap may install missing `curl`, Python 3, OpenSSL (for signed acquisition) or CA certificates **before bundle acquisition**; those OS packages can remain if a later fetch/verification fails. `--verify-only` must never perform that mutation; offline install never uses APT. Do not claim a full host transaction rollback here.
 - Treat downloaded archives and files as untrusted until verified: bound transfer and expansion size, metadata/parser cost, symlinks, traversal, nested paths, disk reserve and redirects. Use protected **root-owned private staging with trusted ancestry** for privileged work. Remove inherited untrusted loader/shell/proxy environment **before the interpreter starts**; script-body cleanup alone is too late.
 - Installed profile IDs, secrets, selected rules and relevant operator state survive an ordinary verified update/reinstall; disabling/uninstalling removes precisely owned runtime/network resources. Default first installation is **Direct**. Purging private operator data is a separately authorized destructive action.
 - Package and routing-list updates are separately validated, versioned and rollback-safe. A bad/old Iranian data feed must not force an untrusted online download or enable a silent foreign Direct leak. Do not rewrite system DNS or change APT repositories to make a mirror appear reachable.
@@ -30,7 +156,7 @@ A mirror is an **untrusted byte host, not a signing authority**: even valid HTTP
 
 ## Reproducible developer evidence
 
-The **current QA-only** bundle is built by `scripts/package.sh` from an independently checked pinned sing-box archive; the shared installer is `install.sh`; the online development bootstrap is `scripts/bootstrap-online.sh`. Source and exact tests own concrete CLI flags, archive size limits and compatibility checks — do not maintain a second changing copy of them here.
+The **current QA-only** bundle is built by `scripts/package.sh` from an independently checked pinned sing-box archive; the shared installer is `bundle/install.sh`, with the trusted acquisition entrypoint `scripts/bootstrap-online.sh` and its independently trusted companion `scripts/release-auth.py`. The examples above are interface documentation for signed QA, not publisher-approved release links.
 
 The builder accepts exactly these target identities; omitting its optional target argument retains the Debian 13 default. Each artifact has its own target-specific filename and manifest, with the same installer and pinned upstream core.
 
@@ -54,9 +180,9 @@ cat /opt/server-connect/current/manifest.json
 sha256sum /opt/server-connect/current/checksums.sha256
 ```
 
-For a meaningful source/build claim, independently compare the installed checksum-manifest digest, manifest source revision/target and original pinned QA archive against the **externally recorded expected artifact identity**. A successful self-contained checksum audit proves only that the stored files agree with their local checksums: it is **not publisher authentication**, a public release signature, source reproducibility, validated network locality, production support or Smart Routing proof. Installed-host tests additionally compare package-provided identities and verify lifecycle/rollback. Corrupt checksum-bearing installed releases fail closed before reuse/uninstall; controlled recovery requires exact independently verified bytes. Private profiles and unrelated systemd/network resources are excluded from the public release snapshot.
+For a meaningful source/build claim, independently compare the installed checksum-manifest digest, manifest source revision/target and original pinned QA archive against the **externally recorded expected artifact identity**. A successful self-contained checksum audit proves only that the stored files agree with their local checksums: it is **not publisher authentication**, a public release signature, source reproducibility, validated network locality, production support or Smart Routing proof. Installed-host tests additionally compare package-provided identities and verify lifecycle/rollback. Corrupt checksum-bearing installed releases fail closed before reuse/uninstall; controlled recovery requires exact independently verified bytes. Private profiles and unrelated systemd/network resources are excluded from the public release snapshot. New signed-aware QA packages retain an explicit local-only checksum receipt or a signed authenticated-public-key receipt; older, provenance-correct development releases remain valid prior installed predecessors but are never relabelled signed.
 
-Online `--verify-only` validates acquisition, digest, archive bounds and required layout only. It neither executes the bundled manager/core/installer nor proves target installability; a layout-valid archive for another target can pass this acquisition check and must still be refused by installation.
+Authenticated `--verify-only` additionally checks the detached signature against an independently supplied public key, the signed version and target, and exact payload/checksum/manifest identities. It **does not** execute the bundled manager/core/installer, prove actual-host compatibility or license clearance. An unsigned `--local-qa --verify-only` checks only the explicitly supplied independent SHA256 and archive layout; it never claims publisher authenticity. The shared local installer independently validates the actual target before mutation.
 
 Relevant test entry points: `scripts/test_bootstrap_online.py`, `scripts/qa/test-package-targets.py`, `scripts/qa/test-installed-release-provenance.py`, `scripts/qa/test-online-minimal-host.sh`, `scripts/qa/test-installed-host.sh`, and `.github/workflows/installed-host-qa.yml`. CI's disconnected Docker/systemd tests and the separately recorded installed Debian 12/13 Incus VM QA are distinct evidence levels. Neither establishes official publisher authenticity, an Iranian public mirror, verified Iranian-origin/foreign-provider field paths or a stable release. The separately authorized real-host driver and its evidence limits are described in [Acceptance](ACCEPTANCE.md#existing-tests-and-their-limits).
 
