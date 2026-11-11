@@ -201,7 +201,7 @@ docker exec "$container" /bin/sh -c '
 '
 docker exec "$container" /usr/bin/env -i \
   HOME=/root PATH=/usr/sbin:/usr/bin:/sbin:/bin LC_ALL=C \
-  /bin/sh /root/server-connect/install.sh --uninstall
+  /bin/sh /root/server-connect/install.sh --uninstall --local-qa
 docker exec "$container" /bin/sh -c '
   set -eu
   test "$(systemctl show server-connect.service -p LoadState --value)" = not-found

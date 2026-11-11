@@ -34,7 +34,7 @@ jobs:
           test "$ID" = debian
           test "$VERSION_ID" = 13
           apt-get update
-          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ca-certificates curl git python3 tar gzip sudo systemd
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ca-certificates curl git python3 tar gzip sudo systemd openssl
           apt-config --version
           git --version
           # Required negative regressions must execute on native Debian 13,
