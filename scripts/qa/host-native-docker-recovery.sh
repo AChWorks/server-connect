@@ -115,7 +115,9 @@ echo 'NATIVE_DOCKER_SIGKILL_LAYOUT_RECOVERY=PASS (real kernel/nft, source-built 
 stage_stopped_core
 ip link add br-foreign type dummy
 ip link set br-foreign up
-ip -4 route add table "$table" local 127.0.0.1 dev br-foreign
+# The conflicting third alias must also coexist with the existing two
+# routes; ordinary 'add' would fail in the fixture before testing refusal.
+ip -4 route append table "$table" local 127.0.0.1 dev br-foreign
 ip -j -4 route show table all > "$scratch/conflict-routes4"
 ip -j -6 route show table all > "$scratch/conflict-routes6"
 ip -j -4 rule show > "$scratch/conflict-rules4"
