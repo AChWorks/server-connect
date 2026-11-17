@@ -147,7 +147,7 @@ trial_exit=0
 [ "$(phase)" = trial_pending ]
 echo PRODUCT_GUARD_TRIAL_PENDING_AFTER_SIGKILL=PASS
 "$ip" -4 rule show | grep -F '9.9.9.0/24' >/dev/null
-if /bin/sh /root/server-connect/install.sh --uninstall \
+if /bin/sh /root/server-connect/install.sh --uninstall --local-qa \
  >/run/sc-qa-trial-uninstall.log 2>&1;then
  echo 'Uninstall incorrectly removed active independent guard' >&2;exit 1
 fi

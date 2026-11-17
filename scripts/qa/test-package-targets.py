@@ -36,6 +36,7 @@ PAYLOAD_FILES = (
     "server-connect-smart-health.service",
     "server-connect-smart-health.timer",
     "install.sh",
+    "release-auth.py",
     "THIRD-PARTY-LICENSES/sing-box-LICENSE",
     "manifest.json",
 )
@@ -150,6 +151,7 @@ printf '%s\n' 'sing-box version 1.14.3'
 PATH=/usr/sbin:/usr/bin:/sbin:/bin
 export PATH
 SOURCE_DIR=$SC_QA_BUNDLE
+local_qa=yes
 say() { printf 'Server Connect: %s\n' "$*"; }
 die() { say "ERROR: $*" >&2; exit 1; }
 check_root_file() { [ -f "$1" ] && [ ! -L "$1" ] || die 'fixture file missing'; }
