@@ -89,16 +89,18 @@ network reservation, authenticated VLESS health, fresh SSH/foreign-reply
 protection, or an independent Activation/Runtime Guard. Keep experimental
 native Apply restricted to its existing admitted QA fixtures.
 
-**Existing foreign SSH/hosting sessions:** Issue #3's physical Debian 13
-QA reproduced a locally generated TCP reset when the official Core's native
-`auto_redirect` policy started. A scoped early conntrack reply mark
-preserved 58/58 old SSH application replies in a manual field experiment.
-The integrated candidate prepares this mark after independently arming
-the existing guards but before systemd/Core start, durably verifies its table
-handle, then consumes a one-use start claim and rejects foreign/orphaned
-policy on recovery; it does not create a foreign-IP
-Direct exception. Independent installed-candidate field review and the
-full [acceptance matrix](docs/ACCEPTANCE.md) still govern V1 readiness.
+**Existing foreign SSH/hosting sessions:** Physical Debian 13 QA
+reproduced a TCP reset of an existing foreign SSH connection during native
+Core `auto_redirect` activation. Reply-only guards were insufficient
+for connections established before conntrack tracked them. A manually
+staged *exact accepted TCP socket* guard then preserved 58/58 old SSH
+replies. The integrated candidate snapshots established listener-side
+TCP four-tuples into owned IPv4/IPv6 nft sets, without blanket exemption
+for the foreign IP or port. It records the fingerprint before mutation,
+verifies the table handle, and permits one-use Core start only after the
+independent health/recovery guards are armed. The candidate remains
+subject to exact installed field proof and independent review; broader
+[acceptance](docs/ACCEPTANCE.md) is not yet satisfied.
 
 ### Native Runtime Health Guard (installed test candidate)
 

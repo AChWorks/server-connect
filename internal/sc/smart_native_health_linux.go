@@ -599,7 +599,7 @@ func (m *Manager) RunNativeHealthRound() (NativeHealthState, error) {
 		s.Phase, s.Reason = "off", reason
 		return s, nil
 	}
-	if e := requireNativeReplyGuardClaim(context.Background(), nativeHealthKernelReader{}, claim.ReplyGuardHandle); e != nil {
+	if e := requireNativeReplyGuardClaim(context.Background(), nativeHealthKernelReader{}, claim.ReplyGuardHandle, claim.ReplyGuardFingerprint); e != nil {
 		stopped, stopErr := m.stopNativeHealthOperation(s.OperationID, "native_reply_guard_unverified")
 		if stopErr != nil {
 			return s, stopErr
@@ -651,7 +651,7 @@ func (m *Manager) RunNativeHealthRound() (NativeHealthState, error) {
 		if e = nativeHealthGuardRoles(); e != nil {
 			return Fault("guard_unavailable", "native guard lost during probe round")
 		}
-		if e = requireNativeReplyGuardClaim(context.Background(), nativeHealthKernelReader{}, claim.ReplyGuardHandle); e != nil {
+		if e = requireNativeReplyGuardClaim(context.Background(), nativeHealthKernelReader{}, claim.ReplyGuardHandle, claim.ReplyGuardFingerprint); e != nil {
 			return Fault("guard_unavailable", "native reply guard changed during selected-path probe")
 		}
 		if e = inspectNativeHealthPolicy(context.Background(), nativeHealthKernelReader{}, claim.recoveryScope(), targets); e != nil {

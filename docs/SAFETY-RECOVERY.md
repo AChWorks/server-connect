@@ -93,32 +93,52 @@ An independently preinstalled narrow route hook at priority `-150` preserved
 58/58 authenticated replies while the identical Core executed. That manually
 staged proof alone is **not** integrated-product or production acceptance.
 
-The integrated candidate's **one** fixed `inet sc_reply_guard` table has
-one `route OUTPUT` chain at priority `-150`, with exactly one expression:
-`ct direction reply meta mark 0 meta mark set 0x2024 counter`. The selected
-Core's official `auto_redirect_output_mark` is explicitly fixed at `0x2024`.
-The rule covers **only unmarked established replies** to preexisting inbound
-connections; it does not exempt the remote peer IP, the listening port, or a
-host subnet. New connections initiated *by the server* to that same public
-client IP are not reply-direction packets and remain VPN-required. The
-isolated three-namespace QA script
-`scripts/qa/native-reply-mark-netns.sh marked-public` additionally checks a
-selected VLESS wire counter and rejects direct foreign egress, though the
-physical original-SSH failure was not reproducible in that VM.
+The integrated candidate's single fixed `inet sc_reply_guard` table has
+one `route OUTPUT` chain at priority `-150`, using the official
+`auto_redirect_output_mark` (`0x2024`). A conntrack `REPLY` rule
+protects the ordinary tracked inbound case. This alone was insufficient in
+physical QA: on a host where TCP sessions were established **before**
+conntrack began observing them, their first observed packet can be from
+server to client and conntrack may call that direction `ORIGINAL`
+(or have no existing row).
+
+Immediately before native activation, the manager takes a read-only snapshot
+from the kernel's IPv4/IPv6 TCP socket tables of *established accepted TCP
+sockets whose local endpoint matches a currently listening socket*. Two
+concatenated nft sets store only those specific
+`local IP . local port . peer IP . peer port` tuples, one per address
+family. The additional rules mark `ct direction original` **only** when
+the packet matches a preexisting accepted tuple. These constant-count,
+hash-lookup rules create no blanket direct exception for a foreign IP, an
+entire listening port, or a subnet. A new server-originated connection to
+that same foreign IP with another TCP four-tuple is not in either set and
+remains VPN-required. The immutable snapshot also protects the case where
+an old accepted connection has not yet entered conntrack at activation.
+This is an admission-specific TCP fix, **not** broad UDP/DNS/IPv6 routing
+or hosted-HTTP acceptance.
+
+In the field comparison, reply-only installed candidates failed after
+5 SSH replies; a separate exact-accepted-socket guard preserved 58/58
+original SSH replies on the same physical target and observed 9 matches
+of the reversed/previously untracked tuple rule. That separately staged
+experiment passed; the subsequently integrated **snapshot-backed**
+candidate still requires its own full installed field proof. The existing
+three-namespace fixture also checks selected VLESS wire counters versus
+direct egress but does not reproduce the original physical SSH failure.
 
 The native one-use, configuration-bound current-boot session and both
-independent timers must be durable **before** installing the exact nftables
-reply guard. The manager then creates the rule and persists its observed
-kernel table handle **before calling systemctl start**, rather than installing
-it in `ExecStartPre`. The latter still rechecks fresh startup authorization,
-the complete native admission and exact committed rule identity, then durably
-consumes a one-use Core-start grant before Core execution. An interrupted
-preflight or failed Core start retains only the original session's independent
-recovery authority; it cannot restart a stale claim. Admission refuses any
-preexisting same-name table. Runtime status and health must attest that the
-current table's complete nftables expression, hook and committed handle match
-the claimed native session. The exact enabled Core may then apply its own
-official TUN, RPDB and nftables state; merely seeing an active process never
+independent timers must be durable **before** installing the nftables reply
+guard. The manager computes the canonical accepted-tuple fingerprint and
+persists it in the one-use native claim **before** the atomic nft transaction,
+then durably records the observed table handle before `systemctl start`.
+An interrupted table-creation/handle-commit window can therefore still be
+recovered by the independent stop guard without adopting a foreign table.
+`ExecStartPre` rechecks fresh startup authorization, complete native
+admission, exact table handle **and** complete accepted-tuple fingerprint,
+then durably consumes a one-use Core-start grant before Core execution.
+A failed preflight or Core start cannot silently reuse a stale receipt.
+Runtime status and health independently attest the same table, hook,
+rules, tuple sets and fingerprint. Merely seeing an active Core never
 establishes selected-path health.
 
 On normal Disconnect, Core exit, or a failed preflight, independent
@@ -126,11 +146,11 @@ On normal Disconnect, Core exit, or a failed preflight, independent
 the reply-guard table and deletes only its verified table handle using the
 existing nftables generation-conditional Netlink transaction. An interrupted
 preflight can have the table but not yet its committed handle; only the
-current one-use claim and exact table shape authorize that narrow recovery.
-Any later foreign replacement, additional/missing rule, changed output mark,
-generation change, uncertain deletion, or mismatched committed handle
-**retains the recovery claim and blocks success**, rather than deleting a
-table by name or presenting an unverified Direct/off. The shared installer
+previously persisted expected fingerprint and current one-use claim authorize
+that narrow recovery. A later foreign replacement, additional/missing rule
+or tuple, changed mark, nft generation drift, uncertain deletion, or
+mismatched committed handle **retains the recovery claim and blocks success**,
+rather than deleting by name or presenting unverified Direct/off. The shared installer
 must refuse orphaned reply-guard objects without a cleared native claim;
 idle Direct must not contain this table.
 

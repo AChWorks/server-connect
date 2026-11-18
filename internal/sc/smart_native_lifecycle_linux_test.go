@@ -659,7 +659,7 @@ func TestNativeAdmissionRechecksCommittedEarlyReplyGuard(t *testing.T) {
 		r.outputs["nft -j list table inet sc_reply_guard"] = nativeReplyGuardFixtureJSON
 		return r
 	}
-	if err := inspectNativeAdmissionWithReplyGuard(ctx, newFixture(), scope, 10); err != nil {
+	if err := inspectNativeAdmissionWithReplyGuard(ctx, newFixture(), scope, 10, nativeAcceptedTCPFingerprint(nil)); err != nil {
 		t.Fatalf("previously committed reply guard refused: %v", err)
 	}
 	for _, tc := range []struct {
@@ -680,7 +680,7 @@ func TestNativeAdmissionRechecksCommittedEarlyReplyGuard(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			r := newFixture()
 			tc.mutate(r)
-			if err := inspectNativeAdmissionWithReplyGuard(ctx, r, scope, tc.handle); err == nil {
+			if err := inspectNativeAdmissionWithReplyGuard(ctx, r, scope, tc.handle, nativeAcceptedTCPFingerprint(nil)); err == nil {
 				t.Fatalf("stale/foreign preflight unexpectedly passed: %s", tc.name)
 			}
 			for _, call := range r.called {

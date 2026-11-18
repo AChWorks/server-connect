@@ -5,6 +5,7 @@ package sc
 import (
 	"context"
 	"errors"
+	"net/netip"
 	"os"
 	"strings"
 	"testing"
@@ -14,11 +15,33 @@ const nativeReplyGuardFixtureJSON = `{"nftables":[
  {"metainfo":{"version":"1.1.3","release_name":"qa","json_schema_version":1}},
  {"table":{"family":"inet","name":"sc_reply_guard","handle":10}},
  {"chain":{"family":"inet","table":"sc_reply_guard","name":"output_reply","handle":1,"type":"route","hook":"output","prio":-150,"policy":"accept"}},
- {"rule":{"family":"inet","table":"sc_reply_guard","chain":"output_reply","handle":2,
+ {"set":{"family":"inet","table":"sc_reply_guard","name":"accepted4","handle":2,"type":["ipv4_addr","inet_service","ipv4_addr","inet_service"]}},
+ {"set":{"family":"inet","table":"sc_reply_guard","name":"accepted6","handle":3,"type":["ipv6_addr","inet_service","ipv6_addr","inet_service"]}},
+ {"rule":{"family":"inet","table":"sc_reply_guard","chain":"output_reply","handle":4,
   "expr":[{"match":{"op":"==","left":{"ct":{"key":"direction"}},"right":"reply"}},
           {"match":{"op":"==","left":{"meta":{"key":"mark"}},"right":0}},
           {"mangle":{"key":{"meta":{"key":"mark"}},"value":8228}},
-          {"counter":{"packets":2,"bytes":208}}]}}
+          {"counter":{"packets":2,"bytes":208}}]}},
+ {"rule":{"family":"inet","table":"sc_reply_guard","chain":"output_reply","handle":5,
+  "expr":[{"match":{"op":"==","left":{"ct":{"key":"direction"}},"right":"original"}},
+          {"match":{"op":"==","left":{"concat":[
+            {"payload":{"protocol":"ip","field":"saddr"}},
+            {"payload":{"protocol":"tcp","field":"sport"}},
+            {"payload":{"protocol":"ip","field":"daddr"}},
+            {"payload":{"protocol":"tcp","field":"dport"}}]},"right":"@accepted4"}},
+          {"match":{"op":"==","left":{"meta":{"key":"mark"}},"right":0}},
+          {"mangle":{"key":{"meta":{"key":"mark"}},"value":8228}},
+          {"counter":{"packets":0,"bytes":0}}]}},
+ {"rule":{"family":"inet","table":"sc_reply_guard","chain":"output_reply","handle":6,
+  "expr":[{"match":{"op":"==","left":{"ct":{"key":"direction"}},"right":"original"}},
+          {"match":{"op":"==","left":{"concat":[
+            {"payload":{"protocol":"ip6","field":"saddr"}},
+            {"payload":{"protocol":"tcp","field":"sport"}},
+            {"payload":{"protocol":"ip6","field":"daddr"}},
+            {"payload":{"protocol":"tcp","field":"dport"}}]},"right":"@accepted6"}},
+          {"match":{"op":"==","left":{"meta":{"key":"mark"}},"right":0}},
+          {"mangle":{"key":{"meta":{"key":"mark"}},"value":8228}},
+          {"counter":{"packets":0,"bytes":0}}]}}
 ]}`
 
 type fakeReplyGuardRunner struct {
@@ -73,6 +96,7 @@ func (r *fakeReplyGuardRunner) deleteReplyGuardCAS(handle uint64, generation uin
 		return r.deleteErr
 	}
 	r.has = false
+	r.foreign = ""
 	r.deleted = true
 	return nil
 }
@@ -143,13 +167,13 @@ func TestNativeReplyGuardTransactionalInstallAndExactRecovery(t *testing.T) {
 	if len(r.mutations) != 1 || r.mutations[0] != "create" {
 		t.Fatalf("preexisting table caused foreign mutation: %v", r.mutations)
 	}
-	if err := recoverNativeReplyGuard(ctx, r, 10); err != nil {
+	if err := recoverNativeReplyGuard(ctx, r, 10, nativeAcceptedTCPFingerprint(nil)); err != nil {
 		t.Fatal(err)
 	}
 	if r.has || !r.deleted || len(r.mutations) != 2 || r.mutations[1] != "delete" {
 		t.Fatalf("owned cleanup did not delete exact table: %+v", r)
 	}
-	if err := recoverNativeReplyGuard(ctx, r, 10); err != nil || len(r.mutations) != 2 {
+	if err := recoverNativeReplyGuard(ctx, r, 10, nativeAcceptedTCPFingerprint(nil)); err != nil || len(r.mutations) != 2 {
 		t.Fatalf("idempotent missing-table recovery: %v / %v", err, r.mutations)
 	}
 }
@@ -171,11 +195,11 @@ func TestNativeReplyGuardForeignCollisionCannotDeleteOrAdopt(t *testing.T) {
 		})
 	}
 	r := &fakeReplyGuardRunner{has: true, foreign: strings.Replace(nativeReplyGuardFixtureJSON, `"value":8228`, `"value":8227`, 1)}
-	if err := recoverNativeReplyGuard(ctx, r, 10); err == nil || len(r.mutations) != 0 {
+	if err := recoverNativeReplyGuard(ctx, r, 10, nativeAcceptedTCPFingerprint(nil)); err == nil || len(r.mutations) != 0 {
 		t.Fatalf("foreign mark rule deleted: %v / %v", err, r.mutations)
 	}
 	r.foreign = strings.Replace(nativeReplyGuardFixtureJSON, `"prio":-150`, `"prio":-149`, 1)
-	if err := recoverNativeReplyGuard(ctx, r, 10); err == nil || len(r.mutations) != 0 {
+	if err := recoverNativeReplyGuard(ctx, r, 10, nativeAcceptedTCPFingerprint(nil)); err == nil || len(r.mutations) != 0 {
 		t.Fatalf("foreign hook deleted: %v / %v", err, r.mutations)
 	}
 }
@@ -187,11 +211,11 @@ func TestNativeReplyGuardInterruptedInstallAndRetryableRecovery(t *testing.T) {
 		t.Fatalf("ambiguous create outcome must retain kernel resource for claim cleanup: %v %+v", err, r)
 	}
 	r.deleteErr = errors.New("first delete failed")
-	if err := recoverNativeReplyGuard(ctx, r, 0); err == nil || !r.has {
+	if err := recoverNativeReplyGuard(ctx, r, 0, nativeAcceptedTCPFingerprint(nil)); err == nil || !r.has {
 		t.Fatalf("failed delete cannot lose owned retry claim: %v %+v", err, r)
 	}
 	r.deleteErr = nil
-	if err := recoverNativeReplyGuard(ctx, r, 0); err != nil || r.has {
+	if err := recoverNativeReplyGuard(ctx, r, 0, nativeAcceptedTCPFingerprint(nil)); err != nil || r.has {
 		t.Fatalf("verified retry must recover without altering foreign state: %v %+v", err, r)
 	}
 }
@@ -208,7 +232,7 @@ func TestNativeReplyGuardLostTableFailsReadOnlyHealth(t *testing.T) {
 
 func TestNativeReplyGuardConcurrentNftGenerationMutationRetainsClaim(t *testing.T) {
 	r := &fakeReplyGuardRunner{has: true, generationDrift: true}
-	if err := recoverNativeReplyGuard(context.Background(), r, 10); err == nil {
+	if err := recoverNativeReplyGuard(context.Background(), r, 10, nativeAcceptedTCPFingerprint(nil)); err == nil {
 		t.Fatal("concurrent nftables generation change not detected")
 	}
 	if !r.has || len(r.mutations) != 0 {
@@ -217,7 +241,7 @@ func TestNativeReplyGuardConcurrentNftGenerationMutationRetainsClaim(t *testing.
 	// Reconciliation is repeatable when the externally changing owner has
 	// stopped and the complete table is still independently validated.
 	r.generationDrift = false
-	if err := recoverNativeReplyGuard(context.Background(), r, 10); err != nil || r.has {
+	if err := recoverNativeReplyGuard(context.Background(), r, 10, nativeAcceptedTCPFingerprint(nil)); err != nil || r.has {
 		t.Fatalf("later verified CAS recovery failed: %v / %+v", err, r)
 	}
 }
@@ -227,7 +251,7 @@ func TestNativeReplyGuardPersistedHandlePreventsIdenticalForeignReplacement(t *t
 	r := &fakeReplyGuardRunner{has: true}
 	// Even when the replacement rule has an identical observable shape,
 	// its different table handle must not be adopted by a persisted receipt.
-	if err := recoverNativeReplyGuard(ctx, r, 42); err == nil {
+	if err := recoverNativeReplyGuard(ctx, r, 42, nativeAcceptedTCPFingerprint(nil)); err == nil {
 		t.Fatal("foreign replacement table handle was accepted")
 	}
 	if !r.has || len(r.mutations) != 0 {
@@ -263,26 +287,33 @@ func TestNativeReplyGuardRealKernelNamespaceLifecycle(t *testing.T) {
 	if err != nil || present {
 		t.Fatalf("owned guest table must be absent before install: %v %t", err, present)
 	}
-	handle, err := installNativeReplyGuardWithHandle(ctx, r)
+	flows := []nativeAcceptedTCPFlow{
+		{Local: netip.AddrPortFrom(netip.MustParseAddr("203.0.113.10"), 22),
+			Peer: netip.AddrPortFrom(netip.MustParseAddr("198.51.100.77"), 51430)},
+		{Local: netip.AddrPortFrom(netip.MustParseAddr("2001:db8::1"), 8443),
+			Peer: netip.AddrPortFrom(netip.MustParseAddr("2001:db8::2"), 54120)},
+	}
+	digest := nativeAcceptedTCPFingerprint(flows)
+	handle, err := installNativeReplyGuardWithHandle(ctx, r, flows, digest)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if handle == 0 {
 		t.Fatal("real nftables table handle not captured")
 	}
-	if err := requireNativeReplyGuardClaim(ctx, r, handle); err != nil {
+	if err := requireNativeReplyGuardClaim(ctx, r, handle, digest); err != nil {
 		t.Fatalf("real nftables JSON or committed handle validation failed: %v", err)
 	}
-	if err := recoverNativeReplyGuard(ctx, r, handle+1); err == nil {
+	if err := recoverNativeReplyGuard(ctx, r, handle+1, digest); err == nil {
 		t.Fatal("foreign replacement table handle accepted")
 	}
-	if err := requireNativeReplyGuardClaim(ctx, r, handle); err != nil {
+	if err := requireNativeReplyGuardClaim(ctx, r, handle, digest); err != nil {
 		t.Fatalf("refused foreign recovery must preserve installed rule: %v", err)
 	}
-	if err := recoverNativeReplyGuard(ctx, r, handle); err != nil {
+	if err := recoverNativeReplyGuard(ctx, r, handle, digest); err != nil {
 		t.Fatalf("real kernel generation-conditional nftables delete failed: %v", err)
 	}
-	if err := recoverNativeReplyGuard(ctx, r, handle); err != nil {
+	if err := recoverNativeReplyGuard(ctx, r, handle, digest); err != nil {
 		t.Fatalf("idempotent exact cleanup failed: %v", err)
 	}
 	restored, err := r.output(ctx, "nft", "list", "tables")
@@ -290,4 +321,61 @@ func TestNativeReplyGuardRealKernelNamespaceLifecycle(t *testing.T) {
 		t.Fatalf("isolated kernel namespace nft baseline not restored: %v / %q / %q", err, baseline, restored)
 	}
 	t.Log("QA_KERNEL_GENERATION_CONDITIONAL_REPLY_GUARD_LIFECYCLE=PASS")
+}
+
+func TestNativeReplyGuardAcceptedSnapshotFingerprintCannotAdoptOtherTuple(t *testing.T) {
+	ctx := context.Background()
+	// The nft rule has not changed; an additional kernel set element by
+	// itself must invalidate the exact precommitted tuple fingerprint.
+	needle := `"handle":2,"type":["ipv4_addr","inet_service","ipv4_addr","inet_service"]`
+	replacement := `"handle":2,"type":["ipv4_addr","inet_service","ipv4_addr","inet_service"],"elem":[{"concat":["203.0.113.10",22,"198.51.100.77",51430]}]`
+	if !strings.Contains(nativeReplyGuardFixtureJSON, needle) {
+		t.Fatal("wrong fixture")
+	}
+	altered := strings.Replace(nativeReplyGuardFixtureJSON, needle, replacement, 1)
+	if err := nativeReplyGuardShape(altered); err != nil {
+		t.Fatalf("otherwise legitimate alternate tuple set rejected structurally: %v", err)
+	}
+	flow := nativeAcceptedTCPFlow{
+		Local: netip.AddrPortFrom(netip.MustParseAddr("203.0.113.10"), 22),
+		Peer:  netip.AddrPortFrom(netip.MustParseAddr("198.51.100.77"), 51430),
+	}
+	_, digest, err := nativeReplyGuardReceipt(altered)
+	if err != nil || digest != nativeAcceptedTCPFingerprint([]nativeAcceptedTCPFlow{flow}) {
+		t.Fatalf("kernel tuple did not survive canonical signature: %v %s", err, digest)
+	}
+	r := &fakeReplyGuardRunner{has: true, foreign: altered}
+	if err := requireNativeReplyGuardClaim(ctx, r, 10, nativeAcceptedTCPFingerprint(nil)); err == nil {
+		t.Fatal("live health silently adopted an unsaved accepted TCP tuple")
+	}
+	if err := recoverNativeReplyGuard(ctx, r, 10, nativeAcceptedTCPFingerprint(nil)); err == nil {
+		t.Fatal("recovery deleted table with a changed accepted TCP tuple")
+	}
+	if len(r.mutations) != 0 {
+		t.Fatalf("foreign accepted TCP tuple triggered kernel mutation: %v", r.mutations)
+	}
+	// The same kernel shape may only be reconciled against its *actual*
+	// prior committed intent, even if table handle and generation match.
+	if err := recoverNativeReplyGuard(ctx, r, 10, nativeAcceptedTCPFingerprint([]nativeAcceptedTCPFlow{flow})); err != nil {
+		t.Fatalf("valid precommitted accepted tuple could not be reclaimed: %v", err)
+	}
+}
+
+func TestNativeReplyGuardRejectsWrongTupleSetTypesAndForeignSet(t *testing.T) {
+	for _, tc := range []struct{ name, old, new string }{
+		{"wrong-tuple-type", `"ipv4_addr","inet_service","ipv4_addr","inet_service"`, `"ipv4_addr","inet_service","ipv4_addr","ipv4_addr"`},
+		{"changed-set-name", `"name":"accepted4"`, `"name":"foreign4"`},
+		{"additional-set", `"handle":3,"type":["ipv6_addr","inet_service","ipv6_addr","inet_service"]`, `"handle":3,"type":["ipv6_addr","inet_service","ipv6_addr","inet_service"]}},{"set":{"family":"inet","table":"sc_reply_guard","name":"third","handle":8`},
+		{"unapproved-mark-rule", `"right":"@accepted4"`, `"right":"@accepted6"`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if !strings.Contains(nativeReplyGuardFixtureJSON, tc.old) {
+				t.Fatalf("bad mutation fixture: %q", tc.old)
+			}
+			altered := strings.Replace(nativeReplyGuardFixtureJSON, tc.old, tc.new, 1)
+			if err := nativeReplyGuardShape(altered); err == nil {
+				t.Fatal("unowned nft shape was accepted")
+			}
+		})
+	}
 }
