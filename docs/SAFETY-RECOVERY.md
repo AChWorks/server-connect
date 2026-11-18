@@ -144,7 +144,25 @@ establishes selected-path health.
 On normal Disconnect, Core exit, or a failed preflight, independent
 `ExecStopPost` first recovers the exact owned Core resources, then inspects
 the reply-guard table and deletes only its verified table handle using the
-existing nftables generation-conditional Netlink transaction. An interrupted
+existing nftables generation-conditional Netlink transaction.
+
+A physical Debian 13 native-Core `SIGKILL` exposed a distinct orphan
+ordering: Core's randomized redirect-table RPDB identity, nft table and TUN
+can disappear while its *fixed-slot* 14200-series/32768 IPv4/IPv6 RPDB
+rules survive. Previously, the missing randomized identity always blocked
+recovery, leaving the guarded host in an explicitly failed Smart state.
+For this one post-crash case, cleanup of the remaining **exact fixed-slot
+RPDB rule bodies and priorities only** is permitted after the current-boot
+native claim proves one-use Core start was consumed and the verified
+reply-guard receipt still exists. The independent stop path must confirm the
+Core PID is zero, the Core's reserved route table is empty, the randomized
+redirect and Core nft identities are absent, no foreign Docker-compatibility
+rules survive, the native TUN is absent and no unattributed loopback redirect
+route to the underlay remains. Any malformed or duplicate rule, foreign
+identity, absent durable grant or missing verification blocks mutation.
+Partial orphan recovery remains retryable under the same claim; the reply
+table is recovered only after RPDB cleanup succeeds. No generic RPDB
+cleanup or automatic adoption of unrelated routes is authorized. An interrupted
 preflight can have the table but not yet its committed handle; only the
 previously persisted expected fingerprint and current one-use claim authorize
 that narrow recovery. A later foreign replacement, additional/missing rule

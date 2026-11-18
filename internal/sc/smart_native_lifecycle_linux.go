@@ -466,7 +466,14 @@ func (m *Manager) NativeRecoverInstalled() error {
 		if err := m.nativeMainPIDZero(); err != nil {
 			return err
 		}
-		if err := recoverNativeRedirect(context.Background(), nativeSystemRunner{}, session.recoveryScope()); err != nil {
+		// Core SIGKILL may destroy its randomized redirect identity before
+		// releasing the three fixed RPDB rules. This narrow orphan path is
+		// authorized only by the durable, already consumed one-use start
+		// claim and the separately committed reply-guard receipt.
+		verifiedStarted := session.CoreStartAttempted && session.ReplyGuardHandle != 0 &&
+			len(session.ReplyGuardFingerprint) == 64
+		if err := recoverNativeRedirectWithVerifiedOrphan(
+			context.Background(), nativeSystemRunner{}, session.recoveryScope(), verifiedStarted); err != nil {
 			return err
 		}
 		// A failed preflight may have committed only the guard table; a

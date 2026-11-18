@@ -79,6 +79,8 @@ type nativeRecoveryRetryRunner struct {
 	hasDocker       bool
 	dockerRules     map[string]bool
 	dockerMalformed bool
+	orphanTun       bool
+	orphanRoute     bool
 	failOnce        string
 	mutations       []string
 }
@@ -116,6 +118,22 @@ func (r *nativeRecoveryRetryRunner) output(_ context.Context, binary string, arg
 		return r.routes["-4"], nil
 	case "ip -6 route show table 3362254344":
 		return r.routes["-6"], nil
+	case "ip -o link show":
+		links := "1: lo: <LOOPBACK,UP> mtu 65536\n2: scouter0: <UP> mtu 1500\n"
+		if r.orphanTun {
+			links += "3: sctun0: <POINTOPOINT,UP> mtu 1380\n"
+		}
+		return links, nil
+	case "ip -4 route show table all":
+		if r.orphanRoute {
+			return "local 127.0.0.1 dev scouter0 table 3362254344 scope host\n", nil
+		}
+		return "local 127.0.0.1 dev lo table local scope host\n", nil
+	case "ip -6 route show table all":
+		if r.orphanRoute {
+			return "local ::1 dev scouter0 table 3362254344 metric 1024 pref medium\n", nil
+		}
+		return "local ::1 dev lo table local proto kernel metric 0 pref medium\n", nil
 	case "nft list tables":
 		tables := "table inet unrelated-product\n"
 		if r.hasNft {
@@ -489,4 +507,176 @@ func TestNativeAdmissionDockerRuleCannotBePreexisting(t *testing.T) {
 			}
 		})
 	}
+}
+
+// On the physical Debian 13 host the SIGKILL-ed official Core removed its
+// randomized table identity, nft table and TUN, but LEFT fixed native RPDB
+// rules 14200/14201/14202/32768 in both address families. The installed
+// stop hook deliberately refused that unsupported orphan before mutation.
+func newNativeCoreSIGKILLOrphanFixture() *nativeRecoveryRetryRunner {
+	r := newNativeRecoveryRetryRunner()
+	r.hasNft = false
+	for _, family := range []string{"-4", "-6"} {
+		var kept []string
+		for _, line := range r.rules[family] {
+			if !strings.HasPrefix(line, "1: ") {
+				kept = append(kept, line)
+			}
+		}
+		r.rules[family] = kept
+		r.routes[family] = ""
+	}
+	return r
+}
+
+func TestNativeCoreSIGKILLWithoutRandomTableIdentityRequiresConsumedClaim(t *testing.T) {
+	scope := nativeRedirectRecovery{TunnelIF: "sctun0", UnderlayIF: "scouter0",
+		Table: NativePolicyTableIndex, Rule: NativePolicyRuleIndex}
+	r := newNativeCoreSIGKILLOrphanFixture()
+	if err := recoverNativeRedirect(context.Background(), r, scope); err == nil {
+		t.Fatal("unclaimed orphan RPDB rules were implicitly adopted")
+	}
+	if len(r.mutations) != 0 {
+		t.Fatalf("unclaimed cleanup mutated network: %v", r.mutations)
+	}
+	if err := recoverNativeRedirectWithVerifiedOrphan(context.Background(), r, scope, true); err != nil {
+		t.Fatalf("verified Core-start claim could not recover physical SIGKILL orphan: %v", err)
+	}
+	for _, family := range []string{"-4", "-6"} {
+		text := strings.Join(r.rules[family], "\n")
+		for _, leaked := range []string{"14200:", "14201:", "14202:", "32768:"} {
+			if strings.Contains(text, leaked) {
+				t.Fatalf("Core orphan rule remains %s in %s", leaked, family)
+			}
+		}
+		if !strings.Contains(text, "40960: from all lookup 123") {
+			t.Fatalf("foreign routing rule was lost in %s: %s", family, text)
+		}
+	}
+	if len(r.mutations) != 8 {
+		t.Fatalf("expected only four owned RPDB deletions per family, got %v", r.mutations)
+	}
+	before := len(r.mutations)
+	if err := recoverNativeRedirectWithVerifiedOrphan(context.Background(), r, scope, true); err != nil ||
+		len(r.mutations) != before {
+		t.Fatalf("exact orphan cleanup not idempotent: %v / %v", err, r.mutations[before:])
+	}
+}
+
+func TestNativeCoreSIGKILLOrphanCleanupFailureIsExactlyRetryable(t *testing.T) {
+	scope := nativeRedirectRecovery{TunnelIF: "sctun0", UnderlayIF: "scouter0",
+		Table: NativePolicyTableIndex, Rule: NativePolicyRuleIndex}
+	r := newNativeCoreSIGKILLOrphanFixture()
+	r.failOnce = "ip -4 rule del pref 14201"
+	if err := recoverNativeRedirectWithVerifiedOrphan(context.Background(), r, scope, true); err == nil {
+		t.Fatal("interrupted RPDB cleanup unexpectedly passed")
+	}
+	if err := recoverNativeRedirectWithVerifiedOrphan(context.Background(), r, scope, true); err != nil {
+		t.Fatalf("exact claimed retry failed: %v", err)
+	}
+	for _, family := range []string{"-4", "-6"} {
+		text := strings.Join(r.rules[family], "\n")
+		if strings.Contains(text, "1420") || strings.Contains(text, "32768:") ||
+			!strings.Contains(text, "40960: from all lookup 123") {
+			t.Fatalf("retry altered foreign rules or left managed rules: %s", text)
+		}
+	}
+}
+
+func TestNativeCoreSIGKILLOrphanRefusesEveryUnsupportedIdentity(t *testing.T) {
+	scope := nativeRedirectRecovery{TunnelIF: "sctun0", UnderlayIF: "scouter0",
+		Table: NativePolicyTableIndex, Rule: NativePolicyRuleIndex}
+	for _, tc := range []struct {
+		name   string
+		change func(*nativeRecoveryRetryRunner)
+	}{
+		{"unverified-start", func(r *nativeRecoveryRetryRunner) {}},
+		{"still-present-core-nft", func(r *nativeRecoveryRetryRunner) { r.hasNft = true }},
+		{"remaining-core-tunnel", func(r *nativeRecoveryRetryRunner) { r.orphanTun = true }},
+		{"unattributed-redirect-route", func(r *nativeRecoveryRetryRunner) { r.orphanRoute = true }},
+		{"foreign-managed-rule", func(r *nativeRecoveryRetryRunner) {
+			r.rules["-4"] = append(r.rules["-4"], "14200: from all lookup 999")
+		}},
+		{"foreign-docker-injection", func(r *nativeRecoveryRetryRunner) {
+			r.hasDocker = true
+			r.dockerRules = map[string]bool{"iifname": true, "oifname": true}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := newNativeCoreSIGKILLOrphanFixture()
+			tc.change(r)
+			verified := tc.name != "unverified-start"
+			if err := recoverNativeRedirectWithVerifiedOrphan(context.Background(), r, scope, verified); err == nil {
+				t.Fatalf("unsafe orphan case accepted: %s", tc.name)
+			}
+			if len(r.mutations) != 0 {
+				t.Fatalf("unsafe orphan case mutated kernel: %s: %v", tc.name, r.mutations)
+			}
+		})
+	}
+}
+
+// Run only in an explicitly isolated, disposable Linux network namespace
+// whose harness pre-staged the *exact* fixed-slot orphan RPDB layout after
+// an already stopped Core. This exercises the actual iproute2 recovery calls,
+// separate from the fake kernel and the physical installed crash test.
+func TestNativeCoreSIGKILLOrphanRealKernelNamespace(t *testing.T) {
+	if os.Getenv("SC_NATIVE_ORPHAN_GUEST") != "yes" {
+		t.Skip("requires explicitly prepared disconnected orphan network namespace")
+	}
+	if os.Geteuid() != 0 {
+		t.Fatal("real kernel orphan test requires root in isolated namespace")
+	}
+	current, err := os.Readlink("/proc/self/ns/net")
+	if err != nil {
+		t.Fatal(err)
+	}
+	init, err := os.Readlink("/proc/1/ns/net")
+	if err != nil || current == init {
+		t.Fatal("refuse to mutate initial host namespace")
+	}
+	scope := nativeRedirectRecovery{TunnelIF: "sctun0", UnderlayIF: "scouter0",
+		Table: NativePolicyTableIndex, Rule: NativePolicyRuleIndex}
+	r := nativeSystemRunner{}
+	ctx := context.Background()
+	baseline4, err := r.output(ctx, "ip", "-4", "rule", "show")
+	if err != nil {
+		t.Fatal(err)
+	}
+	baseline6, err := r.output(ctx, "ip", "-6", "rule", "show")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(baseline4, "14200:") ||
+		!strings.Contains(baseline6, "14200:") ||
+		!strings.Contains(baseline4, "32768:") ||
+		!strings.Contains(baseline6, "32768:") {
+		t.Fatal("isolated kernel did not stage the intended Core-owned orphan RPDB rules")
+	}
+	if err := recoverNativeRedirect(ctx, r, scope); err == nil {
+		t.Fatal("strict unclaimed real kernel recovery adopted the orphan")
+	}
+	unchanged4, e4 := r.output(ctx, "ip", "-4", "rule", "show")
+	unchanged6, e6 := r.output(ctx, "ip", "-6", "rule", "show")
+	if e4 != nil || e6 != nil || unchanged4 != baseline4 || unchanged6 != baseline6 {
+		t.Fatal("unclaimed real kernel refusal modified RPDB")
+	}
+	if err := recoverNativeRedirectWithVerifiedOrphan(ctx, r, scope, true); err != nil {
+		t.Fatalf("owned Core orphan cleanup failed on real kernel: %v", err)
+	}
+	for _, family := range []string{"-4", "-6"} {
+		raw, err := r.output(ctx, "ip", family, "rule", "show")
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, pref := range []string{"14200:", "14201:", "14202:", "32768:"} {
+			if strings.Contains(raw, pref) {
+				t.Fatalf("%s Core orphan RPDB rule remains in %s", pref, family)
+			}
+		}
+	}
+	if err := recoverNativeRedirectWithVerifiedOrphan(ctx, r, scope, true); err != nil {
+		t.Fatalf("idempotent real kernel cleanup failed: %v", err)
+	}
+	t.Log("QA_NATIVE_REAL_KERNEL_CONSUMED_ORPHAN_RECOVERY=PASS")
 }

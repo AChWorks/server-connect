@@ -43,7 +43,17 @@ the kernel exactly; 9 packets matched its narrow tuple rule.
 
 The integrated candidate now snapshots actual established accepted
 IPv4/IPv6 TCP sockets at admission; no general remote-IP, port or subnet
-exception is permitted. It still requires independent installed-product
+exception is permitted. An authorized physical Core `SIGKILL` test
+exposed a separate blocking recovery condition: official Core removed the
+randomized redirect identity and TUN but left exact fixed-slot RPDB rules.
+Independent `ExecStopPost` correctly refused to adopt unattributed
+orphan rules and left the native claim unresolved; scope-verified QA
+containment later restored the exact baseline after validating all owned
+rule bodies against the current-boot claim and saved kernel baseline.
+This manual containment is **not** product crash acceptance. The candidate
+must prove automatic recovery of exactly that post-SIGKILL orphan under its
+consumed one-use claim, plus refusal of foreign/duplicate policies and
+retryability under interrupted cleanup. It still requires independent installed-product
 proof of old/new SSH, early prearm, committed fingerprint and handle,
 crash/Disconnect/failure-before-flag cleanup, no foreign-table adoption,
 and **new** server-originated egress to the *same public client IP*

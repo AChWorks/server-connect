@@ -65,6 +65,16 @@ var nativeRuleLine = regexp.MustCompile("^([0-9]+):\\s+(.+)$")
 var nativeChainLine = regexp.MustCompile("(?m)^\\s*chain ([a-zA-Z0-9_]+) \\{")
 
 func recoverNativeRedirect(parent context.Context, r nativeKernelRunner, p nativeRedirectRecovery) error {
+	return recoverNativeRedirectWithVerifiedOrphan(parent, r, p, false)
+}
+
+// The official Core's abnormal SIGKILL teardown can remove its randomized
+// redirect-table identity and nft table but leave exactly shaped 14200-series
+// and 32768 RPDB rules. Without the identity the ordinary recovery must
+// continue to refuse adoption. A caller that already verified this same
+// current-boot, consumed Core-start claim and independently stopped Core may
+// allow ONLY this orphan layout after separate absence/collision checks.
+func recoverNativeRedirectWithVerifiedOrphan(parent context.Context, r nativeKernelRunner, p nativeRedirectRecovery, claimedCoreStart bool) error {
 	if !smartTUNDeviceName.MatchString(p.TunnelIF) || !smartTUNDeviceName.MatchString(p.UnderlayIF) ||
 		p.TunnelIF == p.UnderlayIF || p.TunnelIF == "lo" || p.UnderlayIF == "lo" ||
 		p.Table != NativePolicyTableIndex || p.Rule != NativePolicyRuleIndex {
@@ -201,8 +211,6 @@ func recoverNativeRedirect(parent context.Context, r nativeKernelRunner, p nativ
 				routes = append(routes, nativeAction{"ip", []string{family, "route", "del", "table", strconv.Itoa(redirectTable), "local", host, "dev", dev}})
 			}
 		}
-	} else if len(coreRules) > 0 || len(fallbackRules) > 0 {
-		return errors.New("native recovery: policy orphan without redirect identity")
 	}
 	tables, e := r.output(ctx, "nft", "list", "tables")
 	if e != nil {
@@ -252,6 +260,51 @@ func recoverNativeRedirect(parent context.Context, r nativeKernelRunner, p nativ
 		for _, match := range nativeChainLine.FindAllStringSubmatch(body, -1) {
 			if !known[match[1]] {
 				return errors.New("native recovery: foreign nft chain")
+			}
+		}
+	}
+	// A killed Core may have released its nft table, random-table rule
+	// and TUN interface while its exact fixed-slot RPDB rules remain.
+	// This is not a general orphan cleanup: the caller must have already
+	// verified the one-use Core-start receipt under the native Manager lock.
+	// Refuse even exact RPDB patterns if the Core's nft identity, Docker
+	// compatibility rules, any TUN, or unattributed redirect routes survive.
+	// The previously checked fixed table must be empty; priorities and
+	// complete rule bodies were checked and de-duplicated above.
+	if redirectTable == 0 && (len(coreRules) != 0 || len(fallbackRules) != 0) {
+		if !claimedCoreStart || countTable != 0 || len(dockerActions) != 0 {
+			return errors.New("native recovery: policy orphan without verified Core-start ownership")
+		}
+		links, linkErr := r.output(ctx, "ip", "-o", "link", "show")
+		if linkErr != nil {
+			return linkErr
+		}
+		for _, line := range strings.Split(links, "\n") {
+			if strings.TrimSpace(line) == "" {
+				continue
+			}
+			fields := strings.SplitN(strings.TrimSpace(line), ": ", 3)
+			if len(fields) < 2 {
+				return errors.New("native recovery: unparseable orphan interface inventory")
+			}
+			if strings.SplitN(fields[1], "@", 2)[0] == p.TunnelIF {
+				return errors.New("native recovery: orphan TUN still exists")
+			}
+		}
+		for _, item := range []struct {
+			family, address string
+		}{{"-4", "127.0.0.1"}, {"-6", "::1"}} {
+			allRoutes, routeErr := r.output(ctx, "ip", item.family, "route", "show", "table", "all")
+			if routeErr != nil {
+				return routeErr
+			}
+			for _, line := range strings.Split(allRoutes, "\n") {
+				parts := strings.Fields(line)
+				if len(parts) >= 4 && parts[0] == "local" &&
+					parts[1] == item.address && parts[2] == "dev" &&
+					parts[3] == p.UnderlayIF {
+					return errors.New("native recovery: orphan redirect route still exists without table identity")
+				}
 			}
 		}
 	}
