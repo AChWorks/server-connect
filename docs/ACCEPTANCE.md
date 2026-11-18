@@ -46,7 +46,7 @@ These are **different evidence levels**, not interchangeable versions of a PASS:
 
 When a guard returns verified Direct/off, it is a **network restoration** success, not proof that a formerly blocked foreign route now works. Do not repair orphan policy by flushing another owner's tables; report `UNCERTAIN` if exact ownership cannot be proved. Capture the relevant native and provider-side packet paths independently; use `tcpdump -p` for old TUN-trial captures so the test does not change link flags.
 
-## Legacy non-Docker Debian 13 VM QA boundary (experimental)
+## Installed non-Docker Debian 13 VM QA boundary (experimental)
 
 The existing Docker fixture and the narrowly admitted `sc-qa-vm-us01` QEMU VM are **separate evidence lanes**, not substitutes for public/physical-host acceptance. The VM path uses real sing-box 1.14.3, real native Linux TUN and owner-journaled nftables/RPDB resources with a prearmed systemd recovery timer and independent supervised health executor. Fixed management identity: `scqa` authenticated through fresh OpenSSH with a root OpenSSH parent, then `sudo` for the privileged CLI. The operating system and physical endpoint/underlay must match the exact admitted QA identity. No environment variable or merely claimed host location authorizes the trial.
 
@@ -94,7 +94,7 @@ The **development-only** TUN candidate compiler rejects IPv4 operator Direct CID
 
 **Historical candidate containment:** an earlier unpublished PR #57 iteration temporarily embedded RIPEstat Country Resource List data, whose service terms prohibit repackaging without written permission. That dataset was replaced with explicitly redistributable CC BY 4.0 DB-IP Lite data **before merge**; never reintroduce the RIPEstat payload into distributable artifacts without explicit written rights. Prior public Git objects may remain accessible by immutable SHA even after branch-history replacement.
 
-## QA fixtures and their proof limits
+## Existing tests and their limits
 
 Use this as a **navigation index for reproducible regressions**, not a record of which SHA passed. Actual PASS/FAIL/NOT_RUN, logs, artifact hashes and independent review verdicts belong to the relevant PR/Actions and linked Issue comments. Every case below is **bounded to its own source, guest, profile and network**.
 
