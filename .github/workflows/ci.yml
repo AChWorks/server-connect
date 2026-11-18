@@ -372,6 +372,12 @@ jobs:
           export GIT_CONFIG_VALUE_0="$GITHUB_WORKSPACE"
           git status --porcelain
           scripts/package.sh "$PWD/build/ci/sing-box.tar.gz"
+          # Verify the real Debian 12 package against the independent field
+          # driver's allowlist/checksum contract, not self-derived fixtures.
+          scripts/package.sh "$PWD/build/ci/sing-box.tar.gz" debian-12-amd64
+          SC_QA_FIELD_ARCHIVE="$PWD/dist/server-connect-0.1.0-dev-debian12-amd64-local-qa.tar.gz" \
+            PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/qa/test-debian12-proxy-lifecycle.py \
+            -k test_real_packaged_bundle_matches_field_admission
           # Binary redistributions must contain the exact pinned x/net BSD notice.
           tar -xOzf dist/server-connect-0.1.0-dev-debian13-amd64-local-qa.tar.gz \
             server-connect/THIRD-PARTY-LICENSES/golang.org-x-net-LICENSE \

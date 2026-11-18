@@ -8,7 +8,9 @@ or privileged lifecycle action is invoked by this suite.
 """
 
 import copy
+import hashlib
 import importlib.util
+import json
 import os
 from pathlib import Path
 import tarfile
@@ -185,6 +187,44 @@ class InputAdmissionTests(unittest.TestCase):
                     "file": name + ".tar.gz", "bytes": 1024, "sha256": "d" * 64}
             with self.subTest(extra=extra), self.assertRaises(driver.CheckFailure):
                 driver.validate_manifest(candidate)
+
+    def test_real_packaged_bundle_matches_field_admission(self):
+        """Compare the independent driver's contract to a real package.sh output.
+
+        Synthetic archive fixtures built from BUNDLE_FILES cannot detect drift.
+        CI supplies the actual Debian 12 archive after packaging, with no host
+        install, service invocation or network mutation in this test.
+        """
+        artifact = os.environ.get("SC_QA_FIELD_ARCHIVE")
+        if not artifact:
+            self.skipTest("real Debian 12 package available after package.sh")
+        with tarfile.open(artifact, "r:gz") as package:
+            driver.validate_members(package.getmembers())
+            manifest_file = package.extractfile("server-connect/manifest.json")
+            self.assertIsNotNone(manifest_file)
+            with manifest_file:
+                manifest = json.load(manifest_file)
+            self.assertEqual(manifest["target"], "debian-12-amd64")
+            self.assertEqual(manifest["source_state"], "clean")
+            checksum_file = package.extractfile("server-connect/checksums.sha256")
+            self.assertIsNotNone(checksum_file)
+            with checksum_file:
+                checksum_lines = checksum_file.read().decode("ascii").splitlines()
+            actual = {}
+            for line in checksum_lines:
+                self.assertRegex(line, r"^[0-9a-f]{64}  [A-Za-z0-9._/-]+$")
+                digest, name = line.split("  ", 1)
+                self.assertNotIn(name, actual)
+                actual[name] = digest
+            self.assertEqual(set(actual), driver.BUNDLE_FILES - {"checksums.sha256"})
+            for name, expected_digest in actual.items():
+                member = package.extractfile("server-connect/" + name)
+                self.assertIsNotNone(member, name)
+                digest = hashlib.sha256()
+                with member:
+                    for chunk in iter(lambda: member.read(1024 * 1024), b""):
+                        digest.update(chunk)
+                self.assertEqual(digest.hexdigest(), expected_digest, name)
 
     def test_bundle_requires_exact_regular_payload(self):
         driver.validate_members(members())
