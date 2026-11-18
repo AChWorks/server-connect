@@ -64,6 +64,8 @@ type nativeAction struct {
 var nativeRuleLine = regexp.MustCompile("^([0-9]+):\\s+(.+)$")
 var nativeChainLine = regexp.MustCompile("(?m)^\\s*chain ([a-zA-Z0-9_]+) \\{")
 
+// Callers request `ip -N` to force numeric table identities: a local
+// rt_tables alias must not conceal foreign references to the reserved table.
 // Parse the canonical iproute2 RPDB body as tokens so only a real lookup
 // target (not a numeric prefix or an unrelated rule) is considered a
 // reference. Both address families are inspected before any mutation.
@@ -97,7 +99,7 @@ func recoverNativeRedirectWithVerifiedOrphan(parent context.Context, r nativeKer
 	defer cancel()
 	rules := make([]nativeRule, 0, 16)
 	for _, family := range []string{"-4", "-6"} {
-		raw, e := r.output(ctx, "ip", family, "rule", "show")
+		raw, e := r.output(ctx, "ip", "-N", family, "rule", "show")
 		if e != nil {
 			return e
 		}
@@ -364,7 +366,7 @@ func recoverNativeRedirectWithVerifiedOrphan(parent context.Context, r nativeKer
 	}
 	// Proof of Direct/off means managed RPDB and nft surface is actually gone.
 	for _, family := range []string{"-4", "-6"} {
-		raw, e := r.output(ctx, "ip", family, "rule", "show")
+		raw, e := r.output(ctx, "ip", "-N", family, "rule", "show")
 		if e != nil {
 			return e
 		}

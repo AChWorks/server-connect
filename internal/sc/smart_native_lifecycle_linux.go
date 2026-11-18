@@ -330,7 +330,7 @@ func inspectNativeAdmission(ctx context.Context, r nativeKernelRunner, p nativeR
 // otherwise strict empty-resource policy.
 func inspectNativeAdmissionWithReplyGuard(ctx context.Context, r nativeKernelRunner, p nativeRedirectRecovery, committedReplyHandle uint64, committedFingerprint string) error {
 	for _, family := range []string{"-4", "-6"} {
-		rules, err := r.output(ctx, "ip", family, "rule", "show")
+		rules, err := r.output(ctx, "ip", "-N", family, "rule", "show")
 		if err != nil {
 			return err
 		}

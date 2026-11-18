@@ -47,9 +47,9 @@ type unexpectedNativeRunner struct{ actions int }
 func (r *unexpectedNativeRunner) output(_ context.Context, bin string, args ...string) (string, error) {
 	key := bin + " " + strings.Join(args, " ")
 	switch key {
-	case "ip -4 rule show":
+	case "ip -N -4 rule show":
 		return "0:\tfrom all lookup local\n1:\tfrom all lookup 555\n1:\tfrom all lookup 777\n32766:\tfrom all lookup main\n", nil
-	case "ip -6 rule show":
+	case "ip -N -6 rule show":
 		return "0:\tfrom all lookup local\n", nil
 	}
 	return "", nil
@@ -108,9 +108,9 @@ func newNativeRecoveryRetryRunner() *nativeRecoveryRetryRunner {
 func (r *nativeRecoveryRetryRunner) output(_ context.Context, binary string, args ...string) (string, error) {
 	key := binary + " " + strings.Join(args, " ")
 	switch key {
-	case "ip -4 rule show":
+	case "ip -N -4 rule show":
 		return strings.Join(r.rules["-4"], "\n") + "\n", nil
-	case "ip -6 rule show":
+	case "ip -N -6 rule show":
 		return strings.Join(r.rules["-6"], "\n") + "\n", nil
 	case "ip -4 route show table 27432", "ip -6 route show table 27432":
 		return "", nil
@@ -484,6 +484,24 @@ func (r *nativeDockerAdmissionRunner) output(ctx context.Context, binary string,
 	return r.nativeRecoveryRetryRunner.output(ctx, binary, args...)
 }
 
+// iproute2 can render a custom rt_tables alias instead of the numeric table
+// ID. Admission must explicitly request a numeric kernel RPDB inventory.
+func TestNativeAdmissionRequiresNumericRPDBIdentity(t *testing.T) {
+	r := nativeAdmissionFixture()
+	r.outputs["ip -4 rule show"] = "30000: from all lookup custom_reserved_alias\n"
+	r.outputs["ip -N -4 rule show"] = "30000: from all lookup 27432\n"
+	scope := nativeRedirectRecovery{TunnelIF: "sctun0", UnderlayIF: "eth0",
+		Table: NativePolicyTableIndex, Rule: NativePolicyRuleIndex}
+	if err := inspectNativeAdmission(context.Background(), r, scope); err == nil {
+		t.Fatal("aliased foreign reference to the reserved table was admitted")
+	}
+	for _, call := range r.called {
+		if strings.HasPrefix(call, "MUTATION:") {
+			t.Fatalf("read-only admission mutated kernel: %s", call)
+		}
+	}
+}
+
 func TestNativeAdmissionReservesExactFallbackSlotAndAllTableReferences(t *testing.T) {
 	scope := nativeRedirectRecovery{TunnelIF: "sctun0", UnderlayIF: "scouter0",
 		Table: NativePolicyTableIndex, Rule: NativePolicyRuleIndex}
@@ -532,6 +550,41 @@ func TestNativeAdmissionDockerRuleCannotBePreexisting(t *testing.T) {
 				t.Fatalf("read-only admission mutated Docker resource: %v", r.mutations)
 			}
 		})
+	}
+}
+
+// Present an alias only to normal iproute2 output; numeric (-N) output
+// preserves the real kernel table identity and is required for safe cleanup.
+type nativeAliasRecoveryRunner struct {
+	*nativeRecoveryRetryRunner
+	numericReads int
+}
+
+func (r *nativeAliasRecoveryRunner) output(ctx context.Context, binary string, args ...string) (string, error) {
+	if binary == "ip" && len(args) == 3 && args[0] == "-4" &&
+		args[1] == "rule" && args[2] == "show" {
+		raw, err := r.nativeRecoveryRetryRunner.output(ctx, binary, args...)
+		return strings.Replace(raw, "30000: from all lookup 27432",
+			"30000: from all lookup custom_reserved_alias", 1), err
+	}
+	if binary == "ip" && len(args) == 4 && args[0] == "-N" &&
+		(args[1] == "-4" || args[1] == "-6") && args[2] == "rule" &&
+		args[3] == "show" {
+		r.numericReads++
+	}
+	return r.nativeRecoveryRetryRunner.output(ctx, binary, args...)
+}
+
+func TestNativeRecoveryNumericRPDBReadRefusesAliasedForeignTable(t *testing.T) {
+	r := newNativeCoreSIGKILLOrphanFixture()
+	r.rules["-4"] = append(r.rules["-4"], "30000: from all lookup 27432")
+	w := &nativeAliasRecoveryRunner{nativeRecoveryRetryRunner: r}
+	scope := nativeRedirectRecovery{TunnelIF: "sctun0", UnderlayIF: "scouter0",
+		Table: NativePolicyTableIndex, Rule: NativePolicyRuleIndex}
+	err := recoverNativeRedirectWithVerifiedOrphan(context.Background(), w, scope, true)
+	if err == nil || len(r.mutations) != 0 || w.numericReads != 2 {
+		t.Fatalf("aliased reserved-table reference permitted destructive cleanup: err=%v mutations=%v numeric_reads=%d",
+			err, r.mutations, w.numericReads)
 	}
 }
 

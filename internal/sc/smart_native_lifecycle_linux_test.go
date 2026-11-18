@@ -459,8 +459,8 @@ func (f *fakeNativeAdmission) run(_ context.Context, binary string, args ...stri
 }
 func nativeAdmissionFixture() *fakeNativeAdmission {
 	return &fakeNativeAdmission{outputs: map[string]string{
-		"ip -4 rule show":              "0: from all lookup local\n32766: from all lookup main\n32767: from all lookup default\n",
-		"ip -6 rule show":              "0: from all lookup local\n32766: from all lookup main\n32767: from all lookup default\n",
+		"ip -N -4 rule show":           "0: from all lookup local\n32766: from all lookup main\n32767: from all lookup default\n",
+		"ip -N -6 rule show":           "0: from all lookup local\n32766: from all lookup main\n32767: from all lookup default\n",
 		"ip -4 route show table 27432": "",
 		"ip -6 route show table 27432": "",
 		"nft list tables":              "table inet other-service\n",
@@ -479,8 +479,8 @@ func TestNativeAdmissionRejectsOccupiedResources(t *testing.T) {
 	for _, tc := range []struct {
 		name, key, value string
 	}{
-		{"priority-one", "ip -4 rule show", "0: from all lookup local\n1: from all lookup 12345\n"},
-		{"managed-slot", "ip -4 rule show", "0: from all lookup local\n14200: from all lookup 123\n"},
+		{"priority-one", "ip -N -4 rule show", "0: from all lookup local\n1: from all lookup 12345\n"},
+		{"managed-slot", "ip -N -4 rule show", "0: from all lookup local\n14200: from all lookup 123\n"},
 		{"policy-route", "ip -4 route show table 27432", "default via 1.2.3.4 dev eth0\n"},
 		{"nft-foreign", "nft list tables", "table inet sing-box\n"},
 		{"reply-guard-foreign", "nft list tables", "table inet sc_reply_guard\n"},
@@ -677,7 +677,7 @@ func TestNativeAdmissionRechecksCommittedEarlyReplyGuard(t *testing.T) {
 		}, 10},
 		{"missing-owned-table", func(r *fakeNativeAdmission) { r.outputs["nft list tables"] = "table inet foreign\n" }, 10},
 		{"occupied-core-table", func(r *fakeNativeAdmission) { r.outputs["nft list tables"] += "table inet sing-box\n" }, 10},
-		{"occupied-managed-rule", func(r *fakeNativeAdmission) { r.outputs["ip -4 rule show"] = "14200: from all lookup 254\n" }, 10},
+		{"occupied-managed-rule", func(r *fakeNativeAdmission) { r.outputs["ip -N -4 rule show"] = "14200: from all lookup 254\n" }, 10},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			r := newFixture()

@@ -170,8 +170,11 @@ Core proof. These observations are checked again before kernel recovery.
 
 Both IPv4 and IPv6 RPDB rule inventories are inspected **before any
 mutation**, including foreign references to the reserved table at priorities
-below/above the Core interval. A lookalike fallback rule at priority 30000
-cannot be adopted as the fixed priority-32768 Core rule. The Core's reserved
+below/above the Core interval. All admission, recovery and active-health
+RPDB checks and selected marked-route observations request numeric
+`ip -N` table identities; configurable `rt_tables` names must never hide
+a foreign reference to table 27432. A lookalike fallback rule at priority
+30000 cannot be adopted as the fixed priority-32768 Core rule. The Core's reserved
 route table must be empty, the randomized redirect and Core nft identities
 absent, no foreign Docker-compatibility rules may survive, the native TUN must
 be absent and no unattributed loopback redirect route to the underlay may
