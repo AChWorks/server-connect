@@ -603,6 +603,14 @@ verify_host_services missing-core
 
 assert_no_offline_fetch missing-core
 echo 'OFFLINE_MISSING_CORE_FAIL_CLOSED=PASS (installer NOT applied)'
+# Read-only diagnostic, before strace/offline install: discriminate an
+# independently blocked kernel table from an inspector/execution failure.
+# Never clear unknown nftables resources to make installer QA pass.
+echo '=== Native guard initial ownership evidence (no writes) ==='
+docker exec "$container" /usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin LC_ALL=C /usr/sbin/nft list tables
+if ! docker exec "$container" /usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin LC_ALL=C   /root/server-connect/bin/server-connect --json installer-check-guard-clear; then
+  echo 'NATIVE_GUARD_PREINSTALL_DIAGNOSTIC=REFUSED (inspect before patching)' >&2
+fi
 run_offline first-install --offline
 verify_direct_install
 # Run the newly installed operator overview on BOTH target OS lanes. The
