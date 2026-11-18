@@ -62,6 +62,6 @@ Bundled Iranian-prefix classification uses an offline **DB-IP Country Lite estim
 - [Acceptance](docs/ACCEPTANCE.md): required evidence, physical-vs-guest boundaries and test procedures.
 - [AGENTS.md](AGENTS.md): contributor and independent-review rules.
 
-**Live work:** [MVP foundation #1](https://github.com/AChWorks/server-connect/issues/1), [Smart Routing #2](https://github.com/AChWorks/server-connect/issues/2), [Recovery #3](https://github.com/AChWorks/server-connect/issues/3), [Operator UX #4](https://github.com/AChWorks/server-connect/issues/4), [Release gate #5](https://github.com/AChWorks/server-connect/issues/5), and [legacy cleanup #50](https://github.com/AChWorks/server-connect/issues/50). [Cloudflare website ingress #48](https://github.com/AChWorks/server-connect/issues/48) is post-core; [concurrent VPN profiles #7](https://github.com/AChWorks/server-connect/issues/7) requires a new Owner decision. PRs, Actions and Releases—not this README—own exact SHA-specific execution evidence.
+**Active work, dependencies, release gates and deferred ideas:** consult the [GitHub Issues](https://github.com/AChWorks/server-connect/issues) rather than a potentially stale issue-by-issue status copy here. PRs, Actions and Releases own exact SHA-specific execution evidence.
 
 **License:** This publicly readable repository has **no selected software license**. Public visibility does not grant redistribution rights. Publisher identity, upstream notices and rights must be resolved before distribution.
