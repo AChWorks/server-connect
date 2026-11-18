@@ -305,6 +305,29 @@ else
   echo 'QA_UNPROTECTED_CORE_SSH_WITNESS_INDETERMINATE';cat "$task/old.log";exit 49
  fi
 fi
+# A *fresh* foreign inbound TCP flow has a different client port and was
+# never included in the activation-time accepted4 set. Its server reply
+# must still use the ordinary conntrack REPLY rule under active native TUN.
+if [[ "$mode" == accepted-public ]];then
+ wait "$client_pid"
+ ip netns exec "$ns_cli" env SC3_SERVER_IP="$server_ip" python3 - <<'PYFRESH'
+import os,socket
+payload=b"fresh_inbound_after_native"
+s=socket.socket()
+s.settimeout(5)
+s.bind(("198.51.100.77",0))
+s.connect((os.environ["SC3_SERVER_IP"],18222))
+s.sendall(payload)
+received=b""
+while len(received)<len(payload):
+ chunk=s.recv(256)
+ if not chunk:raise RuntimeError("fresh incoming socket closed prematurely")
+ received+=chunk
+assert received==payload,received
+s.close()
+print("QA_FRESH_FOREIGN_INBOUND_TCP_AFTER_NATIVE_START_PASS",flush=True)
+PYFRESH
+fi
 # Core must not punch a global peer-IP exception; client remote is still selected
 # for a *new* locally originated flow to exactly the same public client IP.
 ip netns exec "$ns_srv" python3 "$task/probe.py" > "$task/post2-new-probe.log" 2>&1
