@@ -63,8 +63,13 @@ func inspectNativeHealthPolicy(ctx context.Context, r interface {
 	}
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
+	// An absent/changed early reply hook is not an acceptable "healthy"
+	// policy even if Core's own TUN, RPDB and nft capture remain intact.
+	if err := requireNativeReplyGuard(ctx, r); err != nil {
+		return err
+	}
 	for _, family := range []string{"-4", "-6"} {
-		data, e := r.output(ctx, "ip", family, "rule", "show")
+		data, e := r.output(ctx, "ip", "-N", family, "rule", "show")
 		if e != nil {
 			return e
 		}
@@ -93,12 +98,13 @@ func inspectNativeHealthPolicy(ctx context.Context, r interface {
 				want = fmt.Sprintf("from all fwmark 0x2023 lookup %d", p.Table)
 			case p.Rule + 2:
 				want = "from all nop"
+			case 32768:
+				want = fmt.Sprintf("not from all fwmark 0x2024 lookup %d", p.Table)
 			default:
-				if strings.Contains(parts[2], fmt.Sprintf("lookup %d", p.Table)) {
-					want = fmt.Sprintf("not from all fwmark 0x2024 lookup %d", p.Table)
-					if parts[2] != want {
-						return Fault("guard_unavailable", "foreign native policy table reference")
-					}
+				// Foreign rules cannot impersonate the fixed fallback at 32768.
+				// Compare numeric table references, including custom aliases.
+				if nativeRuleReferencesTable(parts[2], p.Table) {
+					return Fault("guard_unavailable", "foreign native policy table reference")
 				}
 			}
 			if want != "" {
@@ -108,7 +114,7 @@ func inspectNativeHealthPolicy(ctx context.Context, r interface {
 				found[pref]++
 			}
 		}
-		for _, pref := range []int{1, p.Rule, p.Rule + 1, p.Rule + 2} {
+		for _, pref := range []int{1, p.Rule, p.Rule + 1, p.Rule + 2, 32768} {
 			if found[pref] != 1 {
 				return Fault("guard_unavailable", "native policy RPDB incomplete")
 			}
@@ -122,7 +128,7 @@ func inspectNativeHealthPolicy(ctx context.Context, r interface {
 		return Fault("guard_unavailable", "selected TUN policy table changed")
 	}
 	for _, t := range targets {
-		route, e := r.output(ctx, "ip", "-4", "route", "get", t.IP, "mark", "0x2023")
+		route, e := r.output(ctx, "ip", "-N", "-4", "route", "get", t.IP, "mark", "0x2023")
 		if e != nil {
 			return e
 		}

@@ -82,6 +82,125 @@ managed cleanup, the randomized redirect table remains verifiable via the
 priority-1 RPDB identity until the owned nft table is gone, allowing a later
 narrow retry without adopting unrelated firewall/routing resources.
 
+### Native inbound-reply guard (Issue #3, development candidate)
+
+The pinned official sing-box 1.14.3 `auto_redirect` adds a separate TCP NAT
+`OUTPUT` hook. During physical Debian 13 QA, applying that policy produced a
+locally generated, spoofed-foreign-peer TCP RST and dropped an **already
+established** authenticated foreign SSH connection. The same SSH witness ran
+57/57 replies with Direct/off and 4/57 or 29/57 without correction.
+An independently preinstalled narrow route hook at priority `-150` preserved
+58/58 authenticated replies while the identical Core executed. That manually
+staged proof alone is **not** integrated-product or production acceptance.
+
+The integrated candidate's single fixed `inet sc_reply_guard` table has
+one `route OUTPUT` chain at priority `-150`, using the official
+`auto_redirect_output_mark` (`0x2024`). A conntrack `REPLY` rule
+protects the ordinary tracked inbound case. This alone was insufficient in
+physical QA: on a host where TCP sessions were established **before**
+conntrack began observing them, their first observed packet can be from
+server to client and conntrack may call that direction `ORIGINAL`
+(or have no existing row).
+
+Immediately before native activation, the manager takes a read-only snapshot
+from the kernel's IPv4/IPv6 TCP socket tables of *established accepted TCP
+sockets whose local endpoint matches a currently listening socket*. Two
+concatenated nft sets store only those specific
+`local IP . local port . peer IP . peer port` tuples, one per address
+family. The additional rules mark `ct direction original` **only** when
+the packet matches a preexisting accepted tuple. These constant-count,
+hash-lookup rules create no blanket direct exception for a foreign IP, an
+entire listening port, or a subnet. A new server-originated connection to
+that same foreign IP with another TCP four-tuple is not in either set and
+remains VPN-required. The immutable snapshot also protects the case where
+an old accepted connection has not yet entered conntrack at activation.
+This is an admission-specific TCP fix, **not** broad UDP/DNS/IPv6 routing
+or hosted-HTTP acceptance.
+
+In the field comparison, reply-only installed candidates failed after
+5 SSH replies; a separate exact-accepted-socket guard preserved 58/58
+original SSH replies on the same physical target and observed 9 matches
+of the reversed/previously untracked tuple rule. That separately staged
+experiment passed; the subsequently integrated **snapshot-backed**
+candidate still requires its own full installed field proof. The existing
+three-namespace fixture also checks selected VLESS wire counters versus
+direct egress but does not reproduce the original physical SSH failure.
+
+The native one-use, configuration-bound current-boot session and both
+independent timers must be durable **before** installing the nftables reply
+guard. The manager computes the canonical accepted-tuple fingerprint and
+persists it in the one-use native claim **before** the atomic nft transaction,
+then durably records the observed table handle before `systemctl start`.
+An interrupted table-creation/handle-commit window can therefore still be
+recovered by the independent stop guard without adopting a foreign table.
+`ExecStartPre` rechecks fresh startup authorization, complete native
+admission, exact table handle **and** complete accepted-tuple fingerprint,
+then durably consumes a one-use Core-start grant before Core execution.
+A failed preflight or Core start cannot silently reuse a stale receipt.
+Runtime status and health independently attest the same table, hook,
+rules, tuple sets and fingerprint. Merely seeing an active Core never
+establishes selected-path health.
+
+On normal Disconnect, Core exit, or a failed preflight, independent
+`ExecStopPost` first recovers the exact owned Core resources, then inspects
+the reply-guard table and deletes only its verified table handle using the
+existing nftables generation-conditional Netlink transaction.
+
+A physical Debian 13 native-Core `SIGKILL` exposed a distinct orphan
+ordering: Core's randomized redirect-table RPDB identity, nft table and TUN
+can disappear while its *fixed-slot* 14200-series/32768 IPv4/IPv6 RPDB
+rules survive. Previously, the missing randomized identity always blocked
+recovery, leaving the guarded host in an explicitly failed Smart state.
+For this one post-crash case, cleanup of the remaining **exact fixed-slot
+RPDB rule bodies and priorities only** (14200, 14201, 14202 and **32768** per
+family) is permitted only under the already-consumed one-use Core-start claim.
+The receipt is bound to the previously staged **health operation ID**, exact
+configuration digest and current **boot ID**. The installed stop path must
+reattest the **actual nftables reply-guard table handle, complete hook/rule/
+accepted-tuple structure and committed fingerprint before any orphan-RPDB
+deletion**. A stale operation/boot, replaced/missing table, or uncertain read
+cannot authorize orphan-rule deletion.
+
+Systemd Core quiescence is more than `MainPID=0`: stopped/failed idle units
+must have no ControlPID, Job or cgroup. The installed **ExecStopPost** itself
+is the narrow exception while systemd reports `deactivating/stop-post`: its
+`ControlPID` must identify the current recovery process. Pending
+`ExecStartPre`, start jobs and unrelated control processes are not stopped
+Core proof. These observations are checked again before kernel recovery.
+
+Both IPv4 and IPv6 RPDB rule inventories are inspected **before any
+mutation**, including foreign references to the reserved table at priorities
+below/above the Core interval. All admission, recovery and active-health
+RPDB checks and selected marked-route observations request numeric
+`ip -N` table identities; configurable `rt_tables` names must never hide
+a foreign reference to table 27432. A lookalike fallback rule at priority
+30000 cannot be adopted as the fixed priority-32768 Core rule. The Core's reserved
+route table must be empty, the randomized redirect and Core nft identities
+absent, no foreign Docker-compatibility rules may survive, the native TUN must
+be absent and no unattributed loopback redirect route to the underlay may
+remain. Any malformed or duplicate rule, foreign identity or unverified
+lifecycle blocks mutation. Legitimate partial subsets of exactly owned rules
+remain retryable, and the reply table is deleted **after** RPDB cleanup, with
+its original generation-conditional netlink delete.
+
+A completely clean Direct kernel is separately verified read-only and may
+finish a retained claim even when its already-deleted reply table is absent;
+it is **not** permission to delete orphan RPDB without the owner. An
+interrupted preflight can have the guard table but not its handle; the
+previously persisted fingerprint still authorizes only that narrow
+pre-start guard cleanup, never the consumed-start orphan exception.
+A later foreign replacement, additional/missing rule or tuple, changed mark,
+nft generation drift, uncertain deletion or mismatched handle **retains the
+recovery claim and blocks success** rather than deleting by name or presenting
+unverified Direct/off. The shared installer must refuse orphaned reply-guard
+objects without a cleared claim; idle Direct must not contain this table.
+
+This guard **does not** grant general-host acceptance for SSH/HTTP hosting,
+UDP, DNS, IPv6, real Iran Direct, or an actual foreign VPN provider. Record
+separate positive old/new SSH and hosted-HTTP replies, negative same-client-IP
+outbound-VPN proof, guard-loss/failure cases and exact post-recovery kernel
+identity on the reviewed integrated binary before V1 release.
+
 For the separate *native sing-box lifecycle*, an independently verified
 Direct/off transition may leave either or both of the exact installed Health
 and Recovery oneshots in systemd `failed` bookkeeping. A fresh Connect may

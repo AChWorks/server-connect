@@ -28,6 +28,42 @@ Owner-approved **proportional recovery** requires representative evidence for no
 | Activation Guard | Independent guard **armed before mutation**; wrong/replayed confirmation, no fresh SSH/console approval, 600-second deadline, crash, reboot and foreign object collisions recover exact owned state without deleting other owners' resources | Systemd/journal/route evidence and new management connection; fault injection at each mutation phase |
 | Runtime Health Guard | Actual VPN path failure, core exit, broken DNS, one-site false alarms, dead/masked/hung watchdog and reboot lead to honest state and independently verified safe recovery. On confirmed recoverable failure, bounded backoff/reconnect (initial candidate maximum 3 attempts, configurable) either proves real VPN recovery or ends in Direct/off with no automatic retry loop. Unsafe guard/SSH scenarios bypass retries. No silent Direct bypass **while routed**, no VPN-only blocking **after confirmed Direct/off**, and local failure/attempt/result evidence; external notifications deferred | Separate normal/negative supervisor and selected-route tests, transient recovery/exhaustion/flapping/fatal-stop cases and local status/log inspection |
 
+**Issue #3, physical SSH admission blocker:** On original
+`main@6857fb8`, an independently authenticated foreign SSH session
+ran 57/57 application nonces in Direct/off but reset during native Apply.
+A manually staged early reply-only mark preserved 58/58, but *both*
+installed reply-only candidates (`ba0b538` in ExecStartPre,
+`893a589` immediately before Core start) failed after 5 replies
+despite structurally verified rules and autonomous Direct/off recovery.
+Inspection of conntrack found existing inbound SSH flows recorded with
+reversed original direction or not yet tracked at all. A manually staged
+*specific accepted TCP four-tuple* guard then preserved **58/58** old SSH
+replies while Core was active and autonomous Direct/off recovery restored
+the kernel exactly; 9 packets matched its narrow tuple rule.
+
+The integrated candidate now snapshots actual established accepted
+IPv4/IPv6 TCP sockets at admission; no general remote-IP, port or subnet
+exception is permitted. An authorized physical Core `SIGKILL` test
+exposed a separate blocking recovery condition: official Core removed the
+randomized redirect identity and TUN but left exact fixed-slot RPDB rules.
+Independent `ExecStopPost` correctly refused to adopt unattributed
+orphan rules and left the native claim unresolved; scope-verified QA
+containment later restored the exact baseline after validating all owned
+rule bodies against the current-boot claim and saved kernel baseline.
+This manual containment is **not** product crash acceptance. The candidate
+must prove automatic recovery of exactly that post-SIGKILL orphan under its
+consumed one-use claim, plus refusal of foreign/duplicate policies and
+retryability under interrupted cleanup. It still requires independent installed-product
+proof of old/new SSH, early prearm, committed fingerprint and handle,
+crash/Disconnect/failure-before-flag cleanup, no foreign-table adoption,
+and **new** server-originated egress to the *same public client IP*
+still selected through VPN. The `marked-public` namespace fixture
+proves VLESS ingress versus Direct leakage but does not reproduce the
+physical failure; do not substitute namespace results for exact installed
+field acceptance. Broader HTTP hosting, UDP/DNS and real foreign-provider
+paths remain separate criteria. See
+[Issue #3](https://github.com/AChWorks/server-connect/issues/3).
+
 The independent **native candidate** health checks only fixed IPv4 HTTPS
 paths. Two existing checked systemd timers independently watch the Core,
 the selected-marked TUN/FIB/nftables path and each other's service/lease.

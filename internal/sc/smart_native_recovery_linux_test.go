@@ -47,9 +47,9 @@ type unexpectedNativeRunner struct{ actions int }
 func (r *unexpectedNativeRunner) output(_ context.Context, bin string, args ...string) (string, error) {
 	key := bin + " " + strings.Join(args, " ")
 	switch key {
-	case "ip -4 rule show":
+	case "ip -N -4 rule show":
 		return "0:\tfrom all lookup local\n1:\tfrom all lookup 555\n1:\tfrom all lookup 777\n32766:\tfrom all lookup main\n", nil
-	case "ip -6 rule show":
+	case "ip -N -6 rule show":
 		return "0:\tfrom all lookup local\n", nil
 	}
 	return "", nil
@@ -79,6 +79,8 @@ type nativeRecoveryRetryRunner struct {
 	hasDocker       bool
 	dockerRules     map[string]bool
 	dockerMalformed bool
+	orphanTun       bool
+	orphanRoute     bool
 	failOnce        string
 	mutations       []string
 }
@@ -106,9 +108,9 @@ func newNativeRecoveryRetryRunner() *nativeRecoveryRetryRunner {
 func (r *nativeRecoveryRetryRunner) output(_ context.Context, binary string, args ...string) (string, error) {
 	key := binary + " " + strings.Join(args, " ")
 	switch key {
-	case "ip -4 rule show":
+	case "ip -N -4 rule show":
 		return strings.Join(r.rules["-4"], "\n") + "\n", nil
-	case "ip -6 rule show":
+	case "ip -N -6 rule show":
 		return strings.Join(r.rules["-6"], "\n") + "\n", nil
 	case "ip -4 route show table 27432", "ip -6 route show table 27432":
 		return "", nil
@@ -116,6 +118,22 @@ func (r *nativeRecoveryRetryRunner) output(_ context.Context, binary string, arg
 		return r.routes["-4"], nil
 	case "ip -6 route show table 3362254344":
 		return r.routes["-6"], nil
+	case "ip -o link show":
+		links := "1: lo: <LOOPBACK,UP> mtu 65536\n2: scouter0: <UP> mtu 1500\n"
+		if r.orphanTun {
+			links += "3: sctun0: <POINTOPOINT,UP> mtu 1380\n"
+		}
+		return links, nil
+	case "ip -4 route show table all":
+		if r.orphanRoute {
+			return "local 127.0.0.1 dev scouter0 table 3362254344 scope host\n", nil
+		}
+		return "local 127.0.0.1 dev lo table local scope host\n", nil
+	case "ip -6 route show table all":
+		if r.orphanRoute {
+			return "local ::1 dev scouter0 table 3362254344 metric 1024 pref medium\n", nil
+		}
+		return "local ::1 dev lo table local proto kernel metric 0 pref medium\n", nil
 	case "nft list tables":
 		tables := "table inet unrelated-product\n"
 		if r.hasNft {
@@ -466,6 +484,50 @@ func (r *nativeDockerAdmissionRunner) output(ctx context.Context, binary string,
 	return r.nativeRecoveryRetryRunner.output(ctx, binary, args...)
 }
 
+// iproute2 can render a custom rt_tables alias instead of the numeric table
+// ID. Admission must explicitly request a numeric kernel RPDB inventory.
+func TestNativeAdmissionRequiresNumericRPDBIdentity(t *testing.T) {
+	r := nativeAdmissionFixture()
+	r.outputs["ip -4 rule show"] = "30000: from all lookup custom_reserved_alias\n"
+	r.outputs["ip -N -4 rule show"] = "30000: from all lookup 27432\n"
+	scope := nativeRedirectRecovery{TunnelIF: "sctun0", UnderlayIF: "eth0",
+		Table: NativePolicyTableIndex, Rule: NativePolicyRuleIndex}
+	if err := inspectNativeAdmission(context.Background(), r, scope); err == nil {
+		t.Fatal("aliased foreign reference to the reserved table was admitted")
+	}
+	for _, call := range r.called {
+		if strings.HasPrefix(call, "MUTATION:") {
+			t.Fatalf("read-only admission mutated kernel: %s", call)
+		}
+	}
+}
+
+func TestNativeAdmissionReservesExactFallbackSlotAndAllTableReferences(t *testing.T) {
+	scope := nativeRedirectRecovery{TunnelIF: "sctun0", UnderlayIF: "scouter0",
+		Table: NativePolicyTableIndex, Rule: NativePolicyRuleIndex}
+	for _, tc := range []struct {
+		name, rule string
+	}{
+		{"fallback-occupied-by-foreign-owner", "32768: from all lookup 999"},
+		{"foreign-lookalike-at-30000", "30000: not from all fwmark 0x2024 lookup 27432"},
+		{"foreign-table-reference-below-managed", "9000: from all lookup 27432"},
+		{"foreign-table-reference-above-managed", "45000: from all lookup 27432"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := newNativeRecoveryRetryRunner()
+			r.hasNft = false
+			r.routes["-4"], r.routes["-6"] = "", ""
+			r.rules["-4"] = []string{"0: from all lookup local", "32766: from all lookup main",
+				"32767: from all lookup default", "40960: from all lookup 123", tc.rule}
+			r.rules["-6"] = []string{"0: from all lookup local", "32766: from all lookup main"}
+			if err := inspectNativeAdmission(context.Background(), &nativeDockerAdmissionRunner{r}, scope); err == nil ||
+				len(r.mutations) != 0 {
+				t.Fatalf("reserved resource admitted on fresh Core start: %v / %v", err, r.mutations)
+			}
+		})
+	}
+}
+
 func TestNativeAdmissionDockerRuleCannotBePreexisting(t *testing.T) {
 	scope := nativeRedirectRecovery{TunnelIF: "sctun0", UnderlayIF: "scouter0",
 		Table: NativePolicyTableIndex, Rule: NativePolicyRuleIndex}
@@ -489,4 +551,306 @@ func TestNativeAdmissionDockerRuleCannotBePreexisting(t *testing.T) {
 			}
 		})
 	}
+}
+
+// Present an alias only to normal iproute2 output; numeric (-N) output
+// preserves the real kernel table identity and is required for safe cleanup.
+type nativeAliasRecoveryRunner struct {
+	*nativeRecoveryRetryRunner
+	numericReads int
+}
+
+func (r *nativeAliasRecoveryRunner) output(ctx context.Context, binary string, args ...string) (string, error) {
+	if binary == "ip" && len(args) == 3 && args[0] == "-4" &&
+		args[1] == "rule" && args[2] == "show" {
+		raw, err := r.nativeRecoveryRetryRunner.output(ctx, binary, args...)
+		return strings.Replace(raw, "30000: from all lookup 27432",
+			"30000: from all lookup custom_reserved_alias", 1), err
+	}
+	if binary == "ip" && len(args) == 4 && args[0] == "-N" &&
+		(args[1] == "-4" || args[1] == "-6") && args[2] == "rule" &&
+		args[3] == "show" {
+		r.numericReads++
+	}
+	return r.nativeRecoveryRetryRunner.output(ctx, binary, args...)
+}
+
+func TestNativeRecoveryNumericRPDBReadRefusesAliasedForeignTable(t *testing.T) {
+	r := newNativeCoreSIGKILLOrphanFixture()
+	r.rules["-4"] = append(r.rules["-4"], "30000: from all lookup 27432")
+	w := &nativeAliasRecoveryRunner{nativeRecoveryRetryRunner: r}
+	scope := nativeRedirectRecovery{TunnelIF: "sctun0", UnderlayIF: "scouter0",
+		Table: NativePolicyTableIndex, Rule: NativePolicyRuleIndex}
+	err := recoverNativeRedirectWithVerifiedOrphan(context.Background(), w, scope, true)
+	if err == nil || len(r.mutations) != 0 || w.numericReads != 2 {
+		t.Fatalf("aliased reserved-table reference permitted destructive cleanup: err=%v mutations=%v numeric_reads=%d",
+			err, r.mutations, w.numericReads)
+	}
+}
+
+// On the physical Debian 13 host the SIGKILL-ed official Core removed its
+// randomized table identity, nft table and TUN, but LEFT fixed native RPDB
+// rules 14200/14201/14202/32768 in both address families. The installed
+// stop hook deliberately refused that unsupported orphan before mutation.
+func newNativeCoreSIGKILLOrphanFixture() *nativeRecoveryRetryRunner {
+	r := newNativeRecoveryRetryRunner()
+	r.hasNft = false
+	for _, family := range []string{"-4", "-6"} {
+		var kept []string
+		for _, line := range r.rules[family] {
+			if !strings.HasPrefix(line, "1: ") {
+				kept = append(kept, line)
+			}
+		}
+		r.rules[family] = kept
+		r.routes[family] = ""
+	}
+	return r
+}
+
+func TestNativeCoreSIGKILLWithoutRandomTableIdentityRequiresConsumedClaim(t *testing.T) {
+	scope := nativeRedirectRecovery{TunnelIF: "sctun0", UnderlayIF: "scouter0",
+		Table: NativePolicyTableIndex, Rule: NativePolicyRuleIndex}
+	r := newNativeCoreSIGKILLOrphanFixture()
+	if err := recoverNativeRedirect(context.Background(), r, scope); err == nil {
+		t.Fatal("unclaimed orphan RPDB rules were implicitly adopted")
+	}
+	if len(r.mutations) != 0 {
+		t.Fatalf("unclaimed cleanup mutated network: %v", r.mutations)
+	}
+	if err := recoverNativeRedirectWithVerifiedOrphan(context.Background(), r, scope, true); err != nil {
+		t.Fatalf("verified Core-start claim could not recover physical SIGKILL orphan: %v", err)
+	}
+	for _, family := range []string{"-4", "-6"} {
+		text := strings.Join(r.rules[family], "\n")
+		for _, leaked := range []string{"14200:", "14201:", "14202:", "32768:"} {
+			if strings.Contains(text, leaked) {
+				t.Fatalf("Core orphan rule remains %s in %s", leaked, family)
+			}
+		}
+		if !strings.Contains(text, "40960: from all lookup 123") {
+			t.Fatalf("foreign routing rule was lost in %s: %s", family, text)
+		}
+	}
+	if len(r.mutations) != 8 {
+		t.Fatalf("expected only four owned RPDB deletions per family, got %v", r.mutations)
+	}
+	before := len(r.mutations)
+	if err := recoverNativeRedirectWithVerifiedOrphan(context.Background(), r, scope, true); err != nil ||
+		len(r.mutations) != before {
+		t.Fatalf("exact orphan cleanup not idempotent: %v / %v", err, r.mutations[before:])
+	}
+}
+
+func TestNativeCoreSIGKILLOrphanCleanupFailureIsExactlyRetryable(t *testing.T) {
+	scope := nativeRedirectRecovery{TunnelIF: "sctun0", UnderlayIF: "scouter0",
+		Table: NativePolicyTableIndex, Rule: NativePolicyRuleIndex}
+	r := newNativeCoreSIGKILLOrphanFixture()
+	r.failOnce = "ip -4 rule del pref 14201"
+	if err := recoverNativeRedirectWithVerifiedOrphan(context.Background(), r, scope, true); err == nil {
+		t.Fatal("interrupted RPDB cleanup unexpectedly passed")
+	}
+	if err := recoverNativeRedirectWithVerifiedOrphan(context.Background(), r, scope, true); err != nil {
+		t.Fatalf("exact claimed retry failed: %v", err)
+	}
+	for _, family := range []string{"-4", "-6"} {
+		text := strings.Join(r.rules[family], "\n")
+		if strings.Contains(text, "1420") || strings.Contains(text, "32768:") ||
+			!strings.Contains(text, "40960: from all lookup 123") {
+			t.Fatalf("retry altered foreign rules or left managed rules: %s", text)
+		}
+	}
+}
+
+func TestNativeCoreSIGKILLOrphanRefusesEveryUnsupportedIdentity(t *testing.T) {
+	scope := nativeRedirectRecovery{TunnelIF: "sctun0", UnderlayIF: "scouter0",
+		Table: NativePolicyTableIndex, Rule: NativePolicyRuleIndex}
+	for _, tc := range []struct {
+		name   string
+		change func(*nativeRecoveryRetryRunner)
+	}{
+		{"unverified-start", func(r *nativeRecoveryRetryRunner) {}},
+		{"still-present-core-nft", func(r *nativeRecoveryRetryRunner) { r.hasNft = true }},
+		{"remaining-core-tunnel", func(r *nativeRecoveryRetryRunner) { r.orphanTun = true }},
+		{"unattributed-redirect-route", func(r *nativeRecoveryRetryRunner) { r.orphanRoute = true }},
+		{"foreign-managed-rule", func(r *nativeRecoveryRetryRunner) {
+			r.rules["-4"] = append(r.rules["-4"], "14200: from all lookup 999")
+		}},
+		{"foreign-same-body-fallback-priority-30000", func(r *nativeRecoveryRetryRunner) {
+			r.rules["-4"] = append(r.rules["-4"], "30000: not from all fwmark 0x2024 lookup 27432")
+		}},
+		{"foreign-reserved-reference-before-14200", func(r *nativeRecoveryRetryRunner) {
+			r.rules["-6"] = append(r.rules["-6"], "9500: from all lookup 27432")
+		}},
+		{"foreign-reserved-reference-after-32768", func(r *nativeRecoveryRetryRunner) {
+			r.rules["-4"] = append(r.rules["-4"], "40000: from all fwmark 0x2023 lookup 27432")
+		}},
+		{"foreign-reserved-reference-between-slots", func(r *nativeRecoveryRetryRunner) {
+			r.rules["-6"] = append(r.rules["-6"], "20000: from all lookup 27432")
+		}},
+		{"foreign-fixed-fallback-body", func(r *nativeRecoveryRetryRunner) {
+			for i, rule := range r.rules["-4"] {
+				if strings.HasPrefix(rule, "32768:") {
+					r.rules["-4"][i] = "32768: from all lookup 999"
+				}
+			}
+		}},
+		{"foreign-docker-injection", func(r *nativeRecoveryRetryRunner) {
+			r.hasDocker = true
+			r.dockerRules = map[string]bool{"iifname": true, "oifname": true}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := newNativeCoreSIGKILLOrphanFixture()
+			tc.change(r)
+			verified := tc.name != "unverified-start"
+			if err := recoverNativeRedirectWithVerifiedOrphan(context.Background(), r, scope, verified); err == nil {
+				t.Fatalf("unsafe orphan case accepted: %s", tc.name)
+			}
+			if len(r.mutations) != 0 {
+				t.Fatalf("unsafe orphan case mutated kernel: %s: %v", tc.name, r.mutations)
+			}
+		})
+	}
+}
+
+// An interrupted cleanup may have already removed any proper subset of
+// fixed-slot rules. Missing owned rules are not replaced with an arbitrary
+// same-looking fallback: only still-present exact identities are retired.
+func TestNativeCoreSIGKILLOrphanExactPartialSubsets(t *testing.T) {
+	scope := nativeRedirectRecovery{TunnelIF: "sctun0", UnderlayIF: "scouter0",
+		Table: NativePolicyTableIndex, Rule: NativePolicyRuleIndex}
+	for _, removed := range [][]string{
+		{"14200:", "32768:"},
+		{"14201:", "14202:", "32768:"},
+		{"14200:", "14201:", "14202:", "32768:"},
+	} {
+		t.Run(strings.Join(removed, "-"), func(t *testing.T) {
+			r := newNativeCoreSIGKILLOrphanFixture()
+			for _, family := range []string{"-4", "-6"} {
+				var keep []string
+				for _, line := range r.rules[family] {
+					owned := false
+					for _, prefix := range removed {
+						owned = owned || strings.HasPrefix(line, prefix)
+					}
+					if !owned {
+						keep = append(keep, line)
+					}
+				}
+				r.rules[family] = keep
+			}
+			if err := recoverNativeRedirectWithVerifiedOrphan(context.Background(), r, scope, true); err != nil {
+				t.Fatalf("exact partial-owned subset refused: %v", err)
+			}
+			for _, family := range []string{"-4", "-6"} {
+				got := strings.Join(r.rules[family], "\n")
+				if strings.Contains(got, "1420") || strings.Contains(got, "32768:") ||
+					!strings.Contains(got, "40960: from all lookup 123") {
+					t.Fatalf("partial recovery modified foreign or retained Core rules: %s", got)
+				}
+			}
+		})
+	}
+}
+
+// Run only in an explicitly isolated, disposable Linux network namespace
+// whose harness pre-staged the *exact* fixed-slot orphan RPDB layout after
+// an already stopped Core. This exercises the actual iproute2 recovery calls,
+// separate from the fake kernel and the physical installed crash test.
+func TestNativeCoreSIGKILLOrphanRealKernelNamespace(t *testing.T) {
+	if os.Getenv("SC_NATIVE_ORPHAN_GUEST") != "yes" {
+		t.Skip("requires explicitly prepared disconnected orphan network namespace")
+	}
+	if os.Geteuid() != 0 {
+		t.Fatal("real kernel orphan test requires root in isolated namespace")
+	}
+	current, err := os.Readlink("/proc/self/ns/net")
+	if err != nil {
+		t.Fatal(err)
+	}
+	init, err := os.Readlink("/proc/1/ns/net")
+	if err != nil || current == init {
+		t.Fatal("refuse to mutate initial host namespace")
+	}
+	scope := nativeRedirectRecovery{TunnelIF: "sctun0", UnderlayIF: "scouter0",
+		Table: NativePolicyTableIndex, Rule: NativePolicyRuleIndex}
+	r := nativeSystemRunner{}
+	ctx := context.Background()
+	baseline4, err := r.output(ctx, "ip", "-4", "rule", "show")
+	if err != nil {
+		t.Fatal(err)
+	}
+	baseline6, err := r.output(ctx, "ip", "-6", "rule", "show")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(baseline4, "14200:") ||
+		!strings.Contains(baseline6, "14200:") ||
+		!strings.Contains(baseline4, "32768:") ||
+		!strings.Contains(baseline6, "32768:") {
+		t.Fatal("isolated kernel did not stage the intended Core-owned orphan RPDB rules")
+	}
+	// A foreign writer can insert a same-looking fallback at an unrelated
+	// priority after our Core has crashed. The installed recovery must not
+	// delete even one of the genuinely owned rules before refusing it.
+	if err := r.run(ctx, "ip", "-4", "rule", "add", "pref", "30000",
+		"not", "fwmark", "0x2024", "lookup", "27432"); err != nil {
+		t.Fatalf("disposable foreign-priority fixture failed: %v", err)
+	}
+	withForeign4, err := r.output(ctx, "ip", "-4", "rule", "show")
+	// iproute2 uses tabs between priority and body on real Debian kernels;
+	// inspect the parsed rule identity rather than relying on whitespace.
+	foreignPresent := false
+	for _, line := range strings.Split(withForeign4, "\n") {
+		parts := nativeRuleLine.FindStringSubmatch(strings.TrimSpace(line))
+		if parts != nil && parts[1] == "30000" &&
+			parts[2] == "not from all fwmark 0x2024 lookup 27432" {
+			foreignPresent = true
+		}
+	}
+	if err != nil || !foreignPresent {
+		t.Fatalf("foreign-priority fixture not independently observed: %v %s", err, withForeign4)
+	}
+	if err := recoverNativeRedirectWithVerifiedOrphan(ctx, r, scope, true); err == nil {
+		t.Fatal("real kernel adopted foreign 30000 fallback under a consumed claim")
+	}
+	unchangedForeign4, fe4 := r.output(ctx, "ip", "-4", "rule", "show")
+	unchangedForeign6, fe6 := r.output(ctx, "ip", "-6", "rule", "show")
+	if fe4 != nil || fe6 != nil || unchangedForeign4 != withForeign4 || unchangedForeign6 != baseline6 {
+		t.Fatal("foreign-priority refusal changed real RPDB before mutation")
+	}
+	if err := r.run(ctx, "ip", "-4", "rule", "del", "pref", "30000"); err != nil {
+		t.Fatalf("test-owned foreign RPDB fixture could not be retired: %v", err)
+	}
+	if restored4, e := r.output(ctx, "ip", "-4", "rule", "show"); e != nil || restored4 != baseline4 {
+		t.Fatal("foreign-priority test setup did not restore exact baseline")
+	}
+	t.Log("QA_NATIVE_REAL_KERNEL_FOREIGN_PRIORITY_30000_NO_MUTATION=PASS")
+	if err := recoverNativeRedirect(ctx, r, scope); err == nil {
+		t.Fatal("strict unclaimed real kernel recovery adopted the orphan")
+	}
+	unchanged4, e4 := r.output(ctx, "ip", "-4", "rule", "show")
+	unchanged6, e6 := r.output(ctx, "ip", "-6", "rule", "show")
+	if e4 != nil || e6 != nil || unchanged4 != baseline4 || unchanged6 != baseline6 {
+		t.Fatal("unclaimed real kernel refusal modified RPDB")
+	}
+	if err := recoverNativeRedirectWithVerifiedOrphan(ctx, r, scope, true); err != nil {
+		t.Fatalf("owned Core orphan cleanup failed on real kernel: %v", err)
+	}
+	for _, family := range []string{"-4", "-6"} {
+		raw, err := r.output(ctx, "ip", family, "rule", "show")
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, pref := range []string{"14200:", "14201:", "14202:", "32768:"} {
+			if strings.Contains(raw, pref) {
+				t.Fatalf("%s Core orphan RPDB rule remains in %s", pref, family)
+			}
+		}
+	}
+	if err := recoverNativeRedirectWithVerifiedOrphan(ctx, r, scope, true); err != nil {
+		t.Fatalf("idempotent real kernel cleanup failed: %v", err)
+	}
+	t.Log("QA_NATIVE_REAL_KERNEL_CONSUMED_ORPHAN_RECOVERY=PASS")
 }

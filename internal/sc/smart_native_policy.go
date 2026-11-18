@@ -27,6 +27,12 @@ type NativePolicyOptions struct {
 const NativePolicyTableIndex = 27432
 const NativePolicyRuleIndex = 14200
 
+// Official sing-tun 1.14.3 marks outbound underlay/excluded flows with
+// 0x2024. Bind this explicitly to the independently owned early reply guard:
+// existing inbound-session replies bypass Core NAT, while new public outgoing
+// flows remain captured by the selected VPN.
+const NativePolicyOutputMark = 0x2024
+
 // NativePolicyTunMTU is the virtual TUN MTU for the current official-Core
 // native policy, not the physical underlay MTU. The separately retained
 // experimental manager-owned native trial has its own fixed 1400-byte link
@@ -182,7 +188,8 @@ func NativeSmartRoutingConfig(profile Profile, opts NativePolicyOptions, operato
 			"interface_name": opts.InterfaceName, "address": address,
 			"mtu": NativePolicyTunMTU, "stack": "gvisor", "auto_route": true, "auto_redirect": true,
 			"iproute2_table_index": NativePolicyTableIndex, "iproute2_rule_index": NativePolicyRuleIndex,
-			"strict_route": true, "dns_mode": "disabled",
+			"auto_redirect_output_mark": NativePolicyOutputMark,
+			"strict_route":              true, "dns_mode": "disabled",
 		}},
 		"dns": map[string]any{
 			"servers": []any{

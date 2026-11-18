@@ -64,7 +64,32 @@ type nativeAction struct {
 var nativeRuleLine = regexp.MustCompile("^([0-9]+):\\s+(.+)$")
 var nativeChainLine = regexp.MustCompile("(?m)^\\s*chain ([a-zA-Z0-9_]+) \\{")
 
+// Callers request `ip -N` to force numeric table identities: a local
+// rt_tables alias must not conceal foreign references to the reserved table.
+// Parse the canonical iproute2 RPDB body as tokens so only a real lookup
+// target (not a numeric prefix or an unrelated rule) is considered a
+// reference. Both address families are inspected before any mutation.
+func nativeRuleReferencesTable(body string, table int) bool {
+	fields := strings.Fields(body)
+	for i := 0; i+1 < len(fields); i++ {
+		if (fields[i] == "lookup" || fields[i] == "table") && fields[i+1] == strconv.Itoa(table) {
+			return true
+		}
+	}
+	return false
+}
+
 func recoverNativeRedirect(parent context.Context, r nativeKernelRunner, p nativeRedirectRecovery) error {
+	return recoverNativeRedirectWithVerifiedOrphan(parent, r, p, false)
+}
+
+// The official Core's abnormal SIGKILL teardown can remove its randomized
+// redirect-table identity and nft table but leave exactly shaped 14200-series
+// and 32768 RPDB rules. Without the identity the ordinary recovery must
+// continue to refuse adoption. A caller that already verified this same
+// current-boot, consumed Core-start claim and independently stopped Core may
+// allow ONLY this orphan layout after separate absence/collision checks.
+func recoverNativeRedirectWithVerifiedOrphan(parent context.Context, r nativeKernelRunner, p nativeRedirectRecovery, claimedCoreStart bool) error {
 	if !smartTUNDeviceName.MatchString(p.TunnelIF) || !smartTUNDeviceName.MatchString(p.UnderlayIF) ||
 		p.TunnelIF == p.UnderlayIF || p.TunnelIF == "lo" || p.UnderlayIF == "lo" ||
 		p.Table != NativePolicyTableIndex || p.Rule != NativePolicyRuleIndex {
@@ -74,7 +99,7 @@ func recoverNativeRedirect(parent context.Context, r nativeKernelRunner, p nativ
 	defer cancel()
 	rules := make([]nativeRule, 0, 16)
 	for _, family := range []string{"-4", "-6"} {
-		raw, e := r.output(ctx, "ip", family, "rule", "show")
+		raw, e := r.output(ctx, "ip", "-N", family, "rule", "show")
 		if e != nil {
 			return e
 		}
@@ -91,6 +116,22 @@ func recoverNativeRedirect(parent context.Context, r nativeKernelRunner, p nativ
 				return errors.New("native recovery: invalid priority")
 			}
 			rules = append(rules, nativeRule{family, priority, parts[2]})
+		}
+	}
+	// The fixed 32768 fallback is a Core-owned identity only at that exact
+	// priority. Preinspect every reference to the reserved policy table,
+	// including those outside the 14200-series, before scheduling any delete.
+	// A matching body at an arbitrary priority is never proof of ownership.
+	fallbackBody := fmt.Sprintf("not from all fwmark 0x2024 lookup %d", p.Table)
+	for _, rule := range rules {
+		if rule.priority == 32768 && rule.body != fallbackBody {
+			return errors.New("native recovery: foreign fixed fallback priority")
+		}
+		if nativeRuleReferencesTable(rule.body, p.Table) &&
+			!(rule.priority == p.Rule+1 &&
+				rule.body == fmt.Sprintf("from all fwmark 0x2023 lookup %d", p.Table)) &&
+			!(rule.priority == 32768 && rule.body == fallbackBody) {
+			return errors.New("native recovery: foreign reserved-table reference")
 		}
 	}
 	// Resolve the Core's *second*, randomized auto_redirect table, whose
@@ -126,11 +167,8 @@ func recoverNativeRedirect(parent context.Context, r nativeKernelRunner, p nativ
 			}
 			coreRules = append(coreRules, nativeAction{"ip", []string{rule.family, "rule", "del", "pref", strconv.Itoa(pref)}})
 		}
-		if strings.Contains(rule.body, fmt.Sprintf("lookup %d", p.Table)) && pref > p.Rule+10 {
-			if rule.body != fmt.Sprintf("not from all fwmark 0x2024 lookup %d", p.Table) {
-				return errors.New("native recovery: foreign table reference")
-			}
-			fallbackRules = append(fallbackRules, nativeAction{"ip", []string{rule.family, "rule", "del", "pref", strconv.Itoa(pref)}})
+		if pref == 32768 {
+			fallbackRules = append(fallbackRules, nativeAction{"ip", []string{rule.family, "rule", "del", "pref", "32768"}})
 		}
 	}
 	if len(fallbackRules) > 2 {
@@ -201,8 +239,6 @@ func recoverNativeRedirect(parent context.Context, r nativeKernelRunner, p nativ
 				routes = append(routes, nativeAction{"ip", []string{family, "route", "del", "table", strconv.Itoa(redirectTable), "local", host, "dev", dev}})
 			}
 		}
-	} else if len(coreRules) > 0 || len(fallbackRules) > 0 {
-		return errors.New("native recovery: policy orphan without redirect identity")
 	}
 	tables, e := r.output(ctx, "nft", "list", "tables")
 	if e != nil {
@@ -255,6 +291,51 @@ func recoverNativeRedirect(parent context.Context, r nativeKernelRunner, p nativ
 			}
 		}
 	}
+	// A killed Core may have released its nft table, random-table rule
+	// and TUN interface while its exact fixed-slot RPDB rules remain.
+	// This is not a general orphan cleanup: the caller must have already
+	// verified the one-use Core-start receipt under the native Manager lock.
+	// Refuse even exact RPDB patterns if the Core's nft identity, Docker
+	// compatibility rules, any TUN, or unattributed redirect routes survive.
+	// The previously checked fixed table must be empty; priorities and
+	// complete rule bodies were checked and de-duplicated above.
+	if redirectTable == 0 && (len(coreRules) != 0 || len(fallbackRules) != 0) {
+		if !claimedCoreStart || countTable != 0 || len(dockerActions) != 0 {
+			return errors.New("native recovery: policy orphan without verified Core-start ownership")
+		}
+		links, linkErr := r.output(ctx, "ip", "-o", "link", "show")
+		if linkErr != nil {
+			return linkErr
+		}
+		for _, line := range strings.Split(links, "\n") {
+			if strings.TrimSpace(line) == "" {
+				continue
+			}
+			fields := strings.SplitN(strings.TrimSpace(line), ": ", 3)
+			if len(fields) < 2 {
+				return errors.New("native recovery: unparseable orphan interface inventory")
+			}
+			if strings.SplitN(fields[1], "@", 2)[0] == p.TunnelIF {
+				return errors.New("native recovery: orphan TUN still exists")
+			}
+		}
+		for _, item := range []struct {
+			family, address string
+		}{{"-4", "127.0.0.1"}, {"-6", "::1"}} {
+			allRoutes, routeErr := r.output(ctx, "ip", item.family, "route", "show", "table", "all")
+			if routeErr != nil {
+				return routeErr
+			}
+			for _, line := range strings.Split(allRoutes, "\n") {
+				parts := strings.Fields(line)
+				if len(parts) >= 4 && parts[0] == "local" &&
+					parts[1] == item.address && parts[2] == "dev" &&
+					parts[3] == p.UnderlayIF {
+					return errors.New("native recovery: orphan redirect route still exists without table identity")
+				}
+			}
+		}
+	}
 	// Preinspect all objects before changing any. Keep priority-1 redirect
 	// identity until AFTER the nft table is deleted: an interrupted nft delete
 	// must leave the randomized table discoverable for the next exact retry.
@@ -285,7 +366,7 @@ func recoverNativeRedirect(parent context.Context, r nativeKernelRunner, p nativ
 	}
 	// Proof of Direct/off means managed RPDB and nft surface is actually gone.
 	for _, family := range []string{"-4", "-6"} {
-		raw, e := r.output(ctx, "ip", family, "rule", "show")
+		raw, e := r.output(ctx, "ip", "-N", family, "rule", "show")
 		if e != nil {
 			return e
 		}
@@ -295,8 +376,8 @@ func recoverNativeRedirect(parent context.Context, r nativeKernelRunner, p nativ
 				continue
 			}
 			n, _ := strconv.Atoi(match[1])
-			if n == 1 || (n >= p.Rule && n <= p.Rule+10) ||
-				strings.Contains(match[2], fmt.Sprintf("lookup %d", p.Table)) {
+			if n == 1 || n == 32768 || (n >= p.Rule && n <= p.Rule+10) ||
+				nativeRuleReferencesTable(match[2], p.Table) {
 				return errors.New("native recovery: managed RPDB policy remains")
 			}
 		}

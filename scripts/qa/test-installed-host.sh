@@ -1173,7 +1173,8 @@ docker cp "$root/scripts/qa/host-native-docker-recovery.sh" "$container:/root/qa
 docker exec -e SC_QA_NATIVE_DOCKER_GUEST=yes "$container" \
   /bin/sh /root/qa-native-docker-recovery.sh |
   tee "$scratch/native-docker-recovery.log"
-for marker in NATIVE_DOCKER_SIGKILL_LAYOUT_RECOVERY \
+for marker in NATIVE_ORPHAN_REAL_KERNEL_BOUNDARY \
+              NATIVE_DOCKER_SIGKILL_LAYOUT_RECOVERY \
               NATIVE_DOCKER_FOREIGN_BRIDGE_REFUSAL \
               NATIVE_DOCKER_FOREIGN_REFUSAL_RETRY \
               NATIVE_DOCKER_GUEST_FULL_BASELINE_RESTORED; do

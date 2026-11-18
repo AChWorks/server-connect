@@ -465,7 +465,7 @@ func (m *Manager) stopNativeHealthOperation(id, reason string) (bool, error) {
 			if e != nil {
 				return e
 			}
-			if s.OperationID != id || s.ConfigSHA256 != claim.ConfigSHA256 {
+			if s.OperationID != id || s.OperationID != claim.HealthOperationID || s.ConfigSHA256 != claim.ConfigSHA256 {
 				return nil
 			}
 			s.Phase = "stopping"
@@ -556,7 +556,7 @@ func (m *Manager) RunNativeHealthRound() (NativeHealthState, error) {
 		if e != nil {
 			return e
 		}
-		if s.ConfigSHA256 != claim.ConfigSHA256 {
+		if s.ConfigSHA256 != claim.ConfigSHA256 || s.OperationID != claim.HealthOperationID {
 			return Fault("invalid_state", "native health is not bound to session")
 		}
 		raw, e := readRegular(filepath.Join(m.Dir, nativeConfigFile))
@@ -599,6 +599,17 @@ func (m *Manager) RunNativeHealthRound() (NativeHealthState, error) {
 		s.Phase, s.Reason = "off", reason
 		return s, nil
 	}
+	if e := requireNativeReplyGuardClaim(context.Background(), nativeHealthKernelReader{}, claim.ReplyGuardHandle, claim.ReplyGuardFingerprint); e != nil {
+		stopped, stopErr := m.stopNativeHealthOperation(s.OperationID, "native_reply_guard_unverified")
+		if stopErr != nil {
+			return s, stopErr
+		}
+		if !stopped {
+			return s, Fault("guard_pending", "native reply guard belongs to old session")
+		}
+		s.Phase, s.Reason = "off", "native_reply_guard_unverified"
+		return s, nil
+	}
 	if e := inspectNativeHealthPolicy(context.Background(), nativeHealthKernelReader{}, claim.recoveryScope(), targets); e != nil {
 		stopped, stopErr := m.stopNativeHealthOperation(s.OperationID, "native_policy_unverified")
 		if stopErr != nil {
@@ -639,6 +650,9 @@ func (m *Manager) RunNativeHealthRound() (NativeHealthState, error) {
 		}
 		if e = nativeHealthGuardRoles(); e != nil {
 			return Fault("guard_unavailable", "native guard lost during probe round")
+		}
+		if e = requireNativeReplyGuardClaim(context.Background(), nativeHealthKernelReader{}, claim.ReplyGuardHandle, claim.ReplyGuardFingerprint); e != nil {
+			return Fault("guard_unavailable", "native reply guard changed during selected-path probe")
 		}
 		if e = inspectNativeHealthPolicy(context.Background(), nativeHealthKernelReader{}, claim.recoveryScope(), targets); e != nil {
 			return Fault("guard_unavailable", "native kernel policy changed during selected-path probe")
@@ -686,7 +700,7 @@ func (m *Manager) SuperviseNativeHealth() (NativeHealthState, error) {
 		if e != nil {
 			return e
 		}
-		if s.ConfigSHA256 != claim.ConfigSHA256 {
+		if s.ConfigSHA256 != claim.ConfigSHA256 || s.OperationID != claim.HealthOperationID {
 			return Fault("invalid_state", "native supervisor session mismatch")
 		}
 		return m.validateNativeSessionConfig(claim)

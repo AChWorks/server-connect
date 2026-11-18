@@ -89,6 +89,7 @@ docker exec -e "SC_QA_DEBIAN_VERSION=$qa_version" "$container" /bin/sh -c '
   test "$(systemctl show server-connect.service -p LoadState --value)" = not-found
   ! command -v python3
   ! command -v curl
+  ! command -v nft
   test ! -e /opt/server-connect
   test ! -e /var/lib/server-connect
   test ! -e /usr/local/bin/server-connect
@@ -157,6 +158,8 @@ docker exec "$container" /bin/sh -c '
   set -eu
   test "$(command -v curl)" = /usr/bin/curl
   test "$(command -v python3)" = /usr/bin/python3
+  test "$(command -v nft)" = /usr/sbin/nft
+  /usr/sbin/nft list tables >/dev/null
   test "$(cat /opt/server-connect/.owner)" = AChWorks/server-connect
   test "$(readlink /usr/local/bin/server-connect)" = /opt/server-connect/current/bin/server-connect
   test "$(systemctl show server-connect.service -p LoadState --value)" = loaded

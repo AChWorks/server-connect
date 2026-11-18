@@ -1044,6 +1044,9 @@ func (m *Manager) InstallerCheckGuardClear() error {
 	if desired, e := m.load(); e != nil || desired.Desired == "smart" {
 		return Fault("guard_pending", "native Smart Routing must be verified Direct before update")
 	}
+	if present, e := inspectNativeReplyGuard(context.Background(), nativeSystemRunner{}); e != nil || present {
+		return Fault("guard_pending", "orphaned or uncertain native inbound reply guard blocks installer")
+	}
 	raw, err := readRegular(filepath.Join(m.Dir, activationJournalFilename))
 	if errors.Is(err, os.ErrNotExist) {
 		return nil

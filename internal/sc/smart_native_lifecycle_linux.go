@@ -9,7 +9,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -27,11 +26,15 @@ const nativeUnitPath = "/etc/systemd/system/server-connect-native-tun.service"
 // This small persisted receipt is written before starting the official Core.
 // It authorizes only the fixed native policy slots, not global route repair.
 type NativeSession struct {
-	Version       int    `json:"version"`
-	Selected      string `json:"selected"`
-	InterfaceName string `json:"tunnel_if"`
-	UnderlayIF    string `json:"underlay_if"`
-	ConfigSHA256  string `json:"config_sha256"`
+	Version               int    `json:"version"`
+	Selected              string `json:"selected"`
+	InterfaceName         string `json:"tunnel_if"`
+	UnderlayIF            string `json:"underlay_if"`
+	ConfigSHA256          string `json:"config_sha256"`
+	HealthOperationID     string `json:"health_operation_id,omitempty"`
+	ReplyGuardHandle      uint64 `json:"reply_guard_handle,omitempty"`
+	ReplyGuardFingerprint string `json:"reply_guard_fingerprint,omitempty"`
+	CoreStartAttempted    bool   `json:"core_start_attempted,omitempty"`
 }
 type NativeConnectionStatus struct {
 	Desired              string `json:"desired"`
@@ -42,6 +45,7 @@ type NativeConnectionStatus struct {
 	NativePolicyVerified bool   `json:"native_policy_verified"`
 	SelectedVPNPathProof string `json:"selected_vpn_path_proof"`
 	GuardVerified        bool   `json:"runtime_guard_verified"`
+	ReplyGuardVerified   bool   `json:"inbound_reply_guard_verified"`
 	HealthPhase          string `json:"health_phase"`
 	HealthReason         string `json:"health_reason"`
 	HealthFailures       int    `json:"health_failures"`
@@ -71,6 +75,22 @@ func (m *Manager) readNativeSession() (NativeSession, error) {
 	}
 	if _, err := hex.DecodeString(session.ConfigSHA256); err != nil {
 		return NativeSession{}, Fault("invalid_state", "invalid native config digest")
+	}
+	if session.HealthOperationID != "" {
+		if len(session.HealthOperationID) != 32 {
+			return NativeSession{}, Fault("invalid_state", "invalid native health operation binding")
+		}
+		if _, err := hex.DecodeString(session.HealthOperationID); err != nil {
+			return NativeSession{}, Fault("invalid_state", "invalid native health operation binding")
+		}
+	}
+	if session.ReplyGuardFingerprint != "" {
+		if len(session.ReplyGuardFingerprint) != 64 {
+			return NativeSession{}, Fault("invalid_state", "invalid native reply guard fingerprint")
+		}
+		if _, err := hex.DecodeString(session.ReplyGuardFingerprint); err != nil {
+			return NativeSession{}, Fault("invalid_state", "invalid native reply guard fingerprint")
+		}
 	}
 	return session, nil
 }
@@ -188,11 +208,129 @@ func (m *Manager) nativeMainPIDZero() error {
 	return nil
 }
 
+// Unlike a MainPID-only test, this rejects pending ExecStartPre, start jobs,
+// concurrent control operations and stale cgroup occupants. The sole live
+// control process allowed is THIS installed ExecStopPost invocation:
+// systemd serializes the service and identifies it by ControlPID together
+// with the exact deactivating/stop-post lifecycle state.
+func parseNativeCoreRecoveryQuiescence(raw []byte, selfPID int) error {
+	refuse := func() error {
+		return Fault("guard_pending", "native Core has pending or unverified systemd work")
+	}
+	if len(raw) == 0 || len(raw) > 4096 || selfPID <= 1 {
+		return refuse()
+	}
+	fields := make(map[string]string)
+	for _, line := range strings.Split(strings.TrimSuffix(string(raw), "\n"), "\n") {
+		pair := strings.SplitN(line, "=", 2)
+		if len(pair) != 2 {
+			return refuse()
+		}
+		switch pair[0] {
+		case "Id", "ActiveState", "SubState", "MainPID", "ControlPID", "Job", "ControlGroup":
+		default:
+			return refuse()
+		}
+		if _, exists := fields[pair[0]]; exists {
+			return refuse()
+		}
+		fields[pair[0]] = pair[1]
+	}
+	if len(fields) != 7 || fields["Id"] != nativeSmartUnit ||
+		fields["MainPID"] != "0" {
+		return refuse()
+	}
+	if (fields["ActiveState"] == "inactive" && fields["SubState"] == "dead") ||
+		(fields["ActiveState"] == "failed" && fields["SubState"] == "failed") {
+		if fields["ControlPID"] == "0" && (fields["Job"] == "" || fields["Job"] == "0") &&
+			fields["ControlGroup"] == "" {
+			return nil
+		}
+		return refuse()
+	}
+	if fields["ActiveState"] == "deactivating" && fields["SubState"] == "stop-post" &&
+		fields["ControlPID"] == strconv.Itoa(selfPID) {
+		return nil
+	}
+	return refuse()
+}
+
+func (m *Manager) nativeCoreRecoveryQuiescent() error {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	cmd, err := trustedSystemctlCommand(ctx, "show", nativeSmartUnit,
+		"-p", "Id", "-p", "ActiveState", "-p", "SubState",
+		"-p", "MainPID", "-p", "ControlPID", "-p", "Job", "-p", "ControlGroup")
+	if err != nil {
+		return err
+	}
+	raw, err := cmd.Output()
+	if err != nil || ctx.Err() != nil {
+		return Fault("service_state_unavailable", "native Core lifecycle cannot be inspected")
+	}
+	return parseNativeCoreRecoveryQuiescence(raw, os.Getpid())
+}
+
+// A consumed start claim is bound to its one and only staged operation on
+// this boot. Its presence alone cannot adopt newly created fixed-slot rules.
+func nativeOrphanReceiptCurrentBoot(session NativeSession, health NativeHealthState, boot string) bool {
+	return session.CoreStartAttempted && session.ReplyGuardHandle != 0 &&
+		len(session.ReplyGuardFingerprint) == 64 &&
+		len(session.HealthOperationID) == 32 &&
+		trialBootIDPattern.MatchString(boot) &&
+		health.BootID == boot && health.OperationID == session.HealthOperationID &&
+		health.ConfigSHA256 == session.ConfigSHA256
+}
+
+// All checks preceding exceptional orphan deletion are read-only. If the
+// consumed claim is stale or the committed table has gone missing, accept
+// only an independently proven already-clean Direct kernel; never adopt
+// fixed-slot orphan rules from a new boot or an untrusted nft owner.
+func recoverNativeNetworkWithReceipt(ctx context.Context, kernel nativeKernelRunner,
+	guard nativeReplyGuardCASRunner, session NativeSession, health NativeHealthState, boot string) error {
+	scope := session.recoveryScope()
+	claimed := false
+	if session.CoreStartAttempted {
+		if !nativeOrphanReceiptCurrentBoot(session, health, boot) {
+			present, err := nativeReplyGuardPresent(ctx, guard)
+			if err != nil {
+				return err
+			}
+			if present {
+				return Fault("guard_pending", "consumed native claim lacks current-boot operation attestation")
+			}
+			return inspectNativeAdmission(ctx, kernel, scope)
+		}
+		present, err := nativeReplyGuardPresent(ctx, guard)
+		if err != nil {
+			return err
+		}
+		if !present {
+			return inspectNativeAdmission(ctx, kernel, scope)
+		}
+		if err := requireNativeReplyGuardClaim(ctx, guard, session.ReplyGuardHandle, session.ReplyGuardFingerprint); err != nil {
+			return err
+		}
+		claimed = true
+	}
+	if err := recoverNativeRedirectWithVerifiedOrphan(ctx, kernel, scope, claimed); err != nil {
+		return err
+	}
+	return recoverNativeReplyGuard(ctx, guard, session.ReplyGuardHandle, session.ReplyGuardFingerprint)
+}
+
 // This is an inspection, not a resource reservation. systemd ExecStartPre
 // repeats it immediately before native Core execution after receipt staging.
 func inspectNativeAdmission(ctx context.Context, r nativeKernelRunner, p nativeRedirectRecovery) error {
+	return inspectNativeAdmissionWithReplyGuard(ctx, r, p, 0, "")
+}
+
+// Recheck all reserved Core resources immediately before ExecStart.
+// Only the previously committed exact reply table is exempt from the
+// otherwise strict empty-resource policy.
+func inspectNativeAdmissionWithReplyGuard(ctx context.Context, r nativeKernelRunner, p nativeRedirectRecovery, committedReplyHandle uint64, committedFingerprint string) error {
 	for _, family := range []string{"-4", "-6"} {
-		rules, err := r.output(ctx, "ip", family, "rule", "show")
+		rules, err := r.output(ctx, "ip", "-N", family, "rule", "show")
 		if err != nil {
 			return err
 		}
@@ -202,8 +340,9 @@ func inspectNativeAdmission(ctx context.Context, r nativeKernelRunner, p nativeR
 				continue
 			}
 			priority, _ := strconv.Atoi(m[1])
-			if priority == 1 || (priority >= p.Rule && priority <= p.Rule+10) ||
-				strings.Contains(m[2], fmt.Sprintf("lookup %d", p.Table)) {
+			if priority == 1 || priority == 32768 ||
+				(priority >= p.Rule && priority <= p.Rule+10) ||
+				nativeRuleReferencesTable(m[2], p.Table) {
 				return Fault("service_conflict", "native RPDB slots are occupied")
 			}
 		}
@@ -227,6 +366,14 @@ func inspectNativeAdmission(ctx context.Context, r nativeKernelRunner, p nativeR
 		}
 		if f[2] == "sing-box" {
 			return Fault("service_conflict", "sing-box nft table is already occupied")
+		}
+		// This exact name must be absent BEFORE writing the native claim.
+		// An installed reply hook is authorized by a one-use current-boot
+		// session, never merely by a table name or matching nft contents.
+		if f[2] == nativeReplyGuardTable {
+			if committedReplyHandle == 0 || f[1] != "inet" {
+				return Fault("service_conflict", "native inbound-reply guard table is already occupied")
+			}
 		}
 		if f[1] == "ip" && f[2] == "filter" {
 			dockerFilter = true
@@ -255,6 +402,9 @@ func inspectNativeAdmission(ctx context.Context, r nativeKernelRunner, p nativeR
 	if err != nil || strings.TrimSpace(underlay) == "" {
 		return Fault("service_state_unavailable", "underlay interface not available")
 	}
+	if committedReplyHandle != 0 {
+		return requireNativeReplyGuardClaim(ctx, r, committedReplyHandle, committedFingerprint)
+	}
 	return nil
 }
 func (s NativeSession) recoveryScope() nativeRedirectRecovery {
@@ -279,6 +429,7 @@ func nativeDesiredMatchesClaim(state State, session NativeSession) error {
 // do not introduce a second activation permission or a new durable owner.
 func nativeFreshPrearm(session NativeSession, health NativeHealthState, boot string, now int64) error {
 	if health.ConfigSHA256 != session.ConfigSHA256 || health.BootID != boot ||
+		len(session.HealthOperationID) != 32 || health.OperationID != session.HealthOperationID ||
 		health.Phase != "starting" || health.StartedMS <= 0 ||
 		now < health.StartedMS || now-health.StartedMS > nativeHealthGraceMS ||
 		health.HeartbeatMS < health.StartedMS || health.HeartbeatMS > now ||
@@ -288,6 +439,80 @@ func nativeFreshPrearm(session NativeSession, health NativeHealthState, boot str
 	return nil
 }
 
+func (m *Manager) prepareNativeReplyGuardBeforeCoreStart() error {
+	if err := m.nativeUnitOwnership(); err != nil {
+		return err
+	}
+	return m.withLock(func() error {
+		session, err := m.readNativeSession()
+		if err != nil {
+			return err
+		}
+		if err := m.validateNativeSessionConfig(session); err != nil {
+			return err
+		}
+		state, err := m.load()
+		if err != nil {
+			return err
+		}
+		if err := nativeDesiredMatchesClaim(state, session); err != nil {
+			return err
+		}
+		health, err := m.readNativeHealth()
+		if err != nil {
+			return err
+		}
+		boot, err := trialBootIdentity()
+		if err != nil {
+			return Fault("guard_unavailable", "current native boot identity unavailable")
+		}
+		now, err := smartTUNUptimeMillis()
+		if err != nil {
+			return Fault("guard_unavailable", "native uptime unavailable")
+		}
+		if err := nativeFreshPrearm(session, health, boot, now); err != nil {
+			return err
+		}
+		if session.ReplyGuardHandle != 0 || session.CoreStartAttempted {
+			return Fault("guard_pending", "native early reply guard already prepared")
+		}
+		if err := nativeHealthGuardRoles(); err != nil {
+			return err
+		}
+		if err := inspectNativeAdmission(context.Background(), nativeSystemRunner{}, session.recoveryScope()); err != nil {
+			return err
+		}
+		// The physical SSH comparison proved that ExecStartPre is too late
+		// to preserve the original foreign transport. Once the native
+		// claim AND both independent timers are armed, install the scoped
+		// guard BEFORE invoking systemctl start and persist its handle.
+		flows, err := nativeAcceptedTCPSnapshot()
+		if err != nil {
+			return Fault("guard_unavailable", "cannot enumerate existing accepted TCP sockets for early reply guard")
+		}
+		session.ReplyGuardFingerprint = nativeAcceptedTCPFingerprint(flows)
+		// A crash after nft commit but before persisting its kernel handle
+		// must still be recoverable without adopting a foreign table. The
+		// complete expected accepted-tuple snapshot is committed FIRST.
+		raw, err := json.Marshal(session)
+		if err != nil {
+			return err
+		}
+		if err := put(filepath.Join(m.Dir, nativeSessionFile), raw); err != nil {
+			return err
+		}
+		handle, err := installNativeReplyGuardWithHandle(context.Background(), nativeSystemRunner{}, flows, session.ReplyGuardFingerprint)
+		if err != nil {
+			return err
+		}
+		session.ReplyGuardHandle = handle
+		raw, err = json.Marshal(session)
+		if err != nil {
+			return err
+		}
+		return put(filepath.Join(m.Dir, nativeSessionFile), raw)
+	})
+}
 func (m *Manager) NativePreflightInstalled() error {
 	if err := m.nativeUnitOwnership(); err != nil {
 		return err
@@ -322,12 +547,28 @@ func (m *Manager) NativePreflightInstalled() error {
 		if err := nativeFreshPrearm(session, health, boot, now); err != nil {
 			return err
 		}
+		if session.ReplyGuardHandle == 0 || session.ReplyGuardFingerprint == "" || session.CoreStartAttempted {
+			return Fault("guard_pending", "Core start requires a committed, unused early reply guard")
+		}
 		if err := nativeHealthGuardRoles(); err != nil {
 			return err
 		}
-		return inspectNativeAdmission(context.Background(), nativeSystemRunner{}, session.recoveryScope())
+		if err := inspectNativeAdmissionWithReplyGuard(context.Background(), nativeSystemRunner{}, session.recoveryScope(), session.ReplyGuardHandle, session.ReplyGuardFingerprint); err != nil {
+			return err
+		}
+		// An independent restart may not reuse a previous session even if
+		// its boot, lease and timers remain fresh. Persist consumption
+		// BEFORE Core execution; an interrupted start retains the guard
+		// for independent cleanup under the original durable claim.
+		session.CoreStartAttempted = true
+		raw, err := json.Marshal(session)
+		if err != nil {
+			return err
+		}
+		return put(filepath.Join(m.Dir, nativeSessionFile), raw)
 	})
 }
+
 func (m *Manager) NativeRecoverInstalled() error {
 	if err := m.nativeUnitOwnership(); err != nil {
 		return err
@@ -343,10 +584,27 @@ func (m *Manager) NativeRecoverInstalled() error {
 		if err := m.validateNativeSessionConfig(session); err != nil {
 			return err
 		}
-		if err := m.nativeMainPIDZero(); err != nil {
+		if err := m.nativeCoreRecoveryQuiescent(); err != nil {
 			return err
 		}
-		if err := recoverNativeRedirect(context.Background(), nativeSystemRunner{}, session.recoveryScope()); err != nil {
+		// A missing previous-boot health record is not orphan authority.
+		// Completely clean kernel state can still be finalized idempotently.
+		health, healthErr := m.readNativeHealth()
+		if healthErr != nil && !errors.Is(healthErr, os.ErrNotExist) {
+			return healthErr
+		}
+		boot, bootErr := trialBootIdentity()
+		if bootErr != nil {
+			boot = ""
+		}
+		// Recheck systemd after the receipt observations, immediately before
+		// the first possible kernel mutation. ExecStopPost is admitted only
+		// if its ControlPID is this recovery process.
+		if err := m.nativeCoreRecoveryQuiescent(); err != nil {
+			return err
+		}
+		if err := recoverNativeNetworkWithReceipt(context.Background(),
+			nativeSystemRunner{}, nativeSystemRunner{}, session, health, boot); err != nil {
 			return err
 		}
 		// Only after the exact owned network resources are independently
@@ -571,10 +829,6 @@ func (m *Manager) connectNativeSmartRoutingUnlocked(opts NativePolicyOptions) (N
 		sum := sha256.Sum256(config)
 		session := NativeSession{Version: 1, Selected: state.Selected, InterfaceName: opts.InterfaceName,
 			UnderlayIF: opts.UnderlayInterface, ConfigSHA256: hex.EncodeToString(sum[:])}
-		claim, err := json.Marshal(session)
-		if err != nil {
-			return err
-		}
 		if err := put(filepath.Join(m.Dir, nativeConfigFile), config); err != nil {
 			return err
 		}
@@ -584,6 +838,15 @@ func (m *Manager) connectNativeSmartRoutingUnlocked(opts NativePolicyOptions) (N
 		}
 		if e := m.stageNativeHealth(session, threshold, healthScope); e != nil {
 			return e
+		}
+		stagedHealth, e := m.readNativeHealth()
+		if e != nil {
+			return e
+		}
+		session.HealthOperationID = stagedHealth.OperationID
+		claim, err := json.Marshal(session)
+		if err != nil {
+			return err
 		}
 		if err := put(filepath.Join(m.Dir, nativeSessionFile), claim); err != nil {
 			return err
@@ -616,6 +879,15 @@ func (m *Manager) connectNativeSmartRoutingUnlocked(opts NativePolicyOptions) (N
 		}
 		return result, Fault("guard_unavailable", "native guard was unavailable; Direct restored")
 	}
+	// Prearm the physical inbound-reply path BEFORE starting systemd/Core,
+	// while the original native claim and both independent recovery timers
+	// already exist. ExecStartPre rechecks and consumes this one-use receipt.
+	if err := m.prepareNativeReplyGuardBeforeCoreStart(); err != nil {
+		if cleanup := m.disconnectNativeSmartRoutingUnlocked(); cleanup != nil {
+			return result, Fault("guard_pending", "early native reply guard failed and rollback remains uncertain")
+		}
+		return result, Fault("guard_unavailable", "early native reply guard failed; Direct restored")
+	}
 	// Never hold Manager lock while systemd's independent stop hook may need it.
 	if err := m.nativeControl("start"); err != nil {
 		if cleanup := m.disconnectNativeSmartRoutingUnlocked(); cleanup != nil {
@@ -626,9 +898,31 @@ func (m *Manager) connectNativeSmartRoutingUnlocked(opts NativePolicyOptions) (N
 	for i := 0; i < 25; i++ {
 		observed, err := m.nativeActivity()
 		if err == nil && observed == "active" {
-			result.Observed = "active"
-			// Active process is not a selected-path or policy-delivery proof.
-			return result, nil
+			// The Core can be active while an owned early reply hook was
+			// externally replaced. Treat that as a safety failure and let
+			// the independent native stop path restore Direct.
+			var handle uint64
+			var fingerprint string
+			if e := m.withLock(func() error {
+				claim, e := m.readNativeSession()
+				if e == nil {
+					handle, fingerprint = claim.ReplyGuardHandle, claim.ReplyGuardFingerprint
+				}
+				return e
+			}); e == nil {
+				e = requireNativeReplyGuardClaim(context.Background(), nativeSystemRunner{}, handle, fingerprint)
+				if e == nil {
+					result.Observed = "active"
+					result.ReplyGuardVerified = true
+					// Neither active Core nor reply preservation alone
+					// proves the selected VPN data path or broader safety.
+					return result, nil
+				}
+			}
+			if cleanup := m.disconnectNativeSmartRoutingUnlocked(); cleanup != nil {
+				return result, Fault("guard_pending", "native reply guard lost after activation and rollback is uncertain")
+			}
+			return result, Fault("guard_unavailable", "native reply guard not verified; Direct restored")
 		}
 		time.Sleep(150 * time.Millisecond)
 	}
@@ -794,7 +1088,8 @@ func (m *Manager) NativeStatus() (NativeConnectionStatus, error) {
 			return err
 		}
 		result.Observed = observed
-		if healthErr != nil || health.ConfigSHA256 != session.ConfigSHA256 {
+		if healthErr != nil || health.ConfigSHA256 != session.ConfigSHA256 ||
+			health.OperationID != session.HealthOperationID {
 			return Fault("guard_pending", "native health record missing or unbound")
 		}
 		boot, bootErr := trialBootIdentity()
@@ -810,6 +1105,10 @@ func (m *Manager) NativeStatus() (NativeConnectionStatus, error) {
 		if s.Desired != "smart" || observed != "active" {
 			return Fault("guard_pending", "native Core is not verified active and consistent")
 		}
+		if err := requireNativeReplyGuardClaim(context.Background(), nativeSystemRunner{}, session.ReplyGuardHandle, session.ReplyGuardFingerprint); err != nil {
+			return err
+		}
+		result.ReplyGuardVerified = true
 		result.GuardVerified = true
 		result.SelectedVPNPathProof = nativeSelectedHTTPSProof(health, s.Desired, observed, now)
 		return nil

@@ -89,6 +89,19 @@ network reservation, authenticated VLESS health, fresh SSH/foreign-reply
 protection, or an independent Activation/Runtime Guard. Keep experimental
 native Apply restricted to its existing admitted QA fixtures.
 
+**Existing foreign SSH/hosting sessions:** Physical Debian 13 QA
+reproduced a TCP reset of an existing foreign SSH connection during native
+Core `auto_redirect` activation. Reply-only guards were insufficient
+for connections established before conntrack tracked them. A manually
+staged *exact accepted TCP socket* guard then preserved 58/58 old SSH
+replies. The integrated candidate snapshots established listener-side
+TCP four-tuples into owned IPv4/IPv6 nft sets, without blanket exemption
+for the foreign IP or port. It records the fingerprint before mutation,
+verifies the table handle, and permits one-use Core start only after the
+independent health/recovery guards are armed. The candidate remains
+subject to exact installed field proof and independent review; broader
+[acceptance](docs/ACCEPTANCE.md) is not yet satisfied.
+
 ### Native Runtime Health Guard (installed test candidate)
 
 On explicitly authorized disposable hosts only, `connect-smart` now stages
