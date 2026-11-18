@@ -3,7 +3,7 @@
 # Operates only within three task-named network namespaces; no host-route changes.
 set -Eeuo pipefail
 mode=${1:-}
-case "$mode" in negative|marked|negative-public|marked-public) ;; *) echo 'Usage: $0 negative|marked|negative-public|marked-public' >&2; exit 2;; esac
+case "$mode" in negative|marked|negative-public|marked-public|accepted-public) ;; *) echo 'Usage: $0 negative|marked|negative-public|marked-public|accepted-public' >&2; exit 2;; esac
 test "$(id -u)" = 0
 core="${SC_QA_CORE:-/opt/server-connect/current/bin/sing-box}"
 test -x "$core"
@@ -13,6 +13,7 @@ case "$mode" in
  marked) suffix=1;;
  negative-public) suffix=2;;
  marked-public) suffix=3;;
+ accepted-public) suffix=4;;
 esac
 if [[ "$mode" == *-public ]];then
  server_ip=203.0.113.10; gateway_ip=203.0.113.9
@@ -199,8 +200,48 @@ grep -q 'OLD_OK_04' "$task/old.log"
 echo 'QA_FOREIGN_PREEXISTING_TCP_SESSION_READY=PASS'
 ip netns exec "$ns_srv" ip -j -4 rule show > "$task/ns-rules-before.json"
 ip netns exec "$ns_srv" nft -j list ruleset > "$task/ns-nft-before.json"
-if [[ "$mode" == marked* ]];then
- ip netns exec "$ns_srv" nft -f - <<'NFT'
+if [[ "$mode" == marked* || "$mode" == accepted-public ]];then
+ if [[ "$mode" == accepted-public ]];then
+  # Observe a real accepted socket; *never* exempt the whole foreign IP
+  # or every connection to its listener port. The matching nft set is
+  # immutable during Core activation, as in the integrated Manager.
+  peer_port=$(ip netns exec "$ns_srv" python3 - "$server_ip" <<'PYPORT'
+import ipaddress,sys
+server=ipaddress.IPv4Address(sys.argv[1])
+foreign=ipaddress.IPv4Address("198.51.100.77")
+def endpoint(s):
+ a,p=s.split(":")
+ return ipaddress.IPv4Address(bytes.fromhex(a)[::-1]),int(p,16)
+rows=[x.split() for x in open("/proc/net/tcp").read().splitlines()[1:]]
+found=[endpoint(x[2])[1] for x in rows
+       if x[3]=="01" and endpoint(x[1])==(server,18222)
+       and endpoint(x[2])[0]==foreign]
+assert len(found)==1,found
+print(found[0])
+PYPORT
+  )
+  case "$peer_port" in ''|*[!0-9]*) echo 'invalid accepted peer port';exit 50;;esac
+  test "$peer_port" -gt 0 && test "$peer_port" -le 65535
+  ip netns exec "$ns_srv" nft -f - <<NFT
+table inet sc3_reply_safety {
+ set accepted4 {
+  type ipv4_addr . inet_service . ipv4_addr . inet_service;
+  elements = { $server_ip . 18222 . 198.51.100.77 . $peer_port }
+ }
+ set accepted6 {
+  type ipv6_addr . inet_service . ipv6_addr . inet_service;
+ }
+ chain protected_reply {
+  type route hook output priority -150; policy accept;
+  ct direction reply meta mark 0 meta mark set 0x2024 counter
+  ct direction original ip saddr . tcp sport . ip daddr . tcp dport @accepted4 meta mark 0 meta mark set 0x2024 counter
+  ct direction original ip6 saddr . tcp sport . ip6 daddr . tcp dport @accepted6 meta mark 0 meta mark set 0x2024 counter
+ }
+}
+NFT
+  echo 'QA_EXACT_PREEXISTING_ACCEPTED_TCP_TUPLE_ARMED'
+ else
+  ip netns exec "$ns_srv" nft -f - <<'NFT'
 table inet sc3_reply_safety {
  chain protected_reply {
   type route hook output priority -150; policy accept;
@@ -208,7 +249,8 @@ table inet sc3_reply_safety {
  }
 }
 NFT
- echo 'QA_EARLY_CT_REPLY_MARK_ARMED'
+  echo 'QA_EARLY_CT_REPLY_MARK_ARMED'
+ fi
 fi
 ip netns exec "$ns_srv" "$core" run -c "$task/core.json" > "$task/core.log" 2>&1 &
 core_pid=$!
@@ -251,8 +293,8 @@ for tries in {1..150}; do
 done
 old_count=$(grep -Ec '^OLD_OK_[0-9]+$' "$task/old.log" || :)
 echo "QA_OLD_SOCKET_SUCCESSFUL_NONCES=$old_count"
-if [[ "$mode" == marked* ]];then
- grep -qx 'OLD_SOCKET_COMPLETE_PASS' "$task/old.log" || { echo 'MARKED_OLD_TCP_FAILURE';cat "$task/old.log";exit 48; }
+if [[ "$mode" == marked* || "$mode" == accepted-public ]];then
+ grep -qx 'OLD_SOCKET_COMPLETE_PASS' "$task/old.log" || { echo 'PROTECTED_OLD_TCP_FAILURE';cat "$task/old.log";exit 48; }
  echo 'QA_MARKED_FOREIGN_ESTABLISHED_TCP_SURVIVED=PASS'
 else
  if grep -q 'OLD_SOCKET_FAILURE_' "$task/old.log";then
@@ -280,7 +322,7 @@ PYCOUNTERS
 kill "$core_pid"
 wait "$core_pid" 2>/dev/null || :
 # Core owns all native routes. The extra reply-mark table belongs only to this QA.
-if [[ "$mode" == marked* ]];then ip netns exec "$ns_srv" nft delete table inet sc3_reply_safety;fi
+if [[ "$mode" == marked* || "$mode" == accepted-public ]];then ip netns exec "$ns_srv" nft delete table inet sc3_reply_safety;fi
 for tries in {1..40};do
  if ! ip -n "$ns_srv" link show sctun0 >/dev/null 2>&1;then break;fi
  sleep 0.2
