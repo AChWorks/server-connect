@@ -529,6 +529,7 @@ REQUIRED_FILES = {
     "server-connect/bin/sing-box",
     "server-connect/bin/libcronet.so",
     "server-connect/THIRD-PARTY-LICENSES/sing-box-LICENSE",
+    "server-connect/THIRD-PARTY-LICENSES/golang.org-x-net-LICENSE",
 }
 ALLOWED_DIRS = {
     "server-connect",

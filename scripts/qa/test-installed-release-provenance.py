@@ -68,6 +68,7 @@ FILES = (
     "install.sh",
     "release-auth.py",
     "THIRD-PARTY-LICENSES/sing-box-LICENSE",
+    "THIRD-PARTY-LICENSES/golang.org-x-net-LICENSE",
     "manifest.json",
 )
 PROLOG = """set -eu
@@ -117,17 +118,45 @@ class ReleasePayloadTests(unittest.TestCase):
 
     def test_previous_twelve_entry_release_is_retained_and_removable(self):
         release = self.installed_pre_auth_release(
-            ("release-auth.py", "server-connect-native-tun.service")
+            ("release-auth.py", "server-connect-native-tun.service",
+             "THIRD-PARTY-LICENSES/golang.org-x-net-LICENSE")
         )
         self.installed_audit(release)
         (release / "release-auth.py").write_bytes(b"unreceipted helper\n")
         self.installed_audit(release, expected=1)
 
     def test_previous_thirteen_entry_native_release_is_retained_and_removable(self):
-        release = self.installed_pre_auth_release(("release-auth.py",))
+        release = self.installed_pre_auth_release(
+            ("release-auth.py", "THIRD-PARTY-LICENSES/golang.org-x-net-LICENSE"))
         self.installed_audit(release)
         (release / "release-auth.py").write_bytes(b"unreceipted helper\n")
         self.installed_audit(release, expected=1)
+
+    def test_previous_fourteen_entry_signed_aware_local_qa_is_still_auditable(self):
+        release = self.installed_pre_auth_release(
+            ("THIRD-PARTY-LICENSES/golang.org-x-net-LICENSE",))
+        receipt = release / "local-qa.sha256"
+        receipt.write_text(hashlib.sha256(
+            (release / "checksums.sha256").read_bytes()).hexdigest() + "\n")
+        receipt.chmod(0o600)
+        self.installed_audit(release)
+        # An old installed release is not an acceptable new archive.
+        self.audit(release, expected=21)
+        (release / "THIRD-PARTY-LICENSES/sing-box-LICENSE").write_text("tampered")
+        self.installed_audit(release, expected=21)
+
+    def test_incoming_without_vendor_license_rejected_even_if_checksums_match(self):
+        notice = "THIRD-PARTY-LICENSES/golang.org-x-net-LICENSE"
+        (self.source / notice).unlink()
+        (self.source / "checksums.sha256").write_text("".join(
+            hashlib.sha256((self.source / name).read_bytes()).hexdigest()
+            + "  " + name + "\n" for name in FILES if name != notice))
+        self.audit(self.source, expected=21)
+
+    def test_new_installed_release_missing_vendor_license_is_rejected(self):
+        release = self.publish()
+        (release / "THIRD-PARTY-LICENSES/golang.org-x-net-LICENSE").unlink()
+        self.installed_audit(release, expected=21)
 
     def test_missing_new_authentication_helper_cannot_fall_back_to_old_layout(self):
         release = self.publish()
@@ -314,10 +343,12 @@ class ReleasePayloadTests(unittest.TestCase):
         # must still fail the newer complete-payload verification.
         release = self.publish()
         former = tuple(name for name in FILES
-                       if name not in ("server-connect-native-tun.service", "release-auth.py"))
+                       if name not in ("server-connect-native-tun.service", "release-auth.py",
+                                       "THIRD-PARTY-LICENSES/golang.org-x-net-LICENSE"))
         assert len(former) == 12
         (release / "server-connect-native-tun.service").unlink()
         (release / "release-auth.py").unlink()
+        (release / "THIRD-PARTY-LICENSES/golang.org-x-net-LICENSE").unlink()
         (release / "local-qa.sha256").unlink()
         lines = "".join(
             hashlib.sha256((release / name).read_bytes()).hexdigest()

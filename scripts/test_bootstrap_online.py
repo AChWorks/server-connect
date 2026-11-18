@@ -48,6 +48,7 @@ FILE_NAMES = [
     "server-connect/bin/sing-box",
     "server-connect/bin/libcronet.so",
     "server-connect/THIRD-PARTY-LICENSES/sing-box-LICENSE",
+    "server-connect/THIRD-PARTY-LICENSES/golang.org-x-net-LICENSE",
 ]
 
 
@@ -807,7 +808,8 @@ class SignedReleaseTest(unittest.TestCase):
             "server-connect-activation-recover.timer", "server-connect-smart-tun.service",
             "server-connect-native-tun.service",
             "server-connect-smart-health.service", "server-connect-smart-health.timer",
-            "install.sh", "release-auth.py", "THIRD-PARTY-LICENSES/sing-box-LICENSE", "manifest.json",
+            "install.sh", "release-auth.py", "THIRD-PARTY-LICENSES/sing-box-LICENSE",
+            "THIRD-PARTY-LICENSES/golang.org-x-net-LICENSE", "manifest.json",
         )
         self.payload["server-connect/manifest.json"] = json.dumps(
             manifest_override or self.manifest, separators=(",", ":"),

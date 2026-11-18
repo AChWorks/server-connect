@@ -36,6 +36,9 @@ GOTOOLCHAIN=local GOPROXY=off CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -tr
 cp "$up/sing-box" "$work/server-connect/bin/sing-box"
 cp "$up/libcronet.so" "$work/server-connect/bin/libcronet.so"
 cp "$up/LICENSE" "$work/server-connect/THIRD-PARTY-LICENSES/sing-box-LICENSE"
+# The manager includes golang.org/x/net/publicsuffix in its compiled binary.
+# Preserve the vendored BSD-3-Clause notice in the distributable payload.
+cp vendor/golang.org/x/net/LICENSE "$work/server-connect/THIRD-PARTY-LICENSES/golang.org-x-net-LICENSE"
 
 cp bundle/install.sh bundle/server-connect.service bundle/server-connect-activation-recover.service bundle/server-connect-activation-recover.timer bundle/server-connect-smart-tun.service bundle/server-connect-native-tun.service bundle/server-connect-smart-health.service bundle/server-connect-smart-health.timer "$work/server-connect/"
 cp scripts/release-auth.py "$work/server-connect/release-auth.py"
@@ -46,7 +49,7 @@ printf '{"schema":1,"manager":"0.1.0-dev","core":"sing-box 1.14.3","core_archive
 (
  cd "$work/server-connect"
 
- sha256sum bin/server-connect bin/sing-box bin/libcronet.so server-connect.service server-connect-activation-recover.service server-connect-activation-recover.timer server-connect-smart-tun.service server-connect-native-tun.service server-connect-smart-health.service server-connect-smart-health.timer install.sh release-auth.py THIRD-PARTY-LICENSES/sing-box-LICENSE manifest.json > checksums.sha256
+ sha256sum bin/server-connect bin/sing-box bin/libcronet.so server-connect.service server-connect-activation-recover.service server-connect-activation-recover.timer server-connect-smart-tun.service server-connect-native-tun.service server-connect-smart-health.service server-connect-smart-health.timer install.sh release-auth.py THIRD-PARTY-LICENSES/sing-box-LICENSE THIRD-PARTY-LICENSES/golang.org-x-net-LICENSE manifest.json > checksums.sha256
  sha256sum --quiet -c checksums.sha256
  ./bin/server-connect version --json
  ./bin/sing-box version | head -n 1
