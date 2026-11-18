@@ -483,6 +483,7 @@ func TestNativeAdmissionRejectsOccupiedResources(t *testing.T) {
 		{"managed-slot", "ip -4 rule show", "0: from all lookup local\n14200: from all lookup 123\n"},
 		{"policy-route", "ip -4 route show table 27432", "default via 1.2.3.4 dev eth0\n"},
 		{"nft-foreign", "nft list tables", "table inet sing-box\n"},
+		{"reply-guard-foreign", "nft list tables", "table inet sc_reply_guard\n"},
 		{"existing-tun", "ip -o link show", "1: lo: <LOOPBACK>\n5: sctun0: <UP>\n"},
 		{"underlay-missing", "ip -o link show dev eth0", ""},
 	} {

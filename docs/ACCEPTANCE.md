@@ -28,6 +28,22 @@ Owner-approved **proportional recovery** requires representative evidence for no
 | Activation Guard | Independent guard **armed before mutation**; wrong/replayed confirmation, no fresh SSH/console approval, 600-second deadline, crash, reboot and foreign object collisions recover exact owned state without deleting other owners' resources | Systemd/journal/route evidence and new management connection; fault injection at each mutation phase |
 | Runtime Health Guard | Actual VPN path failure, core exit, broken DNS, one-site false alarms, dead/masked/hung watchdog and reboot lead to honest state and independently verified safe recovery. On confirmed recoverable failure, bounded backoff/reconnect (initial candidate maximum 3 attempts, configurable) either proves real VPN recovery or ends in Direct/off with no automatic retry loop. Unsafe guard/SSH scenarios bypass retries. No silent Direct bypass **while routed**, no VPN-only blocking **after confirmed Direct/off**, and local failure/attempt/result evidence; external notifications deferred | Separate normal/negative supervisor and selected-route tests, transient recovery/exhaustion/flapping/fatal-stop cases and local status/log inspection |
 
+**Issue #3, physical SSH admission blocker:** On the original pinned
+`main@6857fb8` Core candidate, an independently authenticated foreign SSH
+session passed 57/57 application-level nonces in Direct/off but reset during
+native Apply. A separately staged, narrowly scoped early `ct direction
+reply` mark preserved 58/58 on the same physical Debian 13 QA target;
+the previous no-mark physical failure and the marked success are not
+evidence of acceptance for the subsequently integrated product. The
+candidate must also prove correct installed `ExecStartPre` ordering,
+durable table-handle ownership, lost-guard/foreign-rule refusal, native
+Crash/Disconnect cleanup, and **new** server-originated traffic to the
+*identical* public client IP still delivered through the selected VPN
+(not exempted Direct). The isolated `marked-public` network-namespace
+fixture independently attests VLESS ingress against Direct leakage, but
+the same fixture does not reproduce the no-mark physical SSH reset;
+do not count it as a substitute for field acceptance. See [Issue #3](https://github.com/AChWorks/server-connect/issues/3).
+
 The independent **native candidate** health checks only fixed IPv4 HTTPS
 paths. Two existing checked systemd timers independently watch the Core,
 the selected-marked TUN/FIB/nftables path and each other's service/lease.

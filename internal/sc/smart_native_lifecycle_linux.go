@@ -27,11 +27,12 @@ const nativeUnitPath = "/etc/systemd/system/server-connect-native-tun.service"
 // This small persisted receipt is written before starting the official Core.
 // It authorizes only the fixed native policy slots, not global route repair.
 type NativeSession struct {
-	Version       int    `json:"version"`
-	Selected      string `json:"selected"`
-	InterfaceName string `json:"tunnel_if"`
-	UnderlayIF    string `json:"underlay_if"`
-	ConfigSHA256  string `json:"config_sha256"`
+	Version          int    `json:"version"`
+	Selected         string `json:"selected"`
+	InterfaceName    string `json:"tunnel_if"`
+	UnderlayIF       string `json:"underlay_if"`
+	ConfigSHA256     string `json:"config_sha256"`
+	ReplyGuardHandle uint64 `json:"reply_guard_handle,omitempty"`
 }
 type NativeConnectionStatus struct {
 	Desired              string `json:"desired"`
@@ -42,6 +43,7 @@ type NativeConnectionStatus struct {
 	NativePolicyVerified bool   `json:"native_policy_verified"`
 	SelectedVPNPathProof string `json:"selected_vpn_path_proof"`
 	GuardVerified        bool   `json:"runtime_guard_verified"`
+	ReplyGuardVerified   bool   `json:"inbound_reply_guard_verified"`
 	HealthPhase          string `json:"health_phase"`
 	HealthReason         string `json:"health_reason"`
 	HealthFailures       int    `json:"health_failures"`
@@ -228,6 +230,12 @@ func inspectNativeAdmission(ctx context.Context, r nativeKernelRunner, p nativeR
 		if f[2] == "sing-box" {
 			return Fault("service_conflict", "sing-box nft table is already occupied")
 		}
+		// This exact name must be absent BEFORE writing the native claim.
+		// An installed reply hook is authorized by a one-use current-boot
+		// session, never merely by a table name or matching nft contents.
+		if f[2] == nativeReplyGuardTable {
+			return Fault("service_conflict", "native inbound-reply guard table is already occupied")
+		}
 		if f[1] == "ip" && f[2] == "filter" {
 			dockerFilter = true
 		}
@@ -322,10 +330,29 @@ func (m *Manager) NativePreflightInstalled() error {
 		if err := nativeFreshPrearm(session, health, boot, now); err != nil {
 			return err
 		}
+		if session.ReplyGuardHandle != 0 {
+			return Fault("guard_pending", "native preflight has already committed a reply guard handle")
+		}
 		if err := nativeHealthGuardRoles(); err != nil {
 			return err
 		}
-		return inspectNativeAdmission(context.Background(), nativeSystemRunner{}, session.recoveryScope())
+		if err := inspectNativeAdmission(context.Background(), nativeSystemRunner{}, session.recoveryScope()); err != nil {
+			return err
+		}
+		// ExecStartPre runs only after the durable native claim and both
+		// independent recovery timers were prearmed. Install atomically
+		// before Core creates its transparent NAT output hook, then durably
+		// commit the observed table handle into this one-use claim.
+		handle, err := installNativeReplyGuardWithHandle(context.Background(), nativeSystemRunner{})
+		if err != nil {
+			return err
+		}
+		session.ReplyGuardHandle = handle
+		raw, err := json.Marshal(session)
+		if err != nil {
+			return err
+		}
+		return put(filepath.Join(m.Dir, nativeSessionFile), raw)
 	})
 }
 func (m *Manager) NativeRecoverInstalled() error {
@@ -347,6 +374,12 @@ func (m *Manager) NativeRecoverInstalled() error {
 			return err
 		}
 		if err := recoverNativeRedirect(context.Background(), nativeSystemRunner{}, session.recoveryScope()); err != nil {
+			return err
+		}
+		// A failed preflight may have committed only the guard table; a
+		// Core crash may have left both. Refuse any modified/foreign rule,
+		// and retain the claim until exact kernel cleanup is proven.
+		if err := recoverNativeReplyGuard(context.Background(), nativeSystemRunner{}, session.ReplyGuardHandle); err != nil {
 			return err
 		}
 		// Only after the exact owned network resources are independently
@@ -626,9 +659,30 @@ func (m *Manager) connectNativeSmartRoutingUnlocked(opts NativePolicyOptions) (N
 	for i := 0; i < 25; i++ {
 		observed, err := m.nativeActivity()
 		if err == nil && observed == "active" {
-			result.Observed = "active"
-			// Active process is not a selected-path or policy-delivery proof.
-			return result, nil
+			// The Core can be active while an owned early reply hook was
+			// externally replaced. Treat that as a safety failure and let
+			// the independent native stop path restore Direct.
+			var handle uint64
+			if e := m.withLock(func() error {
+				claim, e := m.readNativeSession()
+				if e == nil {
+					handle = claim.ReplyGuardHandle
+				}
+				return e
+			}); e == nil {
+				e = requireNativeReplyGuardClaim(context.Background(), nativeSystemRunner{}, handle)
+				if e == nil {
+					result.Observed = "active"
+					result.ReplyGuardVerified = true
+					// Neither active Core nor reply preservation alone
+					// proves the selected VPN data path or broader safety.
+					return result, nil
+				}
+			}
+			if cleanup := m.disconnectNativeSmartRoutingUnlocked(); cleanup != nil {
+				return result, Fault("guard_pending", "native reply guard lost after activation and rollback is uncertain")
+			}
+			return result, Fault("guard_unavailable", "native reply guard not verified; Direct restored")
 		}
 		time.Sleep(150 * time.Millisecond)
 	}
@@ -810,6 +864,10 @@ func (m *Manager) NativeStatus() (NativeConnectionStatus, error) {
 		if s.Desired != "smart" || observed != "active" {
 			return Fault("guard_pending", "native Core is not verified active and consistent")
 		}
+		if err := requireNativeReplyGuardClaim(context.Background(), nativeSystemRunner{}, session.ReplyGuardHandle); err != nil {
+			return err
+		}
+		result.ReplyGuardVerified = true
 		result.GuardVerified = true
 		result.SelectedVPNPathProof = nativeSelectedHTTPSProof(health, s.Desired, observed, now)
 		return nil

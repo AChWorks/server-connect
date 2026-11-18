@@ -59,6 +59,9 @@ func TestNativeSmartPolicyUsesOfficialSingBox(t *testing.T) {
 	if inbound["dns_mode"] != "disabled" {
 		t.Fatal("platform DNS must remain unmodified; TUN route rule handles nonlocal DNS")
 	}
+	if inbound["auto_redirect_output_mark"] != float64(NativePolicyOutputMark) {
+		t.Fatal("Core's output mark must match the independently owned inbound-reply guard")
+	}
 	if inbound["iproute2_table_index"] != float64(NativePolicyTableIndex) ||
 		inbound["iproute2_rule_index"] != float64(NativePolicyRuleIndex) {
 		t.Fatal("native recovery cannot identify policy-owned RPDB slots")

@@ -82,6 +82,59 @@ managed cleanup, the randomized redirect table remains verifiable via the
 priority-1 RPDB identity until the owned nft table is gone, allowing a later
 narrow retry without adopting unrelated firewall/routing resources.
 
+### Native inbound-reply guard (Issue #3, development candidate)
+
+The pinned official sing-box 1.14.3 `auto_redirect` adds a separate TCP NAT
+`OUTPUT` hook. During physical Debian 13 QA, applying that policy produced a
+locally generated, spoofed-foreign-peer TCP RST and dropped an **already
+established** authenticated foreign SSH connection. The same SSH witness ran
+57/57 replies with Direct/off and 4/57 or 29/57 without correction.
+An independently preinstalled narrow route hook at priority `-150` preserved
+58/58 authenticated replies while the identical Core executed. That manually
+staged proof alone is **not** integrated-product or production acceptance.
+
+The integrated candidate's **one** fixed `inet sc_reply_guard` table has
+one `route OUTPUT` chain at priority `-150`, with exactly one expression:
+`ct direction reply meta mark 0 meta mark set 0x2024 counter`. The selected
+Core's official `auto_redirect_output_mark` is explicitly fixed at `0x2024`.
+The rule covers **only unmarked established replies** to preexisting inbound
+connections; it does not exempt the remote peer IP, the listening port, or a
+host subnet. New connections initiated *by the server* to that same public
+client IP are not reply-direction packets and remain VPN-required. The
+isolated three-namespace QA script
+`scripts/qa/native-reply-mark-netns.sh marked-public` additionally checks a
+selected VLESS wire counter and rejects direct foreign egress, though the
+physical original-SSH failure was not reproducible in that VM.
+
+The native one-use, configuration-bound current-boot session and both
+independent timers must be durable **before** the exact table is created by
+the Core unit's `ExecStartPre`. The observed kernel table handle is
+persisted in the same native session before Core execution proceeds.
+Admission refuses any preexisting same-name table. Runtime status and health
+must attest that the current table's complete nftables expression, hook and
+committed handle match the claimed native session. The exact enabled Core
+may then apply its own official TUN, RPDB and nftables state; merely seeing an
+active process never establishes selected-path health.
+
+On normal Disconnect, Core exit, or a failed preflight, independent
+`ExecStopPost` first recovers the exact owned Core resources, then inspects
+the reply-guard table and deletes only its verified table handle using the
+existing nftables generation-conditional Netlink transaction. An interrupted
+preflight can have the table but not yet its committed handle; only the
+current one-use claim and exact table shape authorize that narrow recovery.
+Any later foreign replacement, additional/missing rule, changed output mark,
+generation change, uncertain deletion, or mismatched committed handle
+**retains the recovery claim and blocks success**, rather than deleting a
+table by name or presenting an unverified Direct/off. The shared installer
+must refuse orphaned reply-guard objects without a cleared native claim;
+idle Direct must not contain this table.
+
+This guard **does not** grant general-host acceptance for SSH/HTTP hosting,
+UDP, DNS, IPv6, real Iran Direct, or an actual foreign VPN provider. Record
+separate positive old/new SSH and hosted-HTTP replies, negative same-client-IP
+outbound-VPN proof, guard-loss/failure cases and exact post-recovery kernel
+identity on the reviewed integrated binary before V1 release.
+
 For the separate *native sing-box lifecycle*, an independently verified
 Direct/off transition may leave either or both of the exact installed Health
 and Recovery oneshots in systemd `failed` bookkeeping. A fresh Connect may

@@ -28,6 +28,8 @@ func nativeHealthPolicyFixture() fakeNativeHealthPolicy {
 		"ip -4 route show table 27432":              "default via 172.31.99.2 dev sctun0\n",
 		"ip -4 route get 8.8.8.8 mark 0x2023":       "8.8.8.8 via 172.31.99.2 dev sctun0 table 27432 src 172.31.99.1 mark 0x2023 uid 0\n",
 		"ip -4 route get 198.51.100.42 mark 0x2023": "198.51.100.42 via 172.31.99.2 dev sctun0 table 27432 src 172.31.99.1 mark 0x2023 uid 0\n",
+		"nft list tables":                           "table inet sc_reply_guard\ntable inet sing-box\n",
+		"nft -j list table inet sc_reply_guard":     nativeReplyGuardFixtureJSON,
 		"nft list table inet sing-box": `table inet sing-box {
     chain prerouting_prematch {
       type filter hook prerouting priority dstnat - 1; policy accept;

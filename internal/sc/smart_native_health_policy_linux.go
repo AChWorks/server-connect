@@ -63,6 +63,11 @@ func inspectNativeHealthPolicy(ctx context.Context, r interface {
 	}
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
+	// An absent/changed early reply hook is not an acceptable "healthy"
+	// policy even if Core's own TUN, RPDB and nft capture remain intact.
+	if err := requireNativeReplyGuard(ctx, r); err != nil {
+		return err
+	}
 	for _, family := range []string{"-4", "-6"} {
 		data, e := r.output(ctx, "ip", family, "rule", "show")
 		if e != nil {
