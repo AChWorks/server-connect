@@ -746,7 +746,17 @@ func TestNativeCoreSIGKILLOrphanRealKernelNamespace(t *testing.T) {
 		t.Fatalf("disposable foreign-priority fixture failed: %v", err)
 	}
 	withForeign4, err := r.output(ctx, "ip", "-4", "rule", "show")
-	if err != nil || !strings.Contains(withForeign4, "30000: not from all fwmark 0x2024 lookup 27432") {
+	// iproute2 uses tabs between priority and body on real Debian kernels;
+	// inspect the parsed rule identity rather than relying on whitespace.
+	foreignPresent := false
+	for _, line := range strings.Split(withForeign4, "\n") {
+		parts := nativeRuleLine.FindStringSubmatch(strings.TrimSpace(line))
+		if parts != nil && parts[1] == "30000" &&
+			parts[2] == "not from all fwmark 0x2024 lookup 27432" {
+			foreignPresent = true
+		}
+	}
+	if err != nil || !foreignPresent {
 		t.Fatalf("foreign-priority fixture not independently observed: %v %s", err, withForeign4)
 	}
 	if err := recoverNativeRedirectWithVerifiedOrphan(ctx, r, scope, true); err == nil {
