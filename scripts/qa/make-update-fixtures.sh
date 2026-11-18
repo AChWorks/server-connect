@@ -53,7 +53,8 @@ for variant in valid invalid-unit; do
       server-connect.service server-connect-activation-recover.service \
       server-connect-activation-recover.timer server-connect-smart-tun.service server-connect-native-tun.service \
       server-connect-smart-health.service server-connect-smart-health.timer install.sh release-auth.py \
-      THIRD-PARTY-LICENSES/sing-box-LICENSE manifest.json > checksums.sha256
+      THIRD-PARTY-LICENSES/sing-box-LICENSE THIRD-PARTY-LICENSES/golang.org-x-net-LICENSE \
+      manifest.json > checksums.sha256
     sha256sum --quiet --check checksums.sha256
     ./bin/server-connect version --json | grep -q '"sing_box":"1.14.3"'
     test "$(./bin/sing-box version | head -n 1)" = 'sing-box version 1.14.3'

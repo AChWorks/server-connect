@@ -60,13 +60,18 @@ server-connect-smart-health.service
 server-connect-smart-health.timer
 install.sh
 RELEASE_FILES
- # Existing pre-authentication development releases have no authentication
- # helper (historic 12-entry, current native 13-entry). Newly signed-aware
- # candidates require 14 entries and a retained explicit trust receipt.
+ # Historic development releases have 12/13 entries without the auth helper;
+ # previous signed-aware releases have 14 entries without the x/net notice.
+ # New incoming releases require both the helper and vendored license notice.
  if [ -e "$1/release-auth.py" ] || [ -L "$1/release-auth.py" ]; then
   printf '%s\n' release-auth.py
  fi
- printf '%s\n' THIRD-PARTY-LICENSES/sing-box-LICENSE manifest.json
+ printf '%s\n' THIRD-PARTY-LICENSES/sing-box-LICENSE
+ if [ -e "$1/THIRD-PARTY-LICENSES/golang.org-x-net-LICENSE" ] ||
+    [ -L "$1/THIRD-PARTY-LICENSES/golang.org-x-net-LICENSE" ]; then
+  printf '%s\n' THIRD-PARTY-LICENSES/golang.org-x-net-LICENSE
+ fi
+ printf '%s\n' manifest.json
 }
 verify_release_payload() (
  root=$1
@@ -78,11 +83,13 @@ verify_release_payload() (
 
  check_root_file "$root/checksums.sha256"
  # New archive inputs always have a complete signed-aware package layout.
- # Existing installed pre-authentication QA releases retain their exact
- # previously supported 12/13-entry layouts for safe update/uninstall.
+ # Installed prior 12/13/14-entry releases retain their exact verified
+ # layouts for update/uninstall; no new incoming archive can omit the notice.
  if [ "$prior_installed" = no ]; then
   [ -f "$root/release-auth.py" ] && [ ! -L "$root/release-auth.py" ] ||
    die 'incoming release must contain publisher authentication helper'
+  check_root_file "$root/THIRD-PARTY-LICENSES/golang.org-x-net-LICENSE" ||
+   die 'incoming release must contain x/net third-party license notice'
  fi
  expected=$(release_payload_files "$root")
  if [ "$prior_installed" = yes ] && [ "$(wc -l < "$root/checksums.sha256")" -eq 12 ]; then

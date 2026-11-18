@@ -38,6 +38,7 @@ PAYLOAD_FILES = (
     "install.sh",
     "release-auth.py",
     "THIRD-PARTY-LICENSES/sing-box-LICENSE",
+    "THIRD-PARTY-LICENSES/golang.org-x-net-LICENSE",
     "manifest.json",
 )
 

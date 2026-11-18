@@ -57,7 +57,8 @@ docker exec "$container" /bin/sh -c '
    server-connect-activation-recover.timer server-connect-smart-tun.service \
       server-connect-native-tun.service \
       server-connect-smart-health.service server-connect-smart-health.timer install.sh release-auth.py \
-   THIRD-PARTY-LICENSES/sing-box-LICENSE manifest.json > checksums.sha256
+   THIRD-PARTY-LICENSES/sing-box-LICENSE THIRD-PARTY-LICENSES/golang.org-x-net-LICENSE \
+   manifest.json > checksums.sha256
  sha256sum --quiet --check checksums.sha256
 '
 # The controlled fault changes unit bytes after the incoming archive was
