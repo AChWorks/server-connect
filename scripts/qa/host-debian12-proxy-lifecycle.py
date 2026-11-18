@@ -706,7 +706,7 @@ class FieldRun:
             # a later uninstall. Only an observed successful exit clears this.
             self.installer_unverified = True
         result = self.call(
-            ["/bin/sh", self.bundles["base"] / "install.sh", action],
+            ["/bin/sh", self.bundles["base"] / "install.sh", action, "--local-qa"],
             timeout=70, expected=None, mutation=action != "--verify-only")
         if action != "--verify-only" and result[0] == 0:
             self.installer_unverified = False

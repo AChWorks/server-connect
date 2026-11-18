@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Ordinary, unprivileged regression checks; never construct or run FieldRun.
+"""Ordinary, unprivileged regression checks; never initialize/run a field host.
 
 Run with: PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/qa/test-debian12-proxy-lifecycle.py
 Evidence/admission predicates and a private current-user temporary-tree deletion
@@ -130,6 +130,28 @@ class TrafficEvidenceTests(unittest.TestCase):
 
 
 class InputAdmissionTests(unittest.TestCase):
+    def test_field_installer_explicit_local_qa_for_every_action(self):
+        # Bypass privileged FieldRun.__init__; dispatch is mocked, never executed.
+        source = Path("/root/sc-field-qa/run-01/base/install.sh")
+        for action in ("--verify-only", "--offline", "--uninstall"):
+            with self.subTest(action=action):
+                field = driver.FieldRun.__new__(driver.FieldRun)
+                field.bundles = {"base": source.parent}
+                field.install_dispatched = False
+                field.installer_unverified = False
+                field.call = mock.Mock(return_value=(0, b"", b""))
+                field.installer(action)
+                field.call.assert_called_once_with(
+                    ["/bin/sh", source, action, "--local-qa"],
+                    timeout=70, expected=None, mutation=action != "--verify-only")
+                self.assertEqual(field.install_dispatched, action == "--offline")
+                self.assertFalse(field.installer_unverified)
+
+        field.call.return_value = (1, b"", b"")
+        with self.assertRaisesRegex(driver.CheckFailure, "Installer returned"):
+            field.installer("--offline")
+        self.assertTrue(field.installer_unverified)
+
     def test_opposite_target_requires_the_actual_mismatch_refusal(self):
         report = {
             "ok": False, "data": {"target": "", "verified": False},
