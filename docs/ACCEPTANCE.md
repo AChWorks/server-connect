@@ -35,7 +35,7 @@ native Apply. A separately staged, narrowly scoped early `ct direction
 reply` mark preserved 58/58 on the same physical Debian 13 QA target;
 the previous no-mark physical failure and the marked success are not
 evidence of acceptance for the subsequently integrated product. The
-candidate must also prove correct installed `ExecStartPre` ordering,
+candidate must also prove correct early manager prearm-before-systemd ordering and read-only `ExecStartPre` verification,
 durable table-handle ownership, lost-guard/foreign-rule refusal, native
 Crash/Disconnect cleanup, and **new** server-originated traffic to the
 *identical* public client IP still delivered through the selected VPN

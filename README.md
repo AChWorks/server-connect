@@ -93,9 +93,10 @@ native Apply restricted to its existing admitted QA fixtures.
 QA reproduced a locally generated TCP reset when the official Core's native
 `auto_redirect` policy started. A scoped early conntrack reply mark
 preserved 58/58 old SSH application replies in a manual field experiment.
-The integrated candidate installs this mark only under the existing
-one-use native claim and guards, verifies its table handle and rejects
-foreign/orphaned policy on recovery; it does not create a foreign-IP
+The integrated candidate prepares this mark after independently arming
+the existing guards but before systemd/Core start, durably verifies its table
+handle, then consumes a one-use start claim and rejects foreign/orphaned
+policy on recovery; it does not create a foreign-IP
 Direct exception. Independent installed-candidate field review and the
 full [acceptance matrix](docs/ACCEPTANCE.md) still govern V1 readiness.
 

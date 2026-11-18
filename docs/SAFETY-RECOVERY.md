@@ -107,14 +107,19 @@ selected VLESS wire counter and rejects direct foreign egress, though the
 physical original-SSH failure was not reproducible in that VM.
 
 The native one-use, configuration-bound current-boot session and both
-independent timers must be durable **before** the exact table is created by
-the Core unit's `ExecStartPre`. The observed kernel table handle is
-persisted in the same native session before Core execution proceeds.
-Admission refuses any preexisting same-name table. Runtime status and health
-must attest that the current table's complete nftables expression, hook and
-committed handle match the claimed native session. The exact enabled Core
-may then apply its own official TUN, RPDB and nftables state; merely seeing an
-active process never establishes selected-path health.
+independent timers must be durable **before** installing the exact nftables
+reply guard. The manager then creates the rule and persists its observed
+kernel table handle **before calling systemctl start**, rather than installing
+it in `ExecStartPre`. The latter still rechecks fresh startup authorization,
+the complete native admission and exact committed rule identity, then durably
+consumes a one-use Core-start grant before Core execution. An interrupted
+preflight or failed Core start retains only the original session's independent
+recovery authority; it cannot restart a stale claim. Admission refuses any
+preexisting same-name table. Runtime status and health must attest that the
+current table's complete nftables expression, hook and committed handle match
+the claimed native session. The exact enabled Core may then apply its own
+official TUN, RPDB and nftables state; merely seeing an active process never
+establishes selected-path health.
 
 On normal Disconnect, Core exit, or a failed preflight, independent
 `ExecStopPost` first recovers the exact owned Core resources, then inspects

@@ -648,3 +648,46 @@ func TestNativeFreshPrearmRejectsRetainedBootAndStaleGuard(t *testing.T) {
 		})
 	}
 }
+
+func TestNativeAdmissionRechecksCommittedEarlyReplyGuard(t *testing.T) {
+	ctx := context.Background()
+	scope := nativeRedirectRecovery{TunnelIF: "sctun0", UnderlayIF: "eth0",
+		Table: NativePolicyTableIndex, Rule: NativePolicyRuleIndex}
+	newFixture := func() *fakeNativeAdmission {
+		r := nativeAdmissionFixture()
+		r.outputs["nft list tables"] = "table inet foreign\n" + "table inet sc_reply_guard\n"
+		r.outputs["nft -j list table inet sc_reply_guard"] = nativeReplyGuardFixtureJSON
+		return r
+	}
+	if err := inspectNativeAdmissionWithReplyGuard(ctx, newFixture(), scope, 10); err != nil {
+		t.Fatalf("previously committed reply guard refused: %v", err)
+	}
+	for _, tc := range []struct {
+		name   string
+		mutate func(*fakeNativeAdmission)
+		handle uint64
+	}{
+		{"uncommitted", func(_ *fakeNativeAdmission) {}, 0},
+		{"foreign-handle", func(_ *fakeNativeAdmission) {}, 17},
+		{"tampered-expression", func(r *fakeNativeAdmission) {
+			r.outputs["nft -j list table inet sc_reply_guard"] =
+				strings.Replace(nativeReplyGuardFixtureJSON, `"value":8228`, `"value":8227`, 1)
+		}, 10},
+		{"missing-owned-table", func(r *fakeNativeAdmission) { r.outputs["nft list tables"] = "table inet foreign\n" }, 10},
+		{"occupied-core-table", func(r *fakeNativeAdmission) { r.outputs["nft list tables"] += "table inet sing-box\n" }, 10},
+		{"occupied-managed-rule", func(r *fakeNativeAdmission) { r.outputs["ip -4 rule show"] = "14200: from all lookup 254\n" }, 10},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := newFixture()
+			tc.mutate(r)
+			if err := inspectNativeAdmissionWithReplyGuard(ctx, r, scope, tc.handle); err == nil {
+				t.Fatalf("stale/foreign preflight unexpectedly passed: %s", tc.name)
+			}
+			for _, call := range r.called {
+				if strings.HasPrefix(call, "MUTATION:") {
+					t.Fatalf("read-only preflight mutated kernel: %s", call)
+				}
+			}
+		})
+	}
+}

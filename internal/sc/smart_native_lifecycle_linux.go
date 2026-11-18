@@ -27,12 +27,13 @@ const nativeUnitPath = "/etc/systemd/system/server-connect-native-tun.service"
 // This small persisted receipt is written before starting the official Core.
 // It authorizes only the fixed native policy slots, not global route repair.
 type NativeSession struct {
-	Version          int    `json:"version"`
-	Selected         string `json:"selected"`
-	InterfaceName    string `json:"tunnel_if"`
-	UnderlayIF       string `json:"underlay_if"`
-	ConfigSHA256     string `json:"config_sha256"`
-	ReplyGuardHandle uint64 `json:"reply_guard_handle,omitempty"`
+	Version            int    `json:"version"`
+	Selected           string `json:"selected"`
+	InterfaceName      string `json:"tunnel_if"`
+	UnderlayIF         string `json:"underlay_if"`
+	ConfigSHA256       string `json:"config_sha256"`
+	ReplyGuardHandle   uint64 `json:"reply_guard_handle,omitempty"`
+	CoreStartAttempted bool   `json:"core_start_attempted,omitempty"`
 }
 type NativeConnectionStatus struct {
 	Desired              string `json:"desired"`
@@ -193,6 +194,13 @@ func (m *Manager) nativeMainPIDZero() error {
 // This is an inspection, not a resource reservation. systemd ExecStartPre
 // repeats it immediately before native Core execution after receipt staging.
 func inspectNativeAdmission(ctx context.Context, r nativeKernelRunner, p nativeRedirectRecovery) error {
+	return inspectNativeAdmissionWithReplyGuard(ctx, r, p, 0)
+}
+
+// Recheck all reserved Core resources immediately before ExecStart.
+// Only the previously committed exact reply table is exempt from the
+// otherwise strict empty-resource policy.
+func inspectNativeAdmissionWithReplyGuard(ctx context.Context, r nativeKernelRunner, p nativeRedirectRecovery, committedReplyHandle uint64) error {
 	for _, family := range []string{"-4", "-6"} {
 		rules, err := r.output(ctx, "ip", family, "rule", "show")
 		if err != nil {
@@ -234,7 +242,9 @@ func inspectNativeAdmission(ctx context.Context, r nativeKernelRunner, p nativeR
 		// An installed reply hook is authorized by a one-use current-boot
 		// session, never merely by a table name or matching nft contents.
 		if f[2] == nativeReplyGuardTable {
-			return Fault("service_conflict", "native inbound-reply guard table is already occupied")
+			if committedReplyHandle == 0 || f[1] != "inet" {
+				return Fault("service_conflict", "native inbound-reply guard table is already occupied")
+			}
 		}
 		if f[1] == "ip" && f[2] == "filter" {
 			dockerFilter = true
@@ -262,6 +272,9 @@ func inspectNativeAdmission(ctx context.Context, r nativeKernelRunner, p nativeR
 	underlay, err := r.output(ctx, "ip", "-o", "link", "show", "dev", p.UnderlayIF)
 	if err != nil || strings.TrimSpace(underlay) == "" {
 		return Fault("service_state_unavailable", "underlay interface not available")
+	}
+	if committedReplyHandle != 0 {
+		return requireNativeReplyGuardClaim(ctx, r, committedReplyHandle)
 	}
 	return nil
 }
@@ -296,6 +309,65 @@ func nativeFreshPrearm(session NativeSession, health NativeHealthState, boot str
 	return nil
 }
 
+func (m *Manager) prepareNativeReplyGuardBeforeCoreStart() error {
+	if err := m.nativeUnitOwnership(); err != nil {
+		return err
+	}
+	return m.withLock(func() error {
+		session, err := m.readNativeSession()
+		if err != nil {
+			return err
+		}
+		if err := m.validateNativeSessionConfig(session); err != nil {
+			return err
+		}
+		state, err := m.load()
+		if err != nil {
+			return err
+		}
+		if err := nativeDesiredMatchesClaim(state, session); err != nil {
+			return err
+		}
+		health, err := m.readNativeHealth()
+		if err != nil {
+			return err
+		}
+		boot, err := trialBootIdentity()
+		if err != nil {
+			return Fault("guard_unavailable", "current native boot identity unavailable")
+		}
+		now, err := smartTUNUptimeMillis()
+		if err != nil {
+			return Fault("guard_unavailable", "native uptime unavailable")
+		}
+		if err := nativeFreshPrearm(session, health, boot, now); err != nil {
+			return err
+		}
+		if session.ReplyGuardHandle != 0 || session.CoreStartAttempted {
+			return Fault("guard_pending", "native early reply guard already prepared")
+		}
+		if err := nativeHealthGuardRoles(); err != nil {
+			return err
+		}
+		if err := inspectNativeAdmission(context.Background(), nativeSystemRunner{}, session.recoveryScope()); err != nil {
+			return err
+		}
+		// The physical SSH comparison proved that ExecStartPre is too late
+		// to preserve the original foreign transport. Once the native
+		// claim AND both independent timers are armed, install the scoped
+		// guard BEFORE invoking systemctl start and persist its handle.
+		handle, err := installNativeReplyGuardWithHandle(context.Background(), nativeSystemRunner{})
+		if err != nil {
+			return err
+		}
+		session.ReplyGuardHandle = handle
+		raw, err := json.Marshal(session)
+		if err != nil {
+			return err
+		}
+		return put(filepath.Join(m.Dir, nativeSessionFile), raw)
+	})
+}
 func (m *Manager) NativePreflightInstalled() error {
 	if err := m.nativeUnitOwnership(); err != nil {
 		return err
@@ -330,24 +402,20 @@ func (m *Manager) NativePreflightInstalled() error {
 		if err := nativeFreshPrearm(session, health, boot, now); err != nil {
 			return err
 		}
-		if session.ReplyGuardHandle != 0 {
-			return Fault("guard_pending", "native preflight has already committed a reply guard handle")
+		if session.ReplyGuardHandle == 0 || session.CoreStartAttempted {
+			return Fault("guard_pending", "Core start requires a committed, unused early reply guard")
 		}
 		if err := nativeHealthGuardRoles(); err != nil {
 			return err
 		}
-		if err := inspectNativeAdmission(context.Background(), nativeSystemRunner{}, session.recoveryScope()); err != nil {
+		if err := inspectNativeAdmissionWithReplyGuard(context.Background(), nativeSystemRunner{}, session.recoveryScope(), session.ReplyGuardHandle); err != nil {
 			return err
 		}
-		// ExecStartPre runs only after the durable native claim and both
-		// independent recovery timers were prearmed. Install atomically
-		// before Core creates its transparent NAT output hook, then durably
-		// commit the observed table handle into this one-use claim.
-		handle, err := installNativeReplyGuardWithHandle(context.Background(), nativeSystemRunner{})
-		if err != nil {
-			return err
-		}
-		session.ReplyGuardHandle = handle
+		// An independent restart may not reuse a previous session even if
+		// its boot, lease and timers remain fresh. Persist consumption
+		// BEFORE Core execution; an interrupted start retains the guard
+		// for independent cleanup under the original durable claim.
+		session.CoreStartAttempted = true
 		raw, err := json.Marshal(session)
 		if err != nil {
 			return err
@@ -355,6 +423,7 @@ func (m *Manager) NativePreflightInstalled() error {
 		return put(filepath.Join(m.Dir, nativeSessionFile), raw)
 	})
 }
+
 func (m *Manager) NativeRecoverInstalled() error {
 	if err := m.nativeUnitOwnership(); err != nil {
 		return err
@@ -648,6 +717,15 @@ func (m *Manager) connectNativeSmartRoutingUnlocked(opts NativePolicyOptions) (N
 			return result, Fault("guard_pending", "native guard activation failed; rollback uncertain")
 		}
 		return result, Fault("guard_unavailable", "native guard was unavailable; Direct restored")
+	}
+	// Prearm the physical inbound-reply path BEFORE starting systemd/Core,
+	// while the original native claim and both independent recovery timers
+	// already exist. ExecStartPre rechecks and consumes this one-use receipt.
+	if err := m.prepareNativeReplyGuardBeforeCoreStart(); err != nil {
+		if cleanup := m.disconnectNativeSmartRoutingUnlocked(); cleanup != nil {
+			return result, Fault("guard_pending", "early native reply guard failed and rollback remains uncertain")
+		}
+		return result, Fault("guard_unavailable", "early native reply guard failed; Direct restored")
 	}
 	// Never hold Manager lock while systemd's independent stop hook may need it.
 	if err := m.nativeControl("start"); err != nil {
