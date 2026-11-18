@@ -39,6 +39,27 @@ fi
 [ -z "$(ip -6 rule show | grep -E '^1:|^1420[0-9]:|^32768:' || :)" ] || refuse 'preexisting managed IPv6 RPDB priorities'
 echo 'NATIVE_DOCKER_GUEST_PRECONDITIONS=PASS'
 
+# A separate nested network namespace (not PID 1's guest namespace) stages
+# only the four exact post-Core-SIGKILL fixed slots in each family, with no
+# TUN, Core nft table or randomized redirect identity. The candidate-built
+# Go test injects a foreign same-body priority-30000 rule, proves refusal
+# without a single real-kernel RPDB mutation, removes only its own fixture,
+# and then verifies bounded owned cleanup and repeatable clean Direct.
+# This is NOT a physical Core SIGKILL or remote SSH continuity test.
+unshare --net /bin/sh -ec '
+  [ "$(readlink /proc/self/ns/net)" != "$(readlink /proc/1/ns/net)" ] || exit 2
+  [ -z "$(ip -4 route show default)" ] || exit 2
+  [ -z "$(ip -6 route show default)" ] || exit 2
+  for family in -4 -6; do
+    ip "$family" rule add pref 14202 nop
+    ip "$family" rule add pref 14201 fwmark 0x2023 table 27432
+    ip "$family" rule add pref 14200 fwmark 0x2024 goto 14202
+    ip "$family" rule add pref 32768 not fwmark 0x2024 table 27432
+  done
+  SC_NATIVE_ORPHAN_GUEST=yes /root/qa-native-recovery-test -test.run "^TestNativeCoreSIGKILLOrphanRealKernelNamespace$" -test.v -test.timeout 30s
+'
+echo 'NATIVE_ORPHAN_REAL_KERNEL_BOUNDARY=PASS'
+
 scratch=$(mktemp -d /run/sc-qa-native-docker.XXXXXXXX)
 # Failure cleanup is the outer harness's strictly test-owned --network none
 # Docker container teardown; never blind-delete ambiguous kernel resources.

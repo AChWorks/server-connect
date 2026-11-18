@@ -220,6 +220,13 @@ if [ -n "$url" ]; then
  command -v curl >/dev/null 2>&1 || set -- "$@" curl
 fi
 command -v python3 >/dev/null 2>&1 || set -- "$@" python3
+# The offline installer must inspect the native reply-guard nftables table
+# *before* any product mutation, including a first install. On connected
+# installs acquire the real kernel inspector through signed Debian APT;
+# --verify-only never installs packages and offline remains fail-closed.
+if [ "$verify_only" != yes ] && [ -n "$url" ]; then
+ command -v nft >/dev/null 2>&1 || set -- "$@" nftables
+fi
 if [ "$authenticated" = yes ]; then
  command -v openssl >/dev/null 2>&1 || set -- "$@" openssl
 fi
