@@ -19,7 +19,7 @@ func TestOperatorMenuIsReadOnlyOnFirstUseAndHidesLegacyUntilAdvanced(t *testing.
 	p := operatorPresenter{out: &out, width: 42}
 	p.menu(m, false)
 	basic := out.String()
-	for _, want := range []string{"Server Connect", "0.1.0-dev", "State: not inspected", "NOT AVAILABLE", "18 Mode Overview", "19 Routing Rules", "a Toggle advanced", "0 Exit", "Choice:"} {
+	for _, want := range []string{"Server Connect", "0.1.0-dev", "State: not inspected", "NOT RELEASE-READY", "18 Mode Overview", "19 Routing Rules", "a Toggle advanced", "0 Exit", "Choice:"} {
 		if !strings.Contains(basic, want) {
 			t.Fatalf("missing operator guidance %q in %s", want, basic)
 		}
@@ -313,5 +313,79 @@ func TestOperatorAdvancedMenuRequiresCompleteExplicitInputs(t *testing.T) {
 				t.Fatalf("menu created state without a real operation: %v", err)
 			}
 		})
+	}
+}
+
+func TestOperatorMenuNativeModeTruthfulAcrossHealthAndRecovery(t *testing.T) {
+	p := operatorPresenter{out: io.Discard, width: 78}
+	const selected = "0123456789abcdef"
+	cases := []struct {
+		name           string
+		status         sc.Status
+		observationErr error
+		want           []string
+	}{
+		{"native-healthy", sc.Status{Desired: "smart", Observed: "native_active", Health: "native_selected_https_recent", Selected: selected}, nil,
+			[]string{"Requested: Smart Routing (TUN)", "native Core active", "Profile: " + selected}},
+		{"native-degraded", sc.Status{Desired: "smart", Observed: "native_active", Health: "native_selected_path_degraded", Selected: selected}, nil,
+			[]string{"Requested: Smart Routing (TUN)", "selected path degraded"}},
+		{"native-synthetic", sc.Status{Desired: "smart", Observed: "native_active", Health: "native_selected_synthetic_qa_only", Selected: selected}, nil,
+			[]string{"Requested: Smart Routing (TUN)", "synthetic QA health only"}},
+		{"native-starting", sc.Status{Desired: "smart", Observed: "native_active", Health: "native_health_starting", Selected: selected}, nil,
+			[]string{"Requested: Smart Routing (TUN)", "starting"}},
+		{"native-failed-recovery", sc.Status{Desired: "smart", Observed: "native_failed", Health: "native_recovery_unverified", Selected: selected}, sc.Fault("guard_pending", "native resources may remain"),
+			[]string{"Requested: Smart Routing (TUN)", "recovery unverified"}},
+		{"direct-unverified", sc.Status{Desired: "direct", Observed: "inactive", Health: "not_tested"}, nil,
+			[]string{"Requested: Direct", "host route unverified"}},
+		{"proxy-active", sc.Status{Desired: "proxy", Observed: "active", Health: "not_tested"}, nil,
+			[]string{"Requested: Proxy Only", "Proxy Only service active"}},
+		{"malformed-private-profile", sc.Status{Desired: "smart", Observed: "native_active", Health: "native_selected_https_recent", Selected: "vless://secret-token"}, nil,
+			[]string{"State: unverified"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := p.menuStateFromStatus(tc.status, tc.observationErr)
+			for _, part := range tc.want {
+				if !strings.Contains(got, part) {
+					t.Fatalf("missing %q in %q", part, got)
+				}
+			}
+			if tc.status.Desired == "smart" && strings.Contains(got, "Requested: Direct") {
+				t.Fatalf("routed/recovering host was mislabeled Direct: %q", got)
+			}
+			if strings.Contains(got, "secret-token") || strings.Contains(got, "VPN path verified") {
+				t.Fatalf("untrusted status or fabricated VPN path proof: %q", got)
+			}
+		})
+	}
+}
+
+func TestOperatorMenuSafeDisconnectReusesCLIForEveryMode(t *testing.T) {
+	m := sc.New(filepath.Join(t.TempDir(), "no-state"), "", 0)
+	in, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer in.Close()
+	if _, err = io.WriteString(writer, "7\n0\n"); err != nil {
+		t.Fatal(err)
+	}
+	_ = writer.Close()
+	old := os.Stdin
+	os.Stdin = in
+	defer func() { os.Stdin = old }()
+	var calls []string
+	code, stdout, stderr := hostDriftCapturedOutput(t, func() int {
+		return menuWithRunner(m, func(_ *sc.Manager, args ...string) int {
+			calls = append(calls, strings.Join(args, " "))
+			return 0
+		})
+	})
+	if code != 0 || stderr != "" || len(calls) != 1 || calls[0] != "disconnect" ||
+		!strings.Contains(stdout, "7 Disconnect / Return to Direct") {
+		t.Fatalf("menu and shared Disconnect drift: exit=%d calls=%q out=%q stderr=%q", code, calls, stdout, stderr)
+	}
+	if _, err := os.Lstat(m.Dir); !os.IsNotExist(err) {
+		t.Fatal("display or stubbed Disconnect initialized manager state")
 	}
 }
