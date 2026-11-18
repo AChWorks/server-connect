@@ -57,6 +57,7 @@ UNITS = (
     "server-connect-activation-recover.service",
     "server-connect-activation-recover.timer",
     "server-connect-smart-tun.service",
+    "server-connect-native-tun.service",
     "server-connect-smart-health.service",
     "server-connect-smart-health.timer",
 )
@@ -69,7 +70,9 @@ SERVICE_PROPERTIES = ("MainPID", "ControlPID", "InvocationID",
 TIMER_PROPERTIES = ("Unit", "LastTriggerUSecMonotonic")
 BUNDLE_FILES = {
     "bin/server-connect", "bin/sing-box", "bin/libcronet.so",
-    "THIRD-PARTY-LICENSES/sing-box-LICENSE", "install.sh", "manifest.json",
+    "THIRD-PARTY-LICENSES/sing-box-LICENSE",
+    "THIRD-PARTY-LICENSES/golang.org-x-net-LICENSE",
+    "install.sh", "release-auth.py", "manifest.json",
     "checksums.sha256", *UNITS,
 }
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
@@ -703,7 +706,7 @@ class FieldRun:
             # a later uninstall. Only an observed successful exit clears this.
             self.installer_unverified = True
         result = self.call(
-            ["/bin/sh", self.bundles["base"] / "install.sh", action],
+            ["/bin/sh", self.bundles["base"] / "install.sh", action, "--local-qa"],
             timeout=70, expected=None, mutation=action != "--verify-only")
         if action != "--verify-only" and result[0] == 0:
             self.installer_unverified = False

@@ -436,6 +436,23 @@ verify_clean_uninstall() {
   '
 }
 
+# The field driver explicitly selects --local-qa for unsigned, digest-pinned
+# candidates. A fresh extracted archive without that choice must still fail.
+if [[ $qa_version == 12 ]]; then
+  if docker exec "$container" /usr/bin/env -i \
+    HOME=/root PATH=/usr/sbin:/usr/bin:/sbin:/bin LC_ALL=C \
+    /bin/sh /root/server-connect/install.sh --verify-only \
+    >"$scratch/debian12-implicit-auth.log" 2>&1; then
+    echo 'Unexpected implicit authentication of a fresh LOCAL QA archive' >&2
+    exit 1
+  fi
+  grep -F 'incoming bundles require an independently supplied publisher key' \
+    "$scratch/debian12-implicit-auth.log" >/dev/null
+  docker exec "$container" /bin/sh -c 'test ! -e /opt/server-connect && test ! -e /var/lib/server-connect'
+  assert_network_unchanged implicit-auth-refusal "$offline_before"
+  verify_host_services implicit-auth-refusal
+  echo 'DEBIAN12_FRESH_ARCHIVE_IMPLICIT_AUTH_REFUSED=PASS'
+fi
 run_offline verify-only --verify-only
 assert_network_unchanged verify-only "$offline_before"
 verify_host_services verify-only
