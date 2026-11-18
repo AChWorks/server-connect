@@ -611,8 +611,9 @@ func TestNativeRecoveryRefusesUnrelatedDesiredModeWithoutRetiringClaim(t *testin
 // The existing health receipt must belong to this boot, this config and the
 // just-staged Connect operation; failure leaves the receipt for owned cleanup.
 func TestNativeFreshPrearmRejectsRetainedBootAndStaleGuard(t *testing.T) {
-	claim := NativeSession{Selected: "0123456789abcdef", ConfigSHA256: strings.Repeat("b", 64)}
 	health := nativeHealthTestState()
+	claim := NativeSession{Selected: "0123456789abcdef", ConfigSHA256: strings.Repeat("b", 64),
+		HealthOperationID: health.OperationID}
 	boot := health.BootID
 	for _, tc := range []struct {
 		name    string
@@ -630,6 +631,7 @@ func TestNativeFreshPrearmRejectsRetainedBootAndStaleGuard(t *testing.T) {
 		{"reused-degraded-state", func(_ *NativeSession, h *NativeHealthState) { h.Phase = "degraded" }, boot, 1100, false},
 		{"off-claim", func(_ *NativeSession, h *NativeHealthState) { h.Phase = "off" }, boot, 1100, false},
 		{"unrelated-config", func(s *NativeSession, _ *NativeHealthState) { s.ConfigSHA256 = strings.Repeat("c", 64) }, boot, 1100, false},
+		{"unrelated-health-operation", func(s *NativeSession, _ *NativeHealthState) { s.HealthOperationID = strings.Repeat("c", 32) }, boot, 1100, false},
 		{"heartbeat-future", func(_ *NativeSession, h *NativeHealthState) { h.HeartbeatMS = 1101 }, boot, 1100, false},
 		{"heartbeat-before-start", func(_ *NativeSession, h *NativeHealthState) { h.HeartbeatMS = 999 }, boot, 1100, false},
 	} {
@@ -690,4 +692,166 @@ func TestNativeAdmissionRechecksCommittedEarlyReplyGuard(t *testing.T) {
 			}
 		})
 	}
+}
+
+// Systemd does not report ExecStopPost as a fully idle unit: its ControlPID
+// is the *current* recovery process and the stop Job may still be pending.
+// This exact stopped-Core exception must not admit ExecStartPre or a separate
+// control process just because MainPID has not appeared yet.
+func TestNativeCoreRecoveryQuiescenceRejectsStartingAndForeignControl(t *testing.T) {
+	self := 4321
+	idle := "Id=server-connect-native-tun.service\nActiveState=inactive\nSubState=dead\nMainPID=0\nControlPID=0\nJob=\nControlGroup=\n"
+	stopPost := "Id=server-connect-native-tun.service\nActiveState=deactivating\nSubState=stop-post\nMainPID=0\nControlPID=4321\nJob=67\nControlGroup=/system.slice/server-connect-native-tun.service\n"
+	for _, tc := range []struct {
+		name string
+		raw  string
+		ok   bool
+	}{
+		{"idle", idle, true},
+		{"failed-idle", strings.Replace(strings.Replace(idle, "inactive", "failed", 1), "SubState=dead", "SubState=failed", 1), true},
+		{"real-exec-stop-post-self", stopPost, true},
+		{"pending-start-pre", strings.Replace(strings.Replace(stopPost, "deactivating", "activating", 1), "stop-post", "start-pre", 1), false},
+		{"not-this-control-pid", strings.Replace(stopPost, "ControlPID=4321", "ControlPID=9999", 1), false},
+		{"wrong-stop-substate", strings.Replace(stopPost, "stop-post", "stop-sigterm", 1), false},
+		{"active-core", strings.Replace(idle, "inactive", "active", 1), false},
+		{"main-pid-present", strings.Replace(idle, "MainPID=0", "MainPID=9999", 1), false},
+		{"idle-pending-job", strings.Replace(idle, "Job=\n", "Job=72\n", 1), false},
+		{"idle-control-pid", strings.Replace(idle, "ControlPID=0", "ControlPID=9999", 1), false},
+		{"idle-cgroup-occupied", strings.Replace(idle, "ControlGroup=\n", "ControlGroup=/system.slice/server-connect-native-tun.service\n", 1), false},
+		{"foreign-service", strings.Replace(idle, "Id=server-connect-native-tun.service", "Id=foreign.service", 1), false},
+		{"duplicate-control-key", idle + "ControlPID=0\n", false},
+		{"missing-job", strings.Replace(idle, "Job=\n", "", 1), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := parseNativeCoreRecoveryQuiescence([]byte(tc.raw), self)
+			if (err == nil) != tc.ok {
+				t.Fatalf("recovery quiescence mismatch: ok=%t err=%v", tc.ok, err)
+			}
+		})
+	}
+}
+
+func TestNativeOrphanRecoveryAttestsBootOperationAndReplyGuardBeforeRPDB(t *testing.T) {
+	health := nativeHealthTestState()
+	digest := nativeAcceptedTCPFingerprint(nil)
+	session := NativeSession{
+		Version: 1, Selected: "0123456789abcdef", InterfaceName: "sctun0",
+		UnderlayIF: "scouter0", ConfigSHA256: health.ConfigSHA256,
+		HealthOperationID: health.OperationID, ReplyGuardHandle: 10,
+		ReplyGuardFingerprint: digest, CoreStartAttempted: true,
+	}
+	boot := health.BootID
+	for _, tc := range []struct {
+		name   string
+		change func(*NativeSession, *NativeHealthState, *fakeReplyGuardRunner, *string)
+	}{
+		{"stale-boot", func(_ *NativeSession, _ *NativeHealthState, _ *fakeReplyGuardRunner, boot *string) {
+			*boot = "22222222-2222-4222-8222-222222222222"
+		}},
+		{"wrong-operation", func(s *NativeSession, _ *NativeHealthState, _ *fakeReplyGuardRunner, _ *string) {
+			s.HealthOperationID = strings.Repeat("c", 32)
+		}},
+		{"wrong-config", func(s *NativeSession, _ *NativeHealthState, _ *fakeReplyGuardRunner, _ *string) {
+			s.ConfigSHA256 = strings.Repeat("c", 64)
+		}},
+		{"missing-health", func(_ *NativeSession, h *NativeHealthState, _ *fakeReplyGuardRunner, _ *string) {
+			*h = NativeHealthState{}
+		}},
+		{"changed-guard-handle", func(s *NativeSession, _ *NativeHealthState, _ *fakeReplyGuardRunner, _ *string) {
+			s.ReplyGuardHandle = 11
+		}},
+		{"changed-accepted-tuple-fingerprint", func(s *NativeSession, _ *NativeHealthState, _ *fakeReplyGuardRunner, _ *string) {
+			s.ReplyGuardFingerprint = strings.Repeat("e", 64)
+		}},
+		{"changed-guard-rules", func(_ *NativeSession, _ *NativeHealthState, g *fakeReplyGuardRunner, _ *string) {
+			g.foreign = strings.Replace(nativeReplyGuardFixtureJSON, `"value":8228`, `"value":8227`, 1)
+		}},
+		{"missing-guard-outstanding-rpdb", func(_ *NativeSession, _ *NativeHealthState, g *fakeReplyGuardRunner, _ *string) {
+			g.has = false
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s, h, b := session, health, boot
+			g := &fakeReplyGuardRunner{has: true}
+			r := newNativeCoreSIGKILLOrphanFixture()
+			tc.change(&s, &h, g, &b)
+			err := recoverNativeNetworkWithReceipt(context.Background(), &nativeDockerAdmissionRunner{r}, g, s, h, b)
+			if err == nil || len(r.mutations) != 0 || len(g.mutations) != 0 {
+				t.Fatalf("unattested orphan mutated kernel: err=%v rpdb=%v nft=%v", err, r.mutations, g.mutations)
+			}
+			if !strings.Contains(strings.Join(r.rules["-4"], "\n"), "14200:") {
+				t.Fatal("unauthorized RPDB rule disappeared")
+			}
+		})
+	}
+	t.Run("exact-valid-core-crash", func(t *testing.T) {
+		r := newNativeCoreSIGKILLOrphanFixture()
+		g := &fakeReplyGuardRunner{has: true}
+		if err := recoverNativeNetworkWithReceipt(context.Background(), &nativeDockerAdmissionRunner{r}, g, session, health, boot); err != nil {
+			t.Fatalf("verified consumed orphan claim refused: %v", err)
+		}
+		if g.has || !g.deleted || len(r.mutations) != 8 {
+			t.Fatalf("verified Core cleanup did not retire exactly owned effects: rpdb=%v nft=%v", r.mutations, g.mutations)
+		}
+		for _, family := range []string{"-4", "-6"} {
+			text := strings.Join(r.rules[family], "\n")
+			if strings.Contains(text, "1420") || strings.Contains(text, "32768:") ||
+				!strings.Contains(text, "40960: from all lookup 123") {
+				t.Fatalf("valid cleanup altered foreign RPDB: %s", text)
+			}
+		}
+	})
+	t.Run("interrupted-owned-deletion-retry", func(t *testing.T) {
+		r := newNativeCoreSIGKILLOrphanFixture()
+		g := &fakeReplyGuardRunner{has: true}
+		r.failOnce = "ip -4 rule del pref 14201"
+		kernel := &nativeDockerAdmissionRunner{r}
+		if err := recoverNativeNetworkWithReceipt(context.Background(), kernel, g, session, health, boot); err == nil || !g.has {
+			t.Fatalf("first interrupted recovery must retain guard: %v", err)
+		}
+		if err := recoverNativeNetworkWithReceipt(context.Background(), kernel, g, session, health, boot); err != nil || g.has {
+			t.Fatalf("exact interrupted recovery must retry: %v", err)
+		}
+	})
+	t.Run("already-clean-kernel-missing-guard", func(t *testing.T) {
+		r := newNativeCoreSIGKILLOrphanFixture()
+		for _, family := range []string{"-4", "-6"} {
+			var remain []string
+			for _, rule := range r.rules[family] {
+				if strings.HasPrefix(rule, "1420") || strings.HasPrefix(rule, "32768:") {
+					continue
+				}
+				remain = append(remain, rule)
+			}
+			r.rules[family] = remain
+		}
+		g := &fakeReplyGuardRunner{}
+		if err := recoverNativeNetworkWithReceipt(context.Background(), &nativeDockerAdmissionRunner{r}, g, session, health, boot); err != nil {
+			t.Fatalf("already-clean Direct refused without recreated reply table: %v", err)
+		}
+		if len(r.mutations) != 0 || len(g.mutations) != 0 {
+			t.Fatalf("idempotent Direct mutated foreign resources: rpdb=%v nft=%v", r.mutations, g.mutations)
+		}
+	})
+	t.Run("unconsumed-preflight-guard-cleanup", func(t *testing.T) {
+		s := session
+		s.CoreStartAttempted = false
+		r := newNativeCoreSIGKILLOrphanFixture()
+		for _, family := range []string{"-4", "-6"} {
+			keep := r.rules[family][:0]
+			for _, rule := range r.rules[family] {
+				if !strings.HasPrefix(rule, "1420") && !strings.HasPrefix(rule, "32768:") {
+					keep = append(keep, rule)
+				}
+			}
+			r.rules[family] = keep
+		}
+		g := &fakeReplyGuardRunner{has: true}
+		if err := recoverNativeNetworkWithReceipt(context.Background(), &nativeDockerAdmissionRunner{r}, g, s, health, boot); err != nil {
+			t.Fatalf("unconsumed preflight-only table cannot be recovered: %v", err)
+		}
+		if !g.deleted || len(r.mutations) != 0 {
+			t.Fatalf("preflight-only recovery touched unexpected kernel resources: %v / %v", r.mutations, g.mutations)
+		}
+	})
 }

@@ -64,6 +64,19 @@ type nativeAction struct {
 var nativeRuleLine = regexp.MustCompile("^([0-9]+):\\s+(.+)$")
 var nativeChainLine = regexp.MustCompile("(?m)^\\s*chain ([a-zA-Z0-9_]+) \\{")
 
+// Parse the canonical iproute2 RPDB body as tokens so only a real lookup
+// target (not a numeric prefix or an unrelated rule) is considered a
+// reference. Both address families are inspected before any mutation.
+func nativeRuleReferencesTable(body string, table int) bool {
+	fields := strings.Fields(body)
+	for i := 0; i+1 < len(fields); i++ {
+		if (fields[i] == "lookup" || fields[i] == "table") && fields[i+1] == strconv.Itoa(table) {
+			return true
+		}
+	}
+	return false
+}
+
 func recoverNativeRedirect(parent context.Context, r nativeKernelRunner, p nativeRedirectRecovery) error {
 	return recoverNativeRedirectWithVerifiedOrphan(parent, r, p, false)
 }
@@ -103,6 +116,22 @@ func recoverNativeRedirectWithVerifiedOrphan(parent context.Context, r nativeKer
 			rules = append(rules, nativeRule{family, priority, parts[2]})
 		}
 	}
+	// The fixed 32768 fallback is a Core-owned identity only at that exact
+	// priority. Preinspect every reference to the reserved policy table,
+	// including those outside the 14200-series, before scheduling any delete.
+	// A matching body at an arbitrary priority is never proof of ownership.
+	fallbackBody := fmt.Sprintf("not from all fwmark 0x2024 lookup %d", p.Table)
+	for _, rule := range rules {
+		if rule.priority == 32768 && rule.body != fallbackBody {
+			return errors.New("native recovery: foreign fixed fallback priority")
+		}
+		if nativeRuleReferencesTable(rule.body, p.Table) &&
+			!(rule.priority == p.Rule+1 &&
+				rule.body == fmt.Sprintf("from all fwmark 0x2023 lookup %d", p.Table)) &&
+			!(rule.priority == 32768 && rule.body == fallbackBody) {
+			return errors.New("native recovery: foreign reserved-table reference")
+		}
+	}
 	// Resolve the Core's *second*, randomized auto_redirect table, whose
 	// priority-1 RPDB rule ignores iproute2_table_index.
 	redirectTable := 0
@@ -136,11 +165,8 @@ func recoverNativeRedirectWithVerifiedOrphan(parent context.Context, r nativeKer
 			}
 			coreRules = append(coreRules, nativeAction{"ip", []string{rule.family, "rule", "del", "pref", strconv.Itoa(pref)}})
 		}
-		if strings.Contains(rule.body, fmt.Sprintf("lookup %d", p.Table)) && pref > p.Rule+10 {
-			if rule.body != fmt.Sprintf("not from all fwmark 0x2024 lookup %d", p.Table) {
-				return errors.New("native recovery: foreign table reference")
-			}
-			fallbackRules = append(fallbackRules, nativeAction{"ip", []string{rule.family, "rule", "del", "pref", strconv.Itoa(pref)}})
+		if pref == 32768 {
+			fallbackRules = append(fallbackRules, nativeAction{"ip", []string{rule.family, "rule", "del", "pref", "32768"}})
 		}
 	}
 	if len(fallbackRules) > 2 {
@@ -348,8 +374,8 @@ func recoverNativeRedirectWithVerifiedOrphan(parent context.Context, r nativeKer
 				continue
 			}
 			n, _ := strconv.Atoi(match[1])
-			if n == 1 || (n >= p.Rule && n <= p.Rule+10) ||
-				strings.Contains(match[2], fmt.Sprintf("lookup %d", p.Table)) {
+			if n == 1 || n == 32768 || (n >= p.Rule && n <= p.Rule+10) ||
+				nativeRuleReferencesTable(match[2], p.Table) {
 				return errors.New("native recovery: managed RPDB policy remains")
 			}
 		}

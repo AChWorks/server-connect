@@ -465,7 +465,7 @@ func (m *Manager) stopNativeHealthOperation(id, reason string) (bool, error) {
 			if e != nil {
 				return e
 			}
-			if s.OperationID != id || s.ConfigSHA256 != claim.ConfigSHA256 {
+			if s.OperationID != id || s.OperationID != claim.HealthOperationID || s.ConfigSHA256 != claim.ConfigSHA256 {
 				return nil
 			}
 			s.Phase = "stopping"
@@ -556,7 +556,7 @@ func (m *Manager) RunNativeHealthRound() (NativeHealthState, error) {
 		if e != nil {
 			return e
 		}
-		if s.ConfigSHA256 != claim.ConfigSHA256 {
+		if s.ConfigSHA256 != claim.ConfigSHA256 || s.OperationID != claim.HealthOperationID {
 			return Fault("invalid_state", "native health is not bound to session")
 		}
 		raw, e := readRegular(filepath.Join(m.Dir, nativeConfigFile))
@@ -700,7 +700,7 @@ func (m *Manager) SuperviseNativeHealth() (NativeHealthState, error) {
 		if e != nil {
 			return e
 		}
-		if s.ConfigSHA256 != claim.ConfigSHA256 {
+		if s.ConfigSHA256 != claim.ConfigSHA256 || s.OperationID != claim.HealthOperationID {
 			return Fault("invalid_state", "native supervisor session mismatch")
 		}
 		return m.validateNativeSessionConfig(claim)

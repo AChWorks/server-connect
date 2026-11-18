@@ -152,25 +152,45 @@ can disappear while its *fixed-slot* 14200-series/32768 IPv4/IPv6 RPDB
 rules survive. Previously, the missing randomized identity always blocked
 recovery, leaving the guarded host in an explicitly failed Smart state.
 For this one post-crash case, cleanup of the remaining **exact fixed-slot
-RPDB rule bodies and priorities only** is permitted after the current-boot
-native claim proves one-use Core start was consumed and the verified
-reply-guard receipt still exists. The independent stop path must confirm the
-Core PID is zero, the Core's reserved route table is empty, the randomized
-redirect and Core nft identities are absent, no foreign Docker-compatibility
-rules survive, the native TUN is absent and no unattributed loopback redirect
-route to the underlay remains. Any malformed or duplicate rule, foreign
-identity, absent durable grant or missing verification blocks mutation.
-Partial orphan recovery remains retryable under the same claim; the reply
-table is recovered only after RPDB cleanup succeeds. No generic RPDB
-cleanup or automatic adoption of unrelated routes is authorized. An interrupted
-preflight can have the table but not yet its committed handle; only the
-previously persisted expected fingerprint and current one-use claim authorize
-that narrow recovery. A later foreign replacement, additional/missing rule
-or tuple, changed mark, nft generation drift, uncertain deletion, or
-mismatched committed handle **retains the recovery claim and blocks success**,
-rather than deleting by name or presenting unverified Direct/off. The shared installer
-must refuse orphaned reply-guard objects without a cleared native claim;
-idle Direct must not contain this table.
+RPDB rule bodies and priorities only** (14200, 14201, 14202 and **32768** per
+family) is permitted only under the already-consumed one-use Core-start claim.
+The receipt is bound to the previously staged **health operation ID**, exact
+configuration digest and current **boot ID**. The installed stop path must
+reattest the **actual nftables reply-guard table handle, complete hook/rule/
+accepted-tuple structure and committed fingerprint before any orphan-RPDB
+deletion**. A stale operation/boot, replaced/missing table, or uncertain read
+cannot authorize orphan-rule deletion.
+
+Systemd Core quiescence is more than `MainPID=0`: stopped/failed idle units
+must have no ControlPID, Job or cgroup. The installed **ExecStopPost** itself
+is the narrow exception while systemd reports `deactivating/stop-post`: its
+`ControlPID` must identify the current recovery process. Pending
+`ExecStartPre`, start jobs and unrelated control processes are not stopped
+Core proof. These observations are checked again before kernel recovery.
+
+Both IPv4 and IPv6 RPDB rule inventories are inspected **before any
+mutation**, including foreign references to the reserved table at priorities
+below/above the Core interval. A lookalike fallback rule at priority 30000
+cannot be adopted as the fixed priority-32768 Core rule. The Core's reserved
+route table must be empty, the randomized redirect and Core nft identities
+absent, no foreign Docker-compatibility rules may survive, the native TUN must
+be absent and no unattributed loopback redirect route to the underlay may
+remain. Any malformed or duplicate rule, foreign identity or unverified
+lifecycle blocks mutation. Legitimate partial subsets of exactly owned rules
+remain retryable, and the reply table is deleted **after** RPDB cleanup, with
+its original generation-conditional netlink delete.
+
+A completely clean Direct kernel is separately verified read-only and may
+finish a retained claim even when its already-deleted reply table is absent;
+it is **not** permission to delete orphan RPDB without the owner. An
+interrupted preflight can have the guard table but not its handle; the
+previously persisted fingerprint still authorizes only that narrow
+pre-start guard cleanup, never the consumed-start orphan exception.
+A later foreign replacement, additional/missing rule or tuple, changed mark,
+nft generation drift, uncertain deletion or mismatched handle **retains the
+recovery claim and blocks success** rather than deleting by name or presenting
+unverified Direct/off. The shared installer must refuse orphaned reply-guard
+objects without a cleared claim; idle Direct must not contain this table.
 
 This guard **does not** grant general-host acceptance for SSH/HTTP hosting,
 UDP, DNS, IPv6, real Iran Direct, or an actual foreign VPN provider. Record
