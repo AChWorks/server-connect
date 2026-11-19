@@ -72,6 +72,8 @@ BUNDLE_FILES = {
     "bin/server-connect", "bin/sing-box", "bin/libcronet.so",
     "THIRD-PARTY-LICENSES/sing-box-LICENSE",
     "THIRD-PARTY-LICENSES/golang.org-x-net-LICENSE",
+    "THIRD-PARTY-LICENSES/publicsuffix-LICENSE",
+    "THIRD-PARTY-LICENSES/publicsuffix-list.dat",
     "install.sh", "release-auth.py", "manifest.json",
     "checksums.sha256", *UNITS,
 }

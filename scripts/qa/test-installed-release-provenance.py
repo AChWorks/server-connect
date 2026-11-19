@@ -69,7 +69,15 @@ FILES = (
     "release-auth.py",
     "THIRD-PARTY-LICENSES/sing-box-LICENSE",
     "THIRD-PARTY-LICENSES/golang.org-x-net-LICENSE",
+    "THIRD-PARTY-LICENSES/publicsuffix-LICENSE",
+    "THIRD-PARTY-LICENSES/publicsuffix-list.dat",
     "manifest.json",
+)
+# Prior installed local QA releases used the exact same manifest order but
+# lacked both PSL source materials. They may still be verified and removed.
+OLD_NO_PSL = (
+    "THIRD-PARTY-LICENSES/publicsuffix-LICENSE",
+    "THIRD-PARTY-LICENSES/publicsuffix-list.dat",
 )
 PROLOG = """set -eu
 local_qa=yes
@@ -119,7 +127,7 @@ class ReleasePayloadTests(unittest.TestCase):
     def test_previous_twelve_entry_release_is_retained_and_removable(self):
         release = self.installed_pre_auth_release(
             ("release-auth.py", "server-connect-native-tun.service",
-             "THIRD-PARTY-LICENSES/golang.org-x-net-LICENSE")
+             "THIRD-PARTY-LICENSES/golang.org-x-net-LICENSE") + OLD_NO_PSL
         )
         self.installed_audit(release)
         (release / "release-auth.py").write_bytes(b"unreceipted helper\n")
@@ -127,14 +135,14 @@ class ReleasePayloadTests(unittest.TestCase):
 
     def test_previous_thirteen_entry_native_release_is_retained_and_removable(self):
         release = self.installed_pre_auth_release(
-            ("release-auth.py", "THIRD-PARTY-LICENSES/golang.org-x-net-LICENSE"))
+            ("release-auth.py", "THIRD-PARTY-LICENSES/golang.org-x-net-LICENSE") + OLD_NO_PSL)
         self.installed_audit(release)
         (release / "release-auth.py").write_bytes(b"unreceipted helper\n")
         self.installed_audit(release, expected=1)
 
     def test_previous_fourteen_entry_signed_aware_local_qa_is_still_auditable(self):
         release = self.installed_pre_auth_release(
-            ("THIRD-PARTY-LICENSES/golang.org-x-net-LICENSE",))
+            ("THIRD-PARTY-LICENSES/golang.org-x-net-LICENSE",) + OLD_NO_PSL)
         receipt = release / "local-qa.sha256"
         receipt.write_text(hashlib.sha256(
             (release / "checksums.sha256").read_bytes()).hexdigest() + "\n")
@@ -144,6 +152,46 @@ class ReleasePayloadTests(unittest.TestCase):
         self.audit(release, expected=21)
         (release / "THIRD-PARTY-LICENSES/sing-box-LICENSE").write_text("tampered")
         self.installed_audit(release, expected=21)
+
+    def test_previous_fifteen_entry_installed_release_stays_auditable_but_not_new(self):
+        release = self.installed_pre_auth_release(OLD_NO_PSL)
+        assert len(FILES) - len(OLD_NO_PSL) == 15
+        receipt = release / "local-qa.sha256"
+        receipt.write_text(hashlib.sha256(
+            (release / "checksums.sha256").read_bytes()).hexdigest() + "\n")
+        receipt.chmod(0o600)
+        self.installed_audit(release)
+        self.audit(release, expected=21)
+        # Never classify a partially added PSL pair as a genuine old package.
+        (release / OLD_NO_PSL[0]).write_text("half-present source material")
+        self.installed_audit(release, expected=21)
+
+    def test_incoming_missing_psl_license_or_source_is_rejected_with_forged_checksums(self):
+        for member in OLD_NO_PSL:
+            with self.subTest(member=member):
+                path = self.source / member
+                raw = path.read_bytes()
+                path.unlink()
+                (self.source / "checksums.sha256").write_text("".join(
+                    hashlib.sha256((self.source / name).read_bytes()).hexdigest()
+                    + "  " + name + "\n" for name in FILES if name != member
+                ))
+                self.audit(self.source, expected=21)
+                path.write_bytes(raw)
+                self.checksums()
+
+    def test_installed_psl_tamper_and_missing_source_refused(self):
+        release = self.publish()
+        for member in OLD_NO_PSL:
+            with self.subTest(member=member):
+                path = release / member
+                raw = path.read_bytes()
+                path.write_bytes(b"tampered after installation")
+                self.installed_audit(release, expected=21)
+                path.unlink()
+                self.installed_audit(release, expected=21)
+                path.write_bytes(raw)
+                self.installed_audit(release)
 
     def test_incoming_without_vendor_license_rejected_even_if_checksums_match(self):
         notice = "THIRD-PARTY-LICENSES/golang.org-x-net-LICENSE"
@@ -344,11 +392,13 @@ class ReleasePayloadTests(unittest.TestCase):
         release = self.publish()
         former = tuple(name for name in FILES
                        if name not in ("server-connect-native-tun.service", "release-auth.py",
-                                       "THIRD-PARTY-LICENSES/golang.org-x-net-LICENSE"))
+                                       "THIRD-PARTY-LICENSES/golang.org-x-net-LICENSE", *OLD_NO_PSL))
         assert len(former) == 12
         (release / "server-connect-native-tun.service").unlink()
         (release / "release-auth.py").unlink()
         (release / "THIRD-PARTY-LICENSES/golang.org-x-net-LICENSE").unlink()
+        for name in OLD_NO_PSL:
+            (release / name).unlink()
         (release / "local-qa.sha256").unlink()
         lines = "".join(
             hashlib.sha256((release / name).read_bytes()).hexdigest()

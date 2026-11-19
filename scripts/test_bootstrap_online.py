@@ -49,6 +49,8 @@ FILE_NAMES = [
     "server-connect/bin/libcronet.so",
     "server-connect/THIRD-PARTY-LICENSES/sing-box-LICENSE",
     "server-connect/THIRD-PARTY-LICENSES/golang.org-x-net-LICENSE",
+    "server-connect/THIRD-PARTY-LICENSES/publicsuffix-LICENSE",
+    "server-connect/THIRD-PARTY-LICENSES/publicsuffix-list.dat",
 ]
 
 
@@ -100,6 +102,8 @@ def archive(path: Path, *, abnormal: str | None = None,
                 "missing_native_unit": "server-connect-native-tun.service",
                 "missing_health_service": "server-connect-smart-health.service",
                 "missing_health_timer": "server-connect-smart-health.timer",
+                "missing_psl_license": "publicsuffix-LICENSE",
+                "missing_psl_source": "publicsuffix-list.dat",
             }.get(abnormal)
             if missing_unit and name.endswith("/" + missing_unit):
                 continue
@@ -809,7 +813,9 @@ class SignedReleaseTest(unittest.TestCase):
             "server-connect-native-tun.service",
             "server-connect-smart-health.service", "server-connect-smart-health.timer",
             "install.sh", "release-auth.py", "THIRD-PARTY-LICENSES/sing-box-LICENSE",
-            "THIRD-PARTY-LICENSES/golang.org-x-net-LICENSE", "manifest.json",
+            "THIRD-PARTY-LICENSES/golang.org-x-net-LICENSE",
+            "THIRD-PARTY-LICENSES/publicsuffix-LICENSE",
+            "THIRD-PARTY-LICENSES/publicsuffix-list.dat", "manifest.json",
         )
         self.payload["server-connect/manifest.json"] = json.dumps(
             manifest_override or self.manifest, separators=(",", ":"),
@@ -987,6 +993,19 @@ class SignedReleaseTest(unittest.TestCase):
             with self.subTest(field=field):
                 self.fixture(manifest_override=dict(self.manifest, **{field: value}))
                 self.assertNotEqual(self.run_bootstrap().returncode, 0)
+
+    def test_signed_archive_missing_psl_materials_refused_before_execution(self):
+        # An otherwise valid signed archive cannot waive either the MPL-2.0
+        # notice or the exact data source before extraction/privileged use.
+        for missing in ("missing_psl_license", "missing_psl_source"):
+            with self.subTest(missing=missing):
+                self.fixture(abnormal=missing)
+                for online in (False, True):
+                    result = self.run_bootstrap(online=online)
+                    self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                    self.assertIn("Archive preflight failed", result.stderr)
+                    self.assertNotIn("Installation was not attempted.", result.stdout)
+                    self.assertFalse(self.marker.exists())
 
     def test_valid_signature_cannot_authorize_traversal_links_or_gzip_truncation(self):
         for abnormal in ("traversal", "symlink", "hardlink", "duplicate"):

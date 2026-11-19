@@ -530,6 +530,8 @@ REQUIRED_FILES = {
     "server-connect/bin/libcronet.so",
     "server-connect/THIRD-PARTY-LICENSES/sing-box-LICENSE",
     "server-connect/THIRD-PARTY-LICENSES/golang.org-x-net-LICENSE",
+    "server-connect/THIRD-PARTY-LICENSES/publicsuffix-LICENSE",
+    "server-connect/THIRD-PARTY-LICENSES/publicsuffix-list.dat",
 }
 ALLOWED_DIRS = {
     "server-connect",
