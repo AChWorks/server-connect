@@ -87,6 +87,8 @@ func runSmartRoutingRules(jsonMode bool, m *sc.Manager, args []string) int {
 		v4 := opts.String("tunnel-ipv4", "", "private IPv4 TUN interface")
 		v6 := opts.String("tunnel-ipv6", "", "optional private IPv6 TUN interface")
 		mode := opts.String("mode", "bypass_iran", "default or bypass_iran")
+		selectedIPv6 := opts.Bool("enable-selected-ipv6", false, "selected VPN exit IPv6 independently verified")
+		iranCoverage := opts.String("iran-coverage", "consensus", "consensus or dbip")
 		if err := opts.Parse(args); err != nil || len(opts.Args()) != 0 ||
 			*tunnel == "" || *underlay == "" || *v4 == "" {
 			return output(jsonMode, nil, routingOptionsError())
@@ -94,7 +96,7 @@ func runSmartRoutingRules(jsonMode bool, m *sc.Manager, args []string) int {
 		report, err := m.PreviewNativeSmartRouting(sc.NativePolicyOptions{
 			InterfaceName: *tunnel, UnderlayInterface: *underlay,
 			IPv4Address: *v4, IPv6Address: *v6,
-			Mode: *mode,
+			Mode: *mode, EnableSelectedIPv6: *selectedIPv6, IranCoverage: *iranCoverage,
 		})
 		return output(jsonMode, report, err)
 	case "preview":

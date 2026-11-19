@@ -55,6 +55,7 @@ for variant in valid invalid-unit; do
       server-connect-smart-health.service server-connect-smart-health.timer install.sh release-auth.py \
       THIRD-PARTY-LICENSES/sing-box-LICENSE THIRD-PARTY-LICENSES/golang.org-x-net-LICENSE \
       THIRD-PARTY-LICENSES/publicsuffix-LICENSE THIRD-PARTY-LICENSES/publicsuffix-list.dat \
+      THIRD-PARTY-LICENSES/chocolate4u-LICENSE THIRD-PARTY-LICENSES/chocolate4u-geoip-ir.json \
       manifest.json > checksums.sha256
     sha256sum --quiet --check checksums.sha256
     ./bin/server-connect version --json | grep -q '"sing_box":"1.14.3"'

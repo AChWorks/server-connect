@@ -532,6 +532,8 @@ REQUIRED_FILES = {
     "server-connect/THIRD-PARTY-LICENSES/golang.org-x-net-LICENSE",
     "server-connect/THIRD-PARTY-LICENSES/publicsuffix-LICENSE",
     "server-connect/THIRD-PARTY-LICENSES/publicsuffix-list.dat",
+    "server-connect/THIRD-PARTY-LICENSES/chocolate4u-LICENSE",
+    "server-connect/THIRD-PARTY-LICENSES/chocolate4u-geoip-ir.json",
 }
 ALLOWED_DIRS = {
     "server-connect",

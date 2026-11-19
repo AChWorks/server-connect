@@ -53,6 +53,17 @@ printf '%s\n' \
 }
 cp third_party/publicsuffix/LICENSE "$work/server-connect/THIRD-PARTY-LICENSES/publicsuffix-LICENSE"
 cp third_party/publicsuffix/public_suffix_list.dat "$work/server-connect/THIRD-PARTY-LICENSES/publicsuffix-list.dat"
+# Include the exact separately licensed source data and its GPL-3.0 text
+# in the complete, independently checksummed offline bundle. A bundle is
+# still LOCAL QA ONLY until Owner approves publication/license obligations.
+printf '%s\n' \
+ 'c80922639511fc817957f1ecb018b0f13855decc59c5fbe492fac5bdb6638616  internal/sc/data/iran-chocolate4u-2026-11.json' \
+ '3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986  third_party/chocolate4u/LICENSE' \
+ | sha256sum --strict --quiet --check - || {
+ echo 'Pinned Chocolate4U source/license changed' >&2;exit 1;
+}
+cp internal/sc/data/iran-chocolate4u-2026-11.json "$work/server-connect/THIRD-PARTY-LICENSES/chocolate4u-geoip-ir.json"
+cp third_party/chocolate4u/LICENSE "$work/server-connect/THIRD-PARTY-LICENSES/chocolate4u-LICENSE"
 
 cp bundle/install.sh bundle/server-connect.service bundle/server-connect-activation-recover.service bundle/server-connect-activation-recover.timer bundle/server-connect-smart-tun.service bundle/server-connect-native-tun.service bundle/server-connect-smart-health.service bundle/server-connect-smart-health.timer "$work/server-connect/"
 cp scripts/release-auth.py "$work/server-connect/release-auth.py"
@@ -63,7 +74,7 @@ printf '{"schema":1,"manager":"0.1.0-dev","core":"sing-box 1.14.3","core_archive
 (
  cd "$work/server-connect"
 
- sha256sum bin/server-connect bin/sing-box bin/libcronet.so server-connect.service server-connect-activation-recover.service server-connect-activation-recover.timer server-connect-smart-tun.service server-connect-native-tun.service server-connect-smart-health.service server-connect-smart-health.timer install.sh release-auth.py THIRD-PARTY-LICENSES/sing-box-LICENSE THIRD-PARTY-LICENSES/golang.org-x-net-LICENSE THIRD-PARTY-LICENSES/publicsuffix-LICENSE THIRD-PARTY-LICENSES/publicsuffix-list.dat manifest.json > checksums.sha256
+ sha256sum bin/server-connect bin/sing-box bin/libcronet.so server-connect.service server-connect-activation-recover.service server-connect-activation-recover.timer server-connect-smart-tun.service server-connect-native-tun.service server-connect-smart-health.service server-connect-smart-health.timer install.sh release-auth.py THIRD-PARTY-LICENSES/sing-box-LICENSE THIRD-PARTY-LICENSES/golang.org-x-net-LICENSE THIRD-PARTY-LICENSES/publicsuffix-LICENSE THIRD-PARTY-LICENSES/publicsuffix-list.dat THIRD-PARTY-LICENSES/chocolate4u-LICENSE THIRD-PARTY-LICENSES/chocolate4u-geoip-ir.json manifest.json > checksums.sha256
  sha256sum --quiet -c checksums.sha256
  ./bin/server-connect version --json
  ./bin/sing-box version | head -n 1

@@ -41,23 +41,40 @@ type iranGeoSnapshot struct {
 // Reading it never accesses the network or private state, changes the host or
 // proves the safety of using these prefixes for geographic Direct routing.
 type IranGeoSnapshotStatus struct {
-	Country                    string `json:"country"`
-	Basis                      string `json:"basis"`
-	AsOf                       string `json:"as_of"`
-	Source                     string `json:"source"`
-	PrefixSHA256               string `json:"prefix_sha256"`
-	SourceSHA256               string `json:"source_sha256"`
+	Country                    string                      `json:"country"`
+	Basis                      string                      `json:"basis"`
+	AsOf                       string                      `json:"as_of"`
+	Source                     string                      `json:"source"`
+	PrefixSHA256               string                      `json:"prefix_sha256"`
+	SourceSHA256               string                      `json:"source_sha256"`
+	License                    string                      `json:"license"`
+	Attribution                string                      `json:"attribution"`
+	Changes                    string                      `json:"changes"`
+	IPv4Count                  int                         `json:"ipv4_count"`
+	IPv6Count                  int                         `json:"ipv6_count"`
+	AgeDays                    int                         `json:"age_days"`
+	StaleOver30Days            bool                        `json:"stale_over_30_days"`
+	FormatAndChecksumVerified  bool                        `json:"format_and_checksum_verified"`
+	PublisherSignatureVerified bool                        `json:"publisher_signature_verified"`
+	SafeForGeographicRouting   bool                        `json:"safe_for_geographic_routing"`
+	ActivationReady            bool                        `json:"activation_ready"`
+	DefaultRoutingPolicy       string                      `json:"default_routing_policy,omitempty"`
+	CorroboratingSource        *IranGeoCorroboratingSource `json:"corroborating_source,omitempty"`
+}
+
+// Country estimates have separate attribution; their consensus is an
+// offline policy input, not publisher authentication or country ground truth.
+type IranGeoCorroboratingSource struct {
+	Name                       string `json:"name"`
+	Revision                   string `json:"revision"`
+	SourceRuleSetSHA256        string `json:"source_rule_set_sha256"`
+	DecompiledSHA256           string `json:"decompiled_sha256"`
 	License                    string `json:"license"`
-	Attribution                string `json:"attribution"`
-	Changes                    string `json:"changes"`
 	IPv4Count                  int    `json:"ipv4_count"`
 	IPv6Count                  int    `json:"ipv6_count"`
-	AgeDays                    int    `json:"age_days"`
-	StaleOver30Days            bool   `json:"stale_over_30_days"`
-	FormatAndChecksumVerified  bool   `json:"format_and_checksum_verified"`
+	ConsensusIPv4Count         int    `json:"consensus_ipv4_count"`
+	ConsensusIPv6Count         int    `json:"consensus_ipv6_count"`
 	PublisherSignatureVerified bool   `json:"publisher_signature_verified"`
-	SafeForGeographicRouting   bool   `json:"safe_for_geographic_routing"`
-	ActivationReady            bool   `json:"activation_ready"`
 }
 
 // Only this exact dated, attributed free CSV may back the embedded snapshot.
@@ -269,5 +286,43 @@ func BundledIranGeoSnapshotStatus() (IranGeoSnapshotStatus, error) {
 	if err != nil {
 		return IranGeoSnapshotStatus{}, errors.New("embedded IR country estimate unavailable")
 	}
-	return iranGeoStatus(raw, time.Now().UTC())
+	status, err := iranGeoStatus(raw, time.Now().UTC())
+	if err != nil {
+		return IranGeoSnapshotStatus{}, err
+	}
+	geo, err := decodeIranGeoSnapshot(raw)
+	if err != nil {
+		return IranGeoSnapshotStatus{}, err
+	}
+	choco, err := chocolateIranPrefixes()
+	if err != nil {
+		return IranGeoSnapshotStatus{}, err
+	}
+	consensus, err := intersectIranPrefixes(append(append([]string{}, geo.IPv4...), geo.IPv6...), choco)
+	if err != nil {
+		return IranGeoSnapshotStatus{}, err
+	}
+	confirmation := &IranGeoCorroboratingSource{
+		Name:     "Chocolate4U/Iran-sing-box-rules",
+		Revision: chocolateIranRevision, SourceRuleSetSHA256: chocolateIranSRS_SHA256,
+		DecompiledSHA256: chocolateIranJSON_SHA256, License: chocolateIranLicense,
+		PublisherSignatureVerified: false,
+	}
+	for _, p := range choco {
+		if p.Addr().Is4() {
+			confirmation.IPv4Count++
+		} else {
+			confirmation.IPv6Count++
+		}
+	}
+	for _, p := range consensus {
+		if strings.Contains(p, ":") {
+			confirmation.ConsensusIPv6Count++
+		} else {
+			confirmation.ConsensusIPv4Count++
+		}
+	}
+	status.DefaultRoutingPolicy = "consensus_intersection_dbip_chocolate4u"
+	status.CorroboratingSource = confirmation
+	return status, nil
 }

@@ -28,7 +28,10 @@ func TestIRGeoEstimateDataCLIIsOfflineReadOnlyAndNotActivation(t *testing.T) {
 			if err := json.Unmarshal([]byte(out), &response); err != nil || !response.OK ||
 				response.Data.Country != "IR" || response.Data.IPv4Count != 2024 ||
 				response.Data.IPv6Count != 1014 || response.Data.ActivationReady ||
-				response.Data.SafeForGeographicRouting || response.Data.PublisherSignatureVerified || response.Data.License != "CC-BY-4.0" {
+				response.Data.SafeForGeographicRouting || response.Data.PublisherSignatureVerified || response.Data.License != "CC-BY-4.0" ||
+				response.Data.DefaultRoutingPolicy != "consensus_intersection_dbip_chocolate4u" ||
+				response.Data.CorroboratingSource == nil || response.Data.CorroboratingSource.ConsensusIPv4Count != 2023 ||
+				response.Data.CorroboratingSource.ConsensusIPv6Count != 894 {
 				t.Fatalf("unsafe or incomplete registry report: %+v %v", response, err)
 			}
 		} else if !strings.Contains(out, "dbip_lite_country_geolocation_estimate") ||

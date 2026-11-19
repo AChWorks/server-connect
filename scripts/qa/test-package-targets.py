@@ -41,6 +41,8 @@ PAYLOAD_FILES = (
     "THIRD-PARTY-LICENSES/golang.org-x-net-LICENSE",
     "THIRD-PARTY-LICENSES/publicsuffix-LICENSE",
     "THIRD-PARTY-LICENSES/publicsuffix-list.dat",
+    "THIRD-PARTY-LICENSES/chocolate4u-LICENSE",
+    "THIRD-PARTY-LICENSES/chocolate4u-geoip-ir.json",
     "manifest.json",
 )
 
@@ -60,6 +62,19 @@ class PackageArgumentTests(unittest.TestCase):
                 self.assertEqual(hashlib.sha256(content).hexdigest(), digest)
         self.assertTrue((ROOT / "third_party/publicsuffix/public_suffix_list.dat").read_bytes().startswith(
             b"// This Source Code Form is subject to the terms of the Mozilla Public"))
+
+    def test_pinned_chocolate_source_matches_bundled_revision(self):
+        expected = {
+            "LICENSE": "3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986",
+            "iran-chocolate4u-2026-11.json": "c80922639511fc817957f1ecb018b0f13855decc59c5fbe492fac5bdb6638616",
+        }
+        files = {
+            "LICENSE": ROOT / "third_party/chocolate4u/LICENSE",
+            "iran-chocolate4u-2026-11.json": ROOT / "internal/sc/data/iran-chocolate4u-2026-11.json",
+        }
+        for name, digest in expected.items():
+            with self.subTest(name=name):
+                self.assertEqual(hashlib.sha256(files[name].read_bytes()).hexdigest(), digest)
 
     def invoke(self, *targets):
         with tempfile.TemporaryDirectory(prefix="sc-package-args-") as scratch:
