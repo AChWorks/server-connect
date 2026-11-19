@@ -56,7 +56,7 @@ docker exec "$container" /bin/sh -c '
    server-connect.service server-connect-activation-recover.service \
    server-connect-activation-recover.timer server-connect-smart-tun.service \
       server-connect-native-tun.service \
-      server-connect-smart-health.service server-connect-smart-health.timer install.sh release-auth.py \
+      server-connect-smart-health.service server-connect-smart-health.timer install.sh release-auth.py LICENSE \
    THIRD-PARTY-LICENSES/sing-box-LICENSE THIRD-PARTY-LICENSES/golang.org-x-net-LICENSE \
    THIRD-PARTY-LICENSES/publicsuffix-LICENSE THIRD-PARTY-LICENSES/publicsuffix-list.dat \
       THIRD-PARTY-LICENSES/chocolate4u-LICENSE THIRD-PARTY-LICENSES/chocolate4u-geoip-ir.json \

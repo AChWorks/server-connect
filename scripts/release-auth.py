@@ -34,7 +34,7 @@ PAYLOAD = (
     "server-connect-activation-recover.timer", "server-connect-smart-tun.service",
     "server-connect-native-tun.service",
     "server-connect-smart-health.service", "server-connect-smart-health.timer",
-    "install.sh", "release-auth.py", "THIRD-PARTY-LICENSES/sing-box-LICENSE",
+    "install.sh", "release-auth.py", "LICENSE", "THIRD-PARTY-LICENSES/sing-box-LICENSE",
     "THIRD-PARTY-LICENSES/golang.org-x-net-LICENSE",
     "THIRD-PARTY-LICENSES/publicsuffix-LICENSE",
     "THIRD-PARTY-LICENSES/publicsuffix-list.dat",

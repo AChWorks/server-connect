@@ -37,6 +37,7 @@ PAYLOAD_FILES = (
     "server-connect-smart-health.timer",
     "install.sh",
     "release-auth.py",
+    "LICENSE",
     "THIRD-PARTY-LICENSES/sing-box-LICENSE",
     "THIRD-PARTY-LICENSES/golang.org-x-net-LICENSE",
     "THIRD-PARTY-LICENSES/publicsuffix-LICENSE",
@@ -48,6 +49,13 @@ PAYLOAD_FILES = (
 
 
 class PackageArgumentTests(unittest.TestCase):
+    def test_first_party_license_matches_mpl_2_0_reference(self):
+        # Exact unmodified Mozilla 2.0 text from the Owner's AChrix LICENSE.
+        license_bytes = (ROOT / "LICENSE").read_bytes()
+        self.assertEqual(hashlib.sha256(license_bytes).hexdigest(),
+                         "66a3107d5ad6a058aab753eaac2047ccb2ed0e39465dd0fe5844da3e300d5172")
+        self.assertTrue(license_bytes.startswith(b"Mozilla Public License Version 2.0\n"))
+
     def test_pinned_publicsuffix_source_matches_compiled_revision(self):
         revision = "63cbc63d470d7b52c35266aa96c4c98c96ec499c"
         table = ROOT / "vendor/golang.org/x/net/publicsuffix/table.go"

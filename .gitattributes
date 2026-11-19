@@ -1,3 +1,5 @@
 # Preserve exact upstream MPL-covered source bytes, including upstream spacing.
 third_party/publicsuffix/LICENSE -whitespace
 third_party/publicsuffix/public_suffix_list.dat -whitespace
+# Keep the canonical AChrix/MPL-2.0 license text byte-identical.
+LICENSE -whitespace

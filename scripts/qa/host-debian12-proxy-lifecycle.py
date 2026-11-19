@@ -76,7 +76,7 @@ BUNDLE_FILES = {
     "THIRD-PARTY-LICENSES/publicsuffix-list.dat",
     "THIRD-PARTY-LICENSES/chocolate4u-LICENSE",
     "THIRD-PARTY-LICENSES/chocolate4u-geoip-ir.json",
-    "install.sh", "release-auth.py", "manifest.json",
+    "install.sh", "release-auth.py", "LICENSE", "manifest.json",
     "checksums.sha256", *UNITS,
 }
 HEX64 = re.compile(r"^[0-9a-f]{64}$")

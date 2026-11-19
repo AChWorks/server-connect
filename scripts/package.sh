@@ -67,6 +67,7 @@ cp third_party/chocolate4u/LICENSE "$work/server-connect/THIRD-PARTY-LICENSES/ch
 
 cp bundle/install.sh bundle/server-connect.service bundle/server-connect-activation-recover.service bundle/server-connect-activation-recover.timer bundle/server-connect-smart-tun.service bundle/server-connect-native-tun.service bundle/server-connect-smart-health.service bundle/server-connect-smart-health.timer "$work/server-connect/"
 cp scripts/release-auth.py "$work/server-connect/release-auth.py"
+cp LICENSE "$work/server-connect/LICENSE"
 chmod 0755 "$work/server-connect/install.sh" "$work/server-connect/bin/server-connect" "$work/server-connect/bin/sing-box"
 source_revision=$(git rev-parse HEAD)
 if git diff --quiet && git diff --cached --quiet && [ -z "$(git ls-files --others --exclude-standard)" ]; then source_state=clean;else source_state=dirty;fi
@@ -74,7 +75,7 @@ printf '{"schema":1,"manager":"0.1.0-dev","core":"sing-box 1.14.3","core_archive
 (
  cd "$work/server-connect"
 
- sha256sum bin/server-connect bin/sing-box bin/libcronet.so server-connect.service server-connect-activation-recover.service server-connect-activation-recover.timer server-connect-smart-tun.service server-connect-native-tun.service server-connect-smart-health.service server-connect-smart-health.timer install.sh release-auth.py THIRD-PARTY-LICENSES/sing-box-LICENSE THIRD-PARTY-LICENSES/golang.org-x-net-LICENSE THIRD-PARTY-LICENSES/publicsuffix-LICENSE THIRD-PARTY-LICENSES/publicsuffix-list.dat THIRD-PARTY-LICENSES/chocolate4u-LICENSE THIRD-PARTY-LICENSES/chocolate4u-geoip-ir.json manifest.json > checksums.sha256
+ sha256sum bin/server-connect bin/sing-box bin/libcronet.so server-connect.service server-connect-activation-recover.service server-connect-activation-recover.timer server-connect-smart-tun.service server-connect-native-tun.service server-connect-smart-health.service server-connect-smart-health.timer install.sh release-auth.py LICENSE THIRD-PARTY-LICENSES/sing-box-LICENSE THIRD-PARTY-LICENSES/golang.org-x-net-LICENSE THIRD-PARTY-LICENSES/publicsuffix-LICENSE THIRD-PARTY-LICENSES/publicsuffix-list.dat THIRD-PARTY-LICENSES/chocolate4u-LICENSE THIRD-PARTY-LICENSES/chocolate4u-geoip-ir.json manifest.json > checksums.sha256
  sha256sum --quiet -c checksums.sha256
  ./bin/server-connect version --json
  ./bin/sing-box version | head -n 1
@@ -92,5 +93,5 @@ manifest_digest=$(sha256sum "$work/server-connect/manifest.json" | cut -d' ' -f1
 printf '{"schema":1,"purpose":"server-connect-release","version":"0.1.0-dev","target":"%s","archive_sha256":"%s","checksums_sha256":"%s","manifest_sha256":"%s","source_revision":"%s","source_state":"%s","core":"sing-box 1.14.3","core_archive_sha256":"%s"}\n' \
  "$package_target" "$archive_digest" "$checksums_digest" "$manifest_digest" "$source_revision" "$source_state" "$EXPECTED" > "$artifact.release.json"
 sha256sum "$artifact"
-echo 'LOCAL QA ONLY: unsigned identity sidecar produced; no product license or public release authorization.'
+echo 'LOCAL QA ONLY: first-party MPL-2.0 included; no publisher identity or third-party/public release authorization.'
 echo 'Explicit local QA signatures may be tested with scripts/release-auth.py sign-local-qa and an ephemeral key.'

@@ -67,6 +67,7 @@ FILES = (
     "server-connect-smart-health.timer",
     "install.sh",
     "release-auth.py",
+    "LICENSE",
     "THIRD-PARTY-LICENSES/sing-box-LICENSE",
     "THIRD-PARTY-LICENSES/golang.org-x-net-LICENSE",
     "THIRD-PARTY-LICENSES/publicsuffix-LICENSE",
@@ -75,8 +76,9 @@ FILES = (
     "THIRD-PARTY-LICENSES/chocolate4u-geoip-ir.json",
     "manifest.json",
 )
-# Prior installed local QA releases used the exact same manifest order but
-# lacked both PSL source materials. They may still be verified and removed.
+# Historical installed QA releases may lack the first-party license or
+# later-added third-party source files; all remain auditable and removable.
+OLD_NO_FIRST_PARTY_LICENSE = ("LICENSE",)
 OLD_NO_PSL = (
     "THIRD-PARTY-LICENSES/publicsuffix-LICENSE",
     "THIRD-PARTY-LICENSES/publicsuffix-list.dat",
@@ -133,7 +135,7 @@ class ReleasePayloadTests(unittest.TestCase):
     def test_previous_twelve_entry_release_is_retained_and_removable(self):
         release = self.installed_pre_auth_release(
             ("release-auth.py", "server-connect-native-tun.service",
-             "THIRD-PARTY-LICENSES/golang.org-x-net-LICENSE") + OLD_NO_PSL + OLD_NO_CHOCOLATE
+             "THIRD-PARTY-LICENSES/golang.org-x-net-LICENSE") + OLD_NO_PSL + OLD_NO_CHOCOLATE + OLD_NO_FIRST_PARTY_LICENSE
         )
         self.installed_audit(release)
         (release / "release-auth.py").write_bytes(b"unreceipted helper\n")
@@ -141,14 +143,14 @@ class ReleasePayloadTests(unittest.TestCase):
 
     def test_previous_thirteen_entry_native_release_is_retained_and_removable(self):
         release = self.installed_pre_auth_release(
-            ("release-auth.py", "THIRD-PARTY-LICENSES/golang.org-x-net-LICENSE") + OLD_NO_PSL + OLD_NO_CHOCOLATE)
+            ("release-auth.py", "THIRD-PARTY-LICENSES/golang.org-x-net-LICENSE") + OLD_NO_PSL + OLD_NO_CHOCOLATE + OLD_NO_FIRST_PARTY_LICENSE)
         self.installed_audit(release)
         (release / "release-auth.py").write_bytes(b"unreceipted helper\n")
         self.installed_audit(release, expected=1)
 
     def test_previous_fourteen_entry_signed_aware_local_qa_is_still_auditable(self):
         release = self.installed_pre_auth_release(
-            ("THIRD-PARTY-LICENSES/golang.org-x-net-LICENSE",) + OLD_NO_PSL + OLD_NO_CHOCOLATE)
+            ("THIRD-PARTY-LICENSES/golang.org-x-net-LICENSE",) + OLD_NO_PSL + OLD_NO_CHOCOLATE + OLD_NO_FIRST_PARTY_LICENSE)
         receipt = release / "local-qa.sha256"
         receipt.write_text(hashlib.sha256(
             (release / "checksums.sha256").read_bytes()).hexdigest() + "\n")
@@ -160,8 +162,8 @@ class ReleasePayloadTests(unittest.TestCase):
         self.installed_audit(release, expected=21)
 
     def test_previous_fifteen_entry_installed_release_stays_auditable_but_not_new(self):
-        release = self.installed_pre_auth_release(OLD_NO_PSL + OLD_NO_CHOCOLATE)
-        assert len(FILES) - len(OLD_NO_PSL + OLD_NO_CHOCOLATE) == 15
+        release = self.installed_pre_auth_release(OLD_NO_PSL + OLD_NO_CHOCOLATE + OLD_NO_FIRST_PARTY_LICENSE)
+        assert len(FILES) - len(OLD_NO_PSL + OLD_NO_CHOCOLATE + OLD_NO_FIRST_PARTY_LICENSE) == 15
         receipt = release / "local-qa.sha256"
         receipt.write_text(hashlib.sha256(
             (release / "checksums.sha256").read_bytes()).hexdigest() + "\n")
@@ -214,8 +216,8 @@ class ReleasePayloadTests(unittest.TestCase):
                 self.installed_audit(release)
 
     def test_previous_seventeen_entry_psl_release_remains_retirable(self):
-        release = self.installed_pre_auth_release(OLD_NO_CHOCOLATE)
-        assert len(FILES) - len(OLD_NO_CHOCOLATE) == 17
+        release = self.installed_pre_auth_release(OLD_NO_CHOCOLATE + OLD_NO_FIRST_PARTY_LICENSE)
+        assert len(FILES) - len(OLD_NO_CHOCOLATE + OLD_NO_FIRST_PARTY_LICENSE) == 17
         (release / "local-qa.sha256").write_text(hashlib.sha256(
             (release / "checksums.sha256").read_bytes()).hexdigest()+"\n")
         (release / "local-qa.sha256").chmod(0o600)
@@ -223,6 +225,35 @@ class ReleasePayloadTests(unittest.TestCase):
         self.audit(release, expected=21)
         (release / OLD_NO_CHOCOLATE[0]).write_text("partial new source")
         self.installed_audit(release, expected=21)
+
+    def test_previous_nineteen_entry_installed_release_without_first_party_license_is_auditable(self):
+        release = self.installed_pre_auth_release(OLD_NO_FIRST_PARTY_LICENSE)
+        assert len(FILES) - len(OLD_NO_FIRST_PARTY_LICENSE) == 19
+        (release / "local-qa.sha256").write_text(hashlib.sha256(
+            (release / "checksums.sha256").read_bytes()).hexdigest() + "\n")
+        (release / "local-qa.sha256").chmod(0o600)
+        self.installed_audit(release)
+        # A previous signed-aware layout remains maintainable, not a new input.
+        self.audit(release, expected=21)
+
+    def test_incoming_missing_first_party_license_with_forged_checksums_is_rejected(self):
+        name = "LICENSE"
+        (self.source / name).unlink()
+        (self.source / "checksums.sha256").write_text("".join(
+            hashlib.sha256((self.source / path).read_bytes()).hexdigest()
+            + "  " + path + "\n" for path in FILES if path != name))
+        self.audit(self.source, expected=21)
+
+    def test_installed_first_party_license_tamper_or_removal_is_rejected(self):
+        release = self.publish()
+        license_path = release / "LICENSE"
+        original = license_path.read_bytes()
+        license_path.write_bytes(b"incorrect license or tampering")
+        self.installed_audit(release, expected=21)
+        license_path.unlink()
+        self.installed_audit(release, expected=21)
+        license_path.write_bytes(original)
+        self.installed_audit(release)
 
     def test_installed_psl_tamper_and_missing_source_refused(self):
         release = self.publish()
@@ -436,12 +467,12 @@ class ReleasePayloadTests(unittest.TestCase):
         release = self.publish()
         former = tuple(name for name in FILES
                        if name not in ("server-connect-native-tun.service", "release-auth.py",
-                                       "THIRD-PARTY-LICENSES/golang.org-x-net-LICENSE", *OLD_NO_PSL, *OLD_NO_CHOCOLATE))
+                                       "THIRD-PARTY-LICENSES/golang.org-x-net-LICENSE", *OLD_NO_PSL, *OLD_NO_CHOCOLATE, *OLD_NO_FIRST_PARTY_LICENSE))
         assert len(former) == 12
         (release / "server-connect-native-tun.service").unlink()
         (release / "release-auth.py").unlink()
         (release / "THIRD-PARTY-LICENSES/golang.org-x-net-LICENSE").unlink()
-        for name in OLD_NO_PSL + OLD_NO_CHOCOLATE:
+        for name in OLD_NO_PSL + OLD_NO_CHOCOLATE + OLD_NO_FIRST_PARTY_LICENSE:
             (release / name).unlink()
         (release / "local-qa.sha256").unlink()
         lines = "".join(
