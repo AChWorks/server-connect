@@ -79,16 +79,23 @@ Smart Routing. The old service might remain in systemd's failed bookkeeping
 after SIGKILL even when the hook has restored Direct; status must show that
 failed unit, never infer healthy from the missing recovery receipt.
 
-The official-Core native candidate has passed isolated installed Debian
-12/13 systemd lifecycle QA, including scoped CLI Disconnect, Health/Recovery
-supervision, real pinned-Core packet witnesses and owned kernel restoration.
-Earlier single-VM tests demonstrated narrower SIGKILL/foreign-object
-cases; they are not a different production runtime. The native policy has
-also passed synthetic independent VLESS/Direct witnesses in rootless
-namespaces. These are **installed development-candidate proofs**, not
-authenticated real Iran/foreign-provider field paths, trustworthy Direct
-domain identity or production admission. The legacy experimental trial
-remains only until its distinct recovery consumers can safely be retired.
+The **current Debian 13 installed-host CI** exercises the official-Core
+native TUN lifecycle, supervised Health/Recovery, scoped Direct/VPN packet
+witnesses and owned kernel restoration. The **current Debian 12 installed-host
+CI** verifies Direct/Proxy Only and explicitly refuses the legacy guarded
+`smart-tun-trial-apply` without changing private/network state; its native
+TUN/guarded-rule positive scenarios are **`NOT_RUN`**, not accepted. This
+legacy trial refusal is **not** a categorical Debian 12 prohibition on
+`connect-smart`. Separate **historical Debian 12 and 13 Incus native** results
+are limited to their recorded source and installed QA artifacts; see the
+[acceptance evidence lanes](ACCEPTANCE.md#test-lanes-and-field-regression-lessons).
+Earlier single-VM tests demonstrated narrower SIGKILL/foreign-object cases;
+they are not a different production runtime. The native policy has also passed
+synthetic independent VLESS/Direct witnesses in rootless namespaces. These
+are **development-candidate proofs**, not authenticated real Iran/foreign-provider
+field paths, trustworthy Direct domain identity or production admission. The
+legacy experimental trial remains only until its distinct recovery consumers
+can safely be retired.
 
 Native port-53 traffic uses the same address policy as other transports: the
 Core first honors private/local destinations and validated operator IP/CIDR

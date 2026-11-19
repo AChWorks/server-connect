@@ -10,7 +10,7 @@ Server Connect is an offline-first Linux connectivity manager for servers, inclu
 | --- | --- | --- |
 | **Direct** | Original host networking, with no Server Connect-owned VPN routing or blocking rules | Implemented; source and installed-host QA |
 | **Proxy Only** | Opt-in local HTTP/SOCKS proxy for compatible applications | Implemented; real pinned-Core and installed-host QA |
-| **Smart Routing (TUN)** | Iranian, private and protected paths Direct; other public outbound traffic through the selected VPN, with validated operator exceptions | Native official-Core candidate tested on isolated Debian 12/13 guests; **general-host/production acceptance remains open** |
+| **Smart Routing (TUN)** | Iranian, private and protected paths Direct; other public outbound traffic through the selected VPN, with validated operator exceptions | Current installed-host QA: **Debian 13 native positives**; Debian 12 Direct/Proxy Only and native-trial refusal, **native positives NOT_RUN**. Historical Debian 12/13 native Incus results are revision-bound; field acceptance remains open. |
 
 For a real Smart Routing session, existing/new SSH administration, aaPanel and foreign-client website replies must remain reachable; VPN-required traffic must not escape Direct while routed or degraded. A verified Disconnect or guard-driven switch to Direct must remove precisely owned VPN-only rules while **preserving saved profiles and routing settings**. A healthy Core process, selected HTTPS probe or synthetic guest run alone does not prove all TCP/UDP/DNS/IPv4/IPv6 and provider paths.
 
@@ -36,6 +36,25 @@ server-connect --json import --file /private/profile-link.txt
 ```
 
 The importer supports a bounded set of compatible TCP/WebSocket/HTTPUpgrade links, not subscription downloads or arbitrary Xray transport options. Unsupported or insecure variants must be rejected rather than silently remapped. Native sing-box JSON import is available for other validated profile formats. Stored profiles are secrets.
+
+**Saved routing-rule list import** uses a local ASCII file with LF (not CRLF) line endings, up to 64 KiB. Each nonempty, non-comment line is `kind via value`: `cidr` with `direct` or `vpn`, or exact `domain` / apex-and-subdomains `suffix` with `vpn` only. For example, `/private/operator-rules.txt` can contain:
+
+```text
+# explicit exceptions; these do not authenticate Iranian geography
+cidr direct 1.1.1.0/24
+cidr vpn 9.9.9.9/32
+domain vpn example.org
+suffix vpn test.example.org
+```
+
+Import with a source ID, nonfuture source date and independently pinned SHA-256 of the **exact file bytes** (replace the example placeholders):
+
+```console
+sha256sum /private/operator-rules.txt
+server-connect --json smart-routing-rules import --file /private/operator-rules.txt --source operator-list --as-of YYYY-MM-DD --sha256 EXPECTED_LOWERCASE_SHA256
+```
+
+`--file -` accepts stdin. Updating an existing source also requires `--replaces-sha256 CURRENT_SOURCE_SHA256`; `smart-routing-rules remove-source --source operator-list --sha256 CURRENT_SOURCE_SHA256` removes it. Unsafe, overlapping or uncanonical rules are rejected; saving/importing rules **does not activate routing**. A matching local hash is not a publisher signature or trustworthy geographic evidence.
 
 For local **nonprivileged source validation**:
 
