@@ -44,6 +44,8 @@ PAYLOAD_FILES = (
     "THIRD-PARTY-LICENSES/publicsuffix-list.dat",
     "THIRD-PARTY-LICENSES/chocolate4u-LICENSE",
     "THIRD-PARTY-LICENSES/chocolate4u-geoip-ir.json",
+    "THIRD-PARTY-LICENSES/dbip-ATTRIBUTION.txt",
+    "THIRD-PARTY-LICENSES/dbip-iran-prefixes.json",
     "manifest.json",
 )
 
@@ -83,6 +85,29 @@ class PackageArgumentTests(unittest.TestCase):
         for name, digest in expected.items():
             with self.subTest(name=name):
                 self.assertEqual(hashlib.sha256(files[name].read_bytes()).hexdigest(), digest)
+
+    def test_pinned_dbip_source_and_attribution_are_preserved(self):
+        # The modified DB-IP Lite source is embedded in the manager. Its
+        # CC BY 4.0 credit/license/change notice must also ship with the bundle.
+        expected = {
+            ROOT / "internal/sc/data/iran-dbip-lite-2026-10.json":
+                "c1d00c21ff2df3814d4f04f28fb651401a6c0afb2c9ebad35b70a878b011dc6c",
+            ROOT / "third_party/dbip/ATTRIBUTION.txt":
+                "85d558b73fe325b0fc1c3c7794561199fcc9bc11a0f550c3b3cfce192026131c",
+        }
+        for path, digest in expected.items():
+            with self.subTest(path=path.name):
+                self.assertEqual(hashlib.sha256(path.read_bytes()).hexdigest(), digest)
+        data = json.loads((ROOT / "internal/sc/data/iran-dbip-lite-2026-10.json").read_text())
+        self.assertEqual(data["as_of"], "2026-10-01")
+        self.assertEqual(data["country"], "IR")
+        self.assertEqual(data["license"], "CC-BY-4.0")
+        self.assertEqual(data["source_sha256"],
+                         "097426b8ddae89157d444a59ac1847e873f7943c32d52becc4371c8b0273af80")
+        credit = (ROOT / "third_party/dbip/ATTRIBUTION.txt").read_text()
+        for fragment in ("https://db-ip.com", "https://creativecommons.org/licenses/by/4.0/legalcode",
+                         data["source"], data["source_sha256"], "IR", "CIDR"):
+            self.assertIn(fragment, credit)
 
     def invoke(self, *targets):
         with tempfile.TemporaryDirectory(prefix="sc-package-args-") as scratch:

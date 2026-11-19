@@ -1,0 +1,18 @@
+DB-IP Country Lite — third-party data attribution
+
+Data provider and credit: IP Geolocation by DB-IP (https://db-ip.com)
+Dataset: DB-IP IP to Country Lite, October 2026 (2026-10-01)
+Original download: https://download.db-ip.com/free/dbip-country-lite-2026-10.csv.gz
+Original archive SHA-256: 097426b8ddae89157d444a59ac1847e873f7943c32d52becc4371c8b0273af80
+License: Creative Commons Attribution 4.0 International (CC BY 4.0)
+License terms: https://creativecommons.org/licenses/by/4.0/legalcode
+
+Changes made by Server Connect: extracted rows with country code IR from the
+DB-IP Lite CSV and converted IP intervals to canonical IPv4/IPv6 CIDR prefixes.
+The modified, pinned IR-only dataset is distributed as dbip-iran-prefixes.json
+and also embedded in the Server Connect manager for offline use. The derived
+dataset is an estimate; DB-IP does not endorse Server Connect or certify the
+current geographic location or reachability of any IP address.
+
+Source and transformation details: docs/ACCEPTANCE.md in the Server Connect
+source repository (https://github.com/AChWorks/server-connect).

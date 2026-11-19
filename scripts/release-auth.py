@@ -40,6 +40,8 @@ PAYLOAD = (
     "THIRD-PARTY-LICENSES/publicsuffix-list.dat",
     "THIRD-PARTY-LICENSES/chocolate4u-LICENSE",
     "THIRD-PARTY-LICENSES/chocolate4u-geoip-ir.json",
+    "THIRD-PARTY-LICENSES/dbip-ATTRIBUTION.txt",
+    "THIRD-PARTY-LICENSES/dbip-iran-prefixes.json",
     "manifest.json",
 )
 

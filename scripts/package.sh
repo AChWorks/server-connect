@@ -64,6 +64,17 @@ printf '%s\n' \
 }
 cp internal/sc/data/iran-chocolate4u-2026-11.json "$work/server-connect/THIRD-PARTY-LICENSES/chocolate4u-geoip-ir.json"
 cp third_party/chocolate4u/LICENSE "$work/server-connect/THIRD-PARTY-LICENSES/chocolate4u-LICENSE"
+# The embedded DB-IP Lite country estimate is a CC BY 4.0 adaptation.
+# Keep its exact modified data and provider/license/change attribution in
+# the immutable offline artifact; this does not clear other release gates.
+printf '%s\n' \
+ 'c1d00c21ff2df3814d4f04f28fb651401a6c0afb2c9ebad35b70a878b011dc6c  internal/sc/data/iran-dbip-lite-2026-10.json' \
+ '85d558b73fe325b0fc1c3c7794561199fcc9bc11a0f550c3b3cfce192026131c  third_party/dbip/ATTRIBUTION.txt' \
+ | sha256sum --strict --quiet --check - || {
+ echo 'Pinned DB-IP Lite data or attribution changed' >&2;exit 1;
+}
+cp internal/sc/data/iran-dbip-lite-2026-10.json "$work/server-connect/THIRD-PARTY-LICENSES/dbip-iran-prefixes.json"
+cp third_party/dbip/ATTRIBUTION.txt "$work/server-connect/THIRD-PARTY-LICENSES/dbip-ATTRIBUTION.txt"
 
 cp bundle/install.sh bundle/server-connect.service bundle/server-connect-activation-recover.service bundle/server-connect-activation-recover.timer bundle/server-connect-smart-tun.service bundle/server-connect-native-tun.service bundle/server-connect-smart-health.service bundle/server-connect-smart-health.timer "$work/server-connect/"
 cp scripts/release-auth.py "$work/server-connect/release-auth.py"
@@ -75,7 +86,7 @@ printf '{"schema":1,"manager":"0.1.0-dev","core":"sing-box 1.14.3","core_archive
 (
  cd "$work/server-connect"
 
- sha256sum bin/server-connect bin/sing-box bin/libcronet.so server-connect.service server-connect-activation-recover.service server-connect-activation-recover.timer server-connect-smart-tun.service server-connect-native-tun.service server-connect-smart-health.service server-connect-smart-health.timer install.sh release-auth.py LICENSE THIRD-PARTY-LICENSES/sing-box-LICENSE THIRD-PARTY-LICENSES/golang.org-x-net-LICENSE THIRD-PARTY-LICENSES/publicsuffix-LICENSE THIRD-PARTY-LICENSES/publicsuffix-list.dat THIRD-PARTY-LICENSES/chocolate4u-LICENSE THIRD-PARTY-LICENSES/chocolate4u-geoip-ir.json manifest.json > checksums.sha256
+ sha256sum bin/server-connect bin/sing-box bin/libcronet.so server-connect.service server-connect-activation-recover.service server-connect-activation-recover.timer server-connect-smart-tun.service server-connect-native-tun.service server-connect-smart-health.service server-connect-smart-health.timer install.sh release-auth.py LICENSE THIRD-PARTY-LICENSES/sing-box-LICENSE THIRD-PARTY-LICENSES/golang.org-x-net-LICENSE THIRD-PARTY-LICENSES/publicsuffix-LICENSE THIRD-PARTY-LICENSES/publicsuffix-list.dat THIRD-PARTY-LICENSES/chocolate4u-LICENSE THIRD-PARTY-LICENSES/chocolate4u-geoip-ir.json THIRD-PARTY-LICENSES/dbip-ATTRIBUTION.txt THIRD-PARTY-LICENSES/dbip-iran-prefixes.json manifest.json > checksums.sha256
  sha256sum --quiet -c checksums.sha256
  ./bin/server-connect version --json
  ./bin/sing-box version | head -n 1

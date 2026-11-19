@@ -54,6 +54,8 @@ FILE_NAMES = [
     "server-connect/THIRD-PARTY-LICENSES/publicsuffix-list.dat",
     "server-connect/THIRD-PARTY-LICENSES/chocolate4u-LICENSE",
     "server-connect/THIRD-PARTY-LICENSES/chocolate4u-geoip-ir.json",
+    "server-connect/THIRD-PARTY-LICENSES/dbip-ATTRIBUTION.txt",
+    "server-connect/THIRD-PARTY-LICENSES/dbip-iran-prefixes.json",
 ]
 
 
@@ -110,6 +112,8 @@ def archive(path: Path, *, abnormal: str | None = None,
                 "missing_psl_source": "publicsuffix-list.dat",
                 "missing_chocolate_license": "chocolate4u-LICENSE",
                 "missing_chocolate_source": "chocolate4u-geoip-ir.json",
+                "missing_dbip_attribution": "dbip-ATTRIBUTION.txt",
+                "missing_dbip_source": "dbip-iran-prefixes.json",
             }.get(abnormal)
             if missing_unit and name.endswith("/" + missing_unit):
                 continue
@@ -306,6 +310,8 @@ class BootstrapSecurityTest(unittest.TestCase):
             ("missing_health_timer.tar.gz", "missing_health_timer"),
             ("missing_chocolate_license.tar.gz", "missing_chocolate_license"),
             ("missing_chocolate_source.tar.gz", "missing_chocolate_source"),
+            ("missing_dbip_attribution.tar.gz", "missing_dbip_attribution"),
+            ("missing_dbip_source.tar.gz", "missing_dbip_source"),
             ("duplicate.tar.gz", "duplicate"),
             ("traversal.tar.gz", "traversal"),
             ("symlink.tar.gz", "symlink"),
@@ -467,7 +473,8 @@ class BootstrapSecurityTest(unittest.TestCase):
             "missing_project_license.tar.gz", "missing_recovery_timer.tar.gz", "missing_native_unit.tar.gz",
             "missing_health_service.tar.gz",
             "missing_health_timer.tar.gz", "missing_chocolate_license.tar.gz",
-            "missing_chocolate_source.tar.gz", "duplicate.tar.gz", "traversal.tar.gz", "symlink.tar.gz",
+            "missing_chocolate_source.tar.gz", "missing_dbip_attribution.tar.gz",
+            "missing_dbip_source.tar.gz", "duplicate.tar.gz", "traversal.tar.gz", "symlink.tar.gz",
             "hardlink.tar.gz", "expanded.tar.gz", "members.tar.gz",
             "pax_metadata.tar.gz", "compressed_oversized.tar.gz",
         ):
@@ -827,7 +834,9 @@ class SignedReleaseTest(unittest.TestCase):
             "THIRD-PARTY-LICENSES/publicsuffix-LICENSE",
             "THIRD-PARTY-LICENSES/publicsuffix-list.dat",
             "THIRD-PARTY-LICENSES/chocolate4u-LICENSE",
-            "THIRD-PARTY-LICENSES/chocolate4u-geoip-ir.json", "manifest.json",
+            "THIRD-PARTY-LICENSES/chocolate4u-geoip-ir.json",
+            "THIRD-PARTY-LICENSES/dbip-ATTRIBUTION.txt",
+            "THIRD-PARTY-LICENSES/dbip-iran-prefixes.json", "manifest.json",
         )
         self.payload["server-connect/manifest.json"] = json.dumps(
             manifest_override or self.manifest, separators=(",", ":"),
@@ -1016,6 +1025,16 @@ class SignedReleaseTest(unittest.TestCase):
 
     def test_signed_archive_missing_attributed_country_source_or_license_is_refused(self):
         for missing in ("missing_chocolate_license", "missing_chocolate_source"):
+            with self.subTest(missing=missing):
+                self.fixture(abnormal=missing)
+                for online in (False, True):
+                    result = self.run_bootstrap(online=online)
+                    self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                    self.assertIn("Archive preflight failed", result.stderr)
+                    self.assertFalse(self.marker.exists())
+
+    def test_signed_archive_missing_dbip_attribution_or_modified_data_is_refused(self):
+        for missing in ("missing_dbip_attribution", "missing_dbip_source"):
             with self.subTest(missing=missing):
                 self.fixture(abnormal=missing)
                 for online in (False, True):
