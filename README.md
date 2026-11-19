@@ -27,7 +27,7 @@ server-connect --json smart-routing-data
 server-connect --json smart-routing-rules list
 ```
 
-`mode-overview` reports desired versus observed state; `native-status` exposes the bounded native guard/health observations. These commands are **diagnostics**, not proofs of field-safe activation. Status inspection may initialize private manager state/locks; it does not intentionally change host routes. The menu keeps ordinary Connection, Profiles and Routing Rules actions up front; advanced legacy QA commands are separate. Use the CLI's `help` and the installed binary's actual output for current flags and status meanings.
+`mode-overview` reports desired versus observed state; `native-status` exposes the bounded native guard/health observations. These commands are **diagnostics**, not proofs of field-safe activation. Status inspection may initialize private manager state/locks; it does not intentionally change host routes. The menu header distinguishes requested **Direct**, **Proxy Only** or **Smart Routing** from observed state, including native starting/degraded/synthetic-QA health and uncertain recovery; a running native Core is not independent VPN-path proof and failed recovery must not be labeled verified Direct/off. Menu option **7 Disconnect / Return to Direct** calls the same guarded `disconnect` command as the CLI for Proxy Only and native Smart Routing. Ordinary Connection, Profiles and Routing Rules actions stay up front; advanced legacy QA commands are separate. Use the CLI's `help` and the installed binary's actual output for current flags and status meanings.
 
 For one supported `vless://` profile link, import from a **private file or stdin** instead of placing bearer credentials in shell arguments or logs:
 

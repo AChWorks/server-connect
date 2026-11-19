@@ -737,7 +737,7 @@ func run(j bool, m *sc.Manager, args []string) int {
 	}
 }
 
-const helpText = `Server Connect — minimal offline-first Proxy Only manager
+const helpText = `Server Connect — offline-first Linux connectivity manager
 
 Usage:
   server-connect [--json] [--state-dir PATH] [--core PATH] COMMAND
@@ -765,7 +765,7 @@ Commands:
                               no core execution, route inspection or activation
                              Offline saved settings ONLY, no TUN activation
                               Local service state is not foreign VPN path proof;
-                              Smart Routing remains disposable-guest-only
+                              Native Smart Routing remains candidate-only; not admitted for general hosts
   import [--file FILE|-]      Import one VLESS TCP/WS/HTTPUpgrade URI or
                              supported sing-box outbound/config (private file/stdin)
   validate [--file FILE|-]    Validate against pinned sing-box without saving
