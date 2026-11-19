@@ -30,14 +30,18 @@ directly attached DNS peers into the VPN and broke them during provider outage.
 With native DNS interception disabled, the public DNS request still enters TUN
 and is redirected by route rules through the selected VPN resolver, while the
 on-link DNS peer remains Direct even when the VPN provider is down.
-This is not evidence for untested TCP DNS, other DNS transports, or IPv6 DNS.
-Provider shutdown did not otherwise fall back to Direct.
-Graceful Core stop restored exact private-namespace routes, rules and nftables.
-**Hard SIGKILL leaves native sing-box route/RPDB/nftables state behind**;
-a plain Core restart and graceful stop may still retain the earlier orphaned
-rule/route. This is a measured blocker, not permission for the Manager to
-guess at third-party kernel ownership. A narrowly independent crash/recovery
-guard and reliable resource authority still require design and acceptance.
+That early namespace run alone did not test TCP DNS, other DNS transports
+or IPv6 DNS; subsequent native DNS-policy guest tests cover specific TCP and
+IPv6 wire cases, not arbitrary field DNS. Provider shutdown did not otherwise
+fall back to Direct. Graceful Core stop restored its namespace-owned kernel
+state. A **physical native Core SIGKILL** exposed orphaned fixed-slot RPDB
+rules even after the Core removed its randomized redirect and TUN identities.
+The integrated native recovery now has a narrow current-boot, consumed
+Core-start-claim exception to clean only independently attested orphan
+rule bodies while rejecting alias/foreign references and preserving unknown
+ownership. See [the current guard rules](SAFETY-RECOVERY.md#native-inbound-reply-guard-issue-3-development-candidate).
+That source/isolated repair is **not yet physical crash-recovery acceptance
+for the current integrated candidate**; never flush unrelated host rules.
 
 ### Native Smart Routing candidate lifecycle (not general-host admitted)
 
@@ -75,14 +79,23 @@ Smart Routing. The old service might remain in systemd's failed bookkeeping
 after SIGKILL even when the hook has restored Direct; status must show that
 failed unit, never infer healthy from the missing recovery receipt.
 
-A disposable Debian 13 VM has exercised actual official sing-box 1.14.3
-systemd service, normal CLI Disconnect, SIGKILL-triggered ExecStopPost,
-exact IPv4/IPv6 route/rule/nft baseline restoration and foreign-route
-collision refusal followed by manual recovery. The actual compiled policy
-also passed synthetic independent VLESS/Direct witnesses in a rootless
-namespace. This is candidate evidence, not real Iran/foreign VPN provider
-acceptance, installed artifact parity, domain Direct or runtime health proof.
-The old experimental trial remains until its replacement is accepted.
+The **current Debian 13 installed-host CI** exercises the official-Core
+native TUN lifecycle, supervised Health/Recovery, scoped Direct/VPN packet
+witnesses and owned kernel restoration. The **current Debian 12 installed-host
+CI** verifies Direct/Proxy Only and explicitly refuses the legacy guarded
+`smart-tun-trial-apply` without changing private/network state; its native
+TUN/guarded-rule positive scenarios are **`NOT_RUN`**, not accepted. This
+legacy trial refusal is **not** a categorical Debian 12 prohibition on
+`connect-smart`. Separate **historical Debian 12 and 13 Incus native** results
+are limited to their recorded source and installed QA artifacts; see the
+[acceptance evidence lanes](ACCEPTANCE.md#test-lanes-and-field-regression-lessons).
+Earlier single-VM tests demonstrated narrower SIGKILL/foreign-object cases;
+they are not a different production runtime. The native policy has also passed
+synthetic independent VLESS/Direct witnesses in rootless namespaces. These
+are **development-candidate proofs**, not authenticated real Iran/foreign-provider
+field paths, trustworthy Direct domain identity or production admission. The
+legacy experimental trial remains only until its distinct recovery consumers
+can safely be retired.
 
 Native port-53 traffic uses the same address policy as other transports: the
 Core first honors private/local destinations and validated operator IP/CIDR
