@@ -35,7 +35,9 @@ PAYLOAD = (
     "server-connect-native-tun.service",
     "server-connect-smart-health.service", "server-connect-smart-health.timer",
     "install.sh", "release-auth.py", "THIRD-PARTY-LICENSES/sing-box-LICENSE",
-    "THIRD-PARTY-LICENSES/golang.org-x-net-LICENSE", "manifest.json",
+    "THIRD-PARTY-LICENSES/golang.org-x-net-LICENSE",
+    "THIRD-PARTY-LICENSES/publicsuffix-LICENSE",
+    "THIRD-PARTY-LICENSES/publicsuffix-list.dat", "manifest.json",
 )
 
 

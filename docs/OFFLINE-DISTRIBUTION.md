@@ -16,7 +16,7 @@ An official source, an Iranian mirror and an offline copy differ only in **acqui
 
 A mirror is an **untrusted byte host, not a signing authority**: even valid HTTPS or a checksum delivered alongside the archive cannot independently establish publisher identity. Verify a trusted publisher key/signed digest obtained through an independent channel **before privileged code executes**. Pin version/artifact/architecture; validate TLS, redirects, archive format and manifest. Never publish a `curl | sh` command that executes an unverified arbitrary mirror script.
 
-**Current truth:** the source now includes a shared signed-acquisition verifier, a signed-aware installer and ephemeral LOCAL QA signing tests. The QA bundle carries the pinned upstream sing-box license and the manager's vendored `golang.org/x/net` BSD-3-Clause notice, but **no publisher-approved public key, product license, complete third-party redistribution clearance, real published official or Iranian mirror, or accepted support matrix**. Signature verification against an ephemeral QA key is not publisher authentication. Do not advertise these examples as public installation commands before the remaining release gates pass.
+**Current truth:** the source now includes a shared signed-acquisition verifier, a signed-aware installer and ephemeral LOCAL QA signing tests. The QA bundle carries the pinned upstream sing-box license and the manager's vendored `golang.org/x/net` BSD-3-Clause notice. Because that Go dependency embeds Public Suffix List (PSL) data, it also carries the exact MPL-2.0 source and license from [publicsuffix/list revision `63cbc63d470d7b52c35266aa96c4c98c96ec499c`](https://github.com/publicsuffix/list/tree/63cbc63d470d7b52c35266aa96c4c98c96ec499c), matching `vendor/golang.org/x/net/publicsuffix/table.go`. The original source bytes are stored at `third_party/publicsuffix/` and included as `THIRD-PARTY-LICENSES/publicsuffix-list.dat` plus `publicsuffix-LICENSE`; the packager verifies both pinned SHA-256 digests. These are source/notice preservation steps, **not a complete legal determination**. There is still **no publisher-approved public key, chosen product license, complete third-party (including sing-box GPL and PSL data) redistribution compliance clearance, actual official/Iranian mirror, or accepted support matrix**. Signature verification against an ephemeral QA key is not publisher authentication. Do not advertise these examples as public installation commands before the remaining release gates pass.
 
 ## Authenticated acquisition interface
 
@@ -98,7 +98,10 @@ explicit ephemeral private key, exact archive/metadata paths and version/target
 pins; it generates no key, never replaces an existing signature and grants no
 redistribution permission. Production signing identity, approved product license,
 third-party redistribution compliance and immutable publication remain blocked.
-No private key belongs in source, CI output or release assets.
+No private key belongs in source, CI output or release assets. Preserving PSL
+source and notices does not select the product license or remove the Owner's
+requirement to determine and approve actual third-party distribution terms,
+required corresponding sources, notices and permissions before publication.
 
 A signed installation persists `authentication.json` as root-owned mode 0600
 inside the exact immutable installed release. It contains the signed identity,
@@ -133,7 +136,7 @@ trust recovery remain separate Owner-controlled procedures.
 New unsigned QA installations instead retain an explicit `local-qa.sha256`
 marker bound to the full checksum manifest. They still require `--local-qa`;
 absence of a signed receipt never authorizes unsigned fallback. Previous
-12-entry development releases retain their earlier verified rollback/uninstall
+12/13/14/15-entry development releases retain their earlier verified rollback/uninstall
 format and are never relabelled as publisher-authenticated.
 
 Unsigned development use is deliberately explicit:

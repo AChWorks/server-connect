@@ -58,6 +58,7 @@ docker exec "$container" /bin/sh -c '
       server-connect-native-tun.service \
       server-connect-smart-health.service server-connect-smart-health.timer install.sh release-auth.py \
    THIRD-PARTY-LICENSES/sing-box-LICENSE THIRD-PARTY-LICENSES/golang.org-x-net-LICENSE \
+   THIRD-PARTY-LICENSES/publicsuffix-LICENSE THIRD-PARTY-LICENSES/publicsuffix-list.dat \
    manifest.json > checksums.sha256
  sha256sum --quiet --check checksums.sha256
 '

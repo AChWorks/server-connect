@@ -39,6 +39,20 @@ cp "$up/LICENSE" "$work/server-connect/THIRD-PARTY-LICENSES/sing-box-LICENSE"
 # The manager includes golang.org/x/net/publicsuffix in its compiled binary.
 # Preserve the vendored BSD-3-Clause notice in the distributable payload.
 cp vendor/golang.org/x/net/LICENSE "$work/server-connect/THIRD-PARTY-LICENSES/golang.org-x-net-LICENSE"
+# The compiled x/net/publicsuffix tables embed an MPL-2.0 Public Suffix List
+# snapshot. Preserve the exact upstream source and license alongside the BSD
+# Go-code notice; source provenance does not itself authorize publication.
+grep -Fq '63cbc63d470d7b52c35266aa96c4c98c96ec499c' vendor/golang.org/x/net/publicsuffix/table.go || {
+ echo 'Vendored publicsuffix revision differs from pinned source' >&2; exit 1;
+}
+printf '%s\n' \
+ '66a3107d5ad6a058aab753eaac2047ccb2ed0e39465dd0fe5844da3e300d5172  third_party/publicsuffix/LICENSE' \
+ '4dd388d5006a37c0748f17e1088ecd05c821da88eff36963bcc36297d7dea96e  third_party/publicsuffix/public_suffix_list.dat' \
+ | sha256sum --strict --quiet --check - || {
+ echo 'Pinned Public Suffix List source/license changed' >&2; exit 1;
+}
+cp third_party/publicsuffix/LICENSE "$work/server-connect/THIRD-PARTY-LICENSES/publicsuffix-LICENSE"
+cp third_party/publicsuffix/public_suffix_list.dat "$work/server-connect/THIRD-PARTY-LICENSES/publicsuffix-list.dat"
 
 cp bundle/install.sh bundle/server-connect.service bundle/server-connect-activation-recover.service bundle/server-connect-activation-recover.timer bundle/server-connect-smart-tun.service bundle/server-connect-native-tun.service bundle/server-connect-smart-health.service bundle/server-connect-smart-health.timer "$work/server-connect/"
 cp scripts/release-auth.py "$work/server-connect/release-auth.py"
@@ -49,7 +63,7 @@ printf '{"schema":1,"manager":"0.1.0-dev","core":"sing-box 1.14.3","core_archive
 (
  cd "$work/server-connect"
 
- sha256sum bin/server-connect bin/sing-box bin/libcronet.so server-connect.service server-connect-activation-recover.service server-connect-activation-recover.timer server-connect-smart-tun.service server-connect-native-tun.service server-connect-smart-health.service server-connect-smart-health.timer install.sh release-auth.py THIRD-PARTY-LICENSES/sing-box-LICENSE THIRD-PARTY-LICENSES/golang.org-x-net-LICENSE manifest.json > checksums.sha256
+ sha256sum bin/server-connect bin/sing-box bin/libcronet.so server-connect.service server-connect-activation-recover.service server-connect-activation-recover.timer server-connect-smart-tun.service server-connect-native-tun.service server-connect-smart-health.service server-connect-smart-health.timer install.sh release-auth.py THIRD-PARTY-LICENSES/sing-box-LICENSE THIRD-PARTY-LICENSES/golang.org-x-net-LICENSE THIRD-PARTY-LICENSES/publicsuffix-LICENSE THIRD-PARTY-LICENSES/publicsuffix-list.dat manifest.json > checksums.sha256
  sha256sum --quiet -c checksums.sha256
  ./bin/server-connect version --json
  ./bin/sing-box version | head -n 1

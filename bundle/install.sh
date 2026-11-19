@@ -60,9 +60,9 @@ server-connect-smart-health.service
 server-connect-smart-health.timer
 install.sh
 RELEASE_FILES
- # Historic development releases have 12/13 entries without the auth helper;
- # previous signed-aware releases have 14 entries without the x/net notice.
- # New incoming releases require both the helper and vendored license notice.
+ # Preserve exact previously installed 12/13/14/15-entry QA layouts for
+ # verified update, rollback and uninstall. Newly staged releases include the
+ # MPL-covered PSL source and its license; a partial pair is never admitted.
  if [ -e "$1/release-auth.py" ] || [ -L "$1/release-auth.py" ]; then
   printf '%s\n' release-auth.py
  fi
@@ -70,6 +70,13 @@ RELEASE_FILES
  if [ -e "$1/THIRD-PARTY-LICENSES/golang.org-x-net-LICENSE" ] ||
     [ -L "$1/THIRD-PARTY-LICENSES/golang.org-x-net-LICENSE" ]; then
   printf '%s\n' THIRD-PARTY-LICENSES/golang.org-x-net-LICENSE
+ fi
+ if [ -e "$1/THIRD-PARTY-LICENSES/publicsuffix-LICENSE" ] ||
+    [ -L "$1/THIRD-PARTY-LICENSES/publicsuffix-LICENSE" ] ||
+    [ -e "$1/THIRD-PARTY-LICENSES/publicsuffix-list.dat" ] ||
+    [ -L "$1/THIRD-PARTY-LICENSES/publicsuffix-list.dat" ]; then
+  printf '%s\n' THIRD-PARTY-LICENSES/publicsuffix-LICENSE
+  printf '%s\n' THIRD-PARTY-LICENSES/publicsuffix-list.dat
  fi
  printf '%s\n' manifest.json
 }
@@ -83,13 +90,17 @@ verify_release_payload() (
 
  check_root_file "$root/checksums.sha256"
  # New archive inputs always have a complete signed-aware package layout.
- # Installed prior 12/13/14-entry releases retain their exact verified
- # layouts for update/uninstall; no new incoming archive can omit the notice.
+ # An installed 12/13/14/15-entry release can be verified under its old
+ # immutable manifest; incoming packages must contain both PSL materials.
  if [ "$prior_installed" = no ]; then
   [ -f "$root/release-auth.py" ] && [ ! -L "$root/release-auth.py" ] ||
    die 'incoming release must contain publisher authentication helper'
   check_root_file "$root/THIRD-PARTY-LICENSES/golang.org-x-net-LICENSE" ||
    die 'incoming release must contain x/net third-party license notice'
+  check_root_file "$root/THIRD-PARTY-LICENSES/publicsuffix-LICENSE" ||
+   die 'incoming release must contain Public Suffix List license'
+  check_root_file "$root/THIRD-PARTY-LICENSES/publicsuffix-list.dat" ||
+   die 'incoming release must contain Public Suffix List source'
  fi
  expected=$(release_payload_files "$root")
  if [ "$prior_installed" = yes ] && [ "$(wc -l < "$root/checksums.sha256")" -eq 12 ]; then
