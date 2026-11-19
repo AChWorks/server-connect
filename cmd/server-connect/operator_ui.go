@@ -70,10 +70,13 @@ func (p operatorPresenter) menu(m *sc.Manager, advanced bool) {
 		fmt.Fprintln(p.out, "  1 Status")
 		fmt.Fprintln(p.out, " 18 Mode Overview")
 		fmt.Fprintln(p.out, "  5 Connect (Proxy Only)")
+		fmt.Fprintln(p.out, " 21 Smart Routing (guarded QA)")
 		fmt.Fprintln(p.out, "  7 Disconnect / Return to Direct")
+		fmt.Fprintln(p.out, " 22 Native Guard / Recovery Status")
 	} else {
 		fmt.Fprintln(p.out, "  1 Status         18 Mode Overview")
-		fmt.Fprintln(p.out, "  5 Connect (Proxy Only)    7 Disconnect / Return to Direct")
+		fmt.Fprintln(p.out, "  5 Connect (Proxy Only)       21 Smart Routing (guarded QA)")
+		fmt.Fprintln(p.out, "  7 Disconnect / Return to Direct   22 Native Guard / Recovery Status")
 	}
 	p.section("Profiles and policy")
 	if p.width < 66 {

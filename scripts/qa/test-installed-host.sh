@@ -659,6 +659,46 @@ PYMODEMENU
 assert_network_unchanged installed-mode-overview "$offline_before"
 verify_host_services installed-mode-overview
 echo 'INSTALLED_OPERATOR_MODE_OVERVIEW=PASS (inactive service, honest Direct unknown, non-admitted TUN, CLI/menu parity)'
+# Real installed terminal menu: the new native entry must not start anything
+# until the final explicit confirmation. With no selected profile, even an
+# intentionally confirmed request must be refused by the same guarded CLI.
+# This is safe on both Debian lanes and never claims positive host TUN proof.
+printf '21\ncancel\n22\n0\n' |
+  docker exec -i "$container" /usr/local/bin/server-connect menu \
+  >"$scratch/installed-native-menu-cancel.log" 2>"$scratch/installed-native-menu-cancel.err"
+python3 - "$scratch/installed-native-menu-cancel.log" <<'PYNATIVECANCEL'
+from pathlib import Path
+import sys
+out=Path(sys.argv[1]).read_text()
+assert "21 Smart Routing (guarded QA)" in out
+assert "22 Native Guard / Recovery Status" in out
+assert "Canceled: no action started" in out
+assert "Running native-status" in out
+assert "Core started under native guards" not in out
+PYNATIVECANCEL
+printf '21\neth0\n1\nCONNECT-SMART\n0\n' |
+  docker exec -i "$container" /usr/local/bin/server-connect menu \
+  >"$scratch/installed-native-menu-refusal.log" 2>"$scratch/installed-native-menu-refusal.err"
+python3 - "$scratch/installed-native-menu-refusal.log" "$scratch/installed-native-menu-refusal.err" <<'PYNATIVEREFUSAL'
+from pathlib import Path
+import sys
+out=Path(sys.argv[1]).read_text()
+err=Path(sys.argv[2]).read_text()
+assert "NOT approved for general-host/production use" in out
+assert "Not completed:" in out
+assert "Core started under native guards" not in out
+assert "Error [" in err and "State:" in err and "Next:" in err
+PYNATIVEREFUSAL
+docker exec "$container" /usr/local/bin/server-connect --json status |
+  python3 -c '
+import json,sys
+r=json.load(sys.stdin)
+assert r["ok"] and r["data"]["desired"]=="direct" and r["data"]["observed"]=="inactive"
+assert not r["data"].get("selected")
+'
+assert_network_unchanged installed-native-menu-refusal "$offline_before"
+verify_host_services installed-native-menu-refusal
+echo 'INSTALLED_NATIVE_MENU_SAFE_CANCEL_AND_SHARED_CLI_REFUSAL=PASS (Debian installed host, no TUN activation)'
 # A separately named, never-applied private rule store proves real installed
 # CLI/menu behavior without sharing experimental TUN journals or altering any
 # host policy. Both Debian 12 and 13 must keep SSH/HTTP and routes unchanged.
