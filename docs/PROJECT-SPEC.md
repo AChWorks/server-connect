@@ -2,6 +2,10 @@
 
 **Purpose:** This is the canonical, long-lived product definition. It states **what Server Connect must achieve and why**, its boundaries, and the direction of development. Implementation design, safety procedures, packaging details, acceptance tests, current tasks, and evidence belong to their respective sources linked below.
 
+## License
+
+Original, first-party Server Connect source is licensed under [MPL-2.0](../LICENSE), consistent with AChWorks/achrix. External binaries, libraries and country data retain their own licenses and attribution; see [Distribution](OFFLINE-DISTRIBUTION.md) for the separately gated release and redistribution obligations.
+
 ## Vision
 
 Server Connect is a lightweight, offline-first Linux connectivity manager for servers, particularly Iran-hosted aaPanel, WordPress, and general hosting systems. It should make a compatible outbound VPN usable **as simply as enabling TUN in a desktop VPN client**, without configuring each application, while keeping administrator access, hosted services, and domestic networking safe.

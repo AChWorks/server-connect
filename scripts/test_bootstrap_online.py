@@ -35,6 +35,7 @@ INSTALLER = ROOT / "bundle" / "install.sh"
 FILE_NAMES = [
     "server-connect/install.sh",
     "server-connect/release-auth.py",
+    "server-connect/LICENSE",
     "server-connect/server-connect.service",
     "server-connect/server-connect-activation-recover.service",
     "server-connect/server-connect-activation-recover.timer",
@@ -100,6 +101,7 @@ def archive(path: Path, *, abnormal: str | None = None,
             output.addfile(entry)
         for name in FILE_NAMES:
             missing_unit = {
+                "missing_project_license": "LICENSE",
                 "missing_recovery_timer": "server-connect-activation-recover.timer",
                 "missing_native_unit": "server-connect-native-tun.service",
                 "missing_health_service": "server-connect-smart-health.service",
@@ -297,6 +299,7 @@ class BootstrapSecurityTest(unittest.TestCase):
         cls.digests = {}
         for name, abnormal in [
             ("valid.tar.gz", None),
+            ("missing_project_license.tar.gz", "missing_project_license"),
             ("missing_recovery_timer.tar.gz", "missing_recovery_timer"),
             ("missing_native_unit.tar.gz", "missing_native_unit"),
             ("missing_health_service.tar.gz", "missing_health_service"),
@@ -461,7 +464,7 @@ class BootstrapSecurityTest(unittest.TestCase):
 
     def test_rejects_unsafe_members_and_parser_resource_abuse(self):
         for filename in (
-            "missing_recovery_timer.tar.gz", "missing_native_unit.tar.gz",
+            "missing_project_license.tar.gz", "missing_recovery_timer.tar.gz", "missing_native_unit.tar.gz",
             "missing_health_service.tar.gz",
             "missing_health_timer.tar.gz", "missing_chocolate_license.tar.gz",
             "missing_chocolate_source.tar.gz", "duplicate.tar.gz", "traversal.tar.gz", "symlink.tar.gz",
@@ -819,7 +822,7 @@ class SignedReleaseTest(unittest.TestCase):
             "server-connect-activation-recover.timer", "server-connect-smart-tun.service",
             "server-connect-native-tun.service",
             "server-connect-smart-health.service", "server-connect-smart-health.timer",
-            "install.sh", "release-auth.py", "THIRD-PARTY-LICENSES/sing-box-LICENSE",
+            "install.sh", "release-auth.py", "LICENSE", "THIRD-PARTY-LICENSES/sing-box-LICENSE",
             "THIRD-PARTY-LICENSES/golang.org-x-net-LICENSE",
             "THIRD-PARTY-LICENSES/publicsuffix-LICENSE",
             "THIRD-PARTY-LICENSES/publicsuffix-list.dat",
@@ -1002,6 +1005,14 @@ class SignedReleaseTest(unittest.TestCase):
             with self.subTest(field=field):
                 self.fixture(manifest_override=dict(self.manifest, **{field: value}))
                 self.assertNotEqual(self.run_bootstrap().returncode, 0)
+
+    def test_signed_archive_missing_first_party_license_is_refused(self):
+        self.fixture(abnormal="missing_project_license")
+        for online in (False, True):
+            result = self.run_bootstrap(online=online)
+            self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("Archive preflight failed", result.stderr)
+            self.assertFalse(self.marker.exists())
 
     def test_signed_archive_missing_attributed_country_source_or_license_is_refused(self):
         for missing in ("missing_chocolate_license", "missing_chocolate_source"):

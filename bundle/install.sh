@@ -66,6 +66,11 @@ RELEASE_FILES
  if [ -e "$1/release-auth.py" ] || [ -L "$1/release-auth.py" ]; then
   printf '%s\n' release-auth.py
  fi
+ # Older verified installed releases predate the first-party MPL notice;
+ # newer incoming releases require it in their complete payload.
+ if [ -e "$1/LICENSE" ] || [ -L "$1/LICENSE" ]; then
+  printf '%s\n' LICENSE
+ fi
  printf '%s\n' THIRD-PARTY-LICENSES/sing-box-LICENSE
  if [ -e "$1/THIRD-PARTY-LICENSES/golang.org-x-net-LICENSE" ] ||
     [ -L "$1/THIRD-PARTY-LICENSES/golang.org-x-net-LICENSE" ]; then
@@ -105,6 +110,8 @@ verify_release_payload() (
  if [ "$prior_installed" = no ]; then
   [ -f "$root/release-auth.py" ] && [ ! -L "$root/release-auth.py" ] ||
    die 'incoming release must contain publisher authentication helper'
+  check_root_file "$root/LICENSE" ||
+   die 'incoming release must contain first-party MPL-2.0 license'
   check_root_file "$root/THIRD-PARTY-LICENSES/golang.org-x-net-LICENSE" ||
    die 'incoming release must contain x/net third-party license notice'
   check_root_file "$root/THIRD-PARTY-LICENSES/publicsuffix-LICENSE" ||
