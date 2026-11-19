@@ -51,6 +51,8 @@ FILE_NAMES = [
     "server-connect/THIRD-PARTY-LICENSES/golang.org-x-net-LICENSE",
     "server-connect/THIRD-PARTY-LICENSES/publicsuffix-LICENSE",
     "server-connect/THIRD-PARTY-LICENSES/publicsuffix-list.dat",
+    "server-connect/THIRD-PARTY-LICENSES/chocolate4u-LICENSE",
+    "server-connect/THIRD-PARTY-LICENSES/chocolate4u-geoip-ir.json",
 ]
 
 
@@ -104,6 +106,8 @@ def archive(path: Path, *, abnormal: str | None = None,
                 "missing_health_timer": "server-connect-smart-health.timer",
                 "missing_psl_license": "publicsuffix-LICENSE",
                 "missing_psl_source": "publicsuffix-list.dat",
+                "missing_chocolate_license": "chocolate4u-LICENSE",
+                "missing_chocolate_source": "chocolate4u-geoip-ir.json",
             }.get(abnormal)
             if missing_unit and name.endswith("/" + missing_unit):
                 continue
@@ -297,6 +301,8 @@ class BootstrapSecurityTest(unittest.TestCase):
             ("missing_native_unit.tar.gz", "missing_native_unit"),
             ("missing_health_service.tar.gz", "missing_health_service"),
             ("missing_health_timer.tar.gz", "missing_health_timer"),
+            ("missing_chocolate_license.tar.gz", "missing_chocolate_license"),
+            ("missing_chocolate_source.tar.gz", "missing_chocolate_source"),
             ("duplicate.tar.gz", "duplicate"),
             ("traversal.tar.gz", "traversal"),
             ("symlink.tar.gz", "symlink"),
@@ -457,7 +463,8 @@ class BootstrapSecurityTest(unittest.TestCase):
         for filename in (
             "missing_recovery_timer.tar.gz", "missing_native_unit.tar.gz",
             "missing_health_service.tar.gz",
-            "missing_health_timer.tar.gz", "duplicate.tar.gz", "traversal.tar.gz", "symlink.tar.gz",
+            "missing_health_timer.tar.gz", "missing_chocolate_license.tar.gz",
+            "missing_chocolate_source.tar.gz", "duplicate.tar.gz", "traversal.tar.gz", "symlink.tar.gz",
             "hardlink.tar.gz", "expanded.tar.gz", "members.tar.gz",
             "pax_metadata.tar.gz", "compressed_oversized.tar.gz",
         ):
@@ -815,7 +822,9 @@ class SignedReleaseTest(unittest.TestCase):
             "install.sh", "release-auth.py", "THIRD-PARTY-LICENSES/sing-box-LICENSE",
             "THIRD-PARTY-LICENSES/golang.org-x-net-LICENSE",
             "THIRD-PARTY-LICENSES/publicsuffix-LICENSE",
-            "THIRD-PARTY-LICENSES/publicsuffix-list.dat", "manifest.json",
+            "THIRD-PARTY-LICENSES/publicsuffix-list.dat",
+            "THIRD-PARTY-LICENSES/chocolate4u-LICENSE",
+            "THIRD-PARTY-LICENSES/chocolate4u-geoip-ir.json", "manifest.json",
         )
         self.payload["server-connect/manifest.json"] = json.dumps(
             manifest_override or self.manifest, separators=(",", ":"),
@@ -993,6 +1002,16 @@ class SignedReleaseTest(unittest.TestCase):
             with self.subTest(field=field):
                 self.fixture(manifest_override=dict(self.manifest, **{field: value}))
                 self.assertNotEqual(self.run_bootstrap().returncode, 0)
+
+    def test_signed_archive_missing_attributed_country_source_or_license_is_refused(self):
+        for missing in ("missing_chocolate_license", "missing_chocolate_source"):
+            with self.subTest(missing=missing):
+                self.fixture(abnormal=missing)
+                for online in (False, True):
+                    result = self.run_bootstrap(online=online)
+                    self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                    self.assertIn("Archive preflight failed", result.stderr)
+                    self.assertFalse(self.marker.exists())
 
     def test_signed_archive_missing_psl_materials_refused_before_execution(self):
         # An otherwise valid signed archive cannot waive either the MPL-2.0
