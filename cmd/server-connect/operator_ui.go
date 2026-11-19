@@ -64,16 +64,16 @@ func (p operatorPresenter) menu(m *sc.Manager, advanced bool) {
 	} else {
 		fmt.Fprintln(p.out, "  "+state)
 	}
-	fmt.Fprintln(p.out, "  Smart Routing: "+p.tint("NOT AVAILABLE FOR GENERAL HOSTS (native candidate testing)", "1;33"))
+	fmt.Fprintln(p.out, "  Smart Routing: "+p.tint("NOT RELEASE-READY for general hosts (native candidate testing)", "1;33"))
 	p.section("Connection")
 	if p.width < 66 {
 		fmt.Fprintln(p.out, "  1 Status")
 		fmt.Fprintln(p.out, " 18 Mode Overview")
 		fmt.Fprintln(p.out, "  5 Connect (Proxy Only)")
-		fmt.Fprintln(p.out, "  7 Disconnect (Proxy Only)")
+		fmt.Fprintln(p.out, "  7 Disconnect / Return to Direct")
 	} else {
 		fmt.Fprintln(p.out, "  1 Status         18 Mode Overview")
-		fmt.Fprintln(p.out, "  5 Connect (Proxy Only)    7 Disconnect (Proxy Only)")
+		fmt.Fprintln(p.out, "  5 Connect (Proxy Only)    7 Disconnect / Return to Direct")
 	}
 	p.section("Profiles and policy")
 	if p.width < 66 {
@@ -102,15 +102,19 @@ func (p operatorPresenter) menu(m *sc.Manager, advanced bool) {
 // header. An existing installed state may be inspected via the manager's
 // established service+guard checks; no route/action is inferred from desire.
 func (p operatorPresenter) menuState(m *sc.Manager) string {
-	// Check for both the state directory and existing manager lock: Status()
-	// must not create either resource just to draw a screen for an untouched
-	// installation. Actual status is still obtained through Manager.Status().
+	// Drawing the menu must not initialize previously absent private state.
 	for _, path := range []string{m.Dir, filepath.Join(m.Dir, ".lock")} {
 		if _, err := os.Lstat(path); err != nil {
 			return p.tint("State: not inspected (run Status after setup)", "33")
 		}
 	}
 	status, observationErr := m.Status()
+	return p.menuStateFromStatus(status, observationErr)
+}
+
+// Use the same validated view as mode-overview; a requested mode, active
+// Core process and independently verified VPN/Direct packet paths differ.
+func (p operatorPresenter) menuStateFromStatus(status sc.Status, observationErr error) string {
 	if status.Desired == "" {
 		return p.tint("State: unverified (open Status for diagnostics)", "33")
 	}
@@ -118,23 +122,43 @@ func (p operatorPresenter) menuState(m *sc.Manager) string {
 	if err != nil || view.DesiredMode == "" {
 		return p.tint("State: unverified (open Status for diagnostics)", "33")
 	}
-	mode := "Direct"
-	if view.DesiredMode == "proxy_only" {
-		mode = "Proxy Only"
+	requested := "Direct"
+	switch view.DesiredMode {
+	case "proxy_only":
+		requested = "Proxy Only"
+	case "smart_routing":
+		requested = "Smart Routing (TUN)"
 	}
-	observed := "unverified"
-	if view.ObservedMode == "proxy_only" {
-		observed = "local Proxy Only active (VPN path unverified)"
-	} else if view.TrialPhase != "" {
+
+	observed := "unverified (inspect Status)"
+	switch {
+	case view.ObservedMode == "smart_routing":
+		observed = "native Core active (VPN path not independently verified)"
+		switch view.StatusHealth {
+		case "native_selected_path_degraded":
+			observed = "native Core active; selected path degraded"
+		case "native_selected_synthetic_qa_only":
+			observed = "native Core active; synthetic QA health only"
+		case "native_health_starting":
+			observed = "native Core active; selected path starting"
+		case "native_recovery_in_progress":
+			observed = "native Core stopping; recovery in progress"
+		}
+	case view.ObservedMode == "proxy_only":
+		observed = "Proxy Only service active (VPN path unverified)"
+	case view.TrialPhase != "":
 		observed = "experimental TUN " + view.TrialPhase + " (not general-host proof)"
-	} else if view.ProxyServiceState == "inactive" && observationErr == nil {
+	case view.DesiredMode == "smart_routing":
+		observed = "native recovery unverified (inspect native-status)"
+	case view.ProxyServiceState == "inactive" && observationErr == nil:
 		observed = "Proxy Only service inactive (host route unverified)"
 	}
+
 	selected := "none"
 	if view.SelectedProfileID != "" {
 		selected = view.SelectedProfileID
 	}
-	return "Requested: " + mode + " | Observed: " + observed + " | Profile: " + selected
+	return "Requested: " + requested + " | Observed: " + observed + " | Profile: " + selected
 }
 
 // A newline-terminated reply is required for any prompt that can lead to a
