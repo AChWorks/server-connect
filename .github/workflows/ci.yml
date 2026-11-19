@@ -378,10 +378,17 @@ jobs:
           SC_QA_FIELD_ARCHIVE="$PWD/dist/server-connect-0.1.0-dev-debian12-amd64-local-qa.tar.gz" \
             PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/qa/test-debian12-proxy-lifecycle.py \
             -k test_real_packaged_bundle_matches_field_admission
-          # Binary redistributions must contain the exact pinned x/net BSD notice.
+          # Compiled x/net/publicsuffix has both BSD Go code and an MPL-2.0
+          # embedded data snapshot; prove QA bytes include the pinned sources.
           tar -xOzf dist/server-connect-0.1.0-dev-debian13-amd64-local-qa.tar.gz \
             server-connect/THIRD-PARTY-LICENSES/golang.org-x-net-LICENSE \
             | cmp - vendor/golang.org/x/net/LICENSE
+          tar -xOzf dist/server-connect-0.1.0-dev-debian13-amd64-local-qa.tar.gz \
+            server-connect/THIRD-PARTY-LICENSES/publicsuffix-LICENSE \
+            | cmp - third_party/publicsuffix/LICENSE
+          tar -xOzf dist/server-connect-0.1.0-dev-debian13-amd64-local-qa.tar.gz \
+            server-connect/THIRD-PARTY-LICENSES/publicsuffix-list.dat \
+            | cmp - third_party/publicsuffix/public_suffix_list.dat
           # Prove the same package can be built from a detached clean checkout
           # without the ignored build/ directory, and has identical bytes.
           bash scripts/qa/test-package-clean-checkout.sh "$PWD/build/ci/sing-box.tar.gz"
