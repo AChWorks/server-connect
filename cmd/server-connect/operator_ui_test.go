@@ -445,6 +445,11 @@ func TestOperatorMenuGuardedNativeConnectDispatchAndCancellation(t *testing.T) {
 			if tc.successText != "" && !strings.Contains(out, tc.successText) {
 				t.Fatalf("successful command guidance missing: %s", out)
 			}
+			if tc.name == "all-public-vpn" &&
+				(!strings.Contains(out, "including Iran, via VPN") ||
+					!strings.Contains(out, "Protected/private and explicit Direct exceptions remain Direct")) {
+				t.Fatalf("default-mode policy guidance incorrectly implies Iran bypass or ignores explicit exceptions: %s", out)
+			}
 			if !strings.Contains(out, "NOT RELEASE-READY") {
 				t.Fatalf("menu falsely implies general-host readiness: %s", out)
 			}

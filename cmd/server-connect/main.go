@@ -966,7 +966,11 @@ func menuWithRunner(m *sc.Manager, dispatch func(*sc.Manager, ...string) int) in
 			if !ok {
 				continue
 			}
-			fmt.Print("Policy: 1 Iran Direct / foreign VPN (estimate), 2 Other public traffic via VPN (or cancel): ")
+			fmt.Println("Policy:")
+			fmt.Println("  1 Estimated Iran Direct; other public traffic via VPN")
+			fmt.Println("  2 All public traffic, including Iran, via VPN")
+			fmt.Println("    Protected/private and explicit Direct exceptions remain Direct")
+			fmt.Print("Choose policy 1 or 2 (or cancel): ")
 			policy, err := in.ReadString('\n')
 			if err != nil {
 				fmt.Println("Canceled: incomplete policy; no connection started")
