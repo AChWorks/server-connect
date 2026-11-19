@@ -19,7 +19,7 @@ func TestOperatorMenuIsReadOnlyOnFirstUseAndHidesLegacyUntilAdvanced(t *testing.
 	p := operatorPresenter{out: &out, width: 42}
 	p.menu(m, false)
 	basic := out.String()
-	for _, want := range []string{"Server Connect", "0.1.0-dev", "State: not inspected", "NOT RELEASE-READY", "18 Mode Overview", "19 Routing Rules", "a Toggle advanced", "0 Exit", "Choice:"} {
+	for _, want := range []string{"Server Connect", "0.1.0-dev", "State: not inspected", "NOT RELEASE-READY", "18 Mode Overview", "19 Routing Rules", "21 Smart Routing (guarded QA)", "22 Native Guard / Recovery Status", "a Toggle advanced", "0 Exit", "Choice:"} {
 		if !strings.Contains(basic, want) {
 			t.Fatalf("missing operator guidance %q in %s", want, basic)
 		}
@@ -387,5 +387,124 @@ func TestOperatorMenuSafeDisconnectReusesCLIForEveryMode(t *testing.T) {
 	}
 	if _, err := os.Lstat(m.Dir); !os.IsNotExist(err) {
 		t.Fatal("display or stubbed Disconnect initialized manager state")
+	}
+}
+
+// Real native Smart Routing must be reachable from the ordinary operator menu
+// through exactly the same CLI command, while incomplete or canceled prompts
+// never dispatch, initialize private state, or imply an already-safe host.
+func TestOperatorMenuGuardedNativeConnectDispatchAndCancellation(t *testing.T) {
+	cases := []struct {
+		name, input, want, successText string
+	}{
+		{"underlay-eof", "21\n", "", ""},
+		{"underlay-back", "21\nback\n0\n", "", ""},
+		{"underlay-empty", "21\n\n0\n", "", ""},
+		{"policy-eof", "21\neth0\n", "", ""},
+		{"policy-cancel", "21\neth0\ncancel\n0\n", "", ""},
+		{"policy-invalid", "21\neth0\n3\n0\n", "", ""},
+		{"policy-empty", "21\neth0\n\n0\n", "", ""},
+		{"confirmation-eof", "21\neth0\n1\nCONNECT-SMART", "", ""},
+		{"confirmation-wrong", "21\neth0\n1\nYES\n0\n", "", ""},
+		{"confirmation-back", "21\neth0\n1\nback\n0\n", "", ""},
+		{"iran-direct", "21\neth0\n1\nCONNECT-SMART\n0\n", "connect-smart --underlay-if eth0 --mode bypass_iran", "Core started under native guards"},
+		{"all-public-vpn", "21\nens3\n2\nCONNECT-SMART\n0\n", "connect-smart --underlay-if ens3 --mode default", "Core started under native guards"},
+		{"read-native-health", "22\n0\n", "native-status", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m := sc.New(filepath.Join(t.TempDir(), "uninitialized-state"), "", 0)
+			in, wr, err := os.Pipe()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := io.WriteString(wr, tc.input); err != nil {
+				t.Fatal(err)
+			}
+			wr.Close()
+			old := os.Stdin
+			os.Stdin = in
+			defer func() { os.Stdin = old; in.Close() }()
+			var calls []string
+			code, out, stderr := hostDriftCapturedOutput(t, func() int {
+				return menuWithRunner(m, func(_ *sc.Manager, args ...string) int {
+					calls = append(calls, strings.Join(args, " "))
+					return 0
+				})
+			})
+			if code != 0 || stderr != "" {
+				t.Fatalf("menu failed: code=%d stderr=%s stdout=%s", code, stderr, out)
+			}
+			if tc.want == "" {
+				if len(calls) != 0 || strings.Contains(out, "Core started under native guards") {
+					t.Fatalf("canceled/invalid menu action dispatched or claimed success: calls=%q out=%s", calls, out)
+				}
+			} else if len(calls) != 1 || calls[0] != tc.want {
+				t.Fatalf("shared command mismatch: got %q, want %q; stdout=%s", calls, tc.want, out)
+			}
+			if tc.successText != "" && !strings.Contains(out, tc.successText) {
+				t.Fatalf("successful command guidance missing: %s", out)
+			}
+			if tc.name == "all-public-vpn" &&
+				(!strings.Contains(out, "including Iran, via VPN") ||
+					!strings.Contains(out, "Protected/private and explicit Direct exceptions remain Direct")) {
+				t.Fatalf("default-mode policy guidance incorrectly implies Iran bypass or ignores explicit exceptions: %s", out)
+			}
+			if !strings.Contains(out, "NOT RELEASE-READY") {
+				t.Fatalf("menu falsely implies general-host readiness: %s", out)
+			}
+			if _, err := os.Lstat(m.Dir); !os.IsNotExist(err) {
+				t.Fatalf("menu initialized private state without real operation: %v", err)
+			}
+		})
+	}
+}
+
+func TestOperatorMenuNativeConnectionFailureDoesNotClaimStarted(t *testing.T) {
+	m := sc.New(filepath.Join(t.TempDir(), "no-state"), "", 0)
+	in, wr, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.WriteString(wr, "21\neth0\n1\nCONNECT-SMART\n0\n"); err != nil {
+		t.Fatal(err)
+	}
+	wr.Close()
+	old := os.Stdin
+	os.Stdin = in
+	defer func() { os.Stdin = old; in.Close() }()
+	var called []string
+	code, out, stderr := hostDriftCapturedOutput(t, func() int {
+		return menuWithRunner(m, func(_ *sc.Manager, args ...string) int {
+			called = append(called, strings.Join(args, " "))
+			return 1 // CLI refusal, even though the operator supplied confirmation.
+		})
+	})
+	if code != 0 || stderr != "" || len(called) != 1 ||
+		called[0] != "connect-smart --underlay-if eth0 --mode bypass_iran" {
+		t.Fatalf("failed command dispatch differed: %v %q %s", code, called, stderr)
+	}
+	if strings.Contains(out, "Core started under native guards") || strings.Contains(out, "Inspect option 22 (native-status)") {
+		t.Fatalf("menu claimed native success after CLI refused: %s", out)
+	}
+	if _, err := os.Lstat(m.Dir); !os.IsNotExist(err) {
+		t.Fatal("failed CLI dispatch in isolated runner created state")
+	}
+}
+
+func TestOperatorMenuNativeOptionsVisibleAtWideAndNarrowWidths(t *testing.T) {
+	m := sc.New(filepath.Join(t.TempDir(), "uninitialized"), "", 0)
+	for _, width := range []int{30, 42, 78} {
+		var out bytes.Buffer
+		p := operatorPresenter{out: &out, width: width}
+		p.menu(m, false)
+		for _, want := range []string{"21 Smart Routing (guarded QA)", "22 Native Guard / Recovery Status", "7 Disconnect / Return to Direct"} {
+			if !strings.Contains(out.String(), want) {
+				t.Fatalf("width %d missing %q: %s", width, want, out.String())
+			}
+		}
+	}
+	if _, err := os.Lstat(m.Dir); !os.IsNotExist(err) {
+		t.Fatal("menu presentation changed private state")
 	}
 }

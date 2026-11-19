@@ -954,6 +954,49 @@ func menuWithRunner(m *sc.Manager, dispatch func(*sc.Manager, ...string) int) in
 			dispatch(m, []string{"status"}...)
 		case "18":
 			dispatch(m, []string{"mode-overview"}...)
+		case "22":
+			dispatch(m, []string{"native-status"}...)
+		case "21":
+			// This is the same guarded native action as the CLI, not the
+			// isolated historical TUN trial. Host admission, ownership and
+			// independent recovery are validated inside connect-smart.
+			fmt.Println("Guarded native Smart Routing is a QA candidate, NOT approved for general-host/production use.")
+			fmt.Println("This may change host-wide routing. Use only on an authorized disposable host with console recovery.")
+			underlay, ok := operatorPrompt(in, "Current underlay interface (from 'ip route', or cancel): ", false)
+			if !ok {
+				continue
+			}
+			fmt.Println("Policy:")
+			fmt.Println("  1 Estimated Iran Direct; other public traffic via VPN")
+			fmt.Println("  2 All public traffic, including Iran, via VPN")
+			fmt.Println("    Protected/private and explicit Direct exceptions remain Direct")
+			fmt.Print("Choose policy 1 or 2 (or cancel): ")
+			policy, err := in.ReadString('\n')
+			if err != nil {
+				fmt.Println("Canceled: incomplete policy; no connection started")
+				continue
+			}
+			mode := ""
+			switch strings.TrimSpace(policy) {
+			case "1":
+				mode = "bypass_iran"
+			case "2":
+				mode = "default"
+			default:
+				fmt.Println("Canceled: choose policy 1 or 2; no connection started")
+				continue
+			}
+			fmt.Println("A running Core alone does not prove VPN transit, routing safety, or release readiness.")
+			fmt.Print("Activate independent guards and native host routing? Type CONNECT-SMART: ")
+			ack, err := in.ReadString('\n')
+			if err != nil || strings.TrimSpace(ack) != "CONNECT-SMART" {
+				fmt.Println("Canceled: no connection started")
+				continue
+			}
+			if dispatch(m, "connect-smart", "--underlay-if", underlay, "--mode", mode) == 0 {
+				fmt.Println("Core started under native guards; independently check selected VPN/Direct traffic.")
+				fmt.Println("Inspect option 22 (native-status), or choose option 7 to return to Direct.")
+			}
 		case "20":
 			advanced = true
 			fmt.Println("Smart Routing is admitted ONLY on the exact isolated QEMU Debian 13 QA guest; never production.")
