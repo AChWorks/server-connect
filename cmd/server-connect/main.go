@@ -215,6 +215,8 @@ func run(j bool, m *sc.Manager, args []string) int {
 		mode := opts.String("mode", "bypass_iran", "default|bypass_iran")
 		healthThreshold := opts.Int("health-failures", 3, "consecutive selected HTTPS failure rounds before Direct/off (1-10)")
 		healthQA := opts.Bool("health-synthetic-qa", false, "synthetic-only HTTPS fixture; not field proof")
+		selectedIPv6 := opts.Bool("enable-selected-ipv6", false, "allow IPv6 via VPN only after selected exit IPv6 capability is verified")
+		iranCoverage := opts.String("iran-coverage", "consensus", "consensus (DB-IP and Chocolate4U agreement) or dbip")
 		if e := opts.Parse(args); e != nil || len(opts.Args()) != 0 || *underlay == "" {
 			return output(j, nil, sc.Fault("invalid_arguments", "connect-smart requires --underlay-if"))
 		}
@@ -222,6 +224,7 @@ func run(j bool, m *sc.Manager, args []string) int {
 			InterfaceName: *tun, UnderlayInterface: *underlay,
 			IPv4Address: *ipv4, IPv6Address: *ipv6, Mode: *mode,
 			HealthFailureThreshold: *healthThreshold, HealthSyntheticQA: *healthQA,
+			EnableSelectedIPv6: *selectedIPv6, IranCoverage: *iranCoverage,
 		})
 		return output(j, report, e)
 	case "native-status":
@@ -755,6 +758,7 @@ Commands:
   smart-routing-rules preview-native --tunnel-if NAME --underlay-if NAME
                                      --tunnel-ipv4 CIDR [--tunnel-ipv6 CIDR]
                                      [--mode default|bypass_iran]
+                                     [--iran-coverage consensus|dbip] [--enable-selected-ipv6]
                               Compiles saved rules with official sing-box;
                               checks Core config only, never activates host TUN
   smart-routing-rules preview --tunnel-if NAME --underlay-if NAME --tunnel-ipv4 CIDR
@@ -776,6 +780,8 @@ Commands:
   connect-smart --underlay-if NAME [--tunnel-if NAME] [--tunnel-ipv4 CIDR]
                 [--tunnel-ipv6 CIDR] [--mode default|bypass_iran]
                 [--health-failures 1..10] [--health-synthetic-qa]
+                [--enable-selected-ipv6] [--iran-coverage consensus|dbip]
+                             IPv6 requires verified selected exit; default IR is two-source consensus
                              Start guarded native sing-box Smart Routing
                              Synthetic health only on isolated test hosts
   native-status              Read native service, guard and HTTPS health scope
@@ -785,9 +791,9 @@ Commands:
   disconnect                 Restore Direct from owned Proxy Only/Native TUN
   status [--json]            Desired/observed state, bounded native HTTPS health
   activation-journal-status  Private intent state/operation ID only; no host mutation
-  smart-routing-data        Inspect bundled IR country geolocation estimate offline
-                              Country geolocation is estimated, not verified;
-                              no network Apply or trusted country policy exists
+  smart-routing-data        Inspect pinned DB-IP/Chocolate4U IR consensus offline
+                              Country geolocation is estimated, not proven;
+                              no live test, signed-source trust or routing change
   probe --via proxy|direct --url https://example.org
   diagnose-path --via proxy|direct --url https://one.example --url https://two.example
                               Two to four distinct hosts; diagnostic only
@@ -967,7 +973,7 @@ func menuWithRunner(m *sc.Manager, dispatch func(*sc.Manager, ...string) int) in
 				continue
 			}
 			fmt.Println("Policy:")
-			fmt.Println("  1 Estimated Iran Direct; other public traffic via VPN")
+			fmt.Println("  1 DB-IP + Chocolate4U consensus Direct; other public traffic via VPN")
 			fmt.Println("  2 All public traffic, including Iran, via VPN")
 			fmt.Println("    Protected/private and explicit Direct exceptions remain Direct")
 			fmt.Print("Choose policy 1 or 2 (or cancel): ")

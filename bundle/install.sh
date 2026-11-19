@@ -78,6 +78,16 @@ RELEASE_FILES
   printf '%s\n' THIRD-PARTY-LICENSES/publicsuffix-LICENSE
   printf '%s\n' THIRD-PARTY-LICENSES/publicsuffix-list.dat
  fi
+ # Preserve verified historic installations without these files. Any
+ # upgraded/current release must include the Chocolate4U data/license pair;
+ # a partial pair is never admitted as a valid release.
+ if [ -e "$1/THIRD-PARTY-LICENSES/chocolate4u-LICENSE" ] ||
+    [ -L "$1/THIRD-PARTY-LICENSES/chocolate4u-LICENSE" ] ||
+    [ -e "$1/THIRD-PARTY-LICENSES/chocolate4u-geoip-ir.json" ] ||
+    [ -L "$1/THIRD-PARTY-LICENSES/chocolate4u-geoip-ir.json" ]; then
+  printf '%s\n' THIRD-PARTY-LICENSES/chocolate4u-LICENSE
+  printf '%s\n' THIRD-PARTY-LICENSES/chocolate4u-geoip-ir.json
+ fi
  printf '%s\n' manifest.json
 }
 verify_release_payload() (
@@ -101,6 +111,10 @@ verify_release_payload() (
    die 'incoming release must contain Public Suffix List license'
   check_root_file "$root/THIRD-PARTY-LICENSES/publicsuffix-list.dat" ||
    die 'incoming release must contain Public Suffix List source'
+  check_root_file "$root/THIRD-PARTY-LICENSES/chocolate4u-LICENSE" ||
+   die 'incoming release must contain Chocolate4U source license'
+  check_root_file "$root/THIRD-PARTY-LICENSES/chocolate4u-geoip-ir.json" ||
+   die 'incoming release must contain pinned Chocolate4U source data'
  fi
  expected=$(release_payload_files "$root")
  if [ "$prior_installed" = yes ] && [ "$(wc -l < "$root/checksums.sha256")" -eq 12 ]; then

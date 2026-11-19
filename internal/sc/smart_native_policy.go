@@ -18,6 +18,8 @@ type NativePolicyOptions struct {
 	Mode                   string // "default" or "bypass_iran"
 	HealthFailureThreshold int    // 0 selects conservative default 3 consecutive rounds
 	HealthSyntheticQA      bool   // explicit synthetic HTTPS QA scope, not field acceptance
+	EnableSelectedIPv6     bool   // operator opt-in for selected VPN exit IPv6 after external verification
+	IranCoverage           string // "consensus" (default) or "dbip" (legacy broad estimate)
 }
 
 // NativePolicyTableIndex and NativePolicyRuleIndex reserve predictable native
@@ -54,6 +56,9 @@ func NativeSmartRoutingConfig(profile Profile, opts NativePolicyOptions, operato
 	}
 	if opts.Mode != "default" && opts.Mode != "bypass_iran" {
 		return nil, errors.New("unsupported native policy mode")
+	}
+	if opts.IranCoverage != "" && opts.IranCoverage != "consensus" && opts.IranCoverage != "dbip" {
+		return nil, errors.New("unsupported Iran source policy")
 	}
 	v4, err := netip.ParsePrefix(opts.IPv4Address)
 	if err != nil || !v4.IsValid() || !v4.Addr().Is4() ||
@@ -143,12 +148,25 @@ func NativeSmartRoutingConfig(profile Profile, opts NativePolicyOptions, operato
 		if err != nil || len(geo.IPv4) == 0 || len(geo.IPv6) == 0 {
 			return nil, errors.New("bundled Iran prefix estimate failed integrity validation")
 		}
-		// Inline rule-set is a property of the selected Core, not thousands
-		// of app-owned kernel routes. This source is an estimate, not verified
-		// evidence that any individual network is reachable from Iran.
+		// Offline IP estimates: the default Direct set is the CIDR-precise
+		// intersection of independently licensed DB-IP and Chocolate4U IR.
+		// Chocolate4U includes certain public IPs hosted outside Iran; union
+		// is unsafe because it can bypass the operator's foreign VPN policy.
+		// The explicit dbip fallback preserves legacy breadth where needed.
+		prefixes := append(append([]string{}, geo.IPv4...), geo.IPv6...)
+		if opts.IranCoverage != "dbip" {
+			choco, e := chocolateIranPrefixes()
+			if e != nil {
+				return nil, e
+			}
+			prefixes, e = intersectIranPrefixes(prefixes, choco)
+			if e != nil {
+				return nil, e
+			}
+		}
 		sets = append(sets, map[string]any{
 			"type": "inline", "tag": "iran-public",
-			"rules": []any{map[string]any{"ip_cidr": append(append([]string{}, geo.IPv4...), geo.IPv6...)}},
+			"rules": []any{map[string]any{"ip_cidr": prefixes}},
 		})
 		// A pinned domestic DNS destination remains Direct. Operator VPN
 		// CIDRs above it still win, even when the resolver uses port 53.
@@ -176,11 +194,29 @@ func NativeSmartRoutingConfig(profile Profile, opts NativePolicyOptions, operato
 	if opts.Mode == "bypass_iran" {
 		rules = append(rules, map[string]any{"rule_set": []string{"iran-public"}, "action": "route", "outbound": "direct"})
 	}
+	// A selected IPv6 egress is a property of the remote VPN, not of the
+	// local private TUN address. Until the selected exit is verified capable,
+	// refuse VPN-required IPv6 promptly (TCP reset / ICMP unreachable) instead
+	// of allowing a remote dial that connects and later fails TLS. This comes
+	// AFTER known Direct exceptions, and never routes unknown IPv6 Direct.
+	if !opts.EnableSelectedIPv6 {
+		rules = append(rules, map[string]any{"ip_version": 6, "action": "reject", "method": "default"})
+	}
 
 	// No FakeIP: stale synthetic addresses must not be reclassified Direct.
 	// DNS is tunnel-detoured by default; only selected-outbound bootstrap uses
 	// the explicitly separate local resolver. Native DNS correlation for
 	// Direct domain rules is NOT claimed by this preview.
+	// For an unverified selected IPv6 exit, return an empty successful AAAA
+	// answer to application queries intercepted by the TUN. Merely setting
+	// prefer_ipv4 does NOT suppress AAAA (verified on official Core 1.14.3).
+	// The inbound selector preserves internal/bootstrap DNS for the selected
+	// VPN endpoint and leaves bypassed local/domestic DNS unmanaged.
+	dnsRules := []any{}
+	if !opts.EnableSelectedIPv6 {
+		dnsRules = append(dnsRules, map[string]any{"inbound": []string{"smart-tun"},
+			"query_type": []string{"AAAA"}, "action": "predefined", "rcode": "NOERROR"})
+	}
 	cfg := map[string]any{
 		"log": map[string]any{"level": "warn"},
 		"inbounds": []any{map[string]any{
@@ -196,7 +232,7 @@ func NativeSmartRoutingConfig(profile Profile, opts NativePolicyOptions, operato
 				map[string]any{"type": "local", "tag": "bootstrap"},
 				map[string]any{"type": "udp", "tag": "vpn-dns", "server": "1.1.1.1", "server_port": 53, "detour": "upstream"},
 			},
-			"final": "vpn-dns", "reverse_mapping": false,
+			"final": "vpn-dns", "reverse_mapping": false, "rules": dnsRules,
 		},
 		"outbounds": []any{json.RawMessage(profile.Outbound), map[string]any{"type": "direct", "tag": "direct"}},
 		"route": map[string]any{

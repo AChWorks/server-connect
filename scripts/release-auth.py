@@ -37,7 +37,10 @@ PAYLOAD = (
     "install.sh", "release-auth.py", "THIRD-PARTY-LICENSES/sing-box-LICENSE",
     "THIRD-PARTY-LICENSES/golang.org-x-net-LICENSE",
     "THIRD-PARTY-LICENSES/publicsuffix-LICENSE",
-    "THIRD-PARTY-LICENSES/publicsuffix-list.dat", "manifest.json",
+    "THIRD-PARTY-LICENSES/publicsuffix-list.dat",
+    "THIRD-PARTY-LICENSES/chocolate4u-LICENSE",
+    "THIRD-PARTY-LICENSES/chocolate4u-geoip-ir.json",
+    "manifest.json",
 )
 
 

@@ -91,7 +91,7 @@ func TestNativeSmartPolicyUsesOfficialSingBox(t *testing.T) {
 		t.Fatal("invalid native rule-set")
 	}
 	countries := geo["rules"].([]any)[0].(map[string]any)["ip_cidr"].([]any)
-	if len(countries) != 3038 {
+	if len(countries) != 2917 {
 		t.Fatalf("unexpected verified IR prefix count %d", len(countries))
 	}
 	joined, _ := json.Marshal(route["rules"])
@@ -156,6 +156,7 @@ func TestNativeSmartPolicyUnsafeInputsRejected(t *testing.T) {
 		{"interface loopback", func(_ *Profile, x *NativePolicyOptions, _ *[]SmartRoutingRule) { x.InterfaceName = "lo" }},
 		{"underlay equal tun", func(_ *Profile, x *NativePolicyOptions, _ *[]SmartRoutingRule) { x.UnderlayInterface = x.InterfaceName }},
 		{"unknown mode", func(_ *Profile, x *NativePolicyOptions, _ *[]SmartRoutingRule) { x.Mode = "other" }},
+		{"unknown Iran source policy", func(_ *Profile, x *NativePolicyOptions, _ *[]SmartRoutingRule) { x.IranCoverage = "untrusted_union" }},
 		{"invalid IPv4", func(_ *Profile, x *NativePolicyOptions, _ *[]SmartRoutingRule) { x.IPv4Address = "172.31.0.1/8" }},
 		{"missing IPv6 bypass", func(_ *Profile, x *NativePolicyOptions, _ *[]SmartRoutingRule) { x.IPv6Address = "" }},
 		{"global IPv6", func(_ *Profile, x *NativePolicyOptions, _ *[]SmartRoutingRule) { x.IPv6Address = "2001:db8::1/64" }},
@@ -198,11 +199,15 @@ func TestNativeSmartPolicyForeignDefaultIsVPN(t *testing.T) {
 	}
 	rules := route["rules"].([]any)
 	last := rules[len(rules)-1].(map[string]any)
-	if last["outbound"] != "direct" || last["action"] != "route" {
-		t.Fatal("IR exception must remain last")
+	if last["action"] != "reject" || last["ip_version"] != float64(6) {
+		t.Fatal("unverified public IPv6 must be rejected, not sent Direct")
 	}
-	if _, ok := last["rule_set"]; !ok {
-		t.Fatal("final Direct rule lacks IR selector")
+	iran := rules[len(rules)-2].(map[string]any)
+	if iran["outbound"] != "direct" || iran["action"] != "route" {
+		t.Fatal("IR Direct must precede unverified public IPv6 refusal")
+	}
+	if _, ok := iran["rule_set"]; !ok {
+		t.Fatal("IR Direct rule lacks IR selector")
 	}
 }
 
@@ -282,5 +287,93 @@ func TestNativeSmartPolicyDNSAddressPrecedence(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// A private TUN IPv6 address proves neither selected exit IPv6 nor safe
+// dual-stack application behavior. Unverified IPv6 must be absent from
+// intercepted client DNS while literal IPv6 is refused inside TUN rather
+// than escaping through the host underlay. Explicit Direct exceptions stay.
+func TestNativeSmartPolicyIPv6ExitCapability(t *testing.T) {
+	p, base := nativePolicyFixture()
+	for _, verified := range []bool{false, true} {
+		o := base
+		o.EnableSelectedIPv6 = verified
+		raw, err := NativeSmartRoutingConfig(p, o, []SmartRoutingRule{{Type: "cidr", Value: "2001:4860:4860::8888/128", Via: "direct"}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		cfg := nativePolicyJSON(t, raw)
+		dns := cfg["dns"].(map[string]any)
+		dnsRules := dns["rules"].([]any)
+		rules := cfg["route"].(map[string]any)["rules"].([]any)
+		if verified {
+			if len(dnsRules) != 0 {
+				t.Fatal("verified selected IPv6 exit has incorrect AAAA suppression")
+			}
+			for _, rawRule := range rules {
+				rule := rawRule.(map[string]any)
+				if rule["action"] == "reject" && rule["ip_version"] == float64(6) {
+					t.Fatal("verified selected IPv6 exit incorrectly blocked")
+				}
+			}
+		} else {
+			if len(dnsRules) != 1 {
+				t.Fatal("unverified selected IPv6 must suppress intercepted AAAA")
+			}
+			rule := dnsRules[0].(map[string]any)
+			if rule["action"] != "predefined" || rule["rcode"] != "NOERROR" {
+				t.Fatal("client AAAA must return empty, successful response")
+			}
+			q := rule["query_type"].([]any)
+			if len(q) != 1 || q[0] != "AAAA" {
+				t.Fatal("wrong DNS query filter")
+			}
+			inbound := rule["inbound"].([]any)
+			if len(inbound) != 1 || inbound[0] != "smart-tun" {
+				t.Fatal("must not suppress selected Core bootstrap DNS")
+			}
+			last := rules[len(rules)-1].(map[string]any)
+			if last["action"] != "reject" || last["ip_version"] != float64(6) || last["method"] != "default" {
+				t.Fatal("unverified IPv6 lacks fail-fast route refusal")
+			}
+			first := rules[1].(map[string]any)
+			if first["action"] != "route" || first["outbound"] != "direct" {
+				t.Fatal("explicit Direct IPv6 override lost precedence")
+			}
+		}
+		if core := os.Getenv("SC_TEST_SINGBOX"); core != "" {
+			if err := CheckConfig(core, t.TempDir(), raw); err != nil {
+				t.Fatalf("real Core refused verified=%v: %v", verified, err)
+			}
+		}
+	}
+}
+
+func TestNativeSmartPolicyIranConsensusAndLegacyCoverage(t *testing.T) {
+	p, o := nativePolicyFixture()
+	data, err := NativeSmartRoutingConfig(p, o, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := nativePolicyJSON(t, data)
+	ips := cfg["route"].(map[string]any)["rule_set"].([]any)[0].(map[string]any)["rules"].([]any)[0].(map[string]any)["ip_cidr"].([]any)
+	if len(ips) != 2917 {
+		t.Fatalf("consensus must use exact overlap, got %d", len(ips))
+	}
+	o.IranCoverage = "dbip"
+	data, err = NativeSmartRoutingConfig(p, o, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg = nativePolicyJSON(t, data)
+	ips = cfg["route"].(map[string]any)["rule_set"].([]any)[0].(map[string]any)["rules"].([]any)[0].(map[string]any)["ip_cidr"].([]any)
+	if len(ips) != 3038 {
+		t.Fatalf("existing DB-IP override was not preserved: %d", len(ips))
+	}
+	if core := os.Getenv("SC_TEST_SINGBOX"); core != "" {
+		if err := CheckConfig(core, t.TempDir(), data); err != nil {
+			t.Fatal(err)
+		}
 	}
 }

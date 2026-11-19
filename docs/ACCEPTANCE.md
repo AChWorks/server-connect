@@ -31,6 +31,12 @@ Owner-approved **proportional recovery** requires representative evidence for no
 | Optional foreign Direct-first probing | **Not a prerequisite** for initial static exception support. If shipped, Direct success is path-bound and failures affect only **new** flows, without replaying transactions or flapping | Separate opted-in functional and negative cases |
 | Optional Cloudflare website ingress | **Not a first outbound-only release gate.** If advertised later: approved hostname/origin, official cloudflared identity, reachable Cloudflare egress (Direct or verified VPN), fresh uncached **origin** request, independent connector failure/credentials/DNS/TLS checks | Actual external origin receipt plus separated cloudflared/outbound health |
 
+### Exact-candidate hybrid-IP and dual-stack acceptance (current development)
+
+For a candidate that incorporates the two-source Iran country policy, independently verify the **actual pinned source hashes, CIDR intersection, excluded second-source-only cloud addresses, operator `--iran-coverage dbip` fallback, stored CIDR VPN precedence, offline package source/license pair and refusal of missing/tampered members**, plus old installed-release removal/update. Country agreement alone does not prove current physical location. Future GeoSite Direct activation requires authenticated DNS/IP correlation and separate negative source-spoofing evidence.
+
+For a candidate that suppresses AAAA by default when selected IPv6 egress is unverified, prove **ordinary unforced dual-stack HTTPS** on actual WordPress API/download, aaPanel-equivalent and a large download on the exact real selected foreign VPN path, *not* merely `curl -4`. Verify normal A responses and a properly scoped empty AAAA response through the **actual installed TUN**; test literal IPv6 failure and independent underlay no-leak packet counters, before/after selected exit failures; verify protected public SSH and established HTTP replies. On an environment with genuinely working selected exit IPv6, test explicit opt-in positive IPv6 DNS/literal TCP/TLS and failure/no-leak. Mark unavailable global/provider IPv6 **UNSUPPORTED/NOT_RUN**, never a PASS. Retest Core SIGKILL, short provider outage, real reboot and original kernel restoration on the exact candidate before stable release.
+
 ## Test lanes and field-regression lessons
 
 These are **different evidence levels**, not interchangeable versions of a PASS:
