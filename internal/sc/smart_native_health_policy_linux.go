@@ -174,6 +174,24 @@ func inspectNativeHealthPolicy(ctx context.Context, r interface {
 // on the same output NAT rule, after the chain's own output hook declaration.
 var nativeOutputTCPRedirectRule = regexp.MustCompile(`^meta l4proto (?:tcp|6) counter(?: packets [0-9]+ bytes [0-9]+)? redirect to :([0-9]+) return$`)
 
+// sing-tun's native output NAT chain can exclude Core-underlay packets,
+// previously classified connections, and the host's own local addresses.
+// Those returns are not generic TCP escapes: their selectors are scoped to
+// the Core's reserved marks and its local-address sets. Keep this a semantic
+// witness, not a rule-count or nftables-version restriction.
+var nativeOutputSafeEarlyReturn = regexp.MustCompile(`^(?:meta mark 0x0*2024|ct mark 0x0*202[34]|ip daddr @inet4_local_address_set|ip6 daddr @inet6_local_address_set) counter(?: packets [0-9]+ bytes [0-9]+)? return$`)
+
+// IPv4-only strict routing can explicitly reject unsupported IPv6. Core may
+// also drop MPTCP SYNs (TCP option 30) without bypassing ordinary TCP capture.
+var nativeOutputSafeEarlyIPv6Reject = regexp.MustCompile(`^meta nfproto ipv6 counter(?: packets [0-9]+ bytes [0-9]+)? reject(?: with icmpx type (?:no-route|admin-prohibited))?$`)
+var nativeOutputSafeEarlyMPTCP = regexp.MustCompile(`^meta l4proto (?:tcp|6) tcp option 30 exists counter(?: packets [0-9]+ bytes [0-9]+)? (?:drop|return)$`)
+
+// Any other earlier verdict, NAT diversion, queue, or routing mutation might
+// keep ordinary unmarked TCP away from the later valid-looking redirect.
+// Non-terminal read-only counters and match expressions do not, by themselves,
+// prevent reaching it. Keep fail-closed for unknown earlier effects.
+var nativeOutputEarlyEffect = regexp.MustCompile(`\b(?:return|accept|drop|reject|jump|goto|queue|redirect|dnat|snat|masquerade|tproxy|notrack|vmap|fwd|dup|set)\b`)
+
 func nativeOutputTCPRedirectHealthy(table string) bool {
 	const outputHook = "type nat hook output priority mangle + 2; policy accept;"
 	var seenOutput, inOutput, seenHook, seenRedirect bool
@@ -209,6 +227,12 @@ func nativeOutputTCPRedirectHealthy(table string) bool {
 			continue
 		}
 		if !strings.Contains(line, "redirect") {
+			if nativeOutputEarlyEffect.MatchString(line) &&
+				!nativeOutputSafeEarlyReturn.MatchString(line) &&
+				!nativeOutputSafeEarlyIPv6Reject.MatchString(line) &&
+				!nativeOutputSafeEarlyMPTCP.MatchString(line) {
+				return false
+			}
 			continue
 		}
 		if seenRedirect {

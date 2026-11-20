@@ -182,6 +182,69 @@ func TestNativeHealthRejectsOutputRedirectPartialDrift(t *testing.T) {
 	}
 }
 
+// Earlier NAT output verdicts can bypass a valid later redirect. A marked
+// route-get does not attest ordinary unmarked TCP capture. Recognize only the
+// Core's legitimate narrowly scoped exclusions before the redirect.
+func TestNativeHealthOutputPreRedirectVerdicts(t *testing.T) {
+	p := nativeRedirectRecovery{TunnelIF: "sctun0", UnderlayIF: "enp5s0",
+		Table: NativePolicyTableIndex, Rule: NativePolicyRuleIndex}
+	targets := []nativeProbeTarget{{IP: "8.8.8.8", Name: smartTUNHealthHTTPSName, Port: 19224}}
+	key := "nft list table inet sing-box"
+	for _, proto := range []string{"tcp", "6"} {
+		t.Run(proto, func(t *testing.T) {
+			fixture := nativeHealthPolicyFixture()
+			base := fixture.values[key]
+			if proto == "6" {
+				base = strings.ReplaceAll(base, "meta l4proto tcp counter", "meta l4proto 6 counter")
+			}
+			redirect := "      meta l4proto " + proto + " counter packets 2 bytes 80 redirect to :35785 return"
+			if !strings.Contains(base, redirect) {
+				t.Fatal("missing actual output redirect in test witness")
+			}
+			coreRules := []string{
+				"meta mark 0x00002024 counter packets 1 bytes 70 return",
+				"ct mark 0x00002024 counter packets 1 bytes 70 return",
+				"ct mark 0x00002023 counter packets 1 bytes 70 return",
+				"ip daddr @inet4_local_address_set counter packets 1 bytes 70 return",
+				"ip6 daddr @inet6_local_address_set counter packets 1 bytes 70 return",
+				"meta nfproto ipv6 counter packets 1 bytes 70 reject",
+				"meta l4proto " + proto + " tcp option 30 exists counter packets 1 bytes 70 drop",
+			}
+			// These originate from sing-tun's native mark/conntrack, own-host
+			// address, unsupported family and MPTCP exception paths. No fixed
+			// number of such rules is assumed by the reader.
+			safeBody := strings.Replace(base, redirect, "      "+strings.Join(coreRules, "\n      ")+"\n"+redirect, 1)
+			if err := inspectNativeHealthPolicy(context.Background(), fakeNativeHealthPolicy{values: withNftHealthBody(fixture, safeBody)}, p, targets); err != nil {
+				t.Fatalf("legitimate Core output exemptions refused: %v", err)
+			}
+			for _, tc := range []struct{ name, rule string }{
+				{"earlier-tcp-return", "meta l4proto " + proto + " return"},
+				{"earlier-tcp-accept", "meta l4proto " + proto + " accept"},
+				{"unconditional-return", "return"},
+				{"unconditional-accept", "accept"},
+				{"early-public-destination-return", "ip daddr 8.8.8.8 return"},
+				{"early-unknown-mark-return", "ct mark 0x00002022 return"},
+				{"early-udp-tcp-accept", "meta l4proto { tcp, udp } accept"},
+				{"early-tcp-jump", "meta l4proto " + proto + " jump foreign"},
+				{"early-tcp-goto", "meta l4proto " + proto + " goto foreign"},
+				{"early-tcp-queue", "meta l4proto " + proto + " queue to 100"},
+				{"early-tcp-dnat", "meta l4proto " + proto + " dnat ip to 10.10.10.1"},
+				{"early-tcp-misdirected-redirect", "meta l4proto " + proto + " redirect to :12345"},
+			} {
+				t.Run(tc.name, func(t *testing.T) {
+					bad := strings.Replace(safeBody, redirect, "      "+tc.rule+"\n"+redirect, 1)
+					if bad == safeBody {
+						t.Fatal("test did not insert a preceding verdict")
+					}
+					if err := inspectNativeHealthPolicy(context.Background(), fakeNativeHealthPolicy{values: withNftHealthBody(fixture, bad)}, p, targets); err == nil {
+						t.Fatalf("early output rule %q bypassed a later healthy-looking TCP redirect", tc.rule)
+					}
+				})
+			}
+		})
+	}
+}
+
 func withNftHealthBody(f fakeNativeHealthPolicy, body string) map[string]string {
 	values := make(map[string]string, len(f.values))
 	for k, v := range f.values {

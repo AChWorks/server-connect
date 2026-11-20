@@ -158,9 +158,15 @@ format-only difference: nftables 1.0.6 writes the TCP protocol as numeric
 requires a **single output-NAT-chain redirect rule** that contains the
 actual TCP (IPPROTO_TCP=6) match, counter and redirect in order, after that
 chain's own expected hook. A counter in `output_prematch`, or a detached,
-uncounted, UDP/other-protocol redirect, cannot substitute. This is a
-read-only policy witness, not full proof against arbitrary foreign nft
-ruleset changes. All fixed RPDB, marked selected route, native capture
+uncounted, UDP/other-protocol redirect, cannot substitute. Every
+preceding output-chain rule is also checked for terminal/diverting effects:
+an earlier TCP/general `return`, `accept`, transfer or destination rewrite
+cannot hide behind a valid later redirect. Core's explicitly scoped
+underlay/conntrack marks, local-address sets, unsupported-family rejection
+and MPTCP exception remain permitted; no arbitrary number-of-rules limit
+is imposed. This is a read-only policy witness, not full proof against
+arbitrary foreign nft ruleset changes. All fixed RPDB, marked selected
+route, native capture
 hook/redirect, chain and reply-guard identity checks still apply. A
 missing/changed policy remains fail-closed, with independent Core stop
 and exact-owned Direct restoration.
