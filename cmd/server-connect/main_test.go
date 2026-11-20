@@ -433,7 +433,7 @@ func TestDistinctMenuOptionsAfterPathDiagnosticIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if code != 0 || !strings.Contains(string(raw), "First independent HTTP(S) target:") ||
+	if code != 0 || !strings.Contains(string(raw), "HTTP(S) target (blank to finish, or cancel):") ||
 		!strings.Contains(string(raw), "Unknown option.") ||
 		!strings.Contains(string(raw), "11 Path Diagnostics") ||
 		strings.Contains(string(raw), "12 Selective Plan") {

@@ -1140,12 +1140,22 @@ func menuWithRunner(m *sc.Manager, dispatch func(*sc.Manager, ...string) int) in
 			dispatch(m, []string{"host-preflight", "--with-nftables"}...)
 		case "11":
 			advanced = true
-			first, ok := operatorPrompt(in, "First independent HTTP(S) target: ", false)
-			if !ok {
-				continue
+			fmt.Println("Enter HTTP(S) targets with distinct hostnames; blank finishes, cancel aborts.")
+			var targets []string
+			canceled := false
+			for {
+				target, ok := operatorPrompt(in, "HTTP(S) target (blank to finish, or cancel): ", true)
+				if !ok {
+					canceled = true
+					break
+				}
+				if target == "" {
+					break
+				}
+				targets = append(targets, target)
 			}
-			second, ok := operatorPrompt(in, "Second independent HTTP(S) target: ", false)
-			if !ok {
+			if canceled || len(targets) == 0 {
+				fmt.Println("Canceled: no network diagnostic started")
 				continue
 			}
 			selection, ok := operatorPrompt(in, "Path 1=proxy, 2=direct (or cancel): ", false)
@@ -1157,7 +1167,11 @@ func menuWithRunner(m *sc.Manager, dispatch func(*sc.Manager, ...string) int) in
 			if selection == "2" {
 				via = "direct"
 			}
-			dispatch(m, "diagnose-path", "--via", via, "--url", first, "--url", second)
+			command := []string{"diagnose-path", "--via", via}
+			for _, target := range targets {
+				command = append(command, "--url", target)
+			}
+			dispatch(m, command...)
 		case "13":
 			advanced = true
 			address, ok := operatorPrompt(in, "Literal TCP endpoint IP (no DNS): ", false)
