@@ -4,6 +4,7 @@ package sc
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/netip"
 	"os"
@@ -47,6 +48,7 @@ const nativeReplyGuardFixtureJSON = `{"nftables":[
 type fakeReplyGuardRunner struct {
 	has             bool
 	foreign         string
+	nftJSON         string
 	createErr       error
 	deleteErr       error
 	deleted         bool
@@ -74,6 +76,9 @@ func (r *fakeReplyGuardRunner) output(_ context.Context, bin string, args ...str
 		}
 		if r.foreign != "" {
 			return r.foreign, nil
+		}
+		if r.nftJSON != "" {
+			return r.nftJSON, nil
 		}
 		return nativeReplyGuardFixtureJSON, nil
 	default:
@@ -149,6 +154,121 @@ func TestNativeReplyGuardShapeOnlyAcceptsExactOwnedHook(t *testing.T) {
 	}
 	if err := nativeReplyGuardShape(""); err == nil {
 		t.Fatal("empty nft inspection accepted")
+	}
+}
+
+// This is the actual Debian 12 nft 1.0.6 layout observed during installed
+// connect-smart CI. No expression, set or handle is rewritten: only the
+// order in which nft enumerates the two sets relative to their chain.
+func nativeReplyGuardDebian12Ordering(t *testing.T) string {
+	t.Helper()
+	var doc struct {
+		Nftables []json.RawMessage `json:"nftables"`
+	}
+	debian12JSON := strings.Replace(nativeReplyGuardFixtureJSON,
+		`"version":"1.1.3"`, `"version":"1.0.6"`, 1)
+	if err := json.Unmarshal([]byte(debian12JSON), &doc); err != nil {
+		t.Fatal(err)
+	}
+	if len(doc.Nftables) != 8 {
+		t.Fatalf("bad reference fixture objects: %d", len(doc.Nftables))
+	}
+	// [metainfo, table, chain, accepted4, accepted6, rules...] ->
+	// [metainfo, table, accepted4, accepted6, chain, rules...].
+	doc.Nftables[2], doc.Nftables[3], doc.Nftables[4] =
+		doc.Nftables[3], doc.Nftables[4], doc.Nftables[2]
+	raw, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(raw)
+}
+
+func TestNativeReplyGuardDebian12OrderingExactOwnership(t *testing.T) {
+	raw12 := nativeReplyGuardDebian12Ordering(t)
+	for _, fixture := range []string{nativeReplyGuardFixtureJSON, raw12} {
+		handle, digest, err := nativeReplyGuardReceipt(fixture)
+		if err != nil || handle != 10 || digest != nativeAcceptedTCPFingerprint(nil) {
+			t.Fatalf("refused exact owned nft order: handle=%d err=%v", handle, err)
+		}
+	}
+	// Reordered sets or rules are still a foreign shape, even if their
+	// individual contents could otherwise appear exactly legitimate.
+	var doc struct {
+		Nftables []json.RawMessage `json:"nftables"`
+	}
+	if err := json.Unmarshal([]byte(raw12), &doc); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name string
+		a, b int
+	}{
+		{"reversed-sets", 2, 3},
+		{"interleaved-chain-and-sets", 3, 4},
+		{"reordered-mark-rules", 5, 6},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			doc.Nftables[tc.a], doc.Nftables[tc.b] = doc.Nftables[tc.b], doc.Nftables[tc.a]
+			raw, err := json.Marshal(doc)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := nativeReplyGuardShape(string(raw)); err == nil {
+				t.Fatal("unexpected nft object ordering accepted")
+			}
+			doc.Nftables[tc.a], doc.Nftables[tc.b] = doc.Nftables[tc.b], doc.Nftables[tc.a]
+		})
+	}
+	for _, tc := range []struct{ name, original, replacement string }{
+		{"foreign-mark", `"value":8228`, `"value":8227`},
+		{"wrong-hook", `"prio":-150`, `"prio":-149`},
+		{"wrong-set", `"name":"accepted4"`, `"name":"foreign4"`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if !strings.Contains(raw12, tc.original) {
+				t.Fatalf("bad mutation: %s", tc.original)
+			}
+			if err := nativeReplyGuardShape(strings.Replace(raw12, tc.original, tc.replacement, 1)); err == nil {
+				t.Fatal("modified nft owner accepted")
+			}
+		})
+	}
+	ctx := context.Background()
+	// Handle is an ownership RECEIPT identity, not an invariant fixture
+	// constant: accept any valid new handle during creation, but never
+	// adopt that replacement under the previously committed handle.
+	changedHandle := &fakeReplyGuardRunner{has: true,
+		nftJSON: strings.Replace(raw12, `"handle":10`, `"handle":11`, 1)}
+	if err := requireNativeReplyGuardClaim(ctx, changedHandle, 10, nativeAcceptedTCPFingerprint(nil)); err == nil {
+		t.Fatal("an identical replacement table with another handle was adopted")
+	}
+	if err := recoverNativeReplyGuard(ctx, changedHandle, 10, nativeAcceptedTCPFingerprint(nil)); err == nil || len(changedHandle.mutations) != 0 {
+		t.Fatal("foreign handle was deleted or adopted")
+	}
+	r := &fakeReplyGuardRunner{nftJSON: raw12}
+	handle, err := installNativeReplyGuardWithHandle(ctx, r, nil, nativeAcceptedTCPFingerprint(nil))
+	if err != nil || handle != 10 {
+		t.Fatalf("Debian12 installed early guard cannot verify its receipt: %v (%d)", err, handle)
+	}
+	if err := requireNativeReplyGuardClaim(ctx, r, handle, nativeAcceptedTCPFingerprint(nil)); err != nil {
+		t.Fatalf("Debian12 installed guard cannot verify live ownership: %v", err)
+	}
+	if err := recoverNativeReplyGuard(ctx, r, handle, nativeAcceptedTCPFingerprint(nil)); err != nil {
+		t.Fatalf("Debian12 installed guard cannot delete its exact owner: %v", err)
+	}
+	if r.has || !r.deleted || len(r.mutations) != 2 {
+		t.Fatalf("Debian12 exact receipt not recovered: %+v", r)
+	}
+	// Debian 12's real failure left a committed accepted-socket fingerprint
+	// without a table handle. That interrupted pre-start window must remain
+	// safely recoverable, without silently accepting a foreign owner.
+	interrupted := &fakeReplyGuardRunner{has: true, nftJSON: raw12}
+	if err := recoverNativeReplyGuard(ctx, interrupted, 0, nativeAcceptedTCPFingerprint(nil)); err != nil {
+		t.Fatalf("Debian12 pre-start uncommitted handle cannot recover: %v", err)
+	}
+	if interrupted.has || !interrupted.deleted || len(interrupted.mutations) != 1 {
+		t.Fatalf("Debian12 interrupted owned guard not safely reclaimed: %+v", interrupted)
 	}
 }
 

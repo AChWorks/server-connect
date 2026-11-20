@@ -79,14 +79,26 @@ Smart Routing. The old service might remain in systemd's failed bookkeeping
 after SIGKILL even when the hook has restored Direct; status must show that
 failed unit, never infer healthy from the missing recovery receipt.
 
-The **current Debian 13 installed-host CI** exercises the official-Core
-native TUN lifecycle, supervised Health/Recovery, scoped Direct/VPN packet
-witnesses and owned kernel restoration. The **current Debian 12 installed-host
-CI** verifies Direct/Proxy Only and explicitly refuses the legacy guarded
-`smart-tun-trial-apply` without changing private/network state; its native
-TUN/guarded-rule positive scenarios are **`NOT_RUN`**, not accepted. This
-legacy trial refusal is **not** a categorical Debian 12 prohibition on
-`connect-smart`. Separate **historical Debian 12 and 13 Incus native** results
+The **Debian 12 and 13 installed-host QA candidates** now exercise the
+installed `connect-smart` CLI, official-Core native systemd unit, both independent
+Guard timers, real selected VLESS versus manual Direct TCP/UDP/DNS paths, no
+selected Direct packet leak and exact five-inventory kernel restoration in
+isolated disconnected systemd guests. A deliberately missing authenticated
+selected HTTPS endpoint must also produce autonomous Direct/off. These
+scenarios count as `PASS` **only on successful exact-candidate CI**; they do
+**not** prove a healthy selected HTTPS provider or a physical deployment.
+Debian 12's older `nftables` emits the installed inbound-reply-guard
+sets before the chain; the newer Debian 13 emits chain before sets.
+The native receipt now recognizes exactly these two layouts while still
+checking exact hook/rule order, accepted TCP tuple fingerprint, persisted
+handle and generation-conditional deletion. The independent Native Health
+inspector also recognizes Debian 12 numeric TCP protocol `6` and Debian 13
+`tcp`, but still requires the actual TCP counter and all other read-only
+selected route and capture evidence (see SAFETY-RECOVERY).
+Debian 13 retains its distinct older supervised-trial QA, and Debian 12 still
+refuses only the legacy `smart-tun-trial-apply` without changing network state.
+That refusal is **not** a Debian 12 prohibition on `connect-smart`. Separate
+**historical Debian 12 and 13 Incus native** results
 are limited to their recorded source and installed QA artifacts; see the
 [acceptance evidence lanes](ACCEPTANCE.md#test-lanes-and-field-regression-lessons).
 Earlier single-VM tests demonstrated narrower SIGKILL/foreign-object cases;

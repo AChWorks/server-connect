@@ -1360,6 +1360,7 @@ if [[ $qa_version == 12 ]]; then
     docker cp "$root/scripts/qa/$fixture" "$container:/root/qa-$fixture"
   done
   docker cp "$root/scripts/qa/host-native-dns-policy.sh" "$container:/root/qa-native-dns-policy.sh"
+  docker cp "$root/scripts/qa/host-installed-native-connect.sh" "$container:/root/qa-installed-native-connect.sh"
   # Each mode starts independent selected and native Direct positive controls,
   # verifies UDP/TCP port-53 precedence and IPv6 UDP/MTU/outage containment,
   # then removes its own TUN, VETH, namespace, nft and Core resources.
@@ -1385,13 +1386,29 @@ if [[ $qa_version == 12 ]]; then
     assert_network_unchanged "debian12-native-dns-$native_mode" "$offline_before"
     verify_host_services "debian12-native-dns-$native_mode"
   done
+  echo 'DEBIAN12_INSTALLED_NATIVE_STAGE=actual-connected-manager'
+  installed_native_log="$scratch/debian12-installed-native.log"
+  docker exec -e SC_QA_TUN_INSTALLED_NATIVE=yes \
+    "$container" /bin/sh /root/qa-host-tun-path.sh | tee "$installed_native_log"
+  for marker in INSTALLED_NATIVE_PREARM_DIRECT_BASELINE INSTALLED_NATIVE_SELECTED_PATH \
+                INSTALLED_NATIVE_EXPLICIT_OFF INSTALLED_NATIVE_UNHEALTHY_GUARD \
+                INSTALLED_NATIVE_CLEANUP; do
+    grep -F "${marker}=PASS" "$installed_native_log" >/dev/null
+  done
+  grep -F 'REAL_TUN_LAB_CLEANUP=PASS' "$installed_native_log" >/dev/null
+  [[ $(docker exec "$container" /sbin/ip netns list) == "$tun_netns_before" ]]
+  [[ $(docker exec "$container" /usr/sbin/nft -j list ruleset) == "$tun_nft_before" ]]
+  assert_network_unchanged debian12-installed-native "$offline_before"
+  verify_host_services debian12-installed-native
+  echo 'DEBIAN12_INSTALLED_NATIVE=PASS (actual connect-smart/guards/Off; synthetic disconnected provider only)'
   docker exec "$container" rm -- /root/qa-tun-config-qa \
     /root/qa-tun-dns-peer.py /root/qa-tun-dns-client.py /root/qa-tun-sni-client.py \
     /root/qa-tun-native-apps.py /root/qa-tun-payload-wire.py /root/qa-tun-ipv6-wire.py \
-    /root/qa-host-tun-path.sh /root/qa-native-dns-policy.sh
+    /root/qa-host-tun-path.sh /root/qa-native-dns-policy.sh \
+    /root/qa-installed-native-connect.sh
   assert_network_unchanged debian12-native-dns-final "$offline_before"
   verify_host_services debian12-native-dns-final
-  echo 'DEBIAN12_NATIVE_DNS_WIRE=PASS (real Core/TUN packet paths in isolated guest; installed native guards NOT_RUN)'
+  echo 'DEBIAN12_NATIVE_DNS_WIRE=PASS (source-generated Core/TUN/DNS lab only; installed native lifecycle tested separately)'
 fi
 if [[ $qa_version == 13 ]]; then
 # A REAL Linux TUN+VLESS path is exercised only in the disconnected
@@ -1468,6 +1485,7 @@ docker cp "$root/scripts/qa/tun-ipv6-wire.py" "$container:/root/qa-tun-ipv6-wire
 docker cp "$root/scripts/qa/tun-wordpress-fpm.sh" "$container:/root/qa-tun-wordpress-fpm.sh"
 docker cp "$root/scripts/qa/tun-wp-check.py" "$container:/root/qa-tun-wp-check.py"
 docker cp "$root/scripts/qa/host-tun-path.sh" "$container:/root/qa-host-tun-path.sh"
+docker cp "$root/scripts/qa/host-installed-native-connect.sh" "$container:/root/qa-installed-native-connect.sh"
 docker cp "$root/scripts/qa/host-native-dns-policy.sh" "$container:/root/qa-native-dns-policy.sh"
 docker cp "$root/scripts/qa/host-product-tun-trial.sh" "$container:/root/qa-product-tun-trial.sh"
 docker cp "$root/scripts/qa/host-supervised-product-tun.sh" "$container:/root/qa-supervised-product-tun.sh"
@@ -1995,7 +2013,29 @@ fi
 docker exec "$container" /sbin/ip netns del scqapeer
 assert_tun_native_cleanup real-tun-injected-cleanup-recovery
 echo 'REAL_TUN_CLEANUP_FAILURE_REJECTED=PASS (guest cleanup failure != expected TUN rejection)'
-# Remove exactly the QA helpers copied for the completed TUN trials. This
+# Product code + installed inactive-by-default independent recovery units.
+# The actual RPDB rule is added ONLY in the verified disconnected guest.
+docker cp "$root/scripts/qa/host-product-guard-trial.sh" "$container:/root/qa-product-guard-trial.sh"
+docker exec "$container" /bin/sh /root/qa-product-guard-trial.sh
+assert_network_unchanged product-guard-recovered "$offline_before"
+verify_host_services product-guard-recovered
+# Both legacy supervised TUN and guarded-rule trial fixtures reuse the
+# installed recovery timer but are NOT a supported handoff from the modern
+# Native session. Complete *all* legacy trials first, including their
+# independent recovery executor checks, then run the installed Native
+# lifecycle in the same disposable guest with exact baseline witnesses.
+echo 'REAL_TUN_LAB_STAGE=installed-native-connect-smart'
+installed_native_log="$scratch/debian13-installed-native.log"
+docker exec -e SC_QA_TUN_INSTALLED_NATIVE=yes \
+  "$container" /bin/sh /root/qa-host-tun-path.sh | tee "$installed_native_log"
+for marker in INSTALLED_NATIVE_PREARM_DIRECT_BASELINE INSTALLED_NATIVE_SELECTED_PATH \
+              INSTALLED_NATIVE_EXPLICIT_OFF INSTALLED_NATIVE_UNHEALTHY_GUARD \
+              INSTALLED_NATIVE_CLEANUP; do
+  grep -F "${marker}=PASS" "$installed_native_log" >/dev/null
+done
+grep -F 'REAL_TUN_LAB_CLEANUP=PASS' "$installed_native_log" >/dev/null
+assert_tun_native_cleanup installed-native-connect-smart
+# Remove exactly the QA helpers after the legacy and Native trial matrices. This
 # also closes the earlier WordPress intermediate guest-helper cleanup gap.
 # The bounded helper verifies source hashes after authenticating its pinned
 # objects; a path-following checksum reader must not run before those checks.
@@ -2069,15 +2109,9 @@ docker exec "$container" /bin/rm -f /root/qa-tun-config-qa /root/qa-host-tun-pat
   /root/qa-native-product-tun.sh /root/qa-supervised-product-tun.sh \
   /root/qa-supervised-product-tun.py /root/qa-smart-health-responder.py /root/qa-smart-health-client.py \
   /root/qa-tun-dns-peer.py /root/qa-tun-dns-client.py /root/qa-tun-wordpress-fpm.sh \
-  /root/qa-tun-wp-check.py /root/qa-tun-payload-wire.py /root/qa-tun-ipv6-wire.py
-# Product code + installed inactive-by-default independent recovery units.
-# The actual RPDB rule is added ONLY in the verified disconnected guest.
-docker cp "$root/scripts/qa/host-product-guard-trial.sh" "$container:/root/qa-product-guard-trial.sh"
-docker exec "$container" /bin/sh /root/qa-product-guard-trial.sh
-assert_network_unchanged product-guard-recovered "$offline_before"
-verify_host_services product-guard-recovered
+  /root/qa-installed-native-connect.sh /root/qa-tun-wp-check.py /root/qa-tun-payload-wire.py /root/qa-tun-ipv6-wire.py
 else
-  echo 'NATIVE_TUN_AND_GUARDED_RULE_POSITIVES=NOT_RUN (Debian12 is not admitted; exact refusal checked separately)'
+  echo 'NATIVE_TUN_AND_GUARDED_RULE_POSITIVES=NOT_RUN (Debian12 legacy trial only; installed connect-smart tested separately)'
 fi
 echo '=== Installed real VLESS Proxy Only and owned offline update ==='
 docker cp "$root/scripts/qa/host-proxy-only.sh" "$container:/root/qa-proxy-only.sh"

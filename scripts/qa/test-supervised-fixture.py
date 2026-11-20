@@ -2038,7 +2038,11 @@ class TLSFixtureStagingTests(unittest.TestCase):
         manifest_check = 'docker exec -i -w /root/qa-smart-health-tls "$container" sha256sum -c - <"$tls_fixture_manifest"'
         self.assertEqual(source.count(manifest_check), 1)
         self.assertGreater(source.index(manifest_check), source.index("\nPYTLSSTAGE\n"))
-        cleanup = source.split("# Remove exactly the QA helpers copied for the completed TUN trials. This\n", 1)[1]
+        # This is the actual last TUN acceptance boundary: do not couple a
+        # security-sensitive cleanup assertion to freely editable prose.
+        last_trial = 'assert_tun_native_cleanup installed-native-connect-smart\n'
+        self.assertEqual(source.count(last_trial), 1)
+        cleanup = source.split(last_trial, 1)[1]
         entry = cleanup.split("<<'PYTLSCLEANUP'", 1)[0]
         commands = [line for line in entry.splitlines() if line and not line.startswith("#")]
         self.assertEqual(commands, ['docker exec "$container" /usr/bin/python3 -I -B -c "$(cat '])
@@ -2419,6 +2423,19 @@ class IPv6DriftFixtureOwnershipTests(unittest.TestCase):
                 self.assertFalse(getattr(self.fixture, "ipv6_drift_" + kind + "_intent"))
                 self.assertEqual(len(self.calls), 1)
                 self.assertEqual(getattr(self, field), [])
+
+
+class InstalledNativeCleanupTests(unittest.TestCase):
+    def test_unstarted_native_trial_cleanup_does_not_mask_a_failure(self):
+        # No host state or absolute installed binary is touched. Reproduce the
+        # source shell's nounset + EXIT trap in a subprocess before Apply.
+        helper = Path(__file__).with_name("host-installed-native-connect.sh")
+        command = '. "$1"; trap "native_installed_cleanup" EXIT; exit 37'
+        result = subprocess.run(
+            ["/bin/sh", "-eu", "-c", command, "sh", str(helper)],
+            capture_output=True, text=True, timeout=5, check=False)
+        self.assertEqual(result.returncode, 37, result.stderr)
+        self.assertNotIn("parameter not set", result.stderr)
 
 
 if __name__ == "__main__":

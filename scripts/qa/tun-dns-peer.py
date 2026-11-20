@@ -115,9 +115,10 @@ class TCPHandler(socketserver.BaseRequestHandler):
 
 
 def main():
-    if sys.argv[1:] not in ([], ["native-v6"]):
+    if sys.argv[1:] not in ([], ["native-v4"], ["native-v6"]):
         raise ValueError("invalid disconnected DNS peer mode")
-    native = sys.argv[1:] == ["native-v6"]
+    native = bool(sys.argv[1:])
+    native_v6 = sys.argv[1:] == ["native-v6"]
     # A wildcard-bound UDP socket can reply using the VETH's primary source
     # even when its query arrived at a synthetic public IP. Bind each
     # authoritative endpoint explicitly so the reply source is genuine.
@@ -127,7 +128,7 @@ def main():
             for address in (("5.22.0.10", "8.8.8.8", "1.1.1.1", "5.22.0.11", "9.9.9.9", "10.254.72.2") if native else ("5.22.0.10", "8.8.8.8"))
             for kind, handler in ((UDPServer, UDPHandler), (TCPServer, TCPHandler))
         ]
-        if native:
+        if native_v6:
             servers.extend(
                 stack.enter_context(kind((address, 53), handler))
                 for address in ("fd73:1::2", "2606:4700:5::10", "2606:4700:5::11",
