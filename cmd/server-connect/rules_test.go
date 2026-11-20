@@ -93,7 +93,7 @@ func TestRoutingRulesCLIRejectsUntrustedInputBeforeStateWrite(t *testing.T) {
 		{"smart-routing-rules", "add", "--cidr", "8.8.8.8/32", "--domain", "example.org", "--via", "vpn"},
 		{"smart-routing-rules", "remove", "--cidr", "8.8.8.8/32", "--via", "vpn"},
 		{"smart-routing-rules", "list", "--overwrite"},
-		{"smart-routing-rules", "preview", "--tunnel-if", "a"},
+		{"smart-routing-rules", "preview-native", "--tunnel-if", "a"},
 		{"smart-routing-rules", "unknown-command"},
 	} {
 		rc, reply, _ := captureRulesCommand(t, m, args...)
@@ -221,246 +221,6 @@ func TestRoutingRulesInteractiveMenuMutationsAndRejections(t *testing.T) {
 // underlying Manager compiler. The fixture is an offline, synthetic profile;
 // no sing-box process or kernel route is invoked by this preview.
 
-func TestRoutingRulesCLINamedVLESSPinnedPreviewRemainsUnverified(t *testing.T) {
-	m := rulesCLIManager(t)
-	if _, err := m.AddSmartRoutingRule(sc.SmartRoutingRule{Type: "cidr", Value: "1.1.1.0/24", Via: "direct"}); err != nil {
-		t.Fatal(err)
-	}
-	profile, err := sc.ValidateSource([]byte("vless://c2902f3a-1c25-41ef-a8dc-760b483aa247@node.example.org:443?type=tcp&security=tls#Named"), "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	encoded, err := json.Marshal(profile)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Mkdir(filepath.Join(m.Dir, "profiles"), 0700); err != nil {
-		t.Fatal(err)
-	}
-	profilePath := filepath.Join(m.Dir, "profiles", profile.ID+".json")
-	if err := os.WriteFile(profilePath, encoded, 0600); err != nil {
-		t.Fatal(err)
-	}
-	if err := m.Select(profile.ID); err != nil {
-		t.Fatal(err)
-	}
-	rulePath := filepath.Join(m.Dir, "smart-routing-rules.json")
-	beforeRules, err := os.ReadFile(rulePath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	args := []string{"smart-routing-rules", "preview", "--tunnel-if", "sctunqa0", "--underlay-if", "qaedge0", "--tunnel-ipv4", "172.31.99.1/30", "--domestic-cidr", "5.22.0.0/17", "--protected-cidr", "203.0.113.42/32"}
-	if rc, reply, _ := captureRulesCommand(t, m, args...); rc == 0 || reply["ok"] != false {
-		t.Fatalf("un-pinned hostname accepted: %+v", reply)
-	}
-	for _, pin := range []string{"127.0.0.1", "192.0.2.1", "2001:db8::1", "not-an-ip"} {
-		trialArgs := append(append([]string{}, args...), "--endpoint-pin-ipv4", pin)
-		if rc, reply, _ := captureRulesCommand(t, m, trialArgs...); rc == 0 || reply["ok"] != false {
-			t.Fatalf("invalid endpoint pin %q accepted: %+v", pin, reply)
-		}
-	}
-	for _, emptyPin := range [][]string{{"--endpoint-pin-ipv4="}, {"--endpoint-pin-ipv4", ""}} {
-		trialArgs := append(append([]string{}, args...), emptyPin...)
-		if rc, reply, _ := captureRulesCommand(t, m, trialArgs...); rc == 0 || reply["ok"] != false {
-			t.Fatalf("explicitly empty named endpoint pin accepted: %+v", reply)
-		}
-	}
-	args = append(args, "--endpoint-pin-ipv4", "8.8.8.8")
-	rc, reply, stderr := captureRulesCommand(t, m, args...)
-	if rc != 0 || stderr != "" || reply["ok"] != true {
-		t.Fatalf("pinned preview failed: %d %+v %s", rc, reply, stderr)
-	}
-	report := ruleResult(t, reply)
-	if report["endpoint_pin_evidence"] != "operator_supplied_unverified" ||
-		report["selected_profile_id"] != profile.ID ||
-		report["validation_level"] != "native_policy_compile_only" ||
-		report["core_execution_tested"] != false ||
-		report["host_network_inspected"] != false ||
-		report["activation_ready"] != false || report["applied"] != false {
-		t.Fatalf("preview falsely claimed host/activation evidence: %+v", report)
-	}
-	if rc, again, stderr := captureRulesCommand(t, m, args...); rc != 0 || stderr != "" ||
-		ruleResult(t, again)["native_config_sha256"] != report["native_config_sha256"] {
-		t.Fatal("pinned preview not deterministic")
-	}
-	afterProfile, err := os.ReadFile(profilePath)
-	if err != nil || !bytes.Equal(encoded, afterProfile) {
-		t.Fatal("saved profile mutated")
-	}
-	afterRules, err := os.ReadFile(rulePath)
-	if err != nil || !bytes.Equal(beforeRules, afterRules) {
-		t.Fatal("saved rule registry mutated")
-	}
-	if _, err := os.Stat(filepath.Join(m.Dir, "route-activation-journal.json")); !os.IsNotExist(err) {
-		t.Fatal("preview created a routing activation journal")
-	}
-	jsonOut, _ := json.Marshal(reply)
-	for _, secret := range []string{"c2902f3a", "node.example.org", "8.8.8.8"} {
-		if strings.Contains(string(jsonOut), secret) {
-			t.Fatalf("preview leaked selected data %q", secret)
-		}
-	}
-}
-
-func TestRoutingRulesCLIRejectsMalformedTLSIdentityWithoutSavedStateMutation(t *testing.T) {
-	for _, tc := range []struct{ name, rawName string }{
-		{"embedded space", `"bad name.example"`},
-		{"embedded NUL", `"bad\u0000name.example"`},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			m := rulesCLIManager(t)
-			if _, err := m.AddSmartRoutingRule(sc.SmartRoutingRule{Type: "cidr", Value: "1.1.1.0/24", Via: "direct"}); err != nil {
-				t.Fatal(err)
-			}
-			p, err := sc.ValidateSource([]byte("vless://c2902f3a-1c25-41ef-a8dc-760b483aa247@node.example.org:443?type=tcp&security=none#Named"), "")
-			if err != nil {
-				t.Fatal(err)
-			}
-			var outbound map[string]json.RawMessage
-			if err := json.Unmarshal(p.Outbound, &outbound); err != nil {
-				t.Fatal(err)
-			}
-			outbound["tls"] = json.RawMessage(`{"enabled":true,"server_name":` + tc.rawName + `}`)
-			p.Outbound, err = json.Marshal(outbound)
-			if err != nil {
-				t.Fatal(err)
-			}
-			encoded, err := json.Marshal(p)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if err := os.Mkdir(filepath.Join(m.Dir, "profiles"), 0700); err != nil {
-				t.Fatal(err)
-			}
-			profilePath := filepath.Join(m.Dir, "profiles", p.ID+".json")
-			if err := os.WriteFile(profilePath, encoded, 0600); err != nil {
-				t.Fatal(err)
-			}
-			if err := m.Select(p.ID); err != nil {
-				t.Fatal(err)
-			}
-			rulePath := filepath.Join(m.Dir, "smart-routing-rules.json")
-			statePath := filepath.Join(m.Dir, "state.json")
-			rulesBefore, err := os.ReadFile(rulePath)
-			if err != nil {
-				t.Fatal(err)
-			}
-			stateBefore, err := os.ReadFile(statePath)
-			if err != nil {
-				t.Fatal(err)
-			}
-			args := []string{"smart-routing-rules", "preview", "--tunnel-if", "sctunqa0",
-				"--underlay-if", "qaedge0", "--tunnel-ipv4", "172.31.99.1/30",
-				"--domestic-cidr", "5.22.0.0/17", "--endpoint-pin-ipv4", "8.8.8.8"}
-			rc, reply, stderr := captureRulesCommand(t, m, args...)
-			if rc == 0 || reply["ok"] != false {
-				t.Fatalf("invalid TLS identity accepted: %d %+v %s", rc, reply, stderr)
-			}
-			serialized, _ := json.Marshal(reply)
-			if strings.Contains(string(serialized)+stderr, "node.example.org") ||
-				strings.Contains(string(serialized)+stderr, "bad name.example") ||
-				strings.Contains(string(serialized)+stderr, "8.8.8.8") {
-				t.Fatal("refusal leaked endpoint or TLS identity")
-			}
-			profileAfter, err := os.ReadFile(profilePath)
-			if err != nil || !bytes.Equal(encoded, profileAfter) {
-				t.Fatal("rejected preview changed saved selected profile")
-			}
-			rulesAfter, err := os.ReadFile(rulePath)
-			if err != nil || !bytes.Equal(rulesBefore, rulesAfter) {
-				t.Fatal("rejected preview changed routing-rule bytes")
-			}
-			stateAfter, err := os.ReadFile(statePath)
-			if err != nil || !bytes.Equal(stateBefore, stateAfter) {
-				t.Fatal("rejected preview changed selected state")
-			}
-			if _, err := os.Stat(filepath.Join(m.Dir, "route-activation-journal.json")); !os.IsNotExist(err) {
-				t.Fatal("rejected preview created activation journal")
-			}
-		})
-	}
-}
-
-func TestRoutingRulesCLIPreviewSelectedProfileIsCompileOnly(t *testing.T) {
-	m := rulesCLIManager(t)
-	for _, rule := range []sc.SmartRoutingRule{
-		{Type: "cidr", Value: "1.1.1.0/24", Via: "direct"},
-		{Type: "suffix", Value: "test.example.org", Via: "vpn"},
-	} {
-		if _, err := m.AddSmartRoutingRule(rule); err != nil {
-			t.Fatal(err)
-		}
-	}
-	profile, err := sc.ValidateSource([]byte("vless://c2902f3a-1c25-41ef-a8dc-760b483aa247@8.8.8.8:443?type=tcp&security=none#QA"), "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	encoded, err := json.Marshal(profile)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Mkdir(filepath.Join(m.Dir, "profiles"), 0700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(m.Dir, "profiles", profile.ID+".json"), encoded, 0600); err != nil {
-		t.Fatal(err)
-	}
-	if err := m.Select(profile.ID); err != nil {
-		t.Fatal(err)
-	}
-	path := filepath.Join(m.Dir, "smart-routing-rules.json")
-	before, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	args := []string{"smart-routing-rules", "preview", "--tunnel-if", "sctunqa0",
-		"--underlay-if", "qaedge0", "--tunnel-ipv4", "172.31.99.1/30",
-		"--domestic-cidr", "5.22.0.0/17", "--protected-cidr", "203.0.113.42/32"}
-	code, out, stderr := captureRulesCommand(t, m, args...)
-	if code != 0 || stderr != "" || out["ok"] != true {
-		t.Fatalf("preview failed: %d %+v %s", code, out, stderr)
-	}
-	report := ruleResult(t, out)
-	if _, present := report["endpoint_pin_evidence"]; present {
-		t.Fatal("omitted pin unexpectedly produced endpoint pin evidence")
-	}
-	for _, emptyPin := range [][]string{{"--endpoint-pin-ipv4="}, {"--endpoint-pin-ipv4", ""}} {
-		trialArgs := append(append([]string{}, args...), emptyPin...)
-		if rc, reply, _ := captureRulesCommand(t, m, trialArgs...); rc == 0 || reply["ok"] != false {
-			t.Fatalf("explicitly empty literal endpoint pin accepted: %+v", reply)
-		}
-	}
-	pinnedArgs := append(append([]string{}, args...), "--endpoint-pin-ipv4=8.8.8.8")
-	if rc, pinned, stderr := captureRulesCommand(t, m, pinnedArgs...); rc != 0 || stderr != "" ||
-		ruleResult(t, pinned)["endpoint_pin_evidence"] != "operator_supplied_unverified" {
-		t.Fatalf("valid matching literal pin did not produce explicit evidence: %+v (%d) %s", pinned, rc, stderr)
-	}
-	if report["selected_profile_id"] != profile.ID ||
-		report["rules_revision"] != float64(2) ||
-		report["rule_count"] != float64(2) ||
-		report["validation_level"] != "native_policy_compile_only" ||
-		report["core_execution_tested"] != false ||
-		report["host_network_inspected"] != false ||
-		report["activation_ready"] != false || report["applied"] != false {
-		t.Fatalf("CLI preview misrepresented supported scope: %+v", report)
-	}
-	digest, ok := report["native_config_sha256"].(string)
-	if !ok || len(digest) != 64 {
-		t.Fatalf("missing compiled hash: %+v", report)
-	}
-	again, afterPreview, _ := captureRulesCommand(t, m, args...)
-	if again != 0 || ruleResult(t, afterPreview)["native_config_sha256"] != digest {
-		t.Fatal("CLI preview not deterministic")
-	}
-	after, err := os.ReadFile(path)
-	if err != nil || !bytes.Equal(before, after) {
-		t.Fatal("preview modified saved rule bytes")
-	}
-	if _, err := os.Stat(filepath.Join(m.Dir, "route-activation-journal.json")); !os.IsNotExist(err) {
-		t.Fatal("preview created activation state")
-	}
-}
-
 // CLI and storage must agree on the genuine file budget. A large annotated
 // local list can have a small valid compiled rule set.
 func TestRoutingRulesCLIAllowsLargerCommentedList(t *testing.T) {
@@ -496,5 +256,22 @@ func TestRoutingRulesCLIRejectsOnlyActualStoreBudget(t *testing.T) {
 	}
 	if _, err := readRoutingRuleList(filename); sc.ErrorCode(err) != "routing_rules_invalid" {
 		t.Fatalf("true store-budget overflow was not rejected: %v", err)
+	}
+}
+
+// The superseded synthetic preview has been retired; official-Core
+// preview-native is the single operator entry point.
+func TestRoutingRulesOldPreviewRetired(t *testing.T) {
+	if strings.Contains(helpText, "smart-routing-rules preview --") {
+		t.Fatal("obsolete preview still advertised")
+	}
+	m := rulesCLIManager(t)
+	rc, reply, stderr := captureRulesCommand(t, m, "smart-routing-rules", "preview",
+		"--tunnel-if", "sctunqa0")
+	if rc == 0 || reply["ok"] != false || stderr != "" {
+		t.Fatalf("old preview unexpectedly dispatched: %d %+v %s", rc, reply, stderr)
+	}
+	if _, err := os.Stat(m.Dir); !os.IsNotExist(err) {
+		t.Fatal("retired preview created state")
 	}
 }

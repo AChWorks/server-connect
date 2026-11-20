@@ -3,7 +3,6 @@ package sc
 import (
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -217,50 +216,6 @@ func TestRoutingRulesRejectBroadAggregateAndNullSchema(t *testing.T) {
 	}
 	if _, err := corrupt.InspectSmartRoutingRules(); err == nil {
 		t.Fatal("null instead of a saved rules array accepted")
-	}
-}
-
-func TestRoutingRulesNativeCompilerPreviewNoNetworkEffects(t *testing.T) {
-	m := rulesManager(t)
-	if _, err := m.PreviewSmartRoutingRules(SmartTUNCandidateOptions{}); err == nil {
-		t.Fatal("preview without a selected profile accepted")
-	}
-	profile, original := smartTUNFixture()
-	profile.ID = "0123456789abcdef"
-	if err := m.withLock(func() error {
-		state := State{Version: 1, Desired: "direct", Port: m.Port, Selected: profile.ID}
-		if err := m.save(state); err != nil {
-			return err
-		}
-		raw, err := json.Marshal(profile)
-		if err != nil {
-			return err
-		}
-		return put(filepath.Join(m.Dir, "profiles", profile.ID+".json"), raw)
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := m.AddSmartRoutingRule(SmartRoutingRule{Type: "cidr", Value: "1.1.1.0/24", Via: "direct"}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := m.AddSmartRoutingRule(SmartRoutingRule{Type: "suffix", Value: "example.org", Via: "vpn"}); err != nil {
-		t.Fatal(err)
-	}
-	opts := original
-	opts.Exceptions = nil
-	p, err := m.PreviewSmartRoutingRules(opts)
-	if err != nil || p.RulesRevision != 2 || p.SelectedProfileID != profile.ID || p.RuleCount != 2 ||
-		len(p.NativeConfigSHA256) != 64 || p.ValidationLevel != "native_policy_compile_only" ||
-		p.CoreExecutionTested || p.HostNetworkInspected || p.ActivationReady || p.Applied {
-		t.Fatalf("preview must compile only, no activation: %+v %v", p, err)
-	}
-	again, err := m.PreviewSmartRoutingRules(opts)
-	if err != nil || !reflect.DeepEqual(p, again) {
-		t.Fatalf("compiled plan unstable: %+v %+v %v", p, again, err)
-	}
-	opts.Exceptions = []SmartTUNCIDRException{{CIDR: "8.8.8.8/32", Via: "direct"}}
-	if _, err := m.PreviewSmartRoutingRules(opts); err == nil {
-		t.Fatal("caller-supplied exceptions bypassed saved rules")
 	}
 }
 

@@ -170,10 +170,6 @@ func TestRoutingRegistryR1R2CorruptedSavedStateFailsClosed(t *testing.T) {
 			if _, err := m.InspectSmartRoutingRules(); err == nil {
 				t.Fatal("untrusted saved rule accepted")
 			}
-			_, candidate := smartTUNFixture()
-			if _, err := m.PreviewSmartRoutingRules(candidate); err == nil {
-				t.Fatal("preview accepted invalid saved rule before profile checks")
-			}
 			if _, err := m.AddSmartRoutingRule(SmartRoutingRule{Type: "cidr", Value: "9.9.9.9/32", Via: "vpn"}); err == nil {
 				t.Fatal("invalid existing state overwritten")
 			}
