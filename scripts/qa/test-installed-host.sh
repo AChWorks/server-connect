@@ -816,7 +816,7 @@ with tempfile.TemporaryDirectory(prefix="scqa-operator-cancel-", dir="/run") as 
         "dns-cancel": "14\nnode.example.test\n198.51.100.17\ncancel\n0\n",
         "tcp-optional-host-cancel": "13\n198.51.100.17\n443\nback\n0\n",
         "rule-via-cancel": "19\n2\n1.1.1.0/24\nback\n0\n",
-        "vm-challenge-cancel": "20\n5\n0123456789abcdef\n3\ncancel\n0\n",
+        "retired-vm-menu": "20\n0\n",
     }
     for label, request in cases.items():
         untouched = Path(abort_tmp, label)
@@ -824,14 +824,17 @@ with tempfile.TemporaryDirectory(prefix="scqa-operator-cancel-", dir="/run") as 
                                 input=request, text=True, capture_output=True, timeout=12)
         assert result.returncode == 0 and not result.stderr, (
             label, result.returncode, result.stderr)
-        # Retired option 12 is not a prompt cancellation: it must be rejected
-        # as an unknown choice, with no dispatch or legacy planner prompt.
-        expected = "Unknown option." if label == "retired-selective-menu" else "Canceled:"
+        # Retired options 12 and 20 must be inert unknown choices rather than
+        # entering the old selective planner or isolated-VM trial prompts.
+        expected = "Unknown option." if label.startswith("retired-") else "Canceled:"
         assert expected in result.stdout and "Running " not in result.stdout, (
             label, "unexpected command dispatch/refusal", result.stdout[-500:])
         if label == "retired-selective-menu":
             assert "Selective Plan" not in result.stdout
             assert "Pinned VPN endpoint literal IP:" not in result.stdout
+        if label == "retired-vm-menu":
+            assert "20 Guarded Smart TUN" not in result.stdout
+            assert "VM-CONNECT" not in result.stdout
         assert not untouched.exists(), (label, "inert menu created manager state")
     print("INSTALLED_OPERATOR_ADVANCED_CANCEL_NO_DISPATCH=PASS "
           f"({len(cases)} cancellations/refusals; zero command dispatch; no manager state)",
