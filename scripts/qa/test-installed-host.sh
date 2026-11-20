@@ -816,7 +816,7 @@ with tempfile.TemporaryDirectory(prefix="scqa-operator-cancel-", dir="/run") as 
         "dns-cancel": "14\nnode.example.test\n198.51.100.17\ncancel\n0\n",
         "tcp-optional-host-cancel": "13\n198.51.100.17\n443\nback\n0\n",
         "rule-via-cancel": "19\n2\n1.1.1.0/24\nback\n0\n",
-        "vm-challenge-cancel": "20\n5\n0123456789abcdef\n3\ncancel\n0\n",
+        "retired-vm-menu": "20\n0\n",
     }
     for label, request in cases.items():
         untouched = Path(abort_tmp, label)
@@ -824,14 +824,17 @@ with tempfile.TemporaryDirectory(prefix="scqa-operator-cancel-", dir="/run") as 
                                 input=request, text=True, capture_output=True, timeout=12)
         assert result.returncode == 0 and not result.stderr, (
             label, result.returncode, result.stderr)
-        # Retired option 12 is not a prompt cancellation: it must be rejected
-        # as an unknown choice, with no dispatch or legacy planner prompt.
-        expected = "Unknown option." if label == "retired-selective-menu" else "Canceled:"
+        # Retired options 12 and 20 must be inert unknown choices rather than
+        # entering the old selective planner or isolated-VM trial prompts.
+        expected = "Unknown option." if label.startswith("retired-") else "Canceled:"
         assert expected in result.stdout and "Running " not in result.stdout, (
             label, "unexpected command dispatch/refusal", result.stdout[-500:])
         if label == "retired-selective-menu":
             assert "Selective Plan" not in result.stdout
             assert "Pinned VPN endpoint literal IP:" not in result.stdout
+        if label == "retired-vm-menu":
+            assert "20 Guarded Smart TUN" not in result.stdout
+            assert "VM-CONNECT" not in result.stdout
         assert not untouched.exists(), (label, "inert menu created manager state")
     print("INSTALLED_OPERATOR_ADVANCED_CANCEL_NO_DISPATCH=PASS "
           f"({len(cases)} cancellations/refusals; zero command dispatch; no manager state)",
@@ -910,26 +913,26 @@ with tempfile.TemporaryDirectory(prefix="scqa-operator-menu-", dir="/run") as tm
     imported = cli("import", "--file", "-", stdin=test_uri)["data"]
     selected = imported["id"]
     cli("select", selected)
-    preview_args = ("smart-routing-rules", "preview",
-                    "--tunnel-if", "sctunqa0",
-                    "--underlay-if", "qaedge0",
+    preview_args = ("smart-routing-rules", "preview-native",
+                    "--tunnel-if", "sctunqa0", "--underlay-if", "qaedge0",
                     "--tunnel-ipv4", "172.31.99.1/30",
-                    "--domestic-cidr", "5.22.0.0/17",
-                    "--protected-cidr", "203.0.113.42/32")
+                    "--tunnel-ipv6", "fd73:99::1/64", "--mode", "bypass_iran")
     before, saved_bytes = snapshot()
     p = cli(*preview_args)["data"]
     assert p["selected_profile_id"] == selected
     assert p["rules_revision"] == 4 and p["rule_count"] == 5
-    assert p["validation_level"] == "native_policy_compile_only"
+    assert p["validation_level"] == "pinned_official_core_check_only"
+    assert p["core_config_accepted"] is True
     assert re.fullmatch(r"[0-9a-f]{64}", p["native_config_sha256"])
     assert all(p[key] is False for key in (
-        "core_execution_tested", "host_network_inspected", "activation_ready", "applied"))
-    assert cli(*preview_args)["data"] == p, "preview emitted nondeterministic config"
+        "host_network_inspected", "activation_ready", "applied",
+        "general_host_admitted"))
+    assert cli(*preview_args)["data"] == p, "native preview emitted nondeterministic config"
     after, current_bytes = snapshot()
-    assert before == after and saved_bytes == current_bytes, "preview modified saved rules"
-    assert not any(state.glob("*activation*journal*")), "preview created an activation journal"
+    assert before == after and saved_bytes == current_bytes, "native preview modified saved rules"
+    assert not any(state.glob("*activation*journal*")), "native preview created an activation journal"
     print("INSTALLED_OPERATOR_CLI_NATIVE_PREVIEW=PASS "
-          "(selected pinned-core VLESS, exact rev/count/config digest, compile only, immutable rules)", flush=True)
+          "(selected official-Core policy, exact rev/count/config digest, read-only)", flush=True)
 
     fixture.write_bytes(updated)
     menu("replace source", f"4\n{fixture}\nmenu-source\n2026-10-02\n{new_sha}\n{sha}\n", 5, 4)

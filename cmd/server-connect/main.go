@@ -761,15 +761,6 @@ Commands:
                                      [--iran-coverage consensus|dbip] [--enable-selected-ipv6]
                               Compiles saved rules with official sing-box;
                               checks Core config only, never activates host TUN
-  smart-routing-rules preview --tunnel-if NAME --underlay-if NAME --tunnel-ipv4 CIDR
-                              --domestic-cidr CIDR [--protected-cidr CIDR...]
-                              [--endpoint-pin-ipv4 PUBLIC_IP] (named VLESS TCP only)
-                              Compiles saved rules with selected native VLESS profile;
-                              explicit pins do not prove DNS or underlay reachability;
-                              no core execution, route inspection or activation
-                             Offline saved settings ONLY, no TUN activation
-                              Local service state is not foreign VPN path proof;
-                              Native Smart Routing remains candidate-only; not admitted for general hosts
   import [--file FILE|-]      Import one VLESS TCP/WS/HTTPUpgrade URI or
                              supported sing-box outbound/config (private file/stdin)
   validate [--file FILE|-]    Validate against pinned sing-box without saving
@@ -1002,82 +993,6 @@ func menuWithRunner(m *sc.Manager, dispatch func(*sc.Manager, ...string) int) in
 			if dispatch(m, "connect-smart", "--underlay-if", underlay, "--mode", mode) == 0 {
 				fmt.Println("Core started under native guards; independently check selected VPN/Direct traffic.")
 				fmt.Println("Inspect option 22 (native-status), or choose option 7 to return to Direct.")
-			}
-		case "20":
-			advanced = true
-			fmt.Println("Smart Routing is admitted ONLY on the exact isolated QEMU Debian 13 QA guest; never production.")
-			fmt.Print("1 Status  2 First guarded VM Connect  3 Reconnect saved  4 Safe Disconnect  5 Confirm from NEW SSH  6 Saved policy  7 Reconcile idle Guard: ")
-			sub, err := in.ReadString('\n')
-			if err != nil {
-				return 0
-			}
-			switch strings.TrimSpace(sub) {
-			case "1":
-				dispatch(m, []string{"smart-tun-trial-status"}...)
-			case "2":
-				fmt.Print("This starts independent rollback/health guards on the isolated QA VM. Type VM-CONNECT: ")
-				ack, err := in.ReadString('\n')
-				if err != nil || strings.TrimSpace(ack) != "VM-CONNECT" {
-					fmt.Println("Canceled; no host change")
-					continue
-				}
-				if dispatch(m, []string{"smart-tun-trial-apply", "--supervised", "--tunnel-if", "scqavm0", "--underlay-if", "ens3", "--tunnel-ipv4", "172.31.99.1/30", "--management-peer", "10.0.2.2", "--domestic-cidr", "5.22.0.10/32", "--protected-cidr", "10.0.2.2/32", "--deadline-seconds", "180"}...) == 0 {
-					fmt.Println("For confirmation open a completely NEW SSH connection, then use option 20 > 5 within the shown deadline.")
-				}
-			case "3":
-				fmt.Print("Revalidate saved profile and rules, start an independently guarded VM trial? Type VM-RECONNECT: ")
-				ack, err := in.ReadString('\n')
-				if err != nil || strings.TrimSpace(ack) != "VM-RECONNECT" {
-					fmt.Println("Canceled; no host change")
-					continue
-				}
-				if dispatch(m, []string{"smart-tun-trial-apply", "--saved", "--supervised", "--deadline-seconds", "180"}...) == 0 {
-					fmt.Println("Open a NEW SSH connection to confirm the one-time challenge.")
-				}
-			case "4":
-				r, err := m.InspectSmartTUNTrial()
-				if err != nil {
-					operatorPrintError(os.Stderr, err)
-					continue
-				}
-				if r.Phase == "absent" {
-					fmt.Println("Already Off; no owned TUN resources")
-					continue
-				}
-				fmt.Printf("Disconnect exact operation %s revision %d? Type VM-DISCONNECT: ", r.OperationID, r.Revision)
-				ack, err := in.ReadString('\n')
-				if err != nil || strings.TrimSpace(ack) != "VM-DISCONNECT" {
-					fmt.Println("Canceled; no host change")
-					continue
-				}
-				dispatch(m, []string{"smart-tun-trial-disconnect", "--operation-id", r.OperationID, "--revision", strconv.FormatUint(r.Revision, 10)}...)
-			case "5":
-				fmt.Println("Use a freshly authenticated SSH connection, not the existing Apply session or a multiplexed channel.")
-				op, ok := operatorPrompt(in, "Operation ID (or cancel): ", false)
-				if !ok {
-					continue
-				}
-				revision, ok := operatorPrompt(in, "Revision (or cancel): ", false)
-				if !ok {
-					continue
-				}
-				challenge, ok := operatorPrompt(in, "Single-use challenge (or cancel): ", false)
-				if !ok {
-					continue
-				}
-				dispatch(m, "smart-tun-trial-confirm", "--operation-id", op, "--revision", revision, "--challenge", challenge)
-			case "6":
-				dispatch(m, []string{"smart-tun-trial-policy"}...)
-			case "7":
-				fmt.Print("Only on the exact isolated QA VM, after confirmed Direct/off and no owned resources. This resets only stale FAILED owned Health/Recovery systemd bookkeeping. Type VM-RECONCILE-GUARD: ")
-				ack, err := in.ReadString('\n')
-				if err != nil || strings.TrimSpace(ack) != "VM-RECONCILE-GUARD" {
-					fmt.Println("Canceled; no host change")
-					continue
-				}
-				dispatch(m, []string{"smart-tun-trial-reconcile-idle-guard"}...)
-			default:
-				fmt.Println("Unknown Smart TUN choice; no change")
 			}
 		case "19":
 			fmt.Print("Routing Rules: 1 List  2 Add CIDR  3 Add VPN Domain  4 Import List  5 Remove CIDR  6 Remove Domain  7 Remove Source: ")

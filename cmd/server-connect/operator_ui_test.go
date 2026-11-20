@@ -36,10 +36,13 @@ func TestOperatorMenuIsReadOnlyOnFirstUseAndHidesLegacyUntilAdvanced(t *testing.
 	out.Reset()
 	p.menu(m, true)
 	advanced := out.String()
-	for _, want := range []string{"Advanced diagnostics", "11 Path Diagnostics", "20 Guarded Smart TUN"} {
+	for _, want := range []string{"Advanced diagnostics", "11 Path Diagnostics"} {
 		if !strings.Contains(advanced, want) {
 			t.Fatalf("advanced tool unavailable: %q", want)
 		}
+	}
+	if strings.Contains(advanced, "20 Guarded Smart TUN") {
+		t.Fatal("obsolete isolated VM trial still appears in the advanced operator menu")
 	}
 	if _, err := os.Lstat(m.Dir); !os.IsNotExist(err) {
 		t.Fatal("opening advanced menu created manager state")
@@ -147,35 +150,34 @@ func TestOperatorPromptRequiresCompleteInput(t *testing.T) {
 	}
 }
 
-// A refused VM-only Apply must not direct the operator to confirm an operation
-// that never started. This is an unprivileged, state-less refusal test; it
-// never exercises a real host TUN, systemd unit or network route.
-func TestOperatorMenuFailedVMApplyNeverOffersConfirmation(t *testing.T) {
-	for _, tc := range []struct{ name, input, successAdvice string }{
-		{"first-apply", "20\n2\nVM-CONNECT\n0\n", "For confirmation open a completely NEW SSH connection"},
-		{"saved-reapply", "20\n3\nVM-RECONNECT\n0\n", "Open a NEW SSH connection to confirm the one-time challenge"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			m := sc.New(filepath.Join(t.TempDir(), "uninstalled-state"), "", 0)
-			in, wr, err := os.Pipe()
-			if err != nil {
-				t.Fatal(err)
-			}
-			if _, err := io.WriteString(wr, tc.input); err != nil {
-				t.Fatal(err)
-			}
-			wr.Close()
-			old := os.Stdin
-			os.Stdin = in
-			defer func() { os.Stdin = old; in.Close() }()
-			code, out, stderr := hostDriftCapturedOutput(t, func() int { return menu(m) })
-			if code != 0 || !strings.Contains(out, "Not completed:") || !strings.Contains(stderr, "Error [") || strings.Contains(out, tc.successAdvice) {
-				t.Fatalf("refused trial implied successful Apply: code=%d out=%s err=%s", code, out, stderr)
-			}
-			if _, err := os.Lstat(m.Dir); !os.IsNotExist(err) {
-				t.Fatal("refused VM trial created uninstalled product state")
-			}
+// The obsolete isolated VM Apply menu must no longer expose a second
+// operator workflow alongside native connect-smart. Unknown choice 20 is
+// inert and cannot initialize private state or dispatch any privileged action.
+func TestRetiredVMMenuIsInert(t *testing.T) {
+	m := sc.New(filepath.Join(t.TempDir(), "uninitialized-state"), "", 0)
+	in, wr, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.WriteString(wr, "20\n0\n"); err != nil {
+		t.Fatal(err)
+	}
+	_ = wr.Close()
+	old := os.Stdin
+	os.Stdin = in
+	defer func() { os.Stdin = old; _ = in.Close() }()
+	called := false
+	code, out, stderr := hostDriftCapturedOutput(t, func() int {
+		return menuWithRunner(m, func(*sc.Manager, ...string) int {
+			called = true
+			return 0
 		})
+	})
+	if code != 0 || called || stderr != "" || !strings.Contains(out, "Unknown option") {
+		t.Fatalf("retired VM menu dispatched an action or failed: code=%d called=%v stdout=%s stderr=%s", code, called, out, stderr)
+	}
+	if _, err := os.Lstat(m.Dir); !os.IsNotExist(err) {
+		t.Fatal("retired VM option initialized manager state")
 	}
 }
 
@@ -271,6 +273,7 @@ func TestOperatorAdvancedMenuRequiresCompleteExplicitInputs(t *testing.T) {
 		{"diagnose-valid-direct", base + "2\n0\n", "diagnose-path --via direct --url " + one + " --url " + two},
 		{"diagnose-valid-five-direct", manyInput + "2\n0\n", manyCommand},
 		{"retired-selective-menu", "12\n0\n", ""},
+		{"retired-vm-trial-menu", "20\n0\n", ""},
 		{"dns-back-last", "14\nnode.example.test\n" + endpoint + "\nback\n0\n", ""},
 		{"dns-cancel-first", "14\ncancel\n0\n", ""},
 		{"dns-eof-middle", "14\nnode.example.test\n" + endpoint, ""},
@@ -287,8 +290,6 @@ func TestOperatorAdvancedMenuRequiresCompleteExplicitInputs(t *testing.T) {
 		{"rules-import-cancel-revision", "19\n4\n/tmp/rules.txt\nsource\n2026-01-01\n" + digest + "\ncancel\n0\n", ""},
 		{"rules-import-blank-revision", "19\n4\n/tmp/rules.txt\nsource\n2026-01-01\n" + digest + "\n\n0\n", "smart-routing-rules import --file /tmp/rules.txt --source source --as-of 2026-01-01 --sha256 " + digest},
 		{"rules-remove-source-eof", "19\n7\nsource\n" + digest, ""},
-		{"vm-confirm-cancel-challenge", "20\n5\n0123456789abcdef\n3\ncancel\n0\n", ""},
-		{"vm-confirm-valid", "20\n5\n0123456789abcdef\n3\nchallenge-token\n0\n", "smart-tun-trial-confirm --operation-id 0123456789abcdef --revision 3 --challenge challenge-token"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
