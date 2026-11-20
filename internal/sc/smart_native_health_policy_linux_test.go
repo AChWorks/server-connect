@@ -121,3 +121,72 @@ func TestNativeHealthMarkedRoutingAttestation(t *testing.T) {
 		})
 	}
 }
+
+// The output_prematch chain has its own TCP counter. It must not make an
+// unrelated or incomplete redirect in the actual output chain look healthy.
+// This was missed by replacing both fixtures' counters at the same time.
+func TestNativeHealthRejectsOutputRedirectPartialDrift(t *testing.T) {
+	p := nativeRedirectRecovery{TunnelIF: "sctun0", UnderlayIF: "enp5s0",
+		Table: NativePolicyTableIndex, Rule: NativePolicyRuleIndex}
+	targets := []nativeProbeTarget{{IP: "8.8.8.8", Name: smartTUNHealthHTTPSName, Port: 19224}}
+	key := "nft list table inet sing-box"
+	for _, tc := range []struct {
+		name, tcp string
+	}{
+		{"debian13-symbolic", "tcp"},
+		{"debian12-numeric", "6"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			base := nativeHealthPolicyFixture()
+			body := base.values[key]
+			if tc.tcp == "6" {
+				body = strings.ReplaceAll(body, "meta l4proto tcp counter", "meta l4proto 6 counter")
+			}
+			if e := inspectNativeHealthPolicy(context.Background(), fakeNativeHealthPolicy{values: withNftHealthBody(base, body)}, p, targets); e != nil {
+				t.Fatalf("intact TCP output rule refused: %v", e)
+			}
+			valid := "meta l4proto " + tc.tcp + " counter packets 2 bytes 80 redirect to :35785 return"
+			for _, drift := range []struct {
+				name, replacement string
+			}{
+				{"output-only-udp", "meta l4proto 17 counter packets 2 bytes 80 redirect to :35785 return"},
+				{"output-only-uncounted", "meta l4proto " + tc.tcp + " redirect to :35785 return"},
+				{"counter-and-redirect-separated", "meta l4proto " + tc.tcp + " counter packets 2 bytes 80 return\n      redirect to :35785 return"},
+				{"tcp-counter-on-different-rule", "meta l4proto " + tc.tcp + " counter packets 2 bytes 80 return\n      meta l4proto 17 redirect to :35785 return"},
+				{"redirect-before-tcp-match", "redirect to :35785 meta l4proto " + tc.tcp + " counter packets 2 bytes 80 return"},
+				{"wrong-output-hook", "meta l4proto " + tc.tcp + " counter packets 2 bytes 80 redirect to :35785 return"},
+			} {
+				t.Run(drift.name, func(t *testing.T) {
+					badBody := body
+					if drift.name == "wrong-output-hook" {
+						badBody = strings.Replace(badBody,
+							"type nat hook output priority mangle + 2;",
+							"type nat hook input priority mangle + 2;", 1)
+						// A decoy in a different chain must not supply the hook.
+						badBody = strings.Replace(badBody,
+							"chain prerouting_prematch {",
+							"chain prerouting_prematch {\n      type nat hook output priority mangle + 2;", 1)
+					} else {
+						badBody = strings.Replace(badBody, valid, drift.replacement, 1)
+					}
+					if badBody == body {
+						t.Fatal("expected precise output-only fixture mutation")
+					}
+					bad := fakeNativeHealthPolicy{values: withNftHealthBody(base, badBody)}
+					if e := inspectNativeHealthPolicy(context.Background(), bad, p, targets); e == nil {
+						t.Fatalf("%s output-only drift falsely accepted as healthy", drift.name)
+					}
+				})
+			}
+		})
+	}
+}
+
+func withNftHealthBody(f fakeNativeHealthPolicy, body string) map[string]string {
+	values := make(map[string]string, len(f.values))
+	for k, v := range f.values {
+		values[k] = v
+	}
+	values["nft list table inet sing-box"] = body
+	return values
+}

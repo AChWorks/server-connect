@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"io"
 	"os/exec"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -144,21 +145,19 @@ func inspectNativeHealthPolicy(ctx context.Context, r interface {
 	if e != nil {
 		return e
 	}
-	required := []string{"chain prerouting_prematch {", "chain output_prematch {", "chain output {", "chain prerouting {",
-		"type route hook output priority mangle + 1;", "type nat hook output priority mangle + 2;",
-		"iifname \"" + p.TunnelIF + "\" return", "redirect to :"}
+	required := []string{"chain prerouting_prematch {", "chain output_prematch {", "chain prerouting {",
+		"type route hook output priority mangle + 1;", "iifname \"" + p.TunnelIF + "\" return"}
 	for _, item := range required {
 		if !strings.Contains(nft, item) {
 			return Fault("guard_unavailable", "native output redirect capture incomplete")
 		}
 	}
-	// nftables 1.0.6 (Debian 12) renders the same IPPROTO_TCP match as
-	// numeric 6; 1.1.3 (Debian 13) renders it as tcp. Require an actual
-	// TCP+counter rule in EITHER exact form; UDP (17), counters without a
-	// protocol and unknown rule shapes are not substitutes.
-	if !strings.Contains(nft, "meta l4proto tcp counter") &&
-		!strings.Contains(nft, "meta l4proto 6 counter") {
-		return Fault("guard_unavailable", "native TCP redirect counter missing")
+	// A TCP counter in output_prematch is NOT proof of TCP redirect capture:
+	// bind the TCP match, counter and redirect to one rule in the actual
+	// output NAT chain with its required hook. nftables 1.0.6 renders TCP
+	// as numeric 6; nftables 1.1.3 renders the same protocol as tcp.
+	if !nativeOutputTCPRedirectHealthy(nft) {
+		return Fault("guard_unavailable", "native output TCP redirect capture incomplete")
 	}
 	known := map[string]bool{"prerouting_prematch": true, "output_prematch": true, "output": true, "output_udp_icmp": true, "input": true, "prerouting": true, "prerouting_udp_icmp": true}
 	for _, match := range nativeChainLine.FindAllStringSubmatch(nft, -1) {
@@ -167,4 +166,63 @@ func inspectNativeHealthPolicy(ctx context.Context, r interface {
 		}
 	}
 	return nil
+}
+
+// The nft CLI emits a single printed line per rule and separate top-level
+// chain blocks. Do not combine matches from output_prematch, a foreign chain,
+// or two different output rules. The match and counter must precede redirect
+// on the same output NAT rule, after the chain's own output hook declaration.
+var nativeOutputTCPRedirectRule = regexp.MustCompile(`^meta l4proto (?:tcp|6) counter(?: packets [0-9]+ bytes [0-9]+)? redirect to :([0-9]+) return$`)
+
+func nativeOutputTCPRedirectHealthy(table string) bool {
+	const outputHook = "type nat hook output priority mangle + 2; policy accept;"
+	var seenOutput, inOutput, seenHook, seenRedirect bool
+	for _, raw := range strings.Split(table, "\n") {
+		line := strings.TrimSpace(raw)
+		if match := nativeChainLine.FindStringSubmatch(raw); match != nil {
+			if inOutput {
+				return false // malformed or nested output chain
+			}
+			if match[1] == "output" {
+				if seenOutput {
+					return false // ambiguous output chains
+				}
+				seenOutput, inOutput = true, true
+			}
+			continue
+		}
+		if !inOutput {
+			continue
+		}
+		if line == "}" {
+			if !seenHook || !seenRedirect {
+				return false
+			}
+			inOutput = false
+			continue
+		}
+		if !seenHook {
+			if line != outputHook {
+				return false
+			}
+			seenHook = true
+			continue
+		}
+		if !strings.Contains(line, "redirect") {
+			continue
+		}
+		if seenRedirect {
+			return false // an extra redirect changes the output policy
+		}
+		match := nativeOutputTCPRedirectRule.FindStringSubmatch(line)
+		if match == nil {
+			return false
+		}
+		port, e := strconv.Atoi(match[1])
+		if e != nil || port < 1 || port > 65535 {
+			return false
+		}
+		seenRedirect = true
+	}
+	return seenOutput && !inOutput && seenHook && seenRedirect
 }
