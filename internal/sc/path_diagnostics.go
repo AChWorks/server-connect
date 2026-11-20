@@ -5,12 +5,6 @@ import (
 	"strings"
 )
 
-const (
-	pathDiagnosticsMinTargets = 2
-	pathDiagnosticsMaxTargets = 4
-	pathDiagnosticsMaxURLSize = 2048
-)
-
 // PathDiagnosticTarget deliberately contains no destination URL, hostname,
 // query, profile details, proxy credentials or response body. A target index
 // permits matching results with the operator's own private input list.
@@ -43,13 +37,13 @@ func validatePathDiagnosticTargets(path string, targets []string) error {
 	if path != "direct" && path != "proxy" {
 		return Fault("invalid_arguments", "diagnostic path must be direct or proxy")
 	}
-	if len(targets) < pathDiagnosticsMinTargets || len(targets) > pathDiagnosticsMaxTargets {
-		return Fault("invalid_arguments", "path diagnostics require two to four distinct HTTP(S) hosts")
+	if len(targets) == 0 {
+		return Fault("invalid_arguments", "path diagnostics require at least one HTTP(S) target")
 	}
 	seen := make(map[string]bool, len(targets))
 	for _, text := range targets {
-		if text == "" || len(text) > pathDiagnosticsMaxURLSize {
-			return Fault("invalid_arguments", "invalid diagnostic target length")
+		if text == "" {
+			return Fault("invalid_arguments", "diagnostic target URL is empty")
 		}
 		u, err := url.Parse(text)
 		if err != nil || u.Opaque != "" || u.User != nil || u.Fragment != "" ||

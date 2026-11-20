@@ -86,7 +86,6 @@ func TestRoutingRulesRejectUnsafeAndConflicting(t *testing.T) {
 		{Type: "domain", Value: "singlelabel", Via: "vpn"},
 		{Type: "invalid", Value: "8.8.8.8/32", Via: "vpn"},
 		{Type: "cidr", Value: "8.8.8.8/32", Via: "auto"},
-		{Type: "cidr", Value: "2001:4860::/32", Via: "direct"},
 	}
 	for _, x := range tests {
 		if _, err := m.AddSmartRoutingRule(x); err == nil {
@@ -202,19 +201,21 @@ func TestRoutingRulesRejectBroadAggregateAndNullSchema(t *testing.T) {
 	}
 	raw := []byte(strings.Join(rows, "\n") + "\n")
 	h := sha256.Sum256(raw)
-	if _, err := m.ImportSmartRoutingRules("operator", "2026-10-01", hex.EncodeToString(h[:]), "", raw); err == nil {
-		t.Fatal("aggregate Direct breadth greater than native compiler limit accepted")
+	report, err := m.ImportSmartRoutingRules("operator", "2026-10-01", hex.EncodeToString(h[:]), "", raw)
+	if err != nil || len(report.Rules) != 65 {
+		t.Fatalf("valid explicit Direct rules rejected by arbitrary 64-block cap: %+v %v", report, err)
 	}
 	if _, err := m.AddSmartRoutingRule(SmartRoutingRule{Type: "suffix", Value: "com", Via: "vpn"}); err == nil {
 		t.Fatal("unscoped whole-TLD suffix accepted")
 	}
-	if err := m.withActivationJournalLock(syscall.Fsync, func(store *activationJournalDir) error {
+	corrupt := rulesManager(t)
+	if err := corrupt.withActivationJournalLock(syscall.Fsync, func(store *activationJournalDir) error {
 		record := []byte("{\"version\":1,\"revision\":1,\"manual\":null,\"imports\":[]}\n")
 		return store.writeSmartTUNFile(smartRoutingRulesFilename, record, nil)
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := m.InspectSmartRoutingRules(); err == nil {
+	if _, err := corrupt.InspectSmartRoutingRules(); err == nil {
 		t.Fatal("null instead of a saved rules array accepted")
 	}
 }
@@ -260,5 +261,88 @@ func TestRoutingRulesNativeCompilerPreviewNoNetworkEffects(t *testing.T) {
 	opts.Exceptions = []SmartTUNCIDRException{{CIDR: "8.8.8.8/32", Via: "direct"}}
 	if _, err := m.PreviewSmartRoutingRules(opts); err == nil {
 		t.Fatal("caller-supplied exceptions bypassed saved rules")
+	}
+}
+
+// There is no protocol limit of 16 independently pinned rule sources; the
+// actual aggregate exception and durable-store constraints still apply.
+func TestRoutingRulesAcceptMoreThanSixteenSources(t *testing.T) {
+	m := rulesManager(t)
+	for i := 1; i <= 20; i++ {
+		raw := []byte(fmt.Sprintf("cidr vpn 11.11.11.%d/32\n", i))
+		sha := sha256.Sum256(raw)
+		name := fmt.Sprintf("list-%02d", i)
+		if _, err := m.ImportSmartRoutingRules(name, "2026-10-01", hex.EncodeToString(sha[:]), "", raw); err != nil {
+			t.Fatalf("source %d: %v", i, err)
+		}
+	}
+	report, err := m.InspectSmartRoutingRules()
+	if err != nil || len(report.Imports) != 20 || len(report.Rules) != 20 {
+		t.Fatalf("imported rule sources were truncated or lost: %+v %v", report, err)
+	}
+	// Do not bypass the actual aggregate compiler limit or conflict checks.
+	raw := []byte("cidr vpn 11.11.11.1/32\n")
+	sha := sha256.Sum256(raw)
+	if _, err := m.ImportSmartRoutingRules("duplicate", "2026-10-01", hex.EncodeToString(sha[:]), "", raw); err == nil {
+		t.Fatal("cross-source duplicate was accepted")
+	}
+}
+
+// A local list can contain comments and blank lines without exhausting a
+// synthetic 512-line/64KiB cap before reaching the actual storage budget.
+func TestRoutingRulesAcceptCommentHeavyImport(t *testing.T) {
+	m := rulesManager(t)
+	raw := []byte(strings.Repeat("# operator annotation for independently verified source\n", 1800) + "cidr vpn 9.9.9.9/32\n")
+	if len(raw) <= 64<<10 || len(raw) >= MaxSmartRoutingImportBytes {
+		t.Fatal("test fixture does not exercise old fake caps within real store budget")
+	}
+	sha := sha256.Sum256(raw)
+	report, err := m.ImportSmartRoutingRules("annotated", "2026-10-01", hex.EncodeToString(sha[:]), "", raw)
+	if err != nil || len(report.Imports) != 1 || len(report.Rules) != 1 {
+		t.Fatalf("comment-heavy import refused: %+v %v", report, err)
+	}
+	again, err := m.InspectSmartRoutingRules()
+	if err != nil || !reflect.DeepEqual(report, again) {
+		t.Fatalf("saved import did not round-trip: %+v %v", again, err)
+	}
+}
+
+// Aggregate rule counts and explicitly chosen Direct prefix breadth are
+// operator policy, not a 128-entry or /24-/64 protocol limit. Verify that
+// current native Core config generation agrees with durable state.
+func TestRoutingRulesLargeNativePolicyAndBroadDirect(t *testing.T) {
+	m := rulesManager(t)
+	rules := make([]SmartRoutingRule, 0, 340)
+	for i := 1; i <= 170; i++ {
+		rules = append(rules,
+			SmartRoutingRule{Type: "cidr", Value: fmt.Sprintf("11.12.%d.0/24", i), Via: "vpn"},
+			SmartRoutingRule{Type: "domain", Value: fmt.Sprintf("node-%03d.example.net", i), Via: "vpn"})
+	}
+	rules = append(rules,
+		SmartRoutingRule{Type: "cidr", Value: "9.0.0.0/8", Via: "direct"},
+		SmartRoutingRule{Type: "cidr", Value: "2001:4860::/32", Via: "direct"})
+	for _, rule := range rules {
+		if _, err := m.AddSmartRoutingRule(rule); err != nil {
+			t.Fatalf("valid operator rule %v failed: %v", rule, err)
+		}
+	}
+	saved, err := m.InspectSmartRoutingRules()
+	if err != nil || len(saved.Rules) != len(rules) {
+		t.Fatalf("rule quota or persisted state loss: got %d, err=%v", len(saved.Rules), err)
+	}
+	p, opts := nativePolicyFixture()
+	cfg, err := NativeSmartRoutingConfig(p, opts, rules)
+	if err != nil {
+		t.Fatalf("native routing compiler refused legitimate saved rules: %v", err)
+	}
+	for _, must := range []string{"9.0.0.0/8", "2001:4860::/32", "node-170.example.net"} {
+		if !strings.Contains(string(cfg), must) {
+			t.Fatalf("native config lost saved rule %q", must)
+		}
+	}
+	// Resource protection is not optional: even among large collections
+	// overlapping CIDRs must still be rejected, without modifying saved state.
+	if _, err := m.AddSmartRoutingRule(SmartRoutingRule{Type: "cidr", Value: "11.12.1.128/25", Via: "direct"}); ErrorCode(err) != "routing_rules_conflict" {
+		t.Fatalf("overlap accepted after large policy: %v", err)
 	}
 }

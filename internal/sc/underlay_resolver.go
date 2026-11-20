@@ -232,9 +232,9 @@ func inspectUnderlayDNSOnDevice(hostname, endpointIP, resolverIP string, resolve
 		}
 		return report, Fault("underlay_dns_unavailable", "explicit resolver failed or timed out")
 	}
-	if len(answers) == 0 || len(answers) > maxEndpointNameAnswers {
+	if len(answers) == 0 {
 		report.Outcome = "dns_answers_unsupported"
-		return report, Fault("underlay_dns_unavailable", "explicit resolver returned no addresses or exceeded answer limit")
+		return report, Fault("underlay_dns_unavailable", "explicit resolver returned no addresses")
 	}
 	seen := make(map[netip.Addr]struct{}, len(answers))
 	valid := make([]netip.Addr, 0, len(answers))

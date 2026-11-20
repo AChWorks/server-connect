@@ -155,9 +155,11 @@ the separate production Activation Guard.
 
 A transient failed round is `degraded`; any other independently healthy
 selected target prevents a one-site false alarm. Short recovered outages
-require fresh selected HTTPS before re-entering `healthy`. A bounded number
-of consecutive failures (default **3**, operator setting **1-10**) or a
-bounded cumulative flapping budget triggers exact Core stop and its
+require fresh selected HTTPS before re-entering `healthy`. A selected number
+of consecutive failures (default **3**; an explicit positive integer with
+**0** selecting the default at Connect), or a
+non-replenishing cumulative budget of three times that threshold (evaluated
+with overflow-safe division), triggers exact Core stop and its
 existing owner-checked `ExecStopPost` Direct restoration. **No blind Core
 restart or unconfirmed boot auto-resume** is introduced: while the Core
 remains active, its transport may reconnect and subsequent independent

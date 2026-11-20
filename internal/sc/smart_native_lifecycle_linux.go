@@ -665,9 +665,9 @@ func (m *Manager) finalizeNativeRecoveryLocked() error {
 }
 
 func (m *Manager) ConnectNativeSmartRouting(opts NativePolicyOptions) (NativeConnectionStatus, error) {
-	if opts.HealthFailureThreshold < 0 || opts.HealthFailureThreshold > 10 {
+	if opts.HealthFailureThreshold < 0 {
 		return NativeConnectionStatus{Desired: "smart", Observed: "not_started", CoreUnit: nativeSmartUnit, SelectedVPNPathProof: "not_run"},
-			Fault("invalid_arguments", "native health failure threshold must be 1-10 (or default 0)")
+			Fault("invalid_arguments", "native health failure threshold must be nonnegative (0 selects default)")
 	}
 	var report NativeConnectionStatus
 	err := m.withNativeTransition(func() error { var e error; report, e = m.connectNativeSmartRoutingUnlocked(opts); return e })

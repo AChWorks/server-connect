@@ -18,9 +18,11 @@ import (
 )
 
 const smartRoutingRulesFilename = "smart-routing-rules.json"
-const MaxSmartRoutingImportBytes = 64 << 10
-const maxSmartRoutingCIDRs = 128
-const maxSmartRoutingDomains = 128
+
+// Import input and saved rules share the existing protected-store byte ceiling.
+// The native policy accepts explicitly validated rules without artificial
+// per-source or per-category quotas.
+const MaxSmartRoutingImportBytes = activationJournalMaxBytes
 
 var routingSourcePattern = regexp.MustCompile("^[a-z][a-z0-9_-]{0,63}$")
 var routingSHA256Pattern = regexp.MustCompile("^[a-f0-9]{64}$")
@@ -92,13 +94,7 @@ func normalizeSmartRoutingRule(x SmartRoutingRule) (SmartRoutingRule, error) {
 			(prefix.Addr().Is6() && !conservativelyPublicIPv6Prefix(prefix)) {
 			return SmartRoutingRule{}, routingRuleInvalid()
 		}
-		if prefix.Addr().Is4() {
-			if (x.Via == "direct" && prefix.Bits() < 24) || (x.Via == "vpn" && prefix.Bits() < 8) {
-				return SmartRoutingRule{}, routingRuleInvalid()
-			}
-		} else if (x.Via == "direct" && prefix.Bits() < 64) || (x.Via == "vpn" && prefix.Bits() < 32) {
-			return SmartRoutingRule{}, routingRuleInvalid()
-		}
+
 	} else {
 		if x.Via != "vpn" {
 			return SmartRoutingRule{}, Fault("routing_rules_invalid", "Direct domain exceptions require trusted DNS/IP correlation and are not supported")
@@ -121,16 +117,12 @@ func validateSmartRoutingAsOf(s string, now time.Time) (time.Time, error) {
 	return d, nil
 }
 func validateSmartRoutingDocument(v smartRoutingRulesDocument, now time.Time) error {
-	if v.Version != 1 || v.Revision == 0 || len(v.Manual) > maxSmartRoutingCIDRs+maxSmartRoutingDomains || len(v.Imports) > 16 {
+	if v.Version != 1 || v.Revision == 0 {
 		return routingRuleInvalid()
 	}
 	var cidrs []netip.Prefix
-	// Mirror native compiler aggregate Direct limits at persistence time.
-	directV4Blocks := map[netip.Prefix]bool{}
-	directV6Blocks := map[netip.Prefix]bool{}
 	seen := map[string]bool{}
 	sources := map[string]bool{}
-	cidrN, domainN := 0, 0
 	scan := func(x SmartRoutingRule) error {
 		y, err := normalizeSmartRoutingRule(x)
 		if err != nil || y != x {
@@ -142,32 +134,8 @@ func validateSmartRoutingDocument(v smartRoutingRulesDocument, now time.Time) er
 		}
 		seen[key] = true
 		if x.Type == "cidr" {
-			cidrN++
 			p, _ := netip.ParsePrefix(x.Value)
-			for _, other := range cidrs {
-				if routePrefixesOverlap(p, other) {
-					return routingRuleConflict()
-				}
-			}
 			cidrs = append(cidrs, p)
-			if x.Via == "direct" {
-				if p.Addr().Is4() {
-					directV4Blocks[netip.PrefixFrom(p.Addr(), 24).Masked()] = true
-					if len(directV4Blocks) > 64 {
-						return routingRuleInvalid()
-					}
-				} else {
-					directV6Blocks[netip.PrefixFrom(p.Addr(), 64).Masked()] = true
-					if len(directV6Blocks) > 64 {
-						return routingRuleInvalid()
-					}
-				}
-			}
-		} else {
-			domainN++
-		}
-		if cidrN > maxSmartRoutingCIDRs || domainN > maxSmartRoutingDomains {
-			return routingRuleInvalid()
 		}
 		return nil
 	}
@@ -191,6 +159,24 @@ func validateSmartRoutingDocument(v smartRoutingRulesDocument, now time.Time) er
 			}
 		}
 	}
+	// Sorting once avoids O(N^2) pairwise overlap checks when importing large
+	// operator lists. Neighbor checks detect every nested/overlapping CIDR
+	// after ordering by family, network address, then shortest prefix.
+	sort.Slice(cidrs, func(i, j int) bool {
+		a, b := cidrs[i], cidrs[j]
+		if a.Addr().Is4() != b.Addr().Is4() {
+			return a.Addr().Is4()
+		}
+		if compare := a.Addr().Compare(b.Addr()); compare != 0 {
+			return compare < 0
+		}
+		return a.Bits() < b.Bits()
+	})
+	for i := 1; i < len(cidrs); i++ {
+		if routePrefixesOverlap(cidrs[i-1], cidrs[i]) {
+			return routingRuleConflict()
+		}
+	}
 	return nil
 }
 func strictSmartRoutingRulesJSON(data []byte) (smartRoutingRulesDocument, error) {
@@ -210,8 +196,7 @@ func strictSmartRoutingRulesJSON(data []byte) (smartRoutingRulesDocument, error)
 		bytes.Equal(bytes.TrimSpace(fields["imports"]), []byte("null")) {
 		return invalid()
 	}
-	if json.Unmarshal(fields["manual"], &manual) != nil || json.Unmarshal(fields["imports"], &imports) != nil ||
-		len(manual) > 256 || len(imports) > 16 {
+	if json.Unmarshal(fields["manual"], &manual) != nil || json.Unmarshal(fields["imports"], &imports) != nil {
 		return invalid()
 	}
 	for _, raw := range manual {
@@ -233,7 +218,7 @@ func strictSmartRoutingRulesJSON(data []byte) (smartRoutingRulesDocument, error)
 		}
 		var rules []json.RawMessage
 		if bytes.Equal(bytes.TrimSpace(m["rules"]), []byte("null")) ||
-			json.Unmarshal(m["rules"], &rules) != nil || len(rules) > 256 {
+			json.Unmarshal(m["rules"], &rules) != nil {
 			return invalid()
 		}
 		for _, entry := range rules {
@@ -412,9 +397,6 @@ func parseSmartRoutingImport(raw []byte) ([]SmartRoutingRule, error) {
 		}
 	}
 	rows := strings.Split(string(raw), "\n")
-	if len(rows) > 512 {
-		return nil, routingRuleInvalid()
-	}
 	rules := make([]SmartRoutingRule, 0, 16)
 	for _, line := range rows {
 		line = strings.TrimSpace(line)
@@ -430,9 +412,7 @@ func parseSmartRoutingImport(raw []byte) ([]SmartRoutingRule, error) {
 			return nil, err
 		}
 		rules = append(rules, value)
-		if len(rules) > maxSmartRoutingCIDRs+maxSmartRoutingDomains {
-			return nil, routingRuleInvalid()
-		}
+
 	}
 	if len(rules) == 0 {
 		return nil, routingRuleInvalid()

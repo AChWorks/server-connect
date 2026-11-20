@@ -460,3 +460,41 @@ func TestRoutingRulesCLIPreviewSelectedProfileIsCompileOnly(t *testing.T) {
 		t.Fatal("preview created activation state")
 	}
 }
+
+// CLI and storage must agree on the genuine file budget. A large annotated
+// local list can have a small valid compiled rule set.
+func TestRoutingRulesCLIAllowsLargerCommentedList(t *testing.T) {
+	m := rulesCLIManager(t)
+	raw := []byte(strings.Repeat("# comment before one operator rule\n", 2400) + "cidr vpn 8.8.8.8/32\n")
+	if len(raw) <= 64<<10 || len(raw) >= sc.MaxSmartRoutingImportBytes {
+		t.Fatal("large-list fixture is outside required window")
+	}
+	file := filepath.Join(t.TempDir(), "annotated-rules.txt")
+	if err := os.WriteFile(file, raw, 0600); err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256(raw)
+	rc, reply, stderr := captureRulesCommand(t, m,
+		"smart-routing-rules", "import", "--file", file,
+		"--source", "large-annotated", "--as-of", "2026-10-01",
+		"--sha256", hex.EncodeToString(digest[:]))
+	if rc != 0 || reply["ok"] != true || len(ruleResult(t, reply)["rules"].([]any)) != 1 || stderr != "" {
+		t.Fatalf("CLI rejected valid annotated import: code=%d reply=%v err=%s", rc, reply, stderr)
+	}
+}
+
+// The remaining input bound is the actual protected store's byte capacity,
+// not the old arbitrary 64KiB/512-line parser shortcut.
+func TestRoutingRulesCLIRejectsOnlyActualStoreBudget(t *testing.T) {
+	filename := filepath.Join(t.TempDir(), "oversized.txt")
+	raw := []byte(strings.Repeat("# a comment line\n", sc.MaxSmartRoutingImportBytes/17+2))
+	if len(raw) <= sc.MaxSmartRoutingImportBytes {
+		t.Fatal("oversize fixture does not exceed protected-store budget")
+	}
+	if err := os.WriteFile(filename, raw, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readRoutingRuleList(filename); sc.ErrorCode(err) != "routing_rules_invalid" {
+		t.Fatalf("true store-budget overflow was not rejected: %v", err)
+	}
+}

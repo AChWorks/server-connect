@@ -178,7 +178,7 @@ func TestUnderlayDNSUnsupportedAddressListsFailClosed(t *testing.T) {
 		addresses []netip.Addr
 	}{
 		{"empty", nil},
-		{"too_many", make([]netip.Addr, maxEndpointNameAnswers+1)},
+		{"invalid_many", make([]netip.Addr, 33)},
 		{"multicast", []netip.Addr{netip.MustParseAddr("224.0.0.1")}},
 		{"broadcast", []netip.Addr{netip.MustParseAddr("255.255.255.255")}},
 		{"link_local", []netip.Addr{netip.MustParseAddr("fe80::1")}},
@@ -216,5 +216,28 @@ func TestUnderlayDNSResolverErrorAndTimeoutBound(t *testing.T) {
 	if ErrorCode(err) != "underlay_name_unavailable" || result.NameResolved ||
 		result.SocketConnected || elapsed < 2500*time.Millisecond || elapsed > 5500*time.Millisecond {
 		t.Fatalf("resolver timeout not bounded: elapsed=%v report=%+v err=%v", elapsed, result, err)
+	}
+}
+
+// Resolver size is an observation, not an artificial 32-address admission
+// ceiling. The explicit pinned endpoint must still be present before TCP
+// probing and all returned addresses remain independently validated.
+func TestUnderlayDNSManyValidAnswersAndPinnedRoute(t *testing.T) {
+	requireNativePreflight(t)
+	listener, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	addresses := make([]netip.Addr, 0, 42)
+	for i := 1; i <= 40; i++ {
+		addresses = append(addresses, netip.AddrFrom4([4]byte{127, 0, 0, byte(i)}))
+	}
+	addresses = append(addresses, addresses[0], addresses[1])
+	report, err := inspectUnderlayWithNameLookup("127.0.0.1", "many.example.test", listener.Addr().(*net.TCPAddr).Port,
+		func(context.Context, string) ([]netip.Addr, error) { return addresses, nil })
+	if err != nil || !report.NameMatched || !report.NameResolved || report.Outcome != "tcp_connected" ||
+		len(report.ResolvedAddresses) != 40 || !report.SocketConnected || report.ActivationReady {
+		t.Fatalf("many legitimate DNS answers blocked or misreported: %+v err=%v", report, err)
 	}
 }

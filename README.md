@@ -39,9 +39,9 @@ For one supported `vless://` profile link, import from a **private file or stdin
 server-connect --json import --file /private/profile-link.txt
 ```
 
-The importer supports a bounded set of compatible TCP/WebSocket/HTTPUpgrade links, not subscription downloads or arbitrary Xray transport options. Unsupported or insecure variants must be rejected rather than silently remapped. Native sing-box JSON import is available for other validated profile formats. Stored profiles are secrets.
+The importer supports a bounded set of compatible TCP/WebSocket/HTTPUpgrade links, not subscription downloads or arbitrary Xray transport options. Unsupported or insecure variants must be rejected rather than silently remapped. Native sing-box JSON import is available for other validated profile formats. Stored profiles are secrets. The optional `--port` accepts any TCP port 1–65535 for the authenticated loopback proxy; OS bind permissions and port conflicts determine runtime availability.
 
-**Saved routing-rule list import** uses a local ASCII file with LF (not CRLF) line endings, up to 64 KiB. Each nonempty, non-comment line is `kind via value`: `cidr` with `direct` or `vpn`, or exact `domain` / apex-and-subdomains `suffix` with `vpn` only. For example, `/private/operator-rules.txt` can contain:
+**Saved routing-rule list import** uses a local ASCII file with LF (not CRLF) line endings, up to 1 MiB (the existing protected state-file ceiling). Each nonempty, non-comment line is `kind via value`: `cidr` with `direct` or `vpn`, or exact `domain` / apex-and-subdomains `suffix` with `vpn` only. For example, `/private/operator-rules.txt` can contain:
 
 ```text
 # explicit exceptions; these do not authenticate Iranian geography

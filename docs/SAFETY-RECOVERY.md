@@ -623,8 +623,10 @@ Iranian-country routing need separate acceptance.**
 
 The default fixed health schedule is a five-second post-round timer,
 20-second first-start grace and a **3-round consecutive** failure
-threshold (configurable 1-10). There is also a non-replenishing bounded
-flapping budget of three times the selected threshold. One unreachable
+threshold. At Connect, an explicit positive integer selects the threshold;
+**0** selects the default **3**, with no arbitrary maximum of 10. There is
+also a non-replenishing cumulative flapping budget of three times the
+selected threshold, evaluated using overflow-safe division. One unreachable
 HTTPS endpoint alone does not mark the VPN down when the other has fresh
 positive selected-path proof. The existing Core stays active for these
 short re-probes, allowing its own transport to recover; there is **no

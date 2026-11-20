@@ -367,3 +367,45 @@ func TestVLESSShareURITransportCompatibility(t *testing.T) {
 		})
 	}
 }
+
+// Operator-provided names are not protocol fields: byte truncation used to
+// corrupt UTF-8 labels while silently changing the stored profile name.
+func TestVLESSLongUnicodeLabelAndLowProxyPort(t *testing.T) {
+	label := strings.Repeat("\u0646\u0627\u0645\U0001F680", 36)
+	link := "vless://" + testUUID + "@example.org:443?type=ws&security=tls#" + label
+	p, err := ValidateSource([]byte(link), "")
+	if err != nil || p.Name != label {
+		t.Fatalf("valid operator label truncated or altered: got %q, err %v", p.Name, err)
+	}
+	for _, port := range []int{1, 80, 443, 1023, 65535} {
+		b, err := CoreConfig(p, port, "private-secret")
+		if err != nil {
+			t.Fatalf("valid loopback port %d rejected: %v", port, err)
+		}
+		var parsed struct {
+			Inbounds []struct {
+				Listen     string `json:"listen"`
+				ListenPort int    `json:"listen_port"`
+			} `json:"inbounds"`
+		}
+		if err := json.Unmarshal(b, &parsed); err != nil || len(parsed.Inbounds) != 1 ||
+			parsed.Inbounds[0].Listen != "127.0.0.1" || parsed.Inbounds[0].ListenPort != port {
+			t.Fatalf("loopback bind changed at port %d: %+v (%v)", port, parsed, err)
+		}
+	}
+	for _, port := range []int{0, -1, 65536} {
+		if _, err := CoreConfig(p, port, "private-secret"); err == nil {
+			t.Fatalf("invalid TCP port %d accepted", port)
+		}
+	}
+	m := New(filepath.Join(t.TempDir(), "state"), "", 443)
+	if err := m.withLock(func() error {
+		return m.save(State{Version: 1, Desired: "direct", Port: 443})
+	}); err != nil {
+		t.Fatal(err)
+	}
+	persisted, err := m.load()
+	if err != nil || persisted.Port != 443 {
+		t.Fatalf("valid persisted low port is unusable: %+v %v", persisted, err)
+	}
+}

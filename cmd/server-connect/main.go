@@ -123,7 +123,7 @@ func parseOpts(args []string) (bool, *sc.Manager, []string, error) {
 	if e := opts.Parse(args); e != nil {
 		return *jsonOut, nil, nil, sc.Fault("invalid_arguments", "invalid or unsupported command options")
 	}
-	if *port < 1024 || *port > 65535 {
+	if *port < 1 || *port > 65535 {
 		return *jsonOut, nil, nil, sc.Fault("invalid_arguments", "invalid local proxy port")
 	}
 	return *jsonOut, sc.New(*stateDir, *core, *port), opts.Args(), nil
@@ -213,7 +213,7 @@ func run(j bool, m *sc.Manager, args []string) int {
 		ipv4 := opts.String("tunnel-ipv4", "172.31.99.1/30", "dedicated private IPv4 TUN CIDR")
 		ipv6 := opts.String("tunnel-ipv6", "fd73:99::1/64", "dedicated private IPv6 TUN CIDR")
 		mode := opts.String("mode", "bypass_iran", "default|bypass_iran")
-		healthThreshold := opts.Int("health-failures", 3, "consecutive selected HTTPS failure rounds before Direct/off (1-10)")
+		healthThreshold := opts.Int("health-failures", 3, "positive consecutive selected HTTPS failure rounds before Direct/off")
 		healthQA := opts.Bool("health-synthetic-qa", false, "synthetic-only HTTPS fixture; not field proof")
 		selectedIPv6 := opts.Bool("enable-selected-ipv6", false, "allow IPv6 via VPN only after selected exit IPv6 capability is verified")
 		iranCoverage := opts.String("iran-coverage", "consensus", "consensus (DB-IP and Chocolate4U agreement) or dbip")
@@ -609,7 +609,7 @@ func run(j bool, m *sc.Manager, args []string) int {
 		opts.SetOutput(io.Discard)
 		via := opts.String("via", "proxy", "direct or proxy; never falls back")
 		var urls []string
-		opts.Func("url", "HTTP(S) target; specify two to four distinct hosts", func(value string) error {
+		opts.Func("url", "HTTP(S) target; repeat for as many distinct hosts as needed", func(value string) error {
 			urls = append(urls, value)
 			return nil
 		})
@@ -779,7 +779,7 @@ Commands:
   connect                    Start authenticated loopback Proxy Only
   connect-smart --underlay-if NAME [--tunnel-if NAME] [--tunnel-ipv4 CIDR]
                 [--tunnel-ipv6 CIDR] [--mode default|bypass_iran]
-                [--health-failures 1..10] [--health-synthetic-qa]
+                [--health-failures POSITIVE_NUMBER] [--health-synthetic-qa]
                 [--enable-selected-ipv6] [--iran-coverage consensus|dbip]
                              IPv6 requires verified selected exit; default IR is two-source consensus
                              Start guarded native sing-box Smart Routing
@@ -1225,12 +1225,22 @@ func menuWithRunner(m *sc.Manager, dispatch func(*sc.Manager, ...string) int) in
 			dispatch(m, []string{"host-preflight", "--with-nftables"}...)
 		case "11":
 			advanced = true
-			first, ok := operatorPrompt(in, "First independent HTTP(S) target: ", false)
-			if !ok {
-				continue
+			fmt.Println("Enter HTTP(S) targets with distinct hostnames; blank finishes, cancel aborts.")
+			var targets []string
+			canceled := false
+			for {
+				target, ok := operatorPrompt(in, "HTTP(S) target (blank to finish, or cancel): ", true)
+				if !ok {
+					canceled = true
+					break
+				}
+				if target == "" {
+					break
+				}
+				targets = append(targets, target)
 			}
-			second, ok := operatorPrompt(in, "Second independent HTTP(S) target: ", false)
-			if !ok {
+			if canceled || len(targets) == 0 {
+				fmt.Println("Canceled: no network diagnostic started")
 				continue
 			}
 			selection, ok := operatorPrompt(in, "Path 1=proxy, 2=direct (or cancel): ", false)
@@ -1242,7 +1252,11 @@ func menuWithRunner(m *sc.Manager, dispatch func(*sc.Manager, ...string) int) in
 			if selection == "2" {
 				via = "direct"
 			}
-			dispatch(m, "diagnose-path", "--via", via, "--url", first, "--url", second)
+			command := []string{"diagnose-path", "--via", via}
+			for _, target := range targets {
+				command = append(command, "--url", target)
+			}
+			dispatch(m, command...)
 		case "13":
 			advanced = true
 			address, ok := operatorPrompt(in, "Literal TCP endpoint IP (no DNS): ", false)

@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -432,7 +433,7 @@ func TestDistinctMenuOptionsAfterPathDiagnosticIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if code != 0 || !strings.Contains(string(raw), "First independent HTTP(S) target:") ||
+	if code != 0 || !strings.Contains(string(raw), "HTTP(S) target (blank to finish, or cancel):") ||
 		!strings.Contains(string(raw), "Unknown option.") ||
 		!strings.Contains(string(raw), "11 Path Diagnostics") ||
 		strings.Contains(string(raw), "12 Selective Plan") {
@@ -1162,5 +1163,22 @@ func TestSelectedHostCheckCLIReadOnlyAndInvalidInputs(t *testing.T) {
 				t.Fatal("read-only selected-host diagnostic created product state")
 			}
 		})
+	}
+}
+
+// Kernel bind privileges determine whether a process may open a low port;
+// parsing must not reject valid ports before the OS can decide.
+func TestProxyPortAcceptsLinuxCapabilityInsteadOfArtificialFloor(t *testing.T) {
+	for _, port := range []int{1, 80, 443, 1023, 1024, 65535} {
+		_, m, _, err := parseOpts([]string{"--port", fmt.Sprint(port), "version"})
+		if err != nil || m == nil || m.Port != port {
+			t.Fatalf("valid local port %d rejected: %+v %v", port, m, err)
+		}
+	}
+	for _, port := range []int{-1, 0, 65536} {
+		_, m, _, err := parseOpts([]string{"--port", fmt.Sprint(port), "version"})
+		if err == nil || m != nil {
+			t.Fatalf("invalid TCP port %d accepted", port)
+		}
 	}
 }
