@@ -2038,7 +2038,11 @@ class TLSFixtureStagingTests(unittest.TestCase):
         manifest_check = 'docker exec -i -w /root/qa-smart-health-tls "$container" sha256sum -c - <"$tls_fixture_manifest"'
         self.assertEqual(source.count(manifest_check), 1)
         self.assertGreater(source.index(manifest_check), source.index("\nPYTLSSTAGE\n"))
-        cleanup = source.split("# Remove exactly the QA helpers copied for the completed TUN trials. This\n", 1)[1]
+        # This is the actual last TUN acceptance boundary: do not couple a
+        # security-sensitive cleanup assertion to freely editable prose.
+        last_trial = 'assert_tun_native_cleanup installed-native-connect-smart\n'
+        self.assertEqual(source.count(last_trial), 1)
+        cleanup = source.split(last_trial, 1)[1]
         entry = cleanup.split("<<'PYTLSCLEANUP'", 1)[0]
         commands = [line for line in entry.splitlines() if line and not line.startswith("#")]
         self.assertEqual(commands, ['docker exec "$container" /usr/bin/python3 -I -B -c "$(cat '])
