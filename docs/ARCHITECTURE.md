@@ -143,7 +143,11 @@ with `SO_BINDTODEVICE=sctun0` is **not** valid with sing-box's
 `ENETUNREACH`); accepting an ordinary unmarked Direct reply would also be
 unsafe. Separate pre/post read-only IPv4/IPv6 RPDB, selected-marked IPv4
 FIB and nftables-capture checks prevent health from treating lost native
-interception as a good VPN path. The synthetic nonce/peer fixture is
+interception as a good VPN path. The admission and each health round also
+resolve the generated Core route rules in order, including inline Iranian
+CIDR rule-sets, explicit VPN overrides and destination-port constraints:
+TLS success for a destination routed Direct is never selected-VPN proof.
+The synthetic nonce/peer fixture is
 **development-only**. Field-mode HTTPS targets measure authenticated
 IPv4 HTTPS/TLS over the selected Core, not Iranian geography or general
 DNS/UDP/IPv6 policy, and a successful HTTPS endpoint alone cannot certify
