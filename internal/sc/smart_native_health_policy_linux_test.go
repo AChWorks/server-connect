@@ -212,6 +212,9 @@ func TestNativeHealthOutputPreRedirectVerdicts(t *testing.T) {
 				"meta nfproto ipv6 counter packets 1 bytes 70 reject",
 				"meta l4proto " + proto + " tcp option 30 exists counter packets 1 bytes 70 drop",
 				"meta l4proto " + proto + " tcp option mptcp present counter packets 1 bytes 70 drop",
+				// Exact Debian12 nft 1.0.6 installed-Core rendering from
+				// 44733846527: the TCP dependency is implicit in the option.
+				"tcp option mptcp exists counter packets 0 bytes 0 drop",
 			}
 			// These originate from sing-tun's native mark/conntrack, own-host
 			// address, unsupported family and MPTCP exception paths. No fixed
@@ -232,6 +235,8 @@ func TestNativeHealthOutputPreRedirectVerdicts(t *testing.T) {
 				{"early-tcp-goto", "meta l4proto " + proto + " goto foreign"},
 				{"early-tcp-queue", "meta l4proto " + proto + " queue to 100"},
 				{"early-tcp-dnat", "meta l4proto " + proto + " dnat ip to 10.10.10.1"},
+				{"early-unrelated-tcp-option-drop", "tcp option maxseg exists counter packets 0 bytes 0 drop"},
+				{"early-mptcp-without-option-test", "tcp option mptcp counter packets 0 bytes 0 drop"},
 				{"early-tcp-misdirected-redirect", "meta l4proto " + proto + " redirect to :12345"},
 			} {
 				t.Run(tc.name, func(t *testing.T) {

@@ -184,7 +184,7 @@ var nativeOutputSafeEarlyReturn = regexp.MustCompile(`^(?:meta mark 0x0*2024|ct 
 // IPv4-only strict routing can explicitly reject unsupported IPv6. Core may
 // also drop MPTCP SYNs (TCP option 30) without bypassing ordinary TCP capture.
 var nativeOutputSafeEarlyIPv6Reject = regexp.MustCompile(`^meta nfproto ipv6 counter(?: packets [0-9]+ bytes [0-9]+)? reject(?: with icmpx type (?:no-route|admin-prohibited))?$`)
-var nativeOutputSafeEarlyMPTCP = regexp.MustCompile(`^meta l4proto (?:tcp|6) tcp option (?:30|mptcp) (?:exists|present) counter(?: packets [0-9]+ bytes [0-9]+)? (?:drop|return)$`)
+var nativeOutputSafeEarlyMPTCP = regexp.MustCompile(`^(?:meta l4proto (?:tcp|6) )?tcp option (?:30|mptcp) (?:exists|present) counter(?: packets [0-9]+ bytes [0-9]+)? (?:drop|return)$`)
 
 // Any other earlier verdict, NAT diversion, queue, or routing mutation might
 // keep ordinary unmarked TCP away from the later valid-looking redirect.
