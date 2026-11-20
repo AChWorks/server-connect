@@ -2013,11 +2013,17 @@ fi
 docker exec "$container" /sbin/ip netns del scqapeer
 assert_tun_native_cleanup real-tun-injected-cleanup-recovery
 echo 'REAL_TUN_CLEANUP_FAILURE_REJECTED=PASS (guest cleanup failure != expected TUN rejection)'
-# The modern Native Core and the legacy experimental supervised trial
-# exercise the same installed recovery timer but do NOT form a supported
-# continuous product transition. Prove each independently after full
-# lifecycle cleanup: run the legacy trial matrix first, then the native
-# installed acceptance last, with exact baseline witnesses on both sides.
+# Product code + installed inactive-by-default independent recovery units.
+# The actual RPDB rule is added ONLY in the verified disconnected guest.
+docker cp "$root/scripts/qa/host-product-guard-trial.sh" "$container:/root/qa-product-guard-trial.sh"
+docker exec "$container" /bin/sh /root/qa-product-guard-trial.sh
+assert_network_unchanged product-guard-recovered "$offline_before"
+verify_host_services product-guard-recovered
+# Both legacy supervised TUN and guarded-rule trial fixtures reuse the
+# installed recovery timer but are NOT a supported handoff from the modern
+# Native session. Complete *all* legacy trials first, including their
+# independent recovery executor checks, then run the installed Native
+# lifecycle in the same disposable guest with exact baseline witnesses.
 echo 'REAL_TUN_LAB_STAGE=installed-native-connect-smart'
 installed_native_log="$scratch/debian13-installed-native.log"
 docker exec -e SC_QA_TUN_INSTALLED_NATIVE=yes \
@@ -2029,7 +2035,7 @@ for marker in INSTALLED_NATIVE_PREARM_DIRECT_BASELINE INSTALLED_NATIVE_SELECTED_
 done
 grep -F 'REAL_TUN_LAB_CLEANUP=PASS' "$installed_native_log" >/dev/null
 assert_tun_native_cleanup installed-native-connect-smart
-# Remove exactly the QA helpers copied for the completed TUN trials. This
+# Remove exactly the QA helpers after the legacy and Native trial matrices. This
 # also closes the earlier WordPress intermediate guest-helper cleanup gap.
 # The bounded helper verifies source hashes after authenticating its pinned
 # objects; a path-following checksum reader must not run before those checks.
@@ -2104,12 +2110,6 @@ docker exec "$container" /bin/rm -f /root/qa-tun-config-qa /root/qa-host-tun-pat
   /root/qa-supervised-product-tun.py /root/qa-smart-health-responder.py /root/qa-smart-health-client.py \
   /root/qa-tun-dns-peer.py /root/qa-tun-dns-client.py /root/qa-tun-wordpress-fpm.sh \
   /root/qa-installed-native-connect.sh /root/qa-tun-wp-check.py /root/qa-tun-payload-wire.py /root/qa-tun-ipv6-wire.py
-# Product code + installed inactive-by-default independent recovery units.
-# The actual RPDB rule is added ONLY in the verified disconnected guest.
-docker cp "$root/scripts/qa/host-product-guard-trial.sh" "$container:/root/qa-product-guard-trial.sh"
-docker exec "$container" /bin/sh /root/qa-product-guard-trial.sh
-assert_network_unchanged product-guard-recovered "$offline_before"
-verify_host_services product-guard-recovered
 else
   echo 'NATIVE_TUN_AND_GUARDED_RULE_POSITIVES=NOT_RUN (Debian12 legacy trial only; installed connect-smart tested separately)'
 fi
