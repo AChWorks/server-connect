@@ -146,11 +146,19 @@ func inspectNativeHealthPolicy(ctx context.Context, r interface {
 	}
 	required := []string{"chain prerouting_prematch {", "chain output_prematch {", "chain output {", "chain prerouting {",
 		"type route hook output priority mangle + 1;", "type nat hook output priority mangle + 2;",
-		"iifname \"" + p.TunnelIF + "\" return", "meta l4proto tcp counter", "redirect to :"}
+		"iifname \"" + p.TunnelIF + "\" return", "redirect to :"}
 	for _, item := range required {
 		if !strings.Contains(nft, item) {
 			return Fault("guard_unavailable", "native output redirect capture incomplete")
 		}
+	}
+	// nftables 1.0.6 (Debian 12) renders the same IPPROTO_TCP match as
+	// numeric 6; 1.1.3 (Debian 13) renders it as tcp. Require an actual
+	// TCP+counter rule in EITHER exact form; UDP (17), counters without a
+	// protocol and unknown rule shapes are not substitutes.
+	if !strings.Contains(nft, "meta l4proto tcp counter") &&
+		!strings.Contains(nft, "meta l4proto 6 counter") {
+		return Fault("guard_unavailable", "native TCP redirect counter missing")
 	}
 	known := map[string]bool{"prerouting_prematch": true, "output_prematch": true, "output": true, "output_udp_icmp": true, "input": true, "prerouting": true, "prerouting_udp_icmp": true}
 	for _, match := range nativeChainLine.FindAllStringSubmatch(nft, -1) {

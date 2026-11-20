@@ -91,7 +91,10 @@ Debian 12's older `nftables` emits the installed inbound-reply-guard
 sets before the chain; the newer Debian 13 emits chain before sets.
 The native receipt now recognizes exactly these two layouts while still
 checking exact hook/rule order, accepted TCP tuple fingerprint, persisted
-handle and generation-conditional deletion (see SAFETY-RECOVERY).
+handle and generation-conditional deletion. The independent Native Health
+inspector also recognizes Debian 12 numeric TCP protocol `6` and Debian 13
+`tcp`, but still requires the actual TCP counter and all other read-only
+selected route and capture evidence (see SAFETY-RECOVERY).
 Debian 13 retains its distinct older supervised-trial QA, and Debian 12 still
 refuses only the legacy `smart-tun-trial-apply` without changing network state.
 That refusal is **not** a Debian 12 prohibition on `connect-smart`. Separate

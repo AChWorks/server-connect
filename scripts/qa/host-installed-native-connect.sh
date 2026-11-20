@@ -71,70 +71,6 @@ except (OSError,TypeError,ValueError):
 ' >&2 || :
 }
 
-# Observe the REAL read-only installed policy before a timer can stop its
-# original Core. Log only predicate outcomes for QA-owned synthetic addresses,
-# never full rulesets, socket tuples, private profile or nft set elements.
-native_installed_policy_observation() {
-  for family in 4 6; do
-    ip -N -"$family" rule show | python3 -c '
-import json,re,sys
-family=sys.argv[1]
-lines=sys.stdin.read().splitlines()
-want={14200:"from all fwmark 0x2024 goto 14202",
-      14201:"from all fwmark 0x2023 lookup 27432",
-      14202:"from all nop",
-      32768:"not from all fwmark 0x2024 lookup 27432"}
-seen={}
-for line in lines:
-    m=re.match(r"^([0-9]+):\s+(.*)$",line.strip())
-    if m and int(m[1]) in (1,14200,14201,14202,32768):
-        seen.setdefault(int(m[1]),[]).append(m[2])
-checks={str(k):len(seen.get(k,[]))==1 and seen[k][0]==v for k,v in want.items()}
-checks["1"]=len(seen.get(1,[]))==1 and seen[1][0].startswith("from all lookup ")
-print("INSTALLED_NATIVE_IP_POLICY="+json.dumps({"family":family,"checks":checks},sort_keys=True))
-' "$family" || :
-  done
-  ip -4 route show table 27432 | python3 -c '
-import json,sys
-text=sys.stdin.read().strip()
-print("INSTALLED_NATIVE_TUN_ROUTE="+json.dumps({"default_via":text.startswith("default via "),
- "tunnel_dev":"dev sctunqa0" in text},sort_keys=True))
-' || :
-  for destination in 8.8.8.8 1.0.0.1; do
-    ip -N -4 route get "$destination" mark 0x2023 | python3 -c '
-import json,sys
-text=sys.stdin.read()
-print("INSTALLED_NATIVE_MARKED_ROUTE="+json.dumps({"target":sys.argv[1],
- "tunnel_dev":" dev sctunqa0 " in text,
- "table_numeric":" table 27432 " in text,
- "mark":" mark 0x2023" in text,
- "route_tokens":len(text.split())},sort_keys=True))
-' "$destination" || :
-  done
-  nft list table inet sing-box | python3 -c '
-import json,re,sys
-text=sys.stdin.read()
-checks={"prerouting_prematch":"chain prerouting_prematch {",
- "output_prematch":"chain output_prematch {",
- "output":"chain output {",
- "prerouting":"chain prerouting {",
- "route_priority":"type route hook output priority mangle + 1;",
- "nat_priority":"type nat hook output priority mangle + 2;",
- "tun_return":"iifname \"sctunqa0\" return",
- "tcp_counter":"meta l4proto tcp counter",
- "redirect":"redirect to :"}
-print("INSTALLED_NATIVE_NFT_POLICY="+json.dumps({
- "checks":{name:term in text for name,term in checks.items()},
- "chains":re.findall(r"chain ([a-z_]+) \{",text),
- "bytes":len(text)},sort_keys=True))
-# The peer is synthetic and disconnected. Print only TCP/queue/redirect
-# rule lines to explain older nft formatter differences; bound the data.
-lines=[line.strip()[:240] for line in text.splitlines()
-       if "l4proto" in line and ("counter" in line or "queue" in line or "redirect" in line)]
-print("INSTALLED_NATIVE_NFT_RULE_FORMAT="+json.dumps(lines[:8]))
-' || :
-}
-
 native_installed_cleanup() {
   # This hook runs BEFORE the caller removes its VETH/peer. A failed native
   # operation must keep the original failure and must not be called recovered
@@ -220,7 +156,6 @@ assert r["data"]["inbound_reply_guard_verified"],r
   test "$(systemctl show server-connect-native-tun.service -p ActiveState --value)" = active || return 1
   test "$(systemctl show server-connect-smart-health.timer -p ActiveState --value)" = active || return 1
   test "$(systemctl show server-connect-activation-recover.timer -p ActiveState --value)" = active || return 1
-  native_installed_policy_observation
 
   # No selected packet is sent before the installed Core and both guards are
   # verified active. An independent native packet counter is fixed BEFORE

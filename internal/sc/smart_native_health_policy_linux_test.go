@@ -79,6 +79,30 @@ func TestNativeHealthMarkedRoutingAttestation(t *testing.T) {
 	if err := inspectNativeHealthPolicy(context.Background(), fixture, p, targets); err != nil {
 		t.Fatalf("expected active marked native capture: %v", err)
 	}
+	// The actual Debian 12 guest emits numeric IPPROTO_TCP 6, not the
+	// human-readable tcp alias. Keep the explicit TCP counter check while
+	// refusing a UDP-only, mark-only or uncounted replacement.
+	debian12 := nativeHealthPolicyFixture()
+	debian12.values["nft list table inet sing-box"] = strings.ReplaceAll(
+		debian12.values["nft list table inet sing-box"],
+		"meta l4proto tcp counter", "meta l4proto 6 counter")
+	if err := inspectNativeHealthPolicy(context.Background(), debian12, p, targets); err != nil {
+		t.Fatalf("Debian 12 nft numeric TCP capture refused: %v", err)
+	}
+	for _, variant := range []struct{ name, from, to string }{
+		{"udp-only", "meta l4proto 6 counter", "meta l4proto 17 counter"},
+		{"missing-counter", "meta l4proto 6 counter", "meta l4proto 6"},
+		{"wrong-proto", "meta l4proto 6 counter", "meta l4proto 7 counter"},
+	} {
+		t.Run("debian12-"+variant.name, func(t *testing.T) {
+			bad := nativeHealthPolicyFixture()
+			bad.values["nft list table inet sing-box"] = strings.ReplaceAll(
+				debian12.values["nft list table inet sing-box"], variant.from, variant.to)
+			if err := inspectNativeHealthPolicy(context.Background(), bad, p, targets); err == nil {
+				t.Fatal("missing or non-TCP counter falsely accepted as healthy")
+			}
+		})
+	}
 	for _, tc := range []struct{ name, key, old, replace string }{
 		{"missing-v4-fwmark", "ip -N -4 rule show", "14201: from all fwmark 0x2023 lookup 27432\n", ""},
 		{"foreign-v6-fwmark", "ip -N -6 rule show", "14201: from all fwmark 0x2023 lookup 27432", "14201: from all fwmark 0x2023 lookup 254"},
