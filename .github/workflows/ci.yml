@@ -186,10 +186,31 @@ jobs:
           go test ./cmd/server-connect -count=1 -run '^(TestRetiredSelectiveCreationCLIIsInert|TestSelectiveIntentCLIAbandonPreparedOnly|TestRetiredSelectiveLiveCLIIsInert)$' -v
           go test ./internal/sc -count=1 -run '^(TestSelectiveAbandon|TestLegacyRecoveryRefusesUnwatchedCustomState|TestGuardedRecoveryDispatch)' -v
           echo 'RETIRED_LEGACY_CREATION_AND_RECOVERY=PASS'
-          build/ci/server-connect-cli --json host-preflight --endpoint 127.0.0.1 \
-            --management-peer 127.0.0.2 > build/ci/host-preflight.json
-          build/ci/server-connect-cli --json host-drift --baseline build/ci/host-preflight.json \
-            > build/ci/host-drift-ok.json
+          # Preserve the specific CLI failure reason when host kernel
+          # observations are unavailable. These JSON responses contain no
+          # profile credentials; log only error code/message, never inventory.
+          if ! build/ci/server-connect-cli --json host-preflight --endpoint 127.0.0.1 \
+            --management-peer 127.0.0.2 > build/ci/host-preflight.json; then
+            python3 - <<'PYHOSTFAIL'
+          import json
+          from pathlib import Path
+          error=json.loads(Path('build/ci/host-preflight.json').read_text()).get('error',{})
+          print('HOST_PREFLIGHT_FAILURE:',error.get('code'),error.get('message'))
+          PYHOSTFAIL
+            exit 1
+          fi
+          echo 'HOST_PREFLIGHT=PASS'
+          if ! build/ci/server-connect-cli --json host-drift --baseline build/ci/host-preflight.json \
+            > build/ci/host-drift-ok.json; then
+            python3 - <<'PYDRIFTFAIL'
+          import json
+          from pathlib import Path
+          error=json.loads(Path('build/ci/host-drift-ok.json').read_text()).get('error',{})
+          print('HOST_DRIFT_FAILURE:',error.get('code'),error.get('message'))
+          PYDRIFTFAIL
+            exit 1
+          fi
+          echo 'HOST_DRIFT_BASELINE=PASS'
           python3 - <<'PYQA'
           import json
           with open('build/ci/host-preflight.json') as source:
