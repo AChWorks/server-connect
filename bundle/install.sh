@@ -54,7 +54,6 @@ bin/libcronet.so
 server-connect.service
 server-connect-activation-recover.service
 server-connect-activation-recover.timer
-server-connect-smart-tun.service
 server-connect-native-tun.service
 server-connect-smart-health.service
 server-connect-smart-health.timer
@@ -349,7 +348,14 @@ check_service_owner() {
 # Independently installed recovery units start DISABLED. The exact owner and
 # manifest digest of each are checked before ANY subsequent replacement.
 check_guard_units() (
- for name in server-connect-activation-recover.service server-connect-activation-recover.timer server-connect-smart-tun.service server-connect-native-tun.service server-connect-smart-health.service server-connect-smart-health.timer; do
+ # Do not silently strand a previous QA Core by adopting the new Native
+ # package. A retained old unit needs the old release's verified uninstall.
+ if [ -e /etc/systemd/system/server-connect-smart-tun.service ] ||
+    [ -L /etc/systemd/system/server-connect-smart-tun.service ] ||
+    [ -e "$PREFIX/server-connect-smart-tun.service.sha256" ]; then
+  die 'retired v4 QA Core unit remains; uninstall the old QA release before Native-only install'
+ fi
+ for name in server-connect-activation-recover.service server-connect-activation-recover.timer server-connect-native-tun.service server-connect-smart-health.service server-connect-smart-health.timer; do
   target=/etc/systemd/system/$name
   digest_file=$PREFIX/$name.sha256
   props=$(systemctl show "$name" --property=LoadState --property=FragmentPath --property=DropInPaths --property=Transient) ||
@@ -368,10 +374,6 @@ check_guard_units() (
    if [ "$name" = server-connect-smart-health.service ]; then
     [ "$(systemctl show "$name" -p UnitFileState --value)" = static ] ||
       die 'experimental health executor must remain static'
-   fi
-   if [ "$name" = server-connect-smart-tun.service ]; then
-    [ "$(systemctl show "$name" -p UnitFileState --value)" = static ] ||
-      die 'experimental TUN service must remain static'
    fi
    if [ "$name" = server-connect-native-tun.service ]; then
     case "$(systemctl show "$name" -p UnitFileState --value)" in
@@ -407,7 +409,7 @@ normalize_idle_health_failure() {
  fi
  # Do not reset either failed executor while an independent timer, core or
  # conflicting legacy role is still active or uncertain.
- for role in server-connect-activation-recover.timer server-connect-smart-tun.service server-connect-native-tun.service server-connect-smart-health.timer; do
+ for role in server-connect-activation-recover.timer server-connect-native-tun.service server-connect-smart-health.timer; do
   [ "$(systemctl show "$role" -p ActiveState --value)" = inactive ] ||
    die 'cannot normalize guard failure while another TUN/timer role is active'
  done
@@ -446,7 +448,7 @@ normalize_idle_health_failure() {
 # An active timer or oneshot may own pending kernel state. Updating or
 # uninstalling its recovery executable would sever the only independent guard.
 require_guard_inactive() {
- for name in server-connect-activation-recover.timer server-connect-activation-recover.service server-connect-smart-tun.service server-connect-native-tun.service server-connect-smart-health.service server-connect-smart-health.timer; do
+ for name in server-connect-activation-recover.timer server-connect-activation-recover.service server-connect-native-tun.service server-connect-smart-health.service server-connect-smart-health.timer; do
   case "$(systemctl show "$name" -p ActiveState --value)" in
    inactive) ;; *) die 'independent recovery guard active or uncertain; refuse installer change' ;;
   esac
@@ -577,11 +579,10 @@ if [ "$ACTION" = --uninstall ]; then
    die 'cannot disable owned native unit during uninstall'
  fi
  rm -f -- "$COMMAND" "$UNIT" "$PREFIX/current" "$PREFIX/unit.sha256" "$PREFIX/.owner" \
-  "$GUARD_SERVICE" "$GUARD_TIMER" /etc/systemd/system/server-connect-smart-tun.service \
+  "$GUARD_SERVICE" "$GUARD_TIMER" \
   /etc/systemd/system/server-connect-native-tun.service \
   "$PREFIX/server-connect-activation-recover.service.sha256" \
   "$PREFIX/server-connect-activation-recover.timer.sha256" \
-  "$PREFIX/server-connect-smart-tun.service.sha256" \
   "$PREFIX/server-connect-native-tun.service.sha256" \
   /etc/systemd/system/server-connect-smart-health.service \
   /etc/systemd/system/server-connect-smart-health.timer \
@@ -673,7 +674,7 @@ rollback_candidate() {
     { say 'RECOVERY_REQUIRED: new unit removal failed';failed=yes; }
   fi
   # Restore precisely the previous supplemental unit bytes (or absence).
-  for name in server-connect-activation-recover.service server-connect-activation-recover.timer server-connect-smart-tun.service server-connect-native-tun.service server-connect-smart-health.service server-connect-smart-health.timer;do
+  for name in server-connect-activation-recover.service server-connect-activation-recover.timer server-connect-native-tun.service server-connect-smart-health.service server-connect-smart-health.timer;do
    path=/etc/systemd/system/$name
    digest=$PREFIX/$name.sha256
    if [ -n "$guard_backup" ] && [ -f "$guard_backup/$name" ];then
@@ -863,7 +864,7 @@ fi
 # Capture the EXACT prior supplemental unit bytes before the candidate can
 # replace them. Guard is inactive by the preceding authoritative inspection.
 guard_backup=$(mktemp -d "$PREFIX/.guard-backup.XXXXXXXX") || die 'guard unit backup unavailable'
-for name in server-connect-activation-recover.service server-connect-activation-recover.timer server-connect-smart-tun.service server-connect-native-tun.service server-connect-smart-health.service server-connect-smart-health.timer;do
+for name in server-connect-activation-recover.service server-connect-activation-recover.timer server-connect-native-tun.service server-connect-smart-health.service server-connect-smart-health.timer;do
  if [ -f "/etc/systemd/system/$name" ];then
   install -m 0644 "/etc/systemd/system/$name" "$guard_backup/$name"
   install -m 0644 "$PREFIX/$name.sha256" "$guard_backup/$name.sha256"
@@ -890,7 +891,7 @@ if [ ! -e "$COMMAND" ] && [ ! -L "$COMMAND" ];then
 fi
 install -m 0644 "$SOURCE_DIR/server-connect.service" "$UNIT" || die 'owned unit installation failed'
 sha256sum "$UNIT" | cut -d' ' -f1 > "$PREFIX/unit.sha256" || die 'owned unit digest write failed'
-for name in server-connect-activation-recover.service server-connect-activation-recover.timer server-connect-smart-tun.service server-connect-native-tun.service server-connect-smart-health.service server-connect-smart-health.timer;do
+for name in server-connect-activation-recover.service server-connect-activation-recover.timer server-connect-native-tun.service server-connect-smart-health.service server-connect-smart-health.timer;do
  install -m 0644 "$SOURCE_DIR/$name" "/etc/systemd/system/$name" || die 'managed unit installation failed'
  sha256sum "/etc/systemd/system/$name" | cut -d' ' -f1 > "$PREFIX/$name.sha256" ||
   die 'managed unit digest write failed'

@@ -11,7 +11,6 @@ on:
       - 'bundle/server-connect.service'
       - 'bundle/server-connect-activation-recover.service'
       - 'bundle/server-connect-activation-recover.timer'
-      - 'bundle/server-connect-smart-tun.service'
       - 'bundle/server-connect-native-tun.service'
       - 'bundle/server-connect-smart-health.service'
       - 'bundle/server-connect-smart-health.timer'

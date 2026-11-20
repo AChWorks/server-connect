@@ -267,7 +267,7 @@ func (m *Manager) List() ([]ProfileInfo, error) {
 }
 func (m *Manager) Select(id string) error {
 	return m.withLock(func() error {
-		if phase, err := m.pendingSmartTUNTrial(); err != nil {
+		if phase, err := m.pendingLegacyActivationJournal(); err != nil {
 			return err
 		} else if phase != "" {
 			return Fault("guard_pending", "reconcile the guarded TUN trial before changing the selected profile")
@@ -293,7 +293,7 @@ func (m *Manager) Select(id string) error {
 }
 func (m *Manager) Remove(id string) error {
 	return m.withLock(func() error {
-		if phase, err := m.pendingSmartTUNTrial(); err != nil {
+		if phase, err := m.pendingLegacyActivationJournal(); err != nil {
 			return err
 		} else if phase != "" {
 			return Fault("guard_pending", "reconcile the guarded TUN trial before removing a profile")
@@ -530,16 +530,13 @@ func (m *Manager) statusWithService(observe func() (string, error), verifyOwners
 		if err != nil {
 			return err
 		}
-		if phase, err := m.pendingSmartTUNTrial(); err != nil {
+		if phase, err := m.pendingLegacyActivationJournal(); err != nil {
 			return err
 		} else if phase != "" {
-			status = Status{Desired: s.Desired, Observed: "smart_tun_" + phase,
+			status = Status{Desired: s.Desired, Observed: "legacy_activation_journal",
 				Selected: s.Selected, Port: s.Port, CoreVersion: CoreVersion,
-				Health: "guarded_trial_unconfirmed"}
-			if strings.HasPrefix(phase, "supervised_") {
-				status.Health = "supervised_record_not_freshly_verified"
-			}
-			return Fault("guard_pending", "Smart Routing trial is not Direct; inspect smart-tun-trial-status")
+				Health: "recovery_pending"}
+			return Fault("guard_pending", "retired journal may still own resources; reconcile the original QA operation before Native activation")
 		}
 		observed, inspectErr := observe()
 		status = Status{Desired: s.Desired, Observed: observed, Selected: s.Selected, Port: s.Port, CoreVersion: CoreVersion, Health: "not_tested"}
@@ -770,7 +767,7 @@ func (m *Manager) Connect() error {
 // connectLocked holds the existing exclusive Manager lock. Only its
 // read-only service observer is injectable for isolated regression tests.
 func (m *Manager) connectLocked(observe func() (string, error)) error {
-	if phase, err := m.pendingSmartTUNTrial(); err != nil {
+	if phase, err := m.pendingLegacyActivationJournal(); err != nil {
 		return err
 	} else if phase != "" {
 		return Fault("guard_pending", "guarded TUN trial must be reconciled before Proxy Only activation")
@@ -952,7 +949,7 @@ func (m *Manager) Disconnect() error {
 // Proxy Only has no native ExecStopPost; its systemctl transitions may safely
 // retain .lock, unlike the native cleanup above.
 func (m *Manager) disconnectProxyOnlyLocked() error {
-	if phase, err := m.pendingSmartTUNTrial(); err != nil {
+	if phase, err := m.pendingLegacyActivationJournal(); err != nil {
 		return err
 	} else if phase != "" {
 		return Fault("guard_pending", "cannot claim Direct while a guarded TUN trial remains")

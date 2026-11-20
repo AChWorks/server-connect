@@ -104,77 +104,6 @@ cleanup() {
       cleanup_failed=yes
     fi
   fi
-  if [ "${SC_QA_TUN_PRODUCT_LAB-}" = yes ] &&
-     command -v native_product_cleanup >/dev/null && ! native_product_cleanup; then
-    echo 'PRODUCT_NATIVE_QA_FIXTURE_CLEANUP=FAIL (unresolved QA fixture ownership)' >&2
-    cleanup_failed=yes
-  fi
-  # On failure during the installed product TUN experiment, the independent
-  # prearmed systemd guard (NOT this shell) must own the stop/rollback.
-  # Do not delete its VETH/peer first: that would destroy the exact native
-  # baseline and make a valid watchdog report an unrecoverable drift.
-  # The ORIGINAL test failure remains a failure even if recovery succeeds.
-  if [ "${SC_QA_TUN_PRODUCT_LAB-}" = yes ] && [ "$original_rc" -ne 0 ] &&
-     [ -f /var/lib/server-connect/route-activation-journal.json ]; then
-    product_recovered=no
-    product_receipt=
-    tries=0
-    while [ "$tries" -lt 65 ]; do
-      if [ ! -e /var/lib/server-connect/route-activation-journal.json ]; then
-        product_recovered=finalized
-        break
-      fi
-      if product_receipt=$(/usr/local/bin/server-connect --json smart-tun-trial-status |
-         /usr/bin/python3 -c '
-import json,sys
-r=json.load(sys.stdin)
-assert r["ok"],r
-d=r["data"]
-assert (d["phase"]=="trial_recovered" and d["revision"] in (2,3) and d["recovery_verified"]) or (d["phase"]=="trial_cleanup_pending" and d["revision"]==4),r
-print(d["operation_id"],d["revision"])' 2>/dev/null); then
-        product_recovered=yes
-        break
-      fi
-      tries=$((tries+1))
-      sleep 1
-    done
-    if [ "$product_recovered" = yes ]; then
-      product_op=${product_receipt% *}
-      product_revision=${product_receipt#* }
-      if [ -n "$product_op" ] &&
-         /usr/local/bin/server-connect --json smart-tun-trial-clear --operation-id "$product_op" --revision "$product_revision" |
-           /usr/bin/python3 -c 'import json,sys;r=json.load(sys.stdin);assert r["ok"] and r["data"]["cleared"],r'; then
-        product_recovered=finalized
-      elif [ ! -e /var/lib/server-connect/route-activation-journal.json ]; then
-        # The independent executor can finish between inspection and the
-        # exact-operation retry. Verify the completed effects below.
-        product_recovered=finalized
-      else
-        echo 'PRODUCT_TUN_FAILURE_CLEANUP=FAIL (exact recovered operation clearance unavailable)' >&2
-        cleanup_failed=yes
-      fi
-    fi
-    if [ "$product_recovered" = finalized ]; then
-      if [ ! -e /var/lib/server-connect/route-activation-journal.json ] &&
-         [ ! -e /var/lib/server-connect/smart-tun-trial.json ] &&
-         [ ! -e /sys/class/net/sctunqa0 ] &&
-         [ "$(systemctl show server-connect-smart-tun.service -p ActiveState --value)" = inactive ] &&
-         [ "$(systemctl show server-connect-activation-recover.timer -p ActiveState --value)" = inactive ] &&
-         [ "$(systemctl is-enabled server-connect-activation-recover.timer)" = disabled ] &&
-         command -v require_native_baseline >/dev/null && require_native_baseline; then
-        echo 'PRODUCT_TUN_FAILURE_CLEANUP=PASS (verified finalization; QA remains failed)'
-      else
-        echo 'PRODUCT_TUN_FAILURE_CLEANUP=FAIL (finalization left product resources)' >&2
-        cleanup_failed=yes
-      fi
-    elif [ "$product_recovered" = no ]; then
-      echo 'PRODUCT_TUN_FAILURE_CLEANUP=FAIL (independent recovery not verified before guest teardown)' >&2
-      cleanup_failed=yes
-    fi
-  fi
-  if [ "${SC_QA_TUN_GUARD_LAB-}" = yes ] && ! qa_tun_guard_cleanup; then
-    cleanup_failed=yes
-  fi
   if [ "${SC_QA_TUN_OWNED_BOUNDARY-}" = yes ] && ! owned_boundary_cleanup; then
     cleanup_failed=yes
   fi
@@ -487,259 +416,61 @@ dns_path() {
     /usr/bin/python3 -I -B /root/qa-tun-dns-client.py "$1" "$2" "$3" "$4" "$5"
 }
 
-case "${SC_QA_TUN_PRODUCT_LAB-}" in
-  ''|'yes') ;;
-  *) echo 'Invalid isolated installed-product TUN mode' >&2; exit 2 ;;
+# Exactly one current Native test surface is selected in this disconnected
+# systemd guest; no parallel v4 Core or supervisor can be activated.
+native_installed_trial_mode=no
+native_dns_trial=no
+ipv6_trial=no
+case "${SC_QA_TUN_INSTALLED_NATIVE-}" in
+  '') ;;
+  yes) native_installed_trial_mode=yes ;;
+  *) echo 'NATIVE_QA=FAIL (unsupported installed mode)' >&2; exit 2 ;;
 esac
-case "${SC_QA_TUN_SUPERVISED-}" in
+case "${SC_QA_TUN_NATIVE_DNS-}" in
   '') ;;
   yes)
-    [ "${SC_QA_TUN_PRODUCT_LAB-}" = yes ] &&
-    [ -z "${SC_QA_TUN_GUARD_LAB-}" ] &&
-    [ -z "${SC_QA_TUN_OWNED_BOUNDARY-}" ] &&
-    [ -z "${SC_QA_TUN_OUTAGE_FAULT-}" ] &&
-    [ -z "${SC_QA_TUN_CLEANUP_FAULT-}" ] || {
-      echo 'SUPERVISED_TUN_PREFLIGHT=FAIL (requires exclusive installed product fixture)' >&2; exit 2;
-    } ;;
-  *) echo 'Invalid isolated supervised TUN mode' >&2; exit 2 ;;
+    [ "$native_installed_trial_mode" != yes ] &&
+    case "${SC_QA_TUN_NATIVE_DNS_MODE-}" in
+      default|bypass_iran) : ;;
+      *) false ;;
+    esac || {
+      echo 'NATIVE_DNS_QA=FAIL (requires exclusive native mode)' >&2; exit 2;
+    }
+    native_dns_trial=yes ;;
+  *) echo 'NATIVE_DNS_QA=FAIL (unsupported mode)' >&2; exit 2 ;;
 esac
 case "${SC_QA_TUN_OWNED_BOUNDARY-}" in
   '') ;;
   yes)
-    if [ "${SC_QA_TUN_IPV6-}" != yes ] ||
-       [ -n "${SC_QA_TUN_PRODUCT_LAB-}" ] || [ -n "${SC_QA_TUN_GUARD_LAB-}" ] ||
-       [ -n "${SC_QA_TUN_OUTAGE_FAULT-}" ] || [ -n "${SC_QA_TUN_CLEANUP_FAULT-}" ]; then
-      echo 'OWNED_TUN_BOUNDARY=FAIL (requires exclusive explicit dual-stack fixture)' >&2; exit 2
-    fi
+    [ "$native_installed_trial_mode" != yes ] && [ "$native_dns_trial" != yes ] || {
+      echo 'OWNED_TUN_BOUNDARY=FAIL (requires separate native fixture)' >&2; exit 2;
+    }
     . /root/qa-owned-tun-boundary.sh ;;
-  *) echo 'Invalid isolated owned TUN boundary mode' >&2; exit 2 ;;
+  *) echo 'OWNED_TUN_BOUNDARY=FAIL (unsupported mode)' >&2; exit 2 ;;
 esac
-if [ "${SC_QA_TUN_PRODUCT_LAB-}" = yes ] && [ "${SC_QA_TUN_GUARD_LAB-}" = yes ]; then
-  echo 'Concurrent distinct TUN guard modes are unsupported' >&2; exit 2
-fi
-case "${SC_QA_TUN_GUARD_LAB-}" in
-  '' ) ;;
-  yes ) . /root/qa-tun-guard-unit-lab.sh ;;
-  * ) echo 'Invalid real-TUN guard laboratory mode' >&2; exit 2 ;;
-esac
-case "${SC_QA_TUN_GUARD_CLEANUP_FAULT-}" in
-  '' ) ;;
-  masked-recovery-unit )
-    [ "${SC_QA_TUN_GUARD_LAB-}" = yes ] || exit 2 ;;
-  * ) echo 'Invalid real-TUN guard cleanup fault mode' >&2; exit 2 ;;
-esac
-
-# Actual installed native Connect is exclusive of legacy TUN trials,
-# standalone native DNS and all fault-injection fixtures.
-case "${SC_QA_TUN_INSTALLED_NATIVE-}" in
-  '') native_installed_trial_mode=no ;;
-  yes)
-    [ -z "${SC_QA_TUN_PRODUCT_LAB-}" ] && [ -z "${SC_QA_TUN_SUPERVISED-}" ] &&
-    [ -z "${SC_QA_TUN_GUARD_LAB-}" ] && [ -z "${SC_QA_TUN_OWNED_BOUNDARY-}" ] &&
-    [ -z "${SC_QA_TUN_NATIVE_DNS-}" ] && [ -z "${SC_QA_TUN_IPV6-}" ] &&
-    [ -z "${SC_QA_TUN_OUTAGE_FAULT-}" ] && [ -z "${SC_QA_TUN_CLEANUP_FAULT-}" ] || {
-      echo 'INSTALLED_NATIVE_PREFLIGHT=FAIL (requires exclusive disconnected guest)' >&2; exit 2;
-    }
-    native_installed_trial_mode=yes ;;
-  *) echo 'INSTALLED_NATIVE_PREFLIGHT=FAIL (unsupported QA mode)' >&2; exit 2 ;;
-esac
-
-# The dual-stack trial is explicitly opted in, strictly disposable and
-# excluded from manager-death/hosting/cleanup fault-injection scenarios.
 case "${SC_QA_TUN_IPV6-}" in
-  '') ipv6_trial=no ;;
-  yes)
-    if [ "${SC_QA_TUN_GUARD_LAB-}" = yes ] ||
-       [ -n "${SC_QA_TUN_OUTAGE_FAULT-}" ] ||
-       [ -n "${SC_QA_TUN_CLEANUP_FAULT-}" ]; then
-      echo 'REAL_TUN_IPV6=FAIL (dual-stack trial cannot combine with fault modes)' >&2
-      exit 2
-    fi
-    ipv6_trial=yes ;;
-  *) echo 'REAL_TUN_IPV6=FAIL (unsupported QA mode)' >&2; exit 2 ;;
-esac
-
-# Exclusive IPv4-only live IPv6 drift test within the disconnected QA guest.
-# This is a distinct packet lab for the integrated native policy compiler,
-# never the older SmartTUNCandidateConfig or production Apply.
-case "${SC_QA_TUN_NATIVE_DNS-}" in
-  '') native_dns_trial=no ;;
-  yes)
-    if [ "$ipv6_trial" != yes ] || [ -n "${SC_QA_TUN_PRODUCT_LAB-}" ] ||
-       [ -n "${SC_QA_TUN_OWNED_BOUNDARY-}" ] || [ -n "${SC_QA_TUN_SUPERVISED-}" ] ||
-       [ -n "${SC_QA_TUN_GUARD_LAB-}" ] || [ -n "${SC_QA_TUN_OUTAGE_FAULT-}" ] ||
-       [ -n "${SC_QA_TUN_CLEANUP_FAULT-}" ]; then
-      echo 'NATIVE_DNS_WIRE=FAIL (requires exclusive dual-stack disconnected guest)' >&2
-      exit 2
-    fi
-    case "${SC_QA_TUN_NATIVE_DNS_MODE-}" in
-      default|bypass_iran) native_dns_trial=yes ;;
-      *) echo 'NATIVE_DNS_WIRE=FAIL (invalid native policy mode)' >&2; exit 2 ;;
-    esac ;;
-  *) echo 'NATIVE_DNS_WIRE=FAIL (unsupported mode)' >&2; exit 2 ;;
-esac
-
-case "${SC_QA_TUN_IPV6_DRIFT-}" in
   '') ;;
-  yes)
-    if [ "${SC_QA_TUN_PRODUCT_LAB-}" != yes ] ||
-       [ "${SC_QA_TUN_SUPERVISED-}" != yes ] ||
-       [ "$ipv6_trial" = yes ] ||
-       [ -n "${SC_QA_TUN_GUARD_LAB-}" ] ||
-       [ -n "${SC_QA_TUN_OUTAGE_FAULT-}" ] ||
-       [ -n "${SC_QA_TUN_CLEANUP_FAULT-}" ]; then
-      echo 'SUPERVISED_TUN_IPV6_DRIFT=FAIL (requires exclusive IPv4-only guarded guest)' >&2
-      exit 2
-    fi ;;
-  *) echo 'SUPERVISED_TUN_IPV6_DRIFT=FAIL (unsupported QA mode)' >&2; exit 2 ;;
+  yes) ipv6_trial=yes ;;
+  *) echo 'NATIVE_IPV6_QA=FAIL (unsupported mode)' >&2; exit 2 ;;
 esac
-
-# Large-payload QA runs only in the normal disposable positive/outage guest.
-# Avoid expanding unrelated deadline, hosting and forced-cleanup regressions.
-payload_trial=no
-if [ "${SC_QA_TUN_GUARD_LAB-}" != yes ] &&
-   [ -z "${SC_QA_TUN_OUTAGE_FAULT-}" ] &&
-   [ -z "${SC_QA_TUN_CLEANUP_FAULT-}" ]; then
-  payload_trial=yes
+if [ "$native_installed_trial_mode" = yes ] &&
+   { [ "$native_dns_trial" = yes ] || [ "$ipv6_trial" = yes ] ||
+     [ -n "${SC_QA_TUN_OWNED_BOUNDARY-}" ]; }; then
+   echo 'INSTALLED_NATIVE_QA=FAIL (requires exclusive connected-manager fixture)' >&2
+   exit 2
 fi
-
-guarded_real_tun_deadline_trial() {
-  # Stop the original shell-owned test TUN first. The second activation is
-  # from a different manager/controller, and PID1 must stop it independently.
-  stop_tun_client_for_qa_fault
-  test "$(nft -j list ruleset)" = "$nft_before" &&
-    test "$(ip -N -j -4 route show table all)" = "$guard_routes_before" &&
-    test "$(ip -N -j -4 rule show)" = "$guard_rules_before" &&
-    test "$(ip -N -j -6 route show table all)" = "$guard_v6_routes_before" &&
-    test "$(ip -N -j -6 rule show)" = "$guard_v6_rules_before" || {
-      echo 'QA_TUN_GUARD_BASELINE=FAIL (initial TUN did not restore)' >&2
-      return 1
-    }
-  qa_tun_guard_prepare
-  # Discriminating negative: a loaded but INACTIVE timer is not an armed
-  # recovery executor and must never be accepted before starting real TUN.
-  if qa_tun_guard_prearmed || [ -e /sys/class/net/sctunqa0 ]; then
-    echo 'QA_TUN_GUARD_UNARMED_FALSE_PASS=FAIL' >&2
-    return 1
-  fi
-  echo 'QA_TUN_GUARD_UNARMED_FALSE_PASS_REJECTED=PASS'
-
-  # The child must die from actual SIGKILL after starting a deadline timer
-  # and a real TUN via separate systemd units. No parent-driven stop is used
-  # before the deadline. The recovery service runs in PID1's unit lifecycle.
-  controller_rc=0
-  /bin/sh /root/qa-tun-guard-unit-lab.sh controller \
-    >/run/scqa-tun-guard-controller.log 2>&1 || controller_rc=$?
-  test "$controller_rc" -eq 137 &&
-    grep -Fx 'QA_TUN_GUARD_TIMER_PREARMED=PASS' /run/scqa-tun-guard-controller.log >/dev/null &&
-    grep -Fx 'QA_TUN_GUARD_CLIENT_STARTED=PASS' /run/scqa-tun-guard-controller.log >/dev/null || {
-      echo "QA_TUN_GUARD_CONTROLLER=FAIL (rc=$controller_rc)" >&2
-      cat /run/scqa-tun-guard-controller.log >&2
-      return 1
-    }
-  echo 'QA_TUN_GUARD_CONTROLLER_SIGKILL=PASS'
-
-  managed_pid=$(qa_tun_unit_state "$qa_tun_client_unit" MainPID)
-  case "$managed_pid" in ''|0|*[!0-9]*)
-    echo 'QA_TUN_GUARD_CLIENT_IDENTITY=FAIL (no fresh PID)' >&2; return 1 ;;
-  esac
-  test "$(readlink -f "/proc/$managed_pid/exe")" = "$core" &&
-    test "$(qa_tun_unit_state "$qa_tun_client_unit" ActiveState)" = active &&
-    test "$(qa_tun_unit_state "$qa_tun_recover_timer" ActiveState)" = active &&
-    test "$(qa_tun_unit_state "$qa_tun_recover_unit" ExecMainStartTimestampMonotonic)" = 0 || {
-      echo 'QA_TUN_GUARD_CLIENT_IDENTITY=FAIL (wrong managed process, fired timer or dead timer)' >&2
-      return 1
-    }
-
-  managed_ready=no
-  tries=0
-  while [ "$tries" -lt 40 ]; do
-    if [ -e /sys/class/net/sctunqa0 ] &&
-      expect_source 5.22.0.10 10.254.72.1 &&
-      expect_source 8.8.8.8 8.8.8.8; then
-      managed_ready=yes
-      break
-    fi
-    tries=$((tries + 1))
-    sleep 0.2
-  done
-  test "$managed_ready" = yes || {
-    echo 'QA_TUN_GUARD_SELECTED_PATH=FAIL (no live managed TUN)' >&2
-    return 1
-  }
-  udp_path 8.8.8.8 8.8.8.8 guard-foreign-udp reply
-  dns_path 8.8.8.8 192.0.2.22 guard-foreign-dns udp reply
-  expect_foreign_hosted_reply
-  test "$(direct_witness_packets)" -eq "$witness_baseline" &&
-    test "$(direct_udp_witness_packets)" -eq "$udp_witness_baseline" &&
-    test "$(direct_dns_udp_witness_packets)" -eq "$dns_udp_baseline" &&
-    test "$(qa_tun_unit_state "$qa_tun_client_unit" ActiveState)" = active &&
-    test "$(qa_tun_unit_state "$qa_tun_recover_timer" ActiveState)" = active || {
-      echo 'QA_TUN_GUARD_SELECTED_PATH=FAIL (Direct leak/guard gone)' >&2
-      return 1
-    }
-  echo 'QA_TUN_GUARD_SELECTED_PATH=PASS (real VLESS while controller dead)'
-
-  # The original controller is dead. ONLY the prearmed systemd timer can
-  # trigger its independent oneshot. A stale/default Result=success without
-  # a fresh ExecMain timestamp cannot pass this assertion.
-  recovered=no
-  tries=0
-  while [ "$tries" -lt 90 ]; do
-    triggered=$(qa_tun_unit_state "$qa_tun_recover_unit" ExecMainStartTimestampMonotonic)
-    case "$triggered" in ''|0|*[!0-9]*) triggered=0 ;; esac
-    if [ "$triggered" -gt 0 ] &&
-      [ "$(qa_tun_unit_state "$qa_tun_recover_unit" Result)" = success ] &&
-      [ "$(qa_tun_unit_state "$qa_tun_recover_unit" ExecMainStatus)" = 0 ] &&
-      [ "$(qa_tun_unit_state "$qa_tun_client_unit" ActiveState)" = inactive ] &&
-      [ ! -e /sys/class/net/sctunqa0 ]; then
-      recovered=yes
-      break
-    fi
-    tries=$((tries + 1))
-    sleep 0.5
-  done
-  test "$recovered" = yes || {
-    echo 'QA_TUN_GUARD_DEADLINE=FAIL (no fresh independent stop)' >&2
-    return 1
-  }
-  test "$(nft -j list ruleset)" = "$nft_before" &&
-    test "$(ip -N -j -4 route show table all)" = "$guard_routes_before" &&
-    test "$(ip -N -j -4 rule show)" = "$guard_rules_before" &&
-    test "$(ip -N -j -6 route show table all)" = "$guard_v6_routes_before" &&
-    test "$(ip -N -j -6 rule show)" = "$guard_v6_rules_before" || {
-      echo 'QA_TUN_GUARD_RECOVERY=FAIL (native kernel did not restore)' >&2
-      # Failure-only evidence: identify the exact native resource that drifted.
-      # The guest contains fixed QA fixtures, never operator credentials.
-      observed=$(nft -j list ruleset) || observed='INSPECTION_FAILED'
-      if [ "$observed" != "$nft_before" ]; then
-        printf 'QA_TUN_GUARD_DRIFT=nftables expected=%s observed=%s\n' "$nft_before" "$observed" >&2
-      fi
-      observed=$(ip -N -j -4 route show table all) || observed='INSPECTION_FAILED'
-      if [ "$observed" != "$guard_routes_before" ]; then
-        printf 'QA_TUN_GUARD_DRIFT=ipv4-routes expected=%s observed=%s\n' "$guard_routes_before" "$observed" >&2
-      fi
-      observed=$(ip -N -j -4 rule show) || observed='INSPECTION_FAILED'
-      if [ "$observed" != "$guard_rules_before" ]; then
-        printf 'QA_TUN_GUARD_DRIFT=ipv4-rules expected=%s observed=%s\n' "$guard_rules_before" "$observed" >&2
-      fi
-      observed=$(ip -N -j -6 route show table all) || observed='INSPECTION_FAILED'
-      if [ "$observed" != "$guard_v6_routes_before" ]; then
-        printf 'QA_TUN_GUARD_DRIFT=ipv6-routes expected=%s observed=%s\n' "$guard_v6_routes_before" "$observed" >&2
-      fi
-      observed=$(ip -N -j -6 rule show) || observed='INSPECTION_FAILED'
-      if [ "$observed" != "$guard_v6_rules_before" ]; then
-        printf 'QA_TUN_GUARD_DRIFT=ipv6-rules expected=%s observed=%s\n' "$guard_v6_rules_before" "$observed" >&2
-      fi
-      return 1
-    }
-  expect_source 5.22.0.10 10.254.72.1
-  expect_source 8.8.8.8 10.254.72.1
-  dns_path 8.8.8.8 192.0.2.11 guard-restored-direct udp reply
-  expect_foreign_hosted_reply
-  echo 'QA_TUN_GUARD_DEADLINE_RECOVERY=PASS (PID1 stop, exact guest baseline)'
-  echo 'QA_TUN_GUARD_DIRECT_OFF=PASS (new Direct paths, no VPN-only block)'
-}
+if { [ "$native_dns_trial" = yes ] || [ -n "${SC_QA_TUN_OWNED_BOUNDARY-}" ]; } &&
+   [ "$ipv6_trial" != yes ]; then
+   echo 'NATIVE_QA=FAIL (dual-stack fixture requires explicit IPv6)' >&2
+   exit 2
+fi
+if [ "$native_installed_trial_mode" != yes ] && [ "$native_dns_trial" != yes ] &&
+   [ -z "${SC_QA_TUN_OWNED_BOUNDARY-}" ]; then
+   echo 'NATIVE_QA=FAIL (no supported fixture selected)' >&2
+   exit 2
+fi
+# Ordinary packet baseline includes a real TCP/UDP large-payload witness.
+payload_trial=yes
 
 trap cleanup EXIT
 trap 'exit 130' INT
@@ -1065,12 +796,6 @@ if [ "$witness_baseline" -le 0 ]; then
 fi
 echo "REAL_TUN_LAB_UNTUNNELED_BASELINE=PASS (two native routes)"
 echo "REAL_TUN_DIRECT_WITNESS=PASS (positive control observed $witness_baseline direct packets)"
-if [ "${SC_QA_TUN_PRODUCT_LAB-}" = yes ]; then
-  expect_source 198.51.100.42 10.254.72.1
-  visitor_origin_baseline=$(visitor_origin_direct_packets)
-  test "$visitor_origin_baseline" -gt 0
-  echo PRODUCT_NATIVE_VISITOR_ORIGIN_DIRECT_CONTROL=PASS
-fi
 domestic_tls_baseline=$(domestic_tls_direct_packets)
 foreign_tls_baseline=$(foreign_tls_direct_packets)
 test "$domestic_tls_baseline" -gt 0 && test "$foreign_tls_baseline" -gt 0 || {
@@ -1121,12 +846,6 @@ if [ "$ipv6_trial" = yes ]; then
     }
   echo 'REAL_TUN_IPV6_DIRECT_BASELINE=PASS (independent TCP/UDP source and native counters)'
   echo 'REAL_TUN_IPV6_OVERRIDE_UDP_DIRECT_BASELINE=PASS (native UDP positive-controlled counter)'
-  if [ "${SC_QA_TUN_PRODUCT_LAB-}" = yes ]; then
-    icmp6_path reply
-    public_icmp6_baseline=$(public_icmp6_direct_packets)
-    test "$public_icmp6_baseline" -gt 0
-    echo PRODUCT_NATIVE_PUBLIC_ICMP6_DIRECT_CONTROL=PASS
-  fi
 fi
 if [ "$payload_trial" = yes ]; then
   payload_path tcp 8.8.8.8 10.254.72.1 reply
@@ -1142,7 +861,7 @@ fi
 # The native DNS-only packet lab has no PHP/WordPress claim. Do not require
 # Debian 13's PHP 8.4 fixture just to exercise the same genuine TUN/Core and
 # independent DNS witnesses in a disconnected Debian 12 guest.
-if [ "${SC_QA_TUN_GUARD_LAB-}" != yes ] && [ "$native_dns_trial" != yes ] && [ "$native_installed_trial_mode" != yes ]; then
+if [ "$native_dns_trial" != yes ] && [ "$native_installed_trial_mode" != yes ]; then
   # mkdir is exclusive: only a successfully created QA-owned fixture is
   # eligible for cleanup, including when WordPress setup partially fails.
   mkdir -m 0755 "$wp_fixture_dir"
@@ -1180,7 +899,7 @@ echo "REAL_TUN_DNS_DIRECT_WITNESS=PASS (native DNS UDP/TCP positive controls)"
 hosting_baseline=$(hosting_reply_packets)
 test "$hosting_baseline" -gt 0 || { echo 'FAIL: no positive control of foreign visitor hosting reply' >&2; exit 1; }
 echo "REAL_TUN_FOREIGN_HOSTING_BASELINE=PASS (foreign visitor request/reply, packets=$hosting_baseline)"
-if [ "${SC_QA_TUN_GUARD_LAB-}" = yes ] || [ "${SC_QA_TUN_PRODUCT_LAB-}" = yes ] || [ "$native_installed_trial_mode" = yes ]; then
+if [ "$native_installed_trial_mode" = yes ] || [ -n "${SC_QA_TUN_OWNED_BOUNDARY-}" ]; then
   # The disposable VETH may still be doing IPv6 duplicate-address detection.
   # Its fe80:: local /128 route appears only after DAD finishes. Capturing
   # before then produces a false rollback failure 25s later even when the
@@ -1215,11 +934,6 @@ fi
 
 # Separate installed-product guard trial reuses the identical peer paths
 # but starts the real TUN through its installed manager/systemd ownership.
-if [ "${SC_QA_TUN_PRODUCT_LAB-}" = yes ]; then
-  . /root/qa-product-tun-trial.sh
-  product_tun_trial
-  exit 0
-fi
 if [ "${SC_QA_TUN_OWNED_BOUNDARY-}" = yes ]; then
   owned_tun_boundary_trial
   exit 0
@@ -1240,408 +954,5 @@ if [ "$native_dns_trial" = yes ]; then
   exit 0
 fi
 
-# Generate the candidate via the actual manager compiler, not a manually
-# duplicated sing-box config. The fixed lab credentials are not user secrets.
-/root/qa-tun-config-qa > "$client_cfg"
-chmod 0600 "$client_cfg"
-"$core" check -c "$client_cfg"
-"$core" run -c "$client_cfg" >/run/sc-qa-tun-client.log 2>&1 &
-client_pid=$!
-
-ready=no
-attempt=0
-while [ "$attempt" -lt 35 ]; do
-  # TUN existence alone precedes completed native RPDB/nft installation.
-  # Never send a foreign probe into that window: a correct startup can
-  # otherwise leak a test packet before the redirect is armed. The exact
-  # independent Direct-witness baseline stays fixed and must not be reset.
-  if assert_tun_policy_active; then
-    if expect_source 5.22.0.10 10.254.72.1 &&
-       expect_source 8.8.8.8 8.8.8.8; then
-      ready=yes
-      break
-    fi
-  fi
-  if ! kill -0 "$client_pid" 2>/dev/null; then
-    cat /run/sc-qa-tun-client.log >&2
-    echo "TUN client exited before verified selected-path delivery" >&2
-    exit 1
-  fi
-  attempt=$((attempt+1))
-  sleep 0.3
-done
-if [ "$ready" != yes ]; then
-  cat /run/sc-qa-tun-client.log >&2
-  echo "TUN route did not prove distinct direct/VLESS source paths" >&2
-  exit 1
-fi
-# A positive VLESS response is not sufficient if an earlier attempt escaped
-# to Direct. Preserve the pre-TUN positive-control witness across all retries
-# and fail with the actual native count, not an unrelated downstream label.
-witness_at_ready=$(direct_witness_packets) || {
-  echo 'REAL_TUN_SELECTED_TCP_PATH=FAIL (native Direct witness unavailable)' >&2
-  exit 1
-}
-if [ "$witness_at_ready" -ne "$witness_baseline" ]; then
-  echo "REAL_TUN_SELECTED_TCP_PATH=FAIL (foreign Direct packets during startup: baseline=$witness_baseline observed=$witness_at_ready)" >&2
-  exit 1
-fi
-echo "REAL_TUN_SELECTED_TCP_PATH=PASS (domestic Direct vs foreign VLESS; no HTTP proxy)"
-if [ "$ipv6_trial" = yes ]; then
-  ip -6 route show table all | grep -F 'dev sctunqa0' >/dev/null || {
-    echo 'REAL_TUN_IPV6=FAIL (no active kernel IPv6 TUN route)' >&2; exit 1;
-  }
-  ipv6_path tcp 2606:4700:5::11 fd73:1::1 reply
-  ipv6_path udp 2606:4700:5::11 fd73:1::1 reply
-  # The explicitly VPN-only domestic host must override the /64 Direct rule.
-  ipv6_path tcp 2606:4700:5::10 2606:4700:5::10 reply
-  ipv6_path udp 2606:4700:5::10 2606:4700:5::10 reply
-  # Foreign defaults to VLESS; explicit foreign host Direct stays deliberate.
-  ipv6_path tcp 2606:4700:8::8 2606:4700:8::8 reply
-  ipv6_path udp 2606:4700:8::8 2606:4700:8::8 reply
-  ipv6_path tcp 2606:4700:8::9 fd73:1::1 reply
-  ipv6_path udp 2606:4700:8::9 fd73:1::1 reply
-  test "$(ipv6_foreign_tcp_direct_packets)" -eq "$ipv6_foreign_tcp_baseline" &&
-    test "$(ipv6_foreign_udp_direct_packets)" -eq "$ipv6_foreign_udp_baseline" &&
-    test "$(ipv6_override_direct_packets)" -eq "$ipv6_override_baseline" &&
-    test "$(ipv6_override_udp_direct_packets)" -eq "$ipv6_override_udp_baseline" || {
-      echo 'REAL_TUN_IPV6=FAIL (VPN-required IPv6 leaked native Direct)' >&2; exit 1;
-    }
-  assert_tun_policy_active || { echo 'REAL_TUN_IPV6=FAIL (TUN/IPv4 policy disappeared)' >&2; exit 1; }
-  ip -6 route show table all | grep -F 'dev sctunqa0' >/dev/null || {
-    echo 'REAL_TUN_IPV6=FAIL (IPv6 policy disappeared)' >&2; exit 1;
-  }
-  echo 'REAL_TUN_IPV6_OVERRIDE_UDP_SELECTED=PASS (VLESS source and unchanged native UDP counter)'
-  echo 'REAL_TUN_IPV6_EXPLICIT_DIRECT_UDP_SELECTED=PASS (exact source and payload)'
-  echo 'REAL_TUN_IPV6_SELECTED=PASS (native domestic Direct, explicit override, foreign VLESS, no Direct leak)'
-fi
-# Explicit, synthetic HTTP Host exceptions exercise native sing-box sniff.
-# This does not prove DNS correlation, TLS SNI or geographic classification.
-test "$(direct_witness_packets)" -eq "$witness_baseline" || {
-  echo 'REAL_TUN_SNIFFED_DOMAIN_EXCEPTION=FAIL (pre-existing foreign leak)' >&2; exit 1;
-}
-expect_named_source vpn.scqa.example.org 5.22.0.10 5.22.0.10 || {
-  echo 'REAL_TUN_SNIFFED_DOMAIN_EXCEPTION=FAIL (suffix VPN over domestic IP)' >&2; exit 1;
-}
-# The exact name MUST be outside the suffix fixture. Otherwise the suffix
-# route would make this test falsely pass even if exact matching broke.
-expect_named_source only-exact.test 5.22.0.10 5.22.0.10 || {
-  echo 'REAL_TUN_SNIFFED_DOMAIN_EXCEPTION=FAIL (exact-only VPN over domestic IP)' >&2; exit 1;
-}
-# An exact match must NOT act as a suffix: this name uses domestic Direct.
-expect_named_source child.only-exact.test 5.22.0.10 10.254.72.1 || {
-  echo 'REAL_TUN_SNIFFED_DOMAIN_EXCEPTION=FAIL (exact-only overmatched subdomain)' >&2; exit 1;
-}
-assert_tun_policy_active || {
-  echo 'REAL_TUN_SNIFFED_DOMAIN_EXCEPTION=FAIL (TUN policy lost during name proof)' >&2; exit 1;
-}
-expect_source 8.8.8.8 8.8.8.8 || {
-  echo 'REAL_TUN_SNIFFED_DOMAIN_EXCEPTION=FAIL (raw IP foreign)' >&2; exit 1;
-}
-expect_source 5.22.0.10 10.254.72.1 || {
-  echo 'REAL_TUN_SNIFFED_DOMAIN_EXCEPTION=FAIL (raw IP domestic)' >&2; exit 1;
-}
-test "$(direct_witness_packets)" -eq "$witness_baseline" || {
-  echo 'REAL_TUN_SNIFFED_DOMAIN_EXCEPTION=FAIL (VPN-only names leaked to Direct)' >&2; exit 1;
-}
-echo 'REAL_TUN_SNIFFED_DOMAIN_EXCEPTION=PASS (VPN-only HTTP names; no Direct leak)'
-# SNI is distinct from HTTP Host; verify a *real* TLS ClientHello is sniffed.
-# Compare independent VETH counters on each path. The peer's VLESS outbound
-# accesses destination loopback and MUST NOT increment a native VETH witness.
-assert_tun_policy_active || { echo 'REAL_TUN_TLS_SNI_VPN_ONLY=FAIL (TUN unavailable)' >&2; exit 1; }
-tls_path vpn.scqa.example.org 5.22.0.10 5.22.0.10 reply
-tls_path only-exact.test 5.22.0.10 5.22.0.10 reply
-test "$(domestic_tls_direct_packets)" -eq "$domestic_tls_baseline" || {
-  echo 'REAL_TUN_TLS_SNI_VPN_ONLY=FAIL (matched domestic SNI leaked Direct)' >&2; exit 1;
-}
-# Exact-only must NOT match its children; no SNI must stay IP-only.
-tls_path child.only-exact.test 5.22.0.10 10.254.72.1 reply
-tls_path - 5.22.0.10 10.254.72.1 reply
-domestic_tls_active=$(domestic_tls_direct_packets)
-test "$domestic_tls_active" -gt "$domestic_tls_baseline" || {
-  echo 'REAL_TUN_TLS_SNI_VPN_ONLY=FAIL (missing positive Direct negative-control)' >&2; exit 1;
-}
-tls_path unmatched.test 8.8.8.8 8.8.8.8 reply
-test "$(foreign_tls_direct_packets)" -eq "$foreign_tls_baseline" || {
-  echo 'REAL_TUN_TLS_SNI_VPN_ONLY=FAIL (foreign TLS leaked Direct)' >&2; exit 1;
-}
-assert_tun_policy_active || { echo 'REAL_TUN_TLS_SNI_VPN_ONLY=FAIL (TUN lost)' >&2; exit 1; }
-echo 'REAL_TUN_TLS_SNI_VPN_ONLY=PASS (real suffix/exact ClientHello; positive-controlled Direct witnesses)'
-assert_tun_policy_active || { echo 'FAIL: TUN not active before selected UDP path' >&2; exit 1; }
-udp_path 5.22.0.10 10.254.72.1 tun-domestic reply
-udp_path 8.8.8.8 8.8.8.8 tun-foreign reply
-udp_witness_active=$(direct_udp_witness_packets)
-test "$udp_witness_active" -eq "$udp_witness_baseline" || {
-  echo "FAIL: VPN-required UDP escaped native Direct ($udp_witness_baseline -> $udp_witness_active)" >&2
-  exit 1
-}
-assert_tun_policy_active || { echo 'FAIL: TUN disappeared during selected UDP proof' >&2; exit 1; }
-echo "REAL_TUN_SELECTED_UDP_PATH=PASS (domestic Direct, foreign VLESS, no native foreign UDP packets)"
-assert_tun_policy_active || { echo 'FAIL: TUN unavailable before DNS wire proof' >&2; exit 1; }
-dns_path 5.22.0.10 192.0.2.11 tun-domestic-udp udp reply
-dns_path 5.22.0.10 192.0.2.11 tun-domestic-tcp tcp reply
-dns_path 8.8.8.8 192.0.2.22 tun-foreign-udp udp reply
-dns_path 8.8.8.8 192.0.2.22 tun-foreign-tcp tcp reply
-test "$(direct_dns_udp_witness_packets)" -eq "$dns_udp_baseline" &&
-test "$(direct_dns_tcp_witness_packets)" -eq "$dns_tcp_baseline" || {
-  echo 'FAIL: VPN-required DNS escaped native Direct with active TUN' >&2
-  exit 1
-}
-assert_tun_policy_active || { echo 'FAIL: TUN disappeared during DNS wire proof' >&2; exit 1; }
-echo "REAL_TUN_SELECTED_DNS_WIRE_PATH=PASS (UDP/TCP DNS answers source-bound, no foreign Direct leak)"
-assert_tun_policy_active || { echo 'FAIL: TUN not active before active hosting probe' >&2; exit 1; }
-expect_foreign_hosted_reply
-hosting_active=$(hosting_reply_packets)
-test "$hosting_active" -gt "$hosting_baseline" || { echo 'FAIL: hosting replies did not reach foreign visitor while TUN active' >&2; exit 1; }
-assert_tun_policy_active || { echo 'FAIL: TUN lost during active hosting probe' >&2; exit 1; }
-echo "REAL_TUN_FOREIGN_HOSTING_ACTIVE=PASS (reply packets $hosting_baseline -> $hosting_active; TUN still active)"
-
-# A completely separate proxy-unaware process must follow TUN too.
-wget_result=$(env -i HOME=/root PATH=/usr/bin:/bin:/sbin:/usr/sbin \
-  /usr/bin/wget -q -T 6 -t 1 -O - http://8.8.8.8:19180/wget)
-test "$wget_result" = SOURCE=8.8.8.8
-echo "REAL_TUN_PROXY_UNAWARE_WGET=PASS"
-
-# Genuine native apt-get update + HTTP Git clone, not curl posing as apps.
-# An independent origin and native packet counter distinguish VPN from Direct.
-assert_tun_policy_active || { echo 'REAL_TUN_NATIVE_APPS_SELECTED=FAIL (TUN disappeared)' >&2; exit 1; }
-native_apps selected
-test "$(native_app_direct_packets)" -eq "$native_apps_baseline" || {
-  echo 'REAL_TUN_NATIVE_APPS_SELECTED=FAIL (APT/Git escaped native Direct)' >&2
-  exit 1
-}
-kill -0 "$native_apps_pid" 2>/dev/null &&
-assert_tun_policy_active || {
-  echo 'REAL_TUN_NATIVE_APPS_SELECTED=FAIL (fixture or TUN unavailable)' >&2
-  exit 1
-}
-echo 'REAL_TUN_NATIVE_APPS_SELECTED_WITNESS=PASS (APT/Git VLESS, no native Direct leak)'
-if [ "${SC_QA_TUN_GUARD_LAB-}" != yes ]; then
-  wp_probe positive 8.8.8.8
-  test "$(native_app_direct_packets)" -eq "$native_apps_baseline" || {
-    echo 'REAL_TUN_WORDPRESS=FAIL (native Direct leak under VPN)' >&2; exit 1;
-  }
-  assert_tun_policy_active || {
-    echo 'REAL_TUN_WORDPRESS=FAIL (policy disappeared during selected request)' >&2; exit 1;
-  }
-fi
-
-if [ "$payload_trial" = yes ]; then
-  assert_tun_policy_active || { echo 'REAL_TUN_PAYLOAD=FAIL (missing TUN before payload)' >&2; exit 1; }
-  payload_path tcp 8.8.8.8 8.8.8.8 reply
-  payload_path udp 8.8.8.8 8.8.8.8 reply
-  # An underlay VETH with MTU 1280 must carry multi-packet VLESS traffic
-  # through a 1400-byte TUN interface, without native Direct escape.
-  test "$(cat /sys/class/net/sctunqa0/mtu)" = 1400 || {
-    echo 'REAL_TUN_PAYLOAD=FAIL (unexpected TUN MTU)' >&2; exit 1;
-  }
-  edge_mtu=$(cat "/sys/class/net/$edge/mtu")
-  peer_mtu=$(ip -n "$peer" -j link show dev scqapeer0 |
-    python3 -c 'import json,sys; print(json.load(sys.stdin)[0]["mtu"])')
-  test "$edge_mtu" -gt 1280 && test "$peer_mtu" -gt 1280 || {
-    echo 'REAL_TUN_PAYLOAD=FAIL (no meaningful underlay MTU reduction)' >&2; exit 1;
-  }
-  ip link set dev "$edge" mtu 1280
-  ip -n "$peer" link set dev scqapeer0 mtu 1280
-  test "$(cat "/sys/class/net/$edge/mtu")" = 1280 &&
-    test "$(ip -n "$peer" -j link show dev scqapeer0 |
-      python3 -c 'import json,sys; print(json.load(sys.stdin)[0]["mtu"])')" = 1280 || {
-      echo 'REAL_TUN_PAYLOAD=FAIL (underlay MTU reduction)' >&2; exit 1;
-    }
-  payload_path tcp 8.8.8.8 8.8.8.8 reply
-  payload_path udp 8.8.8.8 8.8.8.8 reply
-  payload_path df 8.8.8.8
-  test "$(payload_tcp_direct_packets)" -eq "$payload_tcp_baseline" &&
-    test "$(payload_udp_direct_packets)" -eq "$payload_udp_baseline" || {
-      echo 'REAL_TUN_PAYLOAD=FAIL (foreign Direct leak under reduced MTU)' >&2; exit 1;
-    }
-  assert_tun_policy_active || { echo 'REAL_TUN_PAYLOAD=FAIL (TUN lost during reduced MTU)' >&2; exit 1; }
-  ip link set dev "$edge" mtu "$edge_mtu"
-  ip -n "$peer" link set dev scqapeer0 mtu "$peer_mtu"
-  test "$(cat "/sys/class/net/$edge/mtu")" = "$edge_mtu" &&
-    test "$(ip -n "$peer" -j link show dev scqapeer0 |
-      python3 -c 'import json,sys; print(json.load(sys.stdin)[0]["mtu"])')" = "$peer_mtu" || {
-      echo 'REAL_TUN_PAYLOAD=FAIL (underlay MTU restoration)' >&2; exit 1;
-    }
-  echo 'REAL_TUN_PAYLOAD_REDUCED_MTU=PASS (real VLESS TCP/UDP echo, MTU 1280, no native Direct leak)'
-fi
-
-if [ "${SC_QA_TUN_GUARD_LAB-}" = yes ]; then
-  guarded_real_tun_deadline_trial
-  exit 0
-fi
-
-assert_tun_policy_active || { echo 'FAIL: TUN and kernel policy not active before outage' >&2; exit 1; }
-witness_before_outage=$(direct_witness_packets)
-if [ "$witness_before_outage" -ne "$witness_baseline" ]; then
-  echo 'FAIL: foreign Direct packets observed while VLESS was healthy' >&2
-  exit 1
-fi
-
-# Stopping the actual VLESS server must not allow foreign-VPN-required traffic
-# to silently use the ordinary direct veth path while TUN remains active.
-kill "$server_pid"
-wait "$server_pid" 2>/dev/null || :
-server_pid=
-assert_tun_policy_active || { echo 'FAIL: TUN and kernel policy lost on upstream termination' >&2; exit 1; }
-if without_proxy http://8.8.8.8:19180/should-fail >/run/sc-qa-tun-leak-check 2>/dev/null; then
-  echo "FAIL: VPN-required traffic silently escaped Direct" >&2
-  rm -f /run/sc-qa-tun-leak-check
-  exit 1
-fi
-if [ -s /run/sc-qa-tun-leak-check ]; then
-  echo "FAIL: VPN-required origin data escaped during outage" >&2
-  rm -f /run/sc-qa-tun-leak-check
-  exit 1
-fi
-rm -f /run/sc-qa-tun-leak-check
-assert_tun_policy_active || { echo 'FAIL: TUN and kernel policy did not remain active during failed foreign request' >&2; exit 1; }
-witness_after_outage=$(direct_witness_packets)
-if [ "$witness_after_outage" -ne "$witness_before_outage" ]; then
-  echo "FAIL: foreign Direct TCP packets leaked ($witness_before_outage -> $witness_after_outage)" >&2
-  exit 1
-fi
-echo 'REAL_TUN_POLICY_DURING_OUTAGE=PASS (live client, TUN route, installed nftables policy)'
-echo 'REAL_TUN_NO_DIRECT_PACKETS_ON_UPSTREAM_LOSS=PASS (positive-controlled independent peer witness)'
-# Native apt-get and Git must also fail closed without silently escaping
-# via Direct while the TUN policy is still active and the HTTP peer is alive.
-native_apps outage
-test "$(native_app_direct_packets)" -eq "$native_apps_baseline" || {
-  echo 'REAL_TUN_NATIVE_APPS_OUTAGE=FAIL (native Direct packets after upstream loss)' >&2
-  exit 1
-}
-kill -0 "$native_apps_pid" 2>/dev/null &&
-assert_tun_policy_active || {
-  echo 'REAL_TUN_NATIVE_APPS_OUTAGE=FAIL (fixture or TUN unavailable)' >&2
-  exit 1
-}
-echo 'REAL_TUN_NATIVE_APPS_OUTAGE_WITNESS=PASS (APT/Git failed closed, independent Direct witness unchanged)'
-if [ "$ipv6_trial" = yes ]; then
-  ipv6_path tcp 2606:4700:8::8 none no-reply
-  ipv6_path udp 2606:4700:8::8 none no-reply
-  ipv6_path tcp 2606:4700:5::10 none no-reply
-  ipv6_path udp 2606:4700:5::10 none no-reply
-  kill -0 "$ipv6_pid" 2>/dev/null || {
-    echo 'REAL_TUN_IPV6=FAIL (independent peer dead during outage)' >&2; exit 1;
-  }
-  # Direct still works after upstream loss and the origin is independently alive.
-  ipv6_path tcp 2606:4700:5::11 fd73:1::1 reply
-  ipv6_path udp 2606:4700:5::11 fd73:1::1 reply
-  ipv6_path tcp 2606:4700:8::9 fd73:1::1 reply
-  ipv6_path udp 2606:4700:8::9 fd73:1::1 reply
-  test "$(ipv6_foreign_tcp_direct_packets)" -eq "$ipv6_foreign_tcp_baseline" &&
-    test "$(ipv6_foreign_udp_direct_packets)" -eq "$ipv6_foreign_udp_baseline" &&
-    test "$(ipv6_override_direct_packets)" -eq "$ipv6_override_baseline" &&
-    test "$(ipv6_override_udp_direct_packets)" -eq "$ipv6_override_udp_baseline" || {
-      echo 'REAL_TUN_IPV6=FAIL (native Direct IPv6 leak on upstream loss)' >&2; exit 1;
-    }
-  ip -6 route show table all | grep -F 'dev sctunqa0' >/dev/null &&
-    assert_tun_policy_active || {
-      echo 'REAL_TUN_IPV6=FAIL (IPv6 routing policy vanished during outage)' >&2; exit 1;
-    }
-  echo 'REAL_TUN_IPV6_OVERRIDE_UDP_OUTAGE=PASS (no reply and unchanged native UDP counter)'
-  echo 'REAL_TUN_IPV6_EXPLICIT_DIRECT_UDP_OUTAGE=PASS (exact source and payload)'
-  echo 'REAL_TUN_IPV6_OUTAGE=PASS (VPN-required TCP/UDP failed closed, native Direct preserved)'
-fi
-if [ "$payload_trial" = yes ]; then
-  payload_path tcp 8.8.8.8 none no-reply
-  payload_path udp 8.8.8.8 none no-reply
-  kill -0 "$payload_pid" 2>/dev/null || {
-    echo 'REAL_TUN_PAYLOAD=FAIL (independent peer died before outage witness)' >&2; exit 1;
-  }
-  # Positive native Direct control AFTER failure: the origin is still alive,
-  # so a foreign no-reply cannot pass merely because the whole peer died.
-  payload_path tcp 5.22.0.10 10.254.72.1 reply
-  payload_path udp 5.22.0.10 10.254.72.1 reply
-  test "$(payload_tcp_direct_packets)" -eq "$payload_tcp_baseline" &&
-    test "$(payload_udp_direct_packets)" -eq "$payload_udp_baseline" || {
-      echo 'REAL_TUN_PAYLOAD=FAIL (foreign TCP/UDP native Direct leak on upstream loss)' >&2; exit 1;
-    }
-  assert_tun_policy_active || { echo 'REAL_TUN_PAYLOAD=FAIL (TUN lost on upstream loss)' >&2; exit 1; }
-  echo 'REAL_TUN_PAYLOAD_OUTAGE=PASS (large TCP/UDP fail closed, no native Direct packets)'
-fi
-wp_probe negative none
-test "$(native_app_direct_packets)" -eq "$native_apps_baseline" || {
-  echo 'REAL_TUN_WORDPRESS=FAIL (native Direct leak after VLESS loss)' >&2; exit 1;
-}
-assert_tun_policy_active || {
-  echo 'REAL_TUN_WORDPRESS=FAIL (policy disappeared during outage)' >&2; exit 1;
-}
-# A domestic destination must NOT become Direct just because the upstream
-# stopped when the explicit SNI rule still requires VPN. A nonmatching SNI
-# to the SAME destination must remain Direct: independent routing proof.
-assert_tun_policy_active || { echo 'REAL_TUN_TLS_SNI_NO_DIRECT_ON_UPSTREAM_LOSS=FAIL (TUN lost)' >&2; exit 1; }
-tls_path vpn.scqa.example.org 5.22.0.10 - no-reply
-tls_path only-exact.test 5.22.0.10 - no-reply
-tls_path unmatched.test 8.8.8.8 - no-reply
-test "$(domestic_tls_direct_packets)" -eq "$domestic_tls_active" &&
-test "$(foreign_tls_direct_packets)" -eq "$foreign_tls_baseline" || {
-  echo 'REAL_TUN_TLS_SNI_NO_DIRECT_ON_UPSTREAM_LOSS=FAIL (native VPN-only TLS leak)' >&2; exit 1;
-}
-if ! tls_path child.only-exact.test 5.22.0.10 10.254.72.1 reply; then
-  echo 'REAL_TUN_TLS_DIRECT_AFTER_UPSTREAM_LOSS=FAIL (fresh Direct positive control)' >&2
-  echo "QA_TLS_PEER_ALIVE=$(kill -0 "$tls_pid" 2>/dev/null && echo yes || echo no)" >&2
-  # Failure-only diagnostic evidence from the isolated synthetic server.
-  # Keep the original failure and do not retry away a routing regression.
-  tail -n 20 /run/sc-qa-tun-tls.log >&2 || :
-  exit 1
-fi
-test "$(domestic_tls_direct_packets)" -gt "$domestic_tls_active" || {
-  echo 'REAL_TUN_TLS_SNI_NO_DIRECT_ON_UPSTREAM_LOSS=FAIL (Direct negative control missing)' >&2; exit 1;
-}
-test "$(foreign_tls_direct_packets)" -eq "$foreign_tls_baseline" || {
-  echo 'REAL_TUN_TLS_SNI_NO_DIRECT_ON_UPSTREAM_LOSS=FAIL (foreign native TLS leak)' >&2; exit 1;
-}
-kill -0 "$tls_pid" 2>/dev/null &&
-assert_tun_policy_active || {
-  echo 'REAL_TUN_TLS_SNI_NO_DIRECT_ON_UPSTREAM_LOSS=FAIL (fixture or policy disappeared)' >&2; exit 1;
-}
-echo 'REAL_TUN_TLS_SNI_NO_DIRECT_ON_UPSTREAM_LOSS=PASS (matched domestic SNI fail-closed; unmatched Direct works)'
-assert_tun_policy_active || { echo 'FAIL: TUN lost before foreign UDP outage probe' >&2; exit 1; }
-udp_path 8.8.8.8 unused outage-foreign no-reply
-udp_witness_outage=$(direct_udp_witness_packets)
-test "$udp_witness_outage" -eq "$udp_witness_active" || {
-  echo "FAIL: VPN-required UDP leaked native Direct on upstream loss ($udp_witness_active -> $udp_witness_outage)" >&2
-  exit 1
-}
-udp_path 5.22.0.10 10.254.72.1 outage-domestic reply
-assert_tun_policy_active || { echo 'FAIL: TUN lost during foreign UDP outage probe' >&2; exit 1; }
-echo 'REAL_TUN_UDP_NO_DIRECT_PACKETS_ON_UPSTREAM_LOSS=PASS (positive-controlled peer witness)'
-assert_tun_policy_active || { echo 'FAIL: TUN lost before DNS outage proof' >&2; exit 1; }
-dns_path 8.8.8.8 none outage-foreign-udp udp no-reply
-dns_path 8.8.8.8 none outage-foreign-tcp tcp no-reply
-dns_path 5.22.0.10 192.0.2.11 outage-domestic-udp udp reply
-dns_path 5.22.0.10 192.0.2.11 outage-domestic-tcp tcp reply
-test "$(direct_dns_udp_witness_packets)" -eq "$dns_udp_baseline" &&
-test "$(direct_dns_tcp_witness_packets)" -eq "$dns_tcp_baseline" || {
-  echo 'FAIL: VPN-required DNS leaked native Direct after VLESS loss' >&2
-  exit 1
-}
-assert_tun_policy_active || { echo 'FAIL: TUN lost during DNS outage proof' >&2; exit 1; }
-echo 'REAL_TUN_DNS_NO_DIRECT_PACKETS_ON_UPSTREAM_LOSS=PASS (UDP/TCP negative with independent witness)'
-expect_source 5.22.0.10 10.254.72.1
-echo "REAL_TUN_UPSTREAM_LOSS=PASS (VPN path failed closed, domestic/underlay Direct preserved)"
-# The isolated regression deliberately removes the real TUN after the
-# preceding outage assertions, showing that a native Direct hosting reply
-# alone must NEVER count as "hosting survived with active TUN".
-case "${SC_QA_TUN_OUTAGE_FAULT-}" in
-  '') ;;
-  before-hosting)
-    stop_tun_client_for_qa_fault
-    expect_foreign_hosted_reply
-    echo 'REAL_TUN_NEGATIVE_DIRECT_HOSTING=PASS (native reply works without TUN)'
-    ;;
-  after-hosting) ;;
-  *) echo 'Invalid disposable TUN outage fault injection' >&2; exit 2 ;;
-esac
-assert_tun_policy_active || { echo 'REAL_TUN_FOREIGN_HOSTING_OUTAGE_GUARD=REJECTED (pre-hosting)' >&2; exit 1; }
-expect_foreign_hosted_reply
-hosting_outage=$(hosting_reply_packets)
-test "$hosting_outage" -gt "$hosting_active" || { echo 'FAIL: hosting replies did not survive VLESS outage' >&2; exit 1; }
-if [ "${SC_QA_TUN_OUTAGE_FAULT-}" = after-hosting ]; then
-  stop_tun_client_for_qa_fault
-  expect_foreign_hosted_reply
-  echo 'REAL_TUN_NEGATIVE_DIRECT_HOSTING=PASS (native reply works without TUN)'
-fi
-assert_tun_policy_active || { echo 'REAL_TUN_FOREIGN_HOSTING_OUTAGE_GUARD=REJECTED (post-hosting)' >&2; exit 1; }
-echo "REAL_TUN_FOREIGN_HOSTING_OUTAGE=PASS (reply packets $hosting_active -> $hosting_outage; TUN still active after VPN loss)"
+echo 'NATIVE_QA=FAIL (no current fixture executed)' >&2
+exit 2

@@ -513,7 +513,7 @@ func TestSmartTUNHealthReadCompletionCancellation(t *testing.T) {
 	}
 }
 
-func TestSmartTUNHealthReadCompletionMismatchStopsSupervision(t *testing.T) {
+func TestSmartTUNHealthReadCompletionMismatchNeverPromotesEvidence(t *testing.T) {
 	for _, protocol := range []string{"https", "https-length-held-open", "tcp", "udp", "dns"} {
 		t.Run(protocol, func(t *testing.T) {
 			parent, cancel := context.WithTimeout(context.Background(), smartTUNHealthRoundTimeout)
@@ -547,20 +547,7 @@ func TestSmartTUNHealthReadCompletionMismatchStopsSupervision(t *testing.T) {
 				evidence.FailedTargets != 1 || !validSmartTUNHTTPSEvidence(evidence, true) {
 				t.Fatalf("live alternate masked real completed mismatch: observed=%+v evidence=%+v parent=%v", observed, evidence, parent.Err())
 			}
-			r := supervisedExample(t, true)
-			r.Supervised.Options.FailureThreshold = 3
-			next, stop, reconnect := advanceSupervisedHealth(r, evidence, 106000)
-			if stop != "vpn_path_mismatch" || reconnect || next.Supervised.State != "degraded" || next.Supervised.Reason != stop ||
-				next.Supervised.Evidence != evidence {
-				t.Fatalf("classified critical reply did not request existing stop: stop=%s reconnect=%v supervision=%+v", stop, reconnect, next.Supervised)
-			}
-			unit := smartTUNTrialUnitObservation{activeState: "active", mainPID: 100, result: "success"}
-			if got := supervisedRuntimeReason(next, unit, true, next.BootID, 106001); got != stop {
-				t.Fatalf("independent recovery lost classified critical stop: %s", got)
-			}
-			if err := validateSmartTUNTrial(next); err != nil {
-				t.Fatalf("critical measured record invalid: %v", err)
-			}
+
 		})
 	}
 }

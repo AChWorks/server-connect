@@ -39,7 +39,6 @@ FILE_NAMES = [
     "server-connect/server-connect.service",
     "server-connect/server-connect-activation-recover.service",
     "server-connect/server-connect-activation-recover.timer",
-    "server-connect/server-connect-smart-tun.service",
     "server-connect/server-connect-native-tun.service",
     "server-connect/server-connect-smart-health.service",
     "server-connect/server-connect-smart-health.timer",
@@ -826,7 +825,7 @@ class SignedReleaseTest(unittest.TestCase):
         ordered = (
             "bin/server-connect", "bin/sing-box", "bin/libcronet.so",
             "server-connect.service", "server-connect-activation-recover.service",
-            "server-connect-activation-recover.timer", "server-connect-smart-tun.service",
+            "server-connect-activation-recover.timer",
             "server-connect-native-tun.service",
             "server-connect-smart-health.service", "server-connect-smart-health.timer",
             "install.sh", "release-auth.py", "LICENSE", "THIRD-PARTY-LICENSES/sing-box-LICENSE",

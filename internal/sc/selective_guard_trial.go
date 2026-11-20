@@ -562,8 +562,6 @@ func (m *Manager) RecoverGuardedRuleTrial(qaCrashPoint, qaFaultPoint string) (Tr
 				return TrialReceipt{Phase: "absent", ExperimentOnly: true}, nil
 			case 1:
 				return TrialReceipt{Phase: "unarmed_prepared", ExperimentOnly: true}, nil
-			case smartTUNTrialVersion:
-				return recoverSmartTUNTrialJournalLocked(store, selected.identity, selected.tun)
 			case 2, 3:
 				return recoverLegacyGuardedTrialLocked(store, selected.identity, selected.trial, qaCrashPoint, qaFaultPoint)
 			default:
@@ -580,7 +578,6 @@ type trialRecoverySelection struct {
 	version  int
 	identity activationJournalFileIdentity
 	trial    trialJournal
-	tun      smartTUNTrialJournal
 }
 
 func (m *Manager) recoverGuardedTrialWithHandler(qaCrashPoint, qaFaultPoint string,
@@ -610,17 +607,6 @@ func selectTrialRecoveryLocked(store *activationJournalDir, qaCrashPoint, qaFaul
 	}
 	if err := rejectAmbiguousJournalJSON(raw); err != nil {
 		return trialRecoverySelection{}, err
-	}
-	var marker struct {
-		Version int `json:"version"`
-	}
-	if err := json.Unmarshal(raw, &marker); err == nil && marker.Version == smartTUNTrialVersion &&
-		qaCrashPoint == "" && qaFaultPoint == "" {
-		record, err := decodeSmartTUNTrial(raw)
-		if err != nil {
-			return trialRecoverySelection{}, err
-		}
-		return trialRecoverySelection{version: smartTUNTrialVersion, identity: identity, tun: record}, nil
 	}
 	record, err := decodeTrialJournal(raw)
 	if err != nil {

@@ -15,7 +15,7 @@ func idleRecoveryObservation() string {
 
 func TestParseSmartTUNIdleRecoveryServiceExactProof(t *testing.T) {
 	failed := idleRecoveryObservation()
-	if got, err := parseSmartTUNIdleRecoveryService([]byte(failed)); err != nil || !got {
+	if got, err := parseNativeIdleRecoveryService([]byte(failed)); err != nil || !got {
 		t.Fatalf("trusted, quiescent FAILED rejected: failed=%v err=%v", got, err)
 	}
 	healthy := strings.Replace(
@@ -23,13 +23,13 @@ func TestParseSmartTUNIdleRecoveryServiceExactProof(t *testing.T) {
 			strings.Replace(failed, "ActiveState=failed", "ActiveState=inactive", 1),
 			"SubState=failed", "SubState=dead", 1),
 		"Result=exit-code", "Result=success", 1)
-	if got, err := parseSmartTUNIdleRecoveryService([]byte(healthy)); err != nil || got {
+	if got, err := parseNativeIdleRecoveryService([]byte(healthy)); err != nil || got {
 		t.Fatalf("trusted, inactive SUCCESS rejected: failed=%v err=%v", got, err)
 	}
 	for _, result := range []string{"timeout", "signal", "core-dump"} {
 		t.Run("known_failure_"+result, func(t *testing.T) {
 			data := strings.Replace(failed, "Result=exit-code", "Result="+result, 1)
-			if got, err := parseSmartTUNIdleRecoveryService([]byte(data)); err != nil || !got {
+			if got, err := parseNativeIdleRecoveryService([]byte(data)); err != nil || !got {
 				t.Fatalf("known systemd failure rejected: %v %v", got, err)
 			}
 		})
@@ -64,7 +64,7 @@ func TestParseSmartTUNIdleRecoveryServiceExactProof(t *testing.T) {
 	}
 	for name, candidate := range rejected {
 		t.Run(name, func(t *testing.T) {
-			if _, err := parseSmartTUNIdleRecoveryService([]byte(candidate)); err == nil {
+			if _, err := parseNativeIdleRecoveryService([]byte(candidate)); err == nil {
 				t.Fatal("unsafe recovery executor state accepted")
 			}
 		})
@@ -77,7 +77,7 @@ func TestParseSmartTUNIdleRecoveryServiceNoImplicitTransition(t *testing.T) {
 	raw := idleRecoveryObservation()
 	before := raw
 	for i := 0; i < 2; i++ {
-		failed, err := parseSmartTUNIdleRecoveryService([]byte(raw))
+		failed, err := parseNativeIdleRecoveryService([]byte(raw))
 		if err != nil || !failed {
 			t.Fatal("failed guard silently became ready on repeated observation")
 		}
@@ -87,36 +87,18 @@ func TestParseSmartTUNIdleRecoveryServiceNoImplicitTransition(t *testing.T) {
 	}
 }
 
-func TestRejectSmartTUNOrphanedTables(t *testing.T) {
-	safe := []map[string]any{{"table": map[string]any{"family": "inet", "name": "scqa_foreign_validation"}}}
-	if err := rejectSmartTUNOrphanedTables(safe); err != nil {
-		t.Fatalf("unrelated foreign nft table was treated as product owned: %v", err)
-	}
-	for name, object := range map[string]map[string]any{
-		"orphan_previous_operation": {"table": map[string]any{"family": "inet", "name": "scnt_14e427fefd9a237a69eb91d919a8e8c8"}},
-		"wrong_typed_table":         {"table": "malformed"},
-		"missing_table_name":        {"table": map[string]any{"family": "inet"}},
-	} {
-		t.Run(name, func(t *testing.T) {
-			if err := rejectSmartTUNOrphanedTables([]map[string]any{object}); err == nil {
-				t.Fatal("unsafe native nft observation was accepted")
-			}
-		})
-	}
-}
-
 func TestManagedRecoveryObserverDoesNotWidenHealthOrArbitraryUnitScope(t *testing.T) {
 	for _, role := range []string{trialRecoveryUnit, trialRecoveryTimer} {
-		if _, _, err := observeSmartTUNHealthUnit(role); ErrorCode(err) != "guard_unavailable" {
+		if _, _, err := observeNativeHealthUnit(role); ErrorCode(err) != "guard_unavailable" {
 			t.Fatalf("health observer accepted recovery role %s: %v", role, err)
 		}
 	}
 	for _, role := range []string{smartTUNHealthUnit, smartTUNHealthTimer, "untrusted.service", ""} {
-		if _, _, err := observeSmartTUNRecoveryUnit(role); ErrorCode(err) != "guard_unavailable" {
+		if _, _, err := observeNativeRecoveryUnit(role); ErrorCode(err) != "guard_unavailable" {
 			t.Fatalf("recovery observer accepted other role %s: %v", role, err)
 		}
 	}
-	if _, _, err := observeSmartTUNManagedUnit("untrusted.service"); ErrorCode(err) != "guard_unavailable" {
+	if _, _, err := observeNativeManagedUnit("untrusted.service"); ErrorCode(err) != "guard_unavailable" {
 		t.Fatalf("managed observer accepted untrusted unit: %v", err)
 	}
 }
@@ -128,13 +110,13 @@ func TestParseSmartTUNIdleHealthServiceExactProof(t *testing.T) {
 	failed := strings.ReplaceAll(idleRecoveryObservation(), trialRecoveryUnit, smartTUNHealthUnit)
 	for _, state := range []string{"exit-code", "timeout", "signal", "core-dump"} {
 		raw := strings.Replace(failed, "Result=exit-code", "Result="+state, 1)
-		if got, err := parseSmartTUNIdleManagedService([]byte(raw), smartTUNHealthUnit); err != nil || !got {
+		if got, err := parseNativeIdleManagedService([]byte(raw), smartTUNHealthUnit); err != nil || !got {
 			t.Fatalf("quiescent failed Health %s rejected: %v %v", state, got, err)
 		}
 	}
 	healthy := strings.NewReplacer("ActiveState=failed", "ActiveState=inactive",
 		"SubState=failed", "SubState=dead", "Result=exit-code", "Result=success").Replace(failed)
-	if got, err := parseSmartTUNIdleManagedService([]byte(healthy), smartTUNHealthUnit); err != nil || got {
+	if got, err := parseNativeIdleManagedService([]byte(healthy), smartTUNHealthUnit); err != nil || got {
 		t.Fatalf("idle healthy Health rejected: %v %v", got, err)
 	}
 	for name, raw := range map[string]string{
@@ -150,18 +132,18 @@ func TestParseSmartTUNIdleHealthServiceExactProof(t *testing.T) {
 		"unapproved drop-in":           strings.Replace(failed, "DropInPaths=\n", "DropInPaths=/tmp/override.conf\n", 1),
 	} {
 		t.Run(name, func(t *testing.T) {
-			if _, err := parseSmartTUNIdleManagedService([]byte(raw), smartTUNHealthUnit); ErrorCode(err) != "guard_unavailable" {
+			if _, err := parseNativeIdleManagedService([]byte(raw), smartTUNHealthUnit); ErrorCode(err) != "guard_unavailable" {
 				t.Fatalf("unsafe Health service state accepted: %v", err)
 			}
 		})
 	}
-	if _, err := parseSmartTUNIdleManagedService([]byte(failed), trialRecoveryUnit); err == nil {
+	if _, err := parseNativeIdleManagedService([]byte(failed), trialRecoveryUnit); err == nil {
 		t.Fatal("Health identity was accepted as Recovery authority")
 	}
-	if _, err := parseSmartTUNIdleManagedService([]byte(idleRecoveryObservation()), smartTUNHealthUnit); err == nil {
+	if _, err := parseNativeIdleManagedService([]byte(idleRecoveryObservation()), smartTUNHealthUnit); err == nil {
 		t.Fatal("Recovery identity was accepted as Health authority")
 	}
-	if _, err := parseSmartTUNIdleManagedService([]byte(failed), "ssh.service"); err == nil {
+	if _, err := parseNativeIdleManagedService([]byte(failed), "ssh.service"); err == nil {
 		t.Fatal("arbitrary foreign systemd service accepted as owned Health")
 	}
 }

@@ -61,7 +61,6 @@ FILES = (
     "server-connect.service",
     "server-connect-activation-recover.service",
     "server-connect-activation-recover.timer",
-    "server-connect-smart-tun.service",
     "server-connect-native-tun.service",
     "server-connect-smart-health.service",
     "server-connect-smart-health.timer",
@@ -138,22 +137,6 @@ class ReleasePayloadTests(unittest.TestCase):
         (release / ".owner").write_text("AChWorks/server-connect\n")
         return release
 
-    def test_previous_twelve_entry_release_is_retained_and_removable(self):
-        release = self.installed_pre_auth_release(
-            ("release-auth.py", "server-connect-native-tun.service",
-             "THIRD-PARTY-LICENSES/golang.org-x-net-LICENSE") + OLD_NO_PSL + OLD_NO_CHOCOLATE + OLD_NO_FIRST_PARTY_LICENSE + OLD_NO_DBIP
-        )
-        self.installed_audit(release)
-        (release / "release-auth.py").write_bytes(b"unreceipted helper\n")
-        self.installed_audit(release, expected=1)
-
-    def test_previous_thirteen_entry_native_release_is_retained_and_removable(self):
-        release = self.installed_pre_auth_release(
-            ("release-auth.py", "THIRD-PARTY-LICENSES/golang.org-x-net-LICENSE") + OLD_NO_PSL + OLD_NO_CHOCOLATE + OLD_NO_FIRST_PARTY_LICENSE + OLD_NO_DBIP)
-        self.installed_audit(release)
-        (release / "release-auth.py").write_bytes(b"unreceipted helper\n")
-        self.installed_audit(release, expected=1)
-
     def test_previous_fourteen_entry_signed_aware_local_qa_is_still_auditable(self):
         release = self.installed_pre_auth_release(
             ("THIRD-PARTY-LICENSES/golang.org-x-net-LICENSE",) + OLD_NO_PSL + OLD_NO_CHOCOLATE + OLD_NO_FIRST_PARTY_LICENSE + OLD_NO_DBIP)
@@ -165,19 +148,6 @@ class ReleasePayloadTests(unittest.TestCase):
         # An old installed release is not an acceptable new archive.
         self.audit(release, expected=21)
         (release / "THIRD-PARTY-LICENSES/sing-box-LICENSE").write_text("tampered")
-        self.installed_audit(release, expected=21)
-
-    def test_previous_fifteen_entry_installed_release_stays_auditable_but_not_new(self):
-        release = self.installed_pre_auth_release(OLD_NO_PSL + OLD_NO_CHOCOLATE + OLD_NO_FIRST_PARTY_LICENSE + OLD_NO_DBIP)
-        assert len(FILES) - len(OLD_NO_PSL + OLD_NO_CHOCOLATE + OLD_NO_FIRST_PARTY_LICENSE + OLD_NO_DBIP) == 15
-        receipt = release / "local-qa.sha256"
-        receipt.write_text(hashlib.sha256(
-            (release / "checksums.sha256").read_bytes()).hexdigest() + "\n")
-        receipt.chmod(0o600)
-        self.installed_audit(release)
-        self.audit(release, expected=21)
-        # Never classify a partially added PSL pair as a genuine old package.
-        (release / OLD_NO_PSL[0]).write_text("half-present source material")
         self.installed_audit(release, expected=21)
 
     def test_incoming_missing_psl_license_or_source_is_rejected_with_forged_checksums(self):
@@ -220,40 +190,6 @@ class ReleasePayloadTests(unittest.TestCase):
                 self.installed_audit(release, expected=21)
                 path.write_bytes(raw)
                 self.installed_audit(release)
-
-    def test_previous_seventeen_entry_psl_release_remains_retirable(self):
-        release = self.installed_pre_auth_release(OLD_NO_CHOCOLATE + OLD_NO_FIRST_PARTY_LICENSE + OLD_NO_DBIP)
-        assert len(FILES) - len(OLD_NO_CHOCOLATE + OLD_NO_FIRST_PARTY_LICENSE + OLD_NO_DBIP) == 17
-        (release / "local-qa.sha256").write_text(hashlib.sha256(
-            (release / "checksums.sha256").read_bytes()).hexdigest()+"\n")
-        (release / "local-qa.sha256").chmod(0o600)
-        self.installed_audit(release)
-        self.audit(release, expected=21)
-        (release / OLD_NO_CHOCOLATE[0]).write_text("partial new source")
-        self.installed_audit(release, expected=21)
-
-    def test_previous_nineteen_entry_installed_release_without_first_party_license_is_auditable(self):
-        release = self.installed_pre_auth_release(OLD_NO_FIRST_PARTY_LICENSE + OLD_NO_DBIP)
-        assert len(FILES) - len(OLD_NO_FIRST_PARTY_LICENSE + OLD_NO_DBIP) == 19
-        (release / "local-qa.sha256").write_text(hashlib.sha256(
-            (release / "checksums.sha256").read_bytes()).hexdigest() + "\n")
-        (release / "local-qa.sha256").chmod(0o600)
-        self.installed_audit(release)
-        # A previous signed-aware layout remains maintainable, not a new input.
-        self.audit(release, expected=21)
-
-    def test_previous_twenty_entry_mpl_release_without_dbip_files_remains_auditable(self):
-        release = self.installed_pre_auth_release(OLD_NO_DBIP)
-        assert len(FILES) - len(OLD_NO_DBIP) == 20
-        (release / "local-qa.sha256").write_text(hashlib.sha256(
-            (release / "checksums.sha256").read_bytes()).hexdigest() + "\n")
-        (release / "local-qa.sha256").chmod(0o600)
-        self.installed_audit(release)
-        self.audit(release, expected=21)
-        # A partial pair is not an old accepted inventory, even with a
-        # checksum manifest that was generated for an earlier layout.
-        (release / OLD_NO_DBIP[0]).write_text("partial DB-IP notice")
-        self.installed_audit(release, expected=21)
 
     def test_incoming_dbip_source_and_attribution_are_both_required(self):
         for member in OLD_NO_DBIP:
@@ -508,35 +444,6 @@ class ReleasePayloadTests(unittest.TestCase):
         renamed = self.prefix / "releases" / ("0.1.0-dev-" + "f" * 16)
         release.rename(renamed)
         self.owned_current(renamed, expected=21)
-
-    def test_previous_twelve_file_installed_release_remains_updatable(self):
-        # Existing 12-file packages remain valid prior *installed* releases
-        # after introducing the native unit. An incoming 12-file candidate
-        # must still fail the newer complete-payload verification.
-        release = self.publish()
-        former = tuple(name for name in FILES
-                       if name not in ("server-connect-native-tun.service", "release-auth.py",
-                                       "THIRD-PARTY-LICENSES/golang.org-x-net-LICENSE", *OLD_NO_PSL, *OLD_NO_CHOCOLATE, *OLD_NO_FIRST_PARTY_LICENSE, *OLD_NO_DBIP))
-        assert len(former) == 12
-        (release / "server-connect-native-tun.service").unlink()
-        (release / "release-auth.py").unlink()
-        (release / "THIRD-PARTY-LICENSES/golang.org-x-net-LICENSE").unlink()
-        for name in OLD_NO_PSL + OLD_NO_CHOCOLATE + OLD_NO_FIRST_PARTY_LICENSE + OLD_NO_DBIP:
-            (release / name).unlink()
-        (release / "local-qa.sha256").unlink()
-        lines = "".join(
-            hashlib.sha256((release / name).read_bytes()).hexdigest()
-            + "  " + name + "\n" for name in former
-        )
-        (release / "checksums.sha256").write_text(lines)
-        suffix = hashlib.sha256(lines.encode()).hexdigest()[:16]
-        previous = release.with_name("0.1.0-dev-" + suffix)
-        release.rename(previous)
-        self.installed_audit(previous)
-        self.audit(previous, expected=21)
-        self.owned_current(previous)
-        (previous / "server-connect-smart-tun.service").write_text("tampered previous unit")
-        self.installed_audit(previous, expected=21)
 
     def test_genuine_legacy_identity_and_exact_layout_remain_accepted(self):
         release = self.make_historic_legacy_release()

@@ -38,7 +38,8 @@ patterns = [line[9:-1] for line in path_lines]
 require("bundle/server-connect.service" in patterns, "service-unit-only change ignored")
 require("bundle/server-connect-activation-recover.service" in patterns, "independent guard service-only change ignored")
 require("bundle/server-connect-activation-recover.timer" in patterns, "independent guard timer-only change ignored")
-require("bundle/server-connect-smart-tun.service" in patterns, "separate TUN unit-only change ignored")
+require("bundle/server-connect-native-tun.service" in patterns, "Native Core unit-only change ignored")
+require("bundle/server-connect-smart-tun.service" not in patterns, "retired v4 Core unit must not trigger Native installed QA")
 require("bundle/server-connect-smart-health.service" in patterns, "health execution service-only change ignored")
 require("bundle/server-connect-smart-health.timer" in patterns, "health scheduler timer-only change ignored")
 require(".github/workflows/installed-host-qa.yml" in patterns, "policy changes ignored")
@@ -47,7 +48,8 @@ for candidate, expected in (
     ("bundle/server-connect.service", True),
     ("bundle/server-connect-activation-recover.service", True),
     ("bundle/server-connect-activation-recover.timer", True),
-    ("bundle/server-connect-smart-tun.service", True),
+    ("bundle/server-connect-native-tun.service", True),
+    ("bundle/server-connect-smart-tun.service", False),
     ("bundle/server-connect-smart-health.service", True),
     ("bundle/server-connect-smart-health.timer", True),
     ("scripts/qa/host-proxy-only.sh", True),

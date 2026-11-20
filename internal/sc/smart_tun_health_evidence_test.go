@@ -1,49 +1,6 @@
 package sc
 
-import "encoding/json"
-
-// Version1 must retain its exact accepted wire shape during owned stop and
-// cleanup. Re-encoding old evidence using the Version2 fields would make the
-// next strict read reject the very journal needed to finish recovery.
-type smartTUNLegacyHealthEvidence struct {
-	UnderlayHealthy bool   `json:"underlay_healthy"`
-	VPNHealthy      bool   `json:"vpn_healthy"`
-	IPv4TCP         bool   `json:"ipv4_tcp"`
-	IPv4UDP         bool   `json:"ipv4_udp"`
-	IPv4DNS         bool   `json:"ipv4_dns"`
-	IPv6TCP         bool   `json:"ipv6_tcp"`
-	IPv6UDP         bool   `json:"ipv6_udp"`
-	IPv6DNS         bool   `json:"ipv6_dns"`
-	FailedTargets   int    `json:"failed_targets"`
-	ProbeCount      int    `json:"probe_count"`
-	ElapsedMS       int64  `json:"elapsed_ms"`
-	Reason          string `json:"reason"`
-}
-
-func (s smartTUNSupervision) MarshalJSON() ([]byte, error) {
-	type wire smartTUNSupervision
-	if s.Version == 1 {
-		e := s.Evidence
-		if e.IPv4HTTPS || e.IPv6HTTPS || e.HTTPSResults != ([4]SmartTUNHTTPSResult{}) {
-			return nil, activationJournalError("legacy supervision cannot contain HTTPS evidence")
-		}
-		return json.Marshal(struct {
-			wire
-			Evidence smartTUNLegacyHealthEvidence `json:"evidence"`
-		}{wire: wire(s), Evidence: smartTUNLegacyHealthEvidence{
-			UnderlayHealthy: e.UnderlayHealthy, VPNHealthy: e.VPNHealthy,
-			IPv4TCP: e.IPv4TCP, IPv4UDP: e.IPv4UDP, IPv4DNS: e.IPv4DNS,
-			IPv6TCP: e.IPv6TCP, IPv6UDP: e.IPv6UDP, IPv6DNS: e.IPv6DNS,
-			FailedTargets: e.FailedTargets, ProbeCount: e.ProbeCount,
-			ElapsedMS: e.ElapsedMS, Reason: e.Reason,
-		}})
-	}
-	if s.Version != smartTUNSupervisionVersion {
-		return nil, activationJournalError("unsupported supervision evidence version")
-	}
-	return json.Marshal(wire(s))
-}
-
+// Pure legacy synthetic evidence validator retained as a test oracle.
 func validSmartTUNHTTPSResult(r SmartTUNHTTPSResult) bool {
 	switch r.Result {
 	case "pass", "invalid_response", "path_mismatch":

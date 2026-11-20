@@ -23,6 +23,8 @@ import (
 	"time"
 )
 
+const smartTUNSyntheticBypassMark uint32 = 0x00540000 // isolated lab underlay witness, not Native host policy
+
 const (
 	smartTUNHealthRoundTimeout = 4 * time.Second
 	smartTUNHealthProbeTimeout = 2500 * time.Millisecond
@@ -276,7 +278,7 @@ func smartTUNHealthUnderlayControl(_, _ string, raw syscall.RawConn) error {
 		if socketErr = syscall.SetsockoptString(int(fd), syscall.SOL_SOCKET, syscall.SO_BINDTODEVICE, "scqaedge0"); socketErr != nil {
 			return
 		}
-		socketErr = syscall.SetsockoptInt(int(fd), syscall.SOL_SOCKET, syscall.SO_MARK, int(nativeTUNBypassMark))
+		socketErr = syscall.SetsockoptInt(int(fd), syscall.SOL_SOCKET, syscall.SO_MARK, int(smartTUNSyntheticBypassMark))
 	}); err != nil {
 		return err
 	}

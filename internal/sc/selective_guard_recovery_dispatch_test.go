@@ -15,11 +15,11 @@ import (
 // Exercise the production dispatch wrapper without systemd or kernel policy.
 // The competing writer uses a separate open-file description for the actual
 // manager flock. It must not publish v4 between an absent selection and its
-// no-op handler; the next invocation must select that new v4 intact.
+// no-op handler; the next invocation must select that new v2 intact.
 func TestGuardedRecoveryDispatchKeepsLockAcrossAbsentAndNewApply(t *testing.T) {
 	dir := privateJournalTempDir(t)
 	m := New(dir, DefaultCore, DefaultPort)
-	newRecord := nativeTrialExample(false)
+	newRecord := stagedTrialRecord(t)
 	attempted := make(chan error, 1)
 	written := make(chan error, 1)
 	writerStarted := false
@@ -48,7 +48,7 @@ func TestGuardedRecoveryDispatchKeepsLockAcrossAbsentAndNewApply(t *testing.T) {
 				}
 				other := New(dir, DefaultCore, DefaultPort)
 				written <- other.withActivationJournalLock(syscall.Fsync, func(otherStore *activationJournalDir) error {
-					return writeSmartTUNTrialLocked(otherStore, newRecord, nil)
+					return writeTrialLocked(otherStore, newRecord, nil)
 				})
 			}()
 			select {
@@ -87,17 +87,18 @@ func TestGuardedRecoveryDispatchKeepsLockAcrossAbsentAndNewApply(t *testing.T) {
 	_, err = m.recoverGuardedTrialWithHandler("", "",
 		func(store *activationJournalDir, selected trialRecoverySelection) (TrialReceipt, error) {
 			called++
-			if selected.version != smartTUNTrialVersion || !sameSmartTUNTrial(selected.tun, newRecord) {
-				return TrialReceipt{}, errors.New("new v4 was sent to legacy recovery or lost its full binding")
+			if selected.version != 2 || selected.trial.OperationID != newRecord.OperationID ||
+				selected.trial.Revision != newRecord.Revision {
+				return TrialReceipt{}, errors.New("new v2 was not selected with exact journal authority")
 			}
 			raw, identity, err := store.readJournal()
 			if err != nil || identity != selected.identity || !bytes.Equal(raw, want) {
-				return TrialReceipt{}, fmt.Errorf("new v4 evidence changed during selection: %v", err)
+				return TrialReceipt{}, fmt.Errorf("new v2 evidence changed during selection: %v", err)
 			}
-			return TrialReceipt{OperationID: selected.tun.OperationID, Phase: selected.tun.Phase}, nil
+			return TrialReceipt{OperationID: selected.trial.OperationID, Phase: selected.trial.Phase}, nil
 		})
 	if err != nil || called != 1 {
-		t.Fatalf("next invocation did not select new v4 exactly once: %v calls=%d", err, called)
+		t.Fatalf("next invocation did not select new v2 exactly once: %v calls=%d", err, called)
 	}
 	after, err := os.ReadFile(filepath.Join(dir, activationJournalFilename))
 	if err != nil || !bytes.Equal(after, want) {
@@ -124,7 +125,8 @@ func TestGuardedRecoveryDispatchValidatesSelectionBeforeHandler(t *testing.T) {
 		return raw
 	}
 	v1Raw, v2Raw, v3Raw := marshal(v1), marshal(v2), marshal(v3)
-	v4Raw, nativeRaw := marshal(trialV4Example()), marshal(nativeTrialExample(false))
+	v4Raw := []byte(`{"version":4,"intent_type":"retired_v4"}`)
+	nativeRaw := []byte(`{"version":4,"intent_type":"retired_native_v4"}`)
 	for _, tc := range []struct {
 		name, crash, fault string
 		raw                []byte
@@ -136,8 +138,8 @@ func TestGuardedRecoveryDispatchValidatesSelectionBeforeHandler(t *testing.T) {
 		{name: "pending-v2", raw: v2Raw, version: 2},
 		{name: "pending-v3", raw: v3Raw, version: 3},
 		{name: "recovered-v3", raw: marshal(v3Recovered), version: 3},
-		{name: "legacy-v4", raw: v4Raw, version: 4},
-		{name: "native-v4", raw: nativeRaw, version: 4},
+		{name: "legacy-v4", raw: v4Raw, code: "activation_journal_invalid"},
+		{name: "native-v4", raw: nativeRaw, code: "activation_journal_invalid"},
 		{name: "absent-crash-noop", crash: "after-delete", version: 0},
 		{name: "prepared-crash-noop", raw: v1Raw, crash: "after-route-delete", version: 1},
 		{name: "v3-route-crash", raw: v3Raw, crash: "after-route-delete", version: 3},
@@ -154,7 +156,7 @@ func TestGuardedRecoveryDispatchValidatesSelectionBeforeHandler(t *testing.T) {
 		{name: "duplicate-version", raw: bytes.Replace(v4Raw, []byte(`"version":4`), []byte(`"version":4,"version":4`), 1), code: "activation_journal_invalid"},
 		{name: "case-variant-version", raw: bytes.Replace(v4Raw, []byte(`"version":4`), []byte(`"VERSION":4`), 1), code: "activation_journal_invalid"},
 		{name: "unknown-v4-field", raw: bytes.Replace(v4Raw, []byte(`"version":4`), []byte(`"version":4,"unknown":true`), 1), code: "activation_journal_invalid"},
-		{name: "unknown-native-field", raw: bytes.Replace(nativeRaw, []byte(`"native":{`), []byte(`"native":{"unknown":true,`), 1), code: "activation_journal_invalid"},
+		{name: "unknown-native-field", raw: []byte(`{"version":4,"native":{"unknown":true}}`), code: "activation_journal_invalid"},
 		{name: "v2-extra-route-field", raw: bytes.Replace(v2Raw, []byte(`"version":2`), []byte(`"version":2,"trial_route_device":"lo"`), 1), code: "activation_journal_invalid"},
 		{name: "truncated", raw: []byte(`{"version":4`), code: "activation_journal_invalid"},
 		{name: "trailing-document", raw: append(append([]byte{}, v4Raw...), []byte(`{}`)...), code: "activation_journal_invalid"},
@@ -162,11 +164,7 @@ func TestGuardedRecoveryDispatchValidatesSelectionBeforeHandler(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := privateJournalTempDir(t)
 			m := New(dir, DefaultCore, DefaultPort)
-			credential := []byte("unchanged-dispatch-test-credential")
 			if err := m.withActivationJournalLock(syscall.Fsync, func(store *activationJournalDir) error {
-				if err := store.writeSmartTUNFile(smartTUNTrialConfigFile, credential, nil); err != nil {
-					return err
-				}
 				if tc.raw != nil {
 					return store.writeJournal(tc.raw, nil)
 				}
@@ -204,10 +202,7 @@ func TestGuardedRecoveryDispatchValidatesSelectionBeforeHandler(t *testing.T) {
 			} else if readErr != nil || !bytes.Equal(after, tc.raw) {
 				t.Fatalf("dispatch changed journal evidence: %v", readErr)
 			}
-			secret, readErr := os.ReadFile(filepath.Join(dir, smartTUNTrialConfigFile))
-			if readErr != nil || !bytes.Equal(secret, credential) {
-				t.Fatalf("dispatch changed credential evidence: %v", readErr)
-			}
+
 		})
 	}
 }

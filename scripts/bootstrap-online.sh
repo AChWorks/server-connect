@@ -520,7 +520,6 @@ REQUIRED_FILES = {
     "server-connect/server-connect.service",
     "server-connect/server-connect-activation-recover.service",
     "server-connect/server-connect-activation-recover.timer",
-    "server-connect/server-connect-smart-tun.service",
     "server-connect/server-connect-native-tun.service",
     "server-connect/server-connect-smart-health.service",
     "server-connect/server-connect-smart-health.timer",

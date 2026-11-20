@@ -1111,63 +1111,21 @@ func TestHostDriftCLIRejectsIncompleteBaselineWithoutFakeData(t *testing.T) {
 
 // The combined selected-host diagnostic must not turn an absent profile or
 // malformed inputs into false activation readiness or create product state.
-func TestSelectedHostCheckCLIReadOnlyAndInvalidInputs(t *testing.T) {
-	cases := []struct {
-		args    []string
-		invalid bool
-	}{
-		{[]string{"smart-tun-host-check", "--endpoint-ip", "8.8.8.8", "--management-peer", "198.51.100.7", "--underlay-if", "ens3"}, false},
-		{[]string{"smart-tun-host-check", "--endpoint-ip", "8.8.8.8", "--management-peer", "198.51.100.7", "--underlay-if", "ens3", "--dns-port", "0"}, true},
-		{[]string{"smart-tun-host-check", "--endpoint-ip", "a.example.test", "--management-peer", "198.51.100.7", "--underlay-if", "ens3"}, true},
-		{[]string{"smart-tun-host-check", "--endpoint-ip", "8.8.8.8", "--management-peer", "198.51.100.7", "--underlay-if", "ens3", "extra"}, true},
+// Retired selected-host diagnostic must never inspect or create manager state.
+func TestRetiredSelectedHostCheckInert(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "not-created")
+	m := sc.New(root, "", 0)
+	code, stdout, stderr := hostDriftCapturedOutput(t, func() int {
+		return run(true, m, []string{"smart-tun-host-check", "--endpoint-ip", "8.8.8.8"})
+	})
+	if code != 1 || stderr != "" || !strings.Contains(stdout, `"code":"unknown_command"`) {
+		t.Fatalf("retired host check dispatched: code=%d output=%s err=%s", code, stdout, stderr)
 	}
-	for _, tc := range cases {
-		t.Run(strings.Join(tc.args, "-"), func(t *testing.T) {
-			root := filepath.Join(t.TempDir(), "not-created")
-			reader, writer, err := os.Pipe()
-			if err != nil {
-				t.Fatal(err)
-			}
-			old := os.Stdout
-			os.Stdout = writer
-			code := run(true, sc.New(root, "", 0), tc.args)
-			writer.Close()
-			os.Stdout = old
-			defer reader.Close()
-			var response struct {
-				OK   bool `json:"ok"`
-				Data struct {
-					ReadOnly            bool     `json:"read_only"`
-					ActivationReady     bool     `json:"activation_ready"`
-					GeneralHostAdmitted bool     `json:"general_host_admitted"`
-					Reasons             []string `json:"reasons"`
-				} `json:"data"`
-				Error *apiError `json:"error"`
-			}
-			if err := json.NewDecoder(reader).Decode(&response); err != nil {
-				t.Fatal(err)
-			}
-			if response.Data.ActivationReady || response.Data.GeneralHostAdmitted {
-				t.Fatalf("invalid readiness claim: %+v", response)
-			}
-			if tc.invalid {
-				if code == 0 || response.OK || response.Error == nil ||
-					response.Error.Code != "invalid_arguments" || response.Data.ReadOnly {
-					t.Fatalf("invalid args produced false success: %+v, code=%d", response, code)
-				}
-			} else if code != 0 || !response.OK || !response.Data.ReadOnly ||
-				len(response.Data.Reasons) == 0 || response.Error != nil {
-				t.Fatalf("missing selected profile did not produce a blocked observation: %+v, code=%d", response, code)
-			}
-			if _, err := os.Stat(root); !os.IsNotExist(err) {
-				t.Fatal("read-only selected-host diagnostic created product state")
-			}
-		})
+	if _, err := os.Stat(root); !os.IsNotExist(err) {
+		t.Fatalf("retired check created state: %v", err)
 	}
 }
 
-// Kernel bind privileges determine whether a process may open a low port;
-// parsing must not reject valid ports before the OS can decide.
 func TestProxyPortAcceptsLinuxCapabilityInsteadOfArtificialFloor(t *testing.T) {
 	for _, port := range []int{1, 80, 443, 1023, 1024, 65535} {
 		_, m, _, err := parseOpts([]string{"--port", fmt.Sprint(port), "version"})

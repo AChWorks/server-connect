@@ -7,7 +7,7 @@ After=local-fs.target
 
 [Service]
 Type=oneshot
-ExecStart=/opt/server-connect/current/bin/server-connect --json smart-tun-trial-health
+ExecStart=/opt/server-connect/current/bin/server-connect --json native-health-executor
 TimeoutStartSec=20s
 TimeoutStartFailureMode=kill
 TimeoutStopSec=2s

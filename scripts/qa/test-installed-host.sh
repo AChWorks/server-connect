@@ -81,20 +81,14 @@ PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/qa/test-tun-native-apps.py
 PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/qa/test-tun-payload-wire.py
 PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/qa/test-tun-ipv6-wire.py
 PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/qa/test-tun-wp-check.py
-PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/qa/test-smart-health-wire.py
-PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/qa/test-supervised-fixture.py
 sh -n scripts/qa/tun-wordpress-fpm.sh
 # The guard feasibility probe must be strictly guest-local and must reject
 # ambiguous kernel identities before the privileged disconnected guest runs.
 sh -n scripts/qa/host-activation-guard.sh
 sh -n scripts/qa/host-tun-path.sh
 sh -n scripts/qa/host-native-dns-policy.sh
-sh -n scripts/qa/host-product-tun-trial.sh
-sh -n scripts/qa/host-supervised-product-tun.sh
-sh -n scripts/qa/host-native-product-tun.sh
 sh -n scripts/qa/host-native-docker-recovery.sh
 sh -n scripts/qa/host-owned-tun-boundary.sh
-sh -n scripts/qa/tun-guard-unit-lab.sh
 bash scripts/qa/test-installer-rollback-backups.sh
 PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/qa/test-activation-guard-inspect.py
 # Separate reboot-scheduling QA remains a disposable-container proof only.
@@ -104,8 +98,6 @@ PYTHONDONTWRITEBYTECODE=1 python3 -B - <<'PYBOOTA'
 import ast
 from pathlib import Path
 ast.parse(Path('scripts/qa/activation-boot-guard.py').read_text())
-for source in ('supervised-product-tun.py', 'smart-health-responder.py', 'smart-health-client.py'):
-    ast.parse(Path('scripts/qa', source).read_text())
 PYBOOTA
 PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/qa/test-activation-boot-guard.py
 # This distinct ephemeral systemd guest begins without Python/curl, acquires
@@ -262,7 +254,6 @@ docker exec "$container" /bin/sh -c '
 
 docker cp "$root/scripts/qa/host-qa-assertions.sh" "$container:/root/qa-host-assertions.sh"
 if [[ $qa_version == 13 ]]; then
-docker cp "$root/scripts/qa/host-native-product-tun.sh" "$container:/root/qa-native-product-tun.sh"
 
 # Run before foreign nft fixtures or TUN topology exist. This proves the
 # kernel generation-conditioned deletion primitive, including negative CAS
@@ -285,14 +276,7 @@ native_nft_after=$(docker exec "$container" /usr/sbin/nft -j list ruleset)
 }
 docker exec "$container" /bin/rm -- /root/qa-native-nft-cas-test
 echo NATIVE_NFT_CAS_INDEPENDENT_CLEANUP=PASS
-mutator_log="$scratch/native-mutator-lifetime.log"
-docker exec "$container" /bin/sh /root/qa-native-product-tun.sh mutator-lifetime | tee "$mutator_log"
-grep -Fx 'NATIVE_MUTATOR_IP_FD3_DEATH=PASS' "$mutator_log" >/dev/null
-grep -Fx 'NATIVE_MUTATOR_NFT_FD3_DEATH=PASS' "$mutator_log" >/dev/null
-assert_network_unchanged native-mutator-lifetime "$native_nft_network_before"
-native_mutator_nft_after=$(docker exec "$container" /usr/sbin/nft -j list ruleset)
-[[ $native_mutator_nft_after == "$native_nft_before" ]]
-echo NATIVE_MUTATOR_INDEPENDENT_BASELINE=PASS
+# Retired v4-only mutator script; Native-installed acceptance below remains.
 else
   echo 'NATIVE_KERNEL_PRIMITIVES=NOT_RUN (Debian12 installation compatibility lane)'
 fi
@@ -383,11 +367,9 @@ verify_direct_install() {
     test "$(systemctl show server-connect.service -p ActiveState --value)" = inactive
     test "$(systemctl is-enabled server-connect.service)" = disabled
     test "$(systemctl is-enabled server-connect-activation-recover.timer)" = disabled
-    test "$(systemctl show server-connect-smart-tun.service -p LoadState --value)" = loaded
-    test "$(systemctl show server-connect-smart-tun.service -p UnitFileState --value)" = static
+    test "$(systemctl show server-connect-smart-tun.service -p LoadState --value)" = not-found
     test "$(systemctl show server-connect-native-tun.service -p UnitFileState --value)" = disabled
     test "$(systemctl show server-connect-native-tun.service -p ActiveState --value)" = inactive
-    test "$(systemctl show server-connect-smart-tun.service -p ActiveState --value)" = inactive
     test "$(systemctl show server-connect-smart-health.service -p LoadState --value)" = loaded
     test "$(systemctl show server-connect-smart-health.service -p UnitFileState --value)" = static
     test "$(systemctl show server-connect-smart-health.service -p ActiveState --value)" = inactive
@@ -395,7 +377,7 @@ verify_direct_install() {
     test "$(systemctl show server-connect-smart-health.timer -p ActiveState --value)" = inactive
     test "$(systemctl is-enabled server-connect-smart-health.timer)" = disabled
     test "$(systemctl show server-connect-activation-recover.service -p LoadState --value)" = loaded
-    for name in server-connect-activation-recover.service server-connect-smart-tun.service server-connect-smart-health.service; do
+    for name in server-connect-activation-recover.service server-connect-smart-health.service; do
       test "$(systemctl show "$name" -p FragmentPath --value)" = "/etc/systemd/system/$name"
       test -z "$(systemctl show "$name" -p DropInPaths --value)"
       test "$(systemctl show "$name" -p Transient --value)" = no
@@ -463,127 +445,7 @@ assert_network_unchanged bundle-target-refusals "$offline_before"
 verify_host_services bundle-target-refusals
 docker exec "$container" /bin/rm -- /root/qa-bundle-target-refusal.sh
 
-if [[ $qa_version == 12 ]]; then
-  saved_refusal_nft=$(docker exec "$container" /usr/sbin/nft -j list ruleset)
-  # Real saved-Apply entry points, before installation, in the disconnected
-  # guest only. Failed assertions retain unexpected state for guest teardown.
-  docker exec -i "$container" python3 - <<'PYSAVEDREFUSAL'
-import hashlib
-import json
-import os
-from pathlib import Path
-import stat
-import subprocess
-
-state = Path('/var/lib/server-connect')
-policy = state / 'smart-tun-policy.json'
-manager = '/root/server-connect/bin/server-connect'
-expected = {
-    'code': 'trial_unsupported',
-    'message': 'native trials require Debian 13; Debian 12 installation supports Direct/Proxy Only only',
-}
-units = (
-    'server-connect.service',
-    'server-connect-activation-recover.service',
-    'server-connect-activation-recover.timer',
-    'server-connect-smart-tun.service',
-    'server-connect-smart-health.service',
-    'server-connect-smart-health.timer',
-)
-
-def absent_product():
-    for path in ('/opt/server-connect', '/usr/local/bin/server-connect'):
-        assert not os.path.lexists(path), 'unexpected installed product path'
-    for unit in units:
-        assert not os.path.lexists('/etc/systemd/system/' + unit), 'unexpected product unit'
-        result = subprocess.run(
-            ['systemctl', 'show', unit, '-p', 'LoadState', '--value'],
-            capture_output=True, text=True, timeout=10)
-        assert result.returncode in (0, 1) and result.stdout.strip() == 'not-found', \
-            'product unit no longer absent'
-
-def snapshot():
-    if not os.path.lexists(state):
-        return None
-    root = state.lstat()
-    assert stat.S_ISDIR(root.st_mode) and root.st_uid == 0
-    paths = [state] + sorted(state.iterdir())
-    records = []
-    for path in paths:
-        info = path.lstat()
-        record = [
-            str(path.relative_to(state)), info.st_dev, info.st_ino,
-            info.st_mode, info.st_uid, info.st_gid, info.st_nlink,
-            info.st_size, info.st_mtime_ns, info.st_ctime_ns,
-        ]
-        if path != state:
-            assert stat.S_ISREG(info.st_mode) and info.st_nlink == 1, \
-                'unexpected state object'
-            record.append(hashlib.sha256(path.read_bytes()).hexdigest())
-        records.append(record)
-    return records
-
-valid = {
-    'version': 1,
-    'management_peer_ip': '10.254.72.2',
-    'options': {
-        'tunnel_interface': 'sctunqa0',
-        'underlay_interface': 'scqaedge0',
-        'tunnel_ipv4': '172.31.99.1/30',
-        'tunnel_ipv6': '',
-        'protected_cidrs': ['10.254.72.0/30'],
-        'protected_ipv6_cidrs': [],
-        'domestic_cidrs': ['5.22.0.10/32'],
-        'domestic_ipv6_cidrs': [],
-        'exceptions': [],
-        'ipv6_exceptions': [],
-        'domain_exceptions': [],
-    },
-}
-cases = (
-    ('absent', None),
-    ('empty', None),
-    ('malformed', b'{"version":'),
-    ('valid', (json.dumps(valid, separators=(',', ':')) + '\n').encode()),
-)
-absent_product()
-for label, content in cases:
-    assert not os.path.lexists(state), 'prior state fixture remains'
-    if label != 'absent':
-        state.mkdir(mode=0o700)
-    if content is not None:
-        fd = os.open(policy, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        with os.fdopen(fd, 'wb') as stream:
-            stream.write(content)
-    before = snapshot()
-    for supervised in (False, True):
-        args = [manager, '--json', 'smart-tun-trial-apply',
-                '--saved', '--deadline-seconds', '600']
-        if supervised:
-            args.append('--supervised')
-        result = subprocess.run(args, capture_output=True, text=True, timeout=15)
-        assert result.returncode == 1, 'saved Apply was not refused'
-        reply = json.loads(result.stdout)
-        assert reply['ok'] is False and reply['error'] == expected, \
-            'saved Apply did not report the platform refusal'
-        assert snapshot() == before, 'saved Apply mutated private state'
-        absent_product()
-        form = 'supervised' if supervised else 'pending'
-        print(f'DEBIAN12_SAVED_APPLY_REFUSAL({label},{form})=PASS', flush=True)
-    # Delete only exact unchanged fixtures; never erase unexpected state.
-    assert snapshot() == before
-    if content is not None:
-        policy.unlink()
-    if label != 'absent':
-        state.rmdir()
-assert not os.path.lexists(state)
-PYSAVEDREFUSAL
-  [[ $(docker exec "$container" /usr/sbin/nft -j list ruleset) == "$saved_refusal_nft" ]]
-  assert_network_unchanged debian12-saved-apply-refusals "$offline_before"
-  verify_host_services debian12-saved-apply-refusals
-  echo 'DEBIAN12_SAVED_APPLY_PLATFORM_REFUSAL=PASS (both forms, four state cases, inert product)'
-fi
-
+# Retired v4 preinstall saved-apply check; Native-installed acceptance below remains.
 echo '=== Negative offline acceptance: missing pinned core must reject BEFORE mutation ==='
 # This test mutates ONLY the private disposable source bundle, restores the
 # original verified bytes before the next test, and never touches another host.
@@ -1029,53 +891,7 @@ rm -r -- "$d"
 test ! -e "$d"
 '
 echo 'INSTALLED_OPERATOR_ROUTING_RULES=PASS (real CLI/menu, SHA-pinned import, no network effects, SSH/HTTP preserved)'
-if [[ $qa_version == 12 ]]; then
-  native_refusal_nft=$(docker exec "$container" /usr/sbin/nft -j list ruleset)
-  private_state_digest() {
-    docker exec -i "$container" python3 - <<'PYSTATE'
-import hashlib,json,os,stat
-from pathlib import Path
-root=Path('/var/lib/server-connect')
-records=[]
-for directory,dirs,files in os.walk(root,followlinks=False):
-    for name in ['.']+sorted(dirs+files):
-        path=Path(directory) if name=='.' else Path(directory)/name
-        info=path.lstat()
-        record=[str(path.relative_to(root)),stat.S_IFMT(info.st_mode),stat.S_IMODE(info.st_mode),info.st_uid,info.st_gid]
-        if stat.S_ISREG(info.st_mode):record.append(hashlib.sha256(path.read_bytes()).hexdigest())
-        elif stat.S_ISLNK(info.st_mode):record.append(os.readlink(path))
-        records.append(record)
-print(hashlib.sha256(json.dumps(sorted(records),separators=(',',':')).encode()).hexdigest())
-PYSTATE
-  }
-  native_refusal_state=$(private_state_digest)
-  if docker exec "$container" /usr/local/bin/server-connect --json smart-tun-trial-apply \
-      --tunnel-if sctunqa0 --underlay-if scqaedge0 --tunnel-ipv4 172.31.99.1/30 \
-      --management-peer 10.254.72.2 --domestic-cidr 5.22.0.10/32 \
-      --protected-cidr 10.254.72.0/30 --deadline-seconds 600 \
-      >"$scratch/debian12-native-refusal.json"; then
-    echo 'DEBIAN12_NATIVE_APPLY_PLATFORM_REFUSAL=FAIL (Apply accepted)' >&2
-    exit 1
-  else
-    native_refusal_rc=$?
-  fi
-  [[ $native_refusal_rc == 1 ]]
-  python3 - "$scratch/debian12-native-refusal.json" <<'PYNATIVEREFUSAL'
-import json,sys
-with open(sys.argv[1],encoding='utf-8') as source: reply=json.load(source)
-assert reply['ok'] is False
-assert reply['error']=={
-    'code':'trial_unsupported',
-    'message':'native trials require Debian 13; Debian 12 installation supports Direct/Proxy Only only',
-}
-PYNATIVEREFUSAL
-  [[ $(private_state_digest) == "$native_refusal_state" ]]
-  [[ $(docker exec "$container" /usr/sbin/nft -j list ruleset) == "$native_refusal_nft" ]]
-  verify_direct_install
-  assert_network_unchanged debian12-native-apply-refusal "$offline_before"
-  verify_host_services debian12-native-apply-refusal
-  echo 'DEBIAN12_NATIVE_APPLY_PLATFORM_REFUSAL=PASS (exact OS reason, unchanged private/network state, inert guards)'
-fi
+# Retired v4 installed Debian12 trial refusal; Native-installed acceptance below remains.
 # Exercise the INSTALLED manager, not only Go unit tests: its embedded IR
 # country estimate snapshot must work inside this --network none guest,
 # without a selected profile, a live sing-box process or any routed policy.
@@ -1419,65 +1235,9 @@ echo 'REAL_TUN_LAB_STAGE=build-guest-generator'
 GOPROXY=off GOTOOLCHAIN=local CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
   go build -trimpath -o "$scratch/tun-config-qa" ./scripts/qa/tun_config_generator.go
 test -x "$scratch/tun-config-qa"
-# The PSL policy is loaded by the real native config compiler. Exercise both
-# IPv4 and opted-in IPv6 *before* expensive disposable TUN network experiments
-# so a stale synthetic QA suffix cannot masquerade as a routing regression.
-for family in ipv4 ipv6; do
-  qa_ipv6=
-  if [[ $family == ipv6 ]]; then qa_ipv6=yes; fi
-  SC_QA_TUN_IPV6="$qa_ipv6" "$scratch/tun-config-qa" >"$scratch/tun-psl-$family.json"
-  python3 - "$scratch/tun-psl-$family.json" <<'PYPSLGEN'
-import json,sys
-with open(sys.argv[1],encoding="utf-8") as f:
-    config=json.load(f)
-rules=config["route"]["rules"]
-assert any(r.get("domain_suffix")==[".scqa.example.org"] and
-           r.get("domain")==["scqa.example.org"] and
-           r.get("outbound")=="upstream" for r in rules)
-assert any(r.get("domain")==["only-exact.test"] and
-           "domain_suffix" not in r and r.get("outbound")=="upstream" for r in rules)
-assert config["route"]["final"]=="upstream"
-PYPSLGEN
-done
-echo 'REAL_TUN_PSL_QA_GENERATOR=PASS (registered suffix and exact domain in IPv4/IPv6 candidate compiler; no network mutation)'
+# Native-only generated policy: no separate historical TUN compiler or
+# artificial old candidate quotas. The installed Native policy has source tests.
 docker cp "$scratch/tun-config-qa" "$container:/root/qa-tun-config-qa"
-# The actual guest generator must refuse all unsafe Direct admissions
-# BEFORE it emits runnable config or starts any TUN. This complements Go
-# boundary tests with a disconnected installed-host execution witness.
-for fault in broad-operator-direct aggregate-operator-direct \
-             broad-domestic-direct aggregate-domestic-direct \
-             domestic-rfc1918-overlap domestic-link-local-overlap \
-             domestic-special-anycast; do
-  rejected_config="$scratch/tun-direct-rejected-$fault.json"
-  rejected_log="$scratch/tun-direct-rejected-$fault.stderr"
-  if docker exec -e "SC_QA_TUN_IPV4_ADMISSION=$fault" \
-      "$container" /root/qa-tun-config-qa >"$rejected_config" 2>"$rejected_log"; then
-    echo "REAL_TUN_IPV4_DIRECT_ADMISSION=FAIL ($fault unexpectedly accepted)" >&2
-    exit 1
-  fi
-  test ! -s "$rejected_config" || {
-    echo "REAL_TUN_IPV4_DIRECT_ADMISSION=FAIL ($fault emitted config)" >&2
-    exit 1
-  }
-  case "$fault" in
-    broad-operator-direct)
-      expected='IPv4 operator Direct exception exceeds /24 breadth' ;;
-    aggregate-operator-direct)
-      expected='aggregate IPv4 operator Direct exceptions exceed 64 distinct /24s' ;;
-    broad-domestic-direct)
-      expected='invalid, nonpublic or broad IPv4 domestic Direct prefix' ;;
-    aggregate-domestic-direct)
-      expected='aggregate IPv4 domestic Direct address coverage exceeds candidate limit' ;;
-    domestic-rfc1918-overlap|domestic-link-local-overlap|domestic-special-anycast)
-      expected='IPv4 domestic Direct prefix intersects special-purpose or nonpublic space' ;;
-  esac
-  grep -Fx "QA candidate generation failed: $expected" "$rejected_log" >/dev/null || {
-    echo "REAL_TUN_IPV4_DIRECT_ADMISSION=FAIL ($fault wrong rejection)" >&2
-    cat "$rejected_log" >&2
-    exit 1
-  }
-done
-echo 'REAL_TUN_IPV4_DIRECT_ADMISSION=PASS (invalid broad and aggregate Direct policies produce no runnable config)'
 docker cp "$root/scripts/qa/tun-dns-peer.py" "$container:/root/qa-tun-dns-peer.py"
 docker cp "$root/scripts/qa/tun-dns-client.py" "$container:/root/qa-tun-dns-client.py"
 docker cp "$root/scripts/qa/tun-sni-client.py" "$container:/root/qa-tun-sni-client.py"
@@ -1489,169 +1249,8 @@ docker cp "$root/scripts/qa/tun-wp-check.py" "$container:/root/qa-tun-wp-check.p
 docker cp "$root/scripts/qa/host-tun-path.sh" "$container:/root/qa-host-tun-path.sh"
 docker cp "$root/scripts/qa/host-installed-native-connect.sh" "$container:/root/qa-installed-native-connect.sh"
 docker cp "$root/scripts/qa/host-native-dns-policy.sh" "$container:/root/qa-native-dns-policy.sh"
-docker cp "$root/scripts/qa/host-product-tun-trial.sh" "$container:/root/qa-product-tun-trial.sh"
-docker cp "$root/scripts/qa/host-supervised-product-tun.sh" "$container:/root/qa-supervised-product-tun.sh"
-docker cp "$root/scripts/qa/supervised-product-tun.py" "$container:/root/qa-supervised-product-tun.py"
-docker cp "$root/scripts/qa/smart-health-responder.py" "$container:/root/qa-smart-health-responder.py"
-docker cp "$root/scripts/qa/smart-health-client.py" "$container:/root/qa-smart-health-client.py"
-# Transfer only the exact source fixture bytes, never checkout ownership/modes.
-# The guest creates private objects afresh; an incomplete stage aborts this
-# harness and is retained for the existing exact disposable-container teardown.
-tls_fixture_manifest="$scratch/smart-health-tls.sha256"
-tls_fixture_packet="$scratch/smart-health-tls.json"
-PYTHONDONTWRITEBYTECODE=1 python3 -I -B - "$root/internal/sc/testdata/smart-health-tls" \
-    "$tls_fixture_packet" "$tls_fixture_manifest" <<'PYTLSINPUT'
-import base64, hashlib, json, os, pathlib, stat, sys
-
-def prepare_tls_fixture(source):
-    names = {"qa-root.pem", "qa-server.pem", "qa-server-key.pem", "qa-wrong-name.pem", "qa-wrong-trust.pem",
-             "qa-wrong-root.pem", "qa-expired.pem", "qa-client-auth-only.pem"}
-    def identity(info):
-        return (info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_gid,
-                info.st_nlink, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
-    directory = os.open(source, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-    try:
-        before = os.fstat(directory)
-        assert set(os.listdir(directory)) == names, "TLS fixture source set changed"
-        packet, manifest, identities = {}, [], {}
-        for name in sorted(names):
-            descriptor = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
-            with os.fdopen(descriptor, "rb") as handle:
-                info = os.fstat(handle.fileno())
-                assert stat.S_ISREG(info.st_mode) and info.st_nlink == 1 and 0 < info.st_size <= 4096, \
-                    f"TLS source refused: {name} mode={oct(info.st_mode)} uid={info.st_uid} links={info.st_nlink} size={info.st_size}"
-                data = handle.read(4097)
-                assert len(data) == info.st_size and identity(os.fstat(handle.fileno())) == identity(info)
-                assert identity(os.stat(name, dir_fd=directory, follow_symlinks=False)) == identity(info), "TLS source replaced"
-                identities[name] = identity(info)
-            digest = hashlib.sha256(data).hexdigest()
-            packet[name] = {"data": base64.b64encode(data).decode("ascii"), "sha256": digest}
-            manifest.append(f"{digest}  ./{name}\n")
-        for name in sorted(names):
-            descriptor = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
-            with os.fdopen(descriptor, "rb") as handle:
-                info = os.fstat(handle.fileno())
-                assert identity(info) == identities[name], "TLS source changed after read"
-                data = handle.read(4097)
-                assert len(data) == info.st_size and hashlib.sha256(data).hexdigest() == packet[name]["sha256"], "TLS source content changed after read"
-                assert identity(os.fstat(handle.fileno())) == identities[name], "TLS source changed during final read"
-                assert identity(os.stat(name, dir_fd=directory, follow_symlinks=False)) == identities[name], "TLS source replaced during final read"
-        assert set(os.listdir(directory)) == names and identity(os.fstat(directory)) == identity(before)
-        assert identity(source.lstat()) == identity(before), "TLS source directory replaced"
-        encoded = json.dumps(packet, sort_keys=True, separators=(",", ":")).encode("ascii")
-        assert 0 < len(encoded) <= 65536
-        return encoded, "".join(manifest).encode("ascii")
-    finally:
-        os.close(directory)
-
-if __name__ == "__main__":
-    packet, manifest = prepare_tls_fixture(pathlib.Path(sys.argv[1]))
-    for name, data in ((sys.argv[2], packet), (sys.argv[3], manifest)):
-        descriptor = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
-        with os.fdopen(descriptor, "wb") as handle:
-            handle.write(data)
-PYTLSINPUT
-docker exec -i "$container" /usr/bin/python3 -I -B -c "$(cat <<'PYTLSSTAGE'
-import base64, hashlib, json, os, pathlib, stat, sys
-
-def stage_tls_fixture(parent, raw):
-    names = {"qa-root.pem", "qa-server.pem", "qa-server-key.pem", "qa-wrong-name.pem", "qa-wrong-trust.pem",
-             "qa-wrong-root.pem", "qa-expired.pem", "qa-client-auth-only.pem"}
-    assert 0 < len(raw) <= 65536, "TLS fixture packet exceeds its bound"
-    packet, contents = json.loads(raw), {}
-    assert type(packet) is dict and set(packet) == names, "TLS fixture packet set changed"
-    assert json.dumps(packet, sort_keys=True, separators=(",", ":")).encode("ascii") == raw, "TLS fixture packet is not canonical"
-    for name in sorted(names):
-        item = packet[name]
-        assert type(item) is dict and set(item) == {"data", "sha256"}, "TLS fixture packet shape changed"
-        data = base64.b64decode(item["data"], validate=True)
-        assert 0 < len(data) <= 4096 and hashlib.sha256(data).hexdigest() == item["sha256"], "TLS fixture packet digest changed"
-        contents[name] = data
-    owner, root_name, receipt_name = os.geteuid(), "qa-smart-health-tls", "qa-smart-health-tls-receipt.json"
-    def identity(info):
-        return [info.st_dev, info.st_ino, info.st_mode, info.st_uid]
-    def diagnostic(info):
-        return f"mode={oct(info.st_mode)} uid={info.st_uid} gid={info.st_gid} links={info.st_nlink}"
-    parent_fd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-    directory = None
-    try:
-        parent_info = os.fstat(parent_fd)
-        assert parent_info.st_uid == owner and not parent_info.st_mode & 0o022, "TLS parent refused: " + diagnostic(parent_info)
-        for name in (root_name, receipt_name):
-            try:
-                info = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
-            except FileNotFoundError:
-                continue
-            raise AssertionError("TLS fixture path already exists: " + name + " " + diagnostic(info))
-        assert identity(parent.lstat()) == identity(parent_info), "TLS fixture parent replaced before creation"
-        os.mkdir(root_name, 0o700, dir_fd=parent_fd)
-        created = os.stat(root_name, dir_fd=parent_fd, follow_symlinks=False)
-        directory = os.open(root_name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent_fd)
-        info = os.fstat(directory)
-        assert identity(info) == identity(created) and stat.S_ISDIR(info.st_mode) and info.st_uid == owner \
-            and stat.S_IMODE(info.st_mode) == 0o700, "TLS directory refused: " + diagnostic(info)
-        receipt = {"parent": identity(parent_info), "directory": identity(info), "files": {}}
-        def unchanged():
-            assert identity(parent.lstat()) == receipt["parent"], "TLS fixture parent replaced"
-            current = os.stat(root_name, dir_fd=parent_fd, follow_symlinks=False)
-            assert identity(current) == receipt["directory"], "TLS fixture directory replaced: " + diagnostic(current)
-        for name in sorted(names):
-            unchanged()
-            descriptor = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=directory)
-            with os.fdopen(descriptor, "wb") as handle:
-                info = os.fstat(handle.fileno())
-                assert stat.S_ISREG(info.st_mode) and info.st_uid == owner and info.st_nlink == 1 \
-                    and stat.S_IMODE(info.st_mode) == 0o600, "TLS file refused: " + name + " " + diagnostic(info)
-                created_file = identity(info)
-                assert handle.write(contents[name]) == len(contents[name])
-                handle.flush()
-                os.fsync(handle.fileno())
-                info = os.fstat(handle.fileno())
-                assert identity(info) == created_file and info.st_nlink == 1 and info.st_size == len(contents[name]), "TLS created file changed"
-            receipt["files"][name] = identity(info) + [info.st_size, packet[name]["sha256"]]
-        unchanged()
-        assert set(os.listdir(directory)) == names, "TLS staged fixture set changed"
-        for name in sorted(names):
-            descriptor = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
-            with os.fdopen(descriptor, "rb") as handle:
-                info = os.fstat(handle.fileno())
-                assert stat.S_ISREG(info.st_mode) and info.st_nlink == 1
-                data = handle.read(4097)
-                assert identity(info) + [info.st_size, hashlib.sha256(data).hexdigest()] == receipt["files"][name], "TLS staged file changed"
-                after = os.fstat(handle.fileno())
-                assert identity(after) + [after.st_size, after.st_mtime_ns, after.st_ctime_ns] \
-                    == identity(info) + [info.st_size, info.st_mtime_ns, info.st_ctime_ns], "TLS staged file changed during readback"
-                current = os.stat(name, dir_fd=directory, follow_symlinks=False)
-                assert identity(current) + [current.st_size] == receipt["files"][name][:-1], "TLS staged file replaced"
-        os.fsync(directory)
-        unchanged()
-        encoded_receipt = json.dumps(receipt, sort_keys=True).encode("ascii")
-        descriptor = os.open(receipt_name, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=parent_fd)
-        with os.fdopen(descriptor, "w+b") as handle:
-            info = os.fstat(handle.fileno())
-            assert info.st_uid == owner and info.st_nlink == 1 and stat.S_IMODE(info.st_mode) == 0o600, "TLS receipt refused: " + diagnostic(info)
-            assert handle.write(encoded_receipt) == len(encoded_receipt)
-            handle.flush()
-            os.fsync(handle.fileno())
-            handle.seek(0)
-            assert handle.read(8193) == encoded_receipt, "TLS receipt readback changed"
-            assert identity(os.fstat(handle.fileno())) == identity(info), "TLS receipt metadata changed"
-        unchanged()
-        assert identity(os.stat(receipt_name, dir_fd=parent_fd, follow_symlinks=False)) == identity(info), "TLS receipt replaced"
-        os.fsync(parent_fd)
-    finally:
-        if directory is not None:
-            os.close(directory)
-        os.close(parent_fd)
-
-if __name__ == "__main__":
-    assert os.geteuid() == 0, "TLS fixture staging requires the disposable root guest"
-    stage_tls_fixture(pathlib.Path("/root"), sys.stdin.buffer.read(65537))
-PYTLSSTAGE
-)" <"$tls_fixture_packet"
-docker exec -i -w /root/qa-smart-health-tls "$container" sha256sum -c - <"$tls_fixture_manifest"
+# Retired v4-only TLS staging and receipt fixture; Native-installed acceptance below remains.
 docker cp "$root/scripts/qa/host-owned-tun-boundary.sh" "$container:/root/qa-owned-tun-boundary.sh"
-docker cp "$root/scripts/qa/tun-guard-unit-lab.sh" "$container:/root/qa-tun-guard-unit-lab.sh"
 # Independently check resources omitted from the standard route/rule/link
 # digest, in addition to the guest's own explicit cleanup verdict.
 tun_netns_before=$(docker exec "$container" /sbin/ip netns list)
@@ -1683,63 +1282,7 @@ assert_tun_native_cleanup() {
   verify_host_services "$phase"
   echo "REAL_TUN_NATIVE_CLEANUP($phase)=PASS"
 }
-# A valid negative outcome requires BOTH guard rejection and a clean guest
-# teardown. A cleanup error is never the expected guard's exit status.
-accept_tun_guard_rejection() {
-  local fault=$1 rc=$2 log=$3 expected_guard unexpected scan_rc
-  [[ $rc == 1 ]] || return 1
-  expected_guard=$([[ $fault == before-hosting ]] && echo pre-hosting || echo post-hosting)
-  grep -Fx 'REAL_TUN_NEGATIVE_DIRECT_HOSTING=PASS (native reply works without TUN)' "$log" >/dev/null || return 1
-  grep -Fx "REAL_TUN_FOREIGN_HOSTING_OUTAGE_GUARD=REJECTED ($expected_guard)" "$log" >/dev/null || return 1
-  grep -Fx 'REAL_TUN_LAB_CLEANUP=PASS (owned namespace, VETH, TUN, nftables and default removed)' "$log" >/dev/null || return 1
-  for unexpected in 'REAL_TUN_FOREIGN_HOSTING_OUTAGE=PASS' 'REAL_TUN_LAB_CLEANUP=FAIL'; do
-    if grep -F -- "$unexpected" "$log" >/dev/null; then
-      return 1
-    else
-      scan_rc=$?
-      [[ $scan_rc == 1 ]] || return 1
-    fi
-  done
-}
-assert_tun_native_cleanup ipv4-direct-rejected-before-tun
-echo 'REAL_TUN_LAB_STAGE=execute-guest-path'
-regular_tun_log="$scratch/real-tun-domain-path.log"
-docker exec "$container" /bin/sh /root/qa-host-tun-path.sh | tee "$regular_tun_log"
-grep -Fx 'REAL_TUN_SNIFFED_DOMAIN_EXCEPTION=PASS (VPN-only HTTP names; no Direct leak)' "$regular_tun_log" >/dev/null
-grep -F 'REAL_TUN_TLS_SNI_BASELINE=PASS' "$regular_tun_log" >/dev/null
-grep -F 'REAL_TUN_TLS_SNI_VPN_ONLY=PASS' "$regular_tun_log" >/dev/null
-grep -F 'REAL_TUN_TLS_SNI_NO_DIRECT_ON_UPSTREAM_LOSS=PASS' "$regular_tun_log" >/dev/null
-grep -F 'REAL_TUN_NATIVE_APPS_BASELINE=PASS' "$regular_tun_log" >/dev/null
-grep -F 'REAL_TUN_NATIVE_APPS_SELECTED_WITNESS=PASS' "$regular_tun_log" >/dev/null
-grep -F 'REAL_TUN_NATIVE_APPS_OUTAGE_WITNESS=PASS' "$regular_tun_log" >/dev/null
-grep -F 'REAL_TUN_WORDPRESS_positive_WITNESS=PASS' "$regular_tun_log" >/dev/null
-grep -F 'REAL_TUN_WORDPRESS_negative_WITNESS=PASS' "$regular_tun_log" >/dev/null
-grep -Fx 'REAL_TUN_PAYLOAD_DIRECT_BASELINE=PASS (TCP and UDP independent native counters)' "$regular_tun_log" >/dev/null
-grep -Fx 'REAL_TUN_PAYLOAD_REDUCED_MTU=PASS (real VLESS TCP/UDP echo, MTU 1280, no native Direct leak)' "$regular_tun_log" >/dev/null
-grep -Fx 'REAL_TUN_PAYLOAD_OUTAGE=PASS (large TCP/UDP fail closed, no native Direct packets)' "$regular_tun_log" >/dev/null
-grep -Fx 'REAL_TUN_PAYLOAD_DF_LIMIT=PASS (oversized DF datagram rejected locally)' "$regular_tun_log" >/dev/null
-assert_tun_native_cleanup real-tun-candidate-cleanup
-# Separately opt in to the actual dual-stack candidate. Preserve every legacy
-# IPv4/default trial unchanged; only the second synthetic guest trial enables
-# IPv6 routing. Fresh peer counters and teardown evidence are mandatory.
-echo 'REAL_TUN_LAB_STAGE=disconnected-dual-stack-ipv6'
-ipv6_tun_log="$scratch/real-tun-ipv6-path.log"
-docker exec -e SC_QA_TUN_IPV6=yes "$container" /bin/sh /root/qa-host-tun-path.sh | tee "$ipv6_tun_log"
-grep -Fx 'REAL_TUN_IPV6_DIRECT_BASELINE=PASS (independent TCP/UDP source and native counters)' "$ipv6_tun_log" >/dev/null
-grep -Fx 'REAL_TUN_IPV6_OVERRIDE_UDP_DIRECT_BASELINE=PASS (native UDP positive-controlled counter)' "$ipv6_tun_log" >/dev/null
-grep -Fx 'REAL_TUN_IPV6_EXPLICIT_DIRECT_UDP_SELECTED=PASS (exact source and payload)' "$ipv6_tun_log" >/dev/null
-grep -Fx 'REAL_TUN_IPV6_OVERRIDE_UDP_SELECTED=PASS (VLESS source and unchanged native UDP counter)' "$ipv6_tun_log" >/dev/null
-grep -Fx 'REAL_TUN_IPV6_SELECTED=PASS (native domestic Direct, explicit override, foreign VLESS, no Direct leak)' "$ipv6_tun_log" >/dev/null
-grep -Fx 'REAL_TUN_IPV6_EXPLICIT_DIRECT_UDP_OUTAGE=PASS (exact source and payload)' "$ipv6_tun_log" >/dev/null
-grep -Fx 'REAL_TUN_IPV6_OVERRIDE_UDP_OUTAGE=PASS (no reply and unchanged native UDP counter)' "$ipv6_tun_log" >/dev/null
-grep -Fx 'REAL_TUN_IPV6_OUTAGE=PASS (VPN-required TCP/UDP failed closed, native Direct preserved)' "$ipv6_tun_log" >/dev/null
-grep -F 'REAL_TUN_LAB_CLEANUP=PASS' "$ipv6_tun_log" >/dev/null
-assert_tun_native_cleanup real-tun-ipv6-candidate-cleanup
-
-# The integrated native compiler, unlike the earlier SmartTUNCandidate
-# laboratory above, intercepts unmatched port-53 via its VPN-detoured DNS
-# server. Exercise the SAME Core and independent dual-stack wire witnesses in
-# both native modes. Every run uses a fresh disconnected network namespace.
+# Run the real Native compiler against both DNS routing policies.
 for native_mode in default bypass_iran; do
   echo "NATIVE_DNS_LAB_STAGE=$native_mode"
   native_dns_log="$scratch/native-dns-$native_mode.log"
@@ -1773,252 +1316,10 @@ for marker in \
   grep -Fx "$marker" "$owned_tun_log" >/dev/null
 done
 assert_tun_native_cleanup addressless-owned-tun-boundary
-# The same genuine TUN is started again, but only after an independently
-# armed systemd timer. SIGKILL the initiating controller and prove a fresh
-# PID1 recovery executor restores native Direct without the parent doing it.
-# This is a QA-only feasibility proof, NOT the product Activation Guard.
-echo 'REAL_TUN_LAB_STAGE=prearmed-guard-controller-death'
-clean_guard_log="$scratch/real-tun-guard-cleanup.log"
-docker exec -e SC_QA_TUN_GUARD_LAB=yes "$container" /bin/sh /root/qa-host-tun-path.sh | tee "$clean_guard_log"
-grep -Fx 'QA_TUN_GUARD_UNIT_FINAL_STATE=PASS' "$clean_guard_log" >/dev/null
-assert_tun_native_cleanup real-tun-independent-deadline-cleanup
-# The real timer can restore Direct while a stale systemd unit persists.
-# Deliberately mask only the QA recovery unit after its file is removed and
-# require a distinct cleanup failure, not an overall PASS for the real TUN.
-echo 'REAL_TUN_LAB_STAGE=guard-stale-unit-cleanup-negative'
-unit_fault_log="$scratch/real-tun-guard-stale-unit-negative.log"
-if docker exec -e SC_QA_TUN_GUARD_LAB=yes \
-    -e SC_QA_TUN_GUARD_CLEANUP_FAULT=masked-recovery-unit \
-    "$container" /bin/sh /root/qa-host-tun-path.sh >"$unit_fault_log" 2>&1; then
-  unit_fault_rc=0
-else
-  unit_fault_rc=$?
-fi
-if [[ $unit_fault_rc != 97 ]] ||
-   ! grep -Fx 'QA_TUN_GUARD_DEADLINE_RECOVERY=PASS (PID1 stop, exact guest baseline)' "$unit_fault_log" >/dev/null ||
-   ! grep -Fx 'QA_TUN_GUARD_UNIT_FINAL_STATE=FAIL' "$unit_fault_log" >/dev/null ||
-   ! grep -Fx 'QA_TUN_GUARD_UNIT_CLEANUP=FAIL' "$unit_fault_log" >/dev/null ||
-   ! grep -F 'REAL_TUN_LAB_CLEANUP=FAIL (restoration incomplete;' "$unit_fault_log" >/dev/null ||
-   grep -F 'QA_TUN_GUARD_UNIT_FINAL_STATE=PASS' "$unit_fault_log" >/dev/null ||
-   grep -F 'QA_TUN_GUARD_UNIT_CLEANUP=PASS' "$unit_fault_log" >/dev/null ||
-   grep -F 'REAL_TUN_LAB_CLEANUP=PASS' "$unit_fault_log" >/dev/null; then
-  echo "QA_TUN_GUARD_STALE_UNIT_REJECTION=FAIL (rc=$unit_fault_rc)" >&2
-  cat "$unit_fault_log" >&2
-  exit 1
-fi
-# Release only the fixed fixture-injected symlink, then verify all three
-# systemd names are absent, independently of the guest cleanup assertions.
-docker exec "$container" /bin/sh -c '
-  set -eu
-  path=/run/systemd/system/scqa-tun-lab-recover.service
-  test -L "$path" && test "$(readlink "$path")" = /dev/null
-  rm -- "$path"
-  systemctl daemon-reload
-  for unit in scqa-tun-lab-client.service scqa-tun-lab-recover.service scqa-tun-lab-recover.timer; do
-    test ! -e "/run/systemd/system/$unit" && test ! -L "/run/systemd/system/$unit"
-    test "$(systemctl show "$unit" -p LoadState --value)" = not-found
-    test "$(systemctl show "$unit" -p ActiveState --value)" = inactive
-    test -z "$(systemctl show "$unit" -p FragmentPath --value)"
-  done
-'
-assert_tun_native_cleanup real-tun-guard-stale-unit-negative-cleanup
-echo 'QA_TUN_GUARD_STALE_UNIT_FALSE_PASS_REJECTED=PASS'
-echo 'REAL_TUN_LAB_STAGE=installed-product-guarded-real-tun-pending'
-product_tun_log="$scratch/real-tun-product-guarded-apply.log"
-docker exec -e SC_QA_TUN_PRODUCT_LAB=yes "$container" /bin/sh /root/qa-host-tun-path.sh | tee "$product_tun_log"
-for marker in \
-  'PRODUCT_NATIVE_IPV4_TRANSIT_BASELINE=PASS' \
-  'PRODUCT_NATIVE_IPV4_TRANSIT_ACTIVE=PASS' \
-  'PRODUCT_TUN_INSTALLED_PROFILE_AND_IDLE=PASS' \
-  'PRODUCT_TUN_GUARD_PREARMED_AND_PENDING=PASS' \
-  'PRODUCT_TUN_DIRECT_FALSE_STATUS_AND_PROXY_CONFLICT_REFUSED=PASS' \
-  'PRODUCT_TUN_INSTALLED_REAL_TCP_DIRECT_AND_VLESS=PASS' \
-  'PRODUCT_TUN_INSTALLED_UDP_DNS_AND_FOREIGN_HOSTING=PASS' \
-  'PRODUCT_TUN_INSTALLED_APT_GIT_WORDPRESS=PASS' \
-  'PRODUCT_TUN_SYSTEMD_DEADLINE_EXACT_BASELINE=PASS' \
-  'PRODUCT_TUN_CLEAR_SIGKILL_INDEPENDENT_FINALIZATION=PASS' \
-  'PRODUCT_TUN_RECOVERED_CLEARED_DIRECT=PASS' \
-  'PRODUCT_TUN_CONTROLLER_SIGKILL_INDEPENDENT_PENDING=PASS' \
-  'PRODUCT_TUN_SIGKILL_INDEPENDENT_SYSTEMD_ROLLBACK=PASS' \
-  'PRODUCT_TUN_PRE_CREDENTIAL_SIGKILL_INDEPENDENT_ROLLBACK=PASS' \
-  'PRODUCT_TUN_GUARD_TIMER_LOSS_IMMEDIATE_CONTAINMENT=PASS' \
-  'PRODUCT_NATIVE_EXECUTOR_LOSS_DISJOINT_PRESERVED=PASS' \
-  'PRODUCT_TUN_GUARD_EXECUTOR_LOSS_GUEST_CLEANUP=PASS' \
-  'PRODUCT_TUN_CREDENTIAL_REMOVAL_PERSISTENT_CONFLICT=PASS' \
-  'PRODUCT_NATIVE_CREDENTIAL_CONFLICT_CONTAINMENT=PASS' \
-  'PRODUCT_TUN_CLEAR_CONFLICT_GUARD_STAYS_ARMED=PASS' \
-  'PRODUCT_TUN_CREDENTIAL_CONFLICT_RECONCILED=PASS' \
-  'PRODUCT_TUN_EXPLICIT_OFF_EXACT_BASELINE=PASS' \
-  'PRODUCT_TUN_INVALID_SAVED_POLICY_NO_PREARM=PASS' \
-  'PRODUCT_TUN_STALE_DISCONNECT_NO_MUTATION=PASS' \
-  'PRODUCT_TUN_SAVED_REAPPLY_NEW_OPERATION=PASS' \
-  'PRODUCT_NATIVE_DISJOINT_FOREIGN_SURVIVES_OFF=PASS' \
-  'PRODUCT_NATIVE_VISITOR_ORIGIN_DIRECT_CONTROL=PASS' \
-  'PRODUCT_NATIVE_VISITOR_REPLY_AND_NEW_EGRESS=PASS' \
-  'PRODUCT_TUN_OFF_FIFO_CONTAINMENT_RETAINED=PASS' \
-  'PRODUCT_TUN_OFF_SIGKILL_INDEPENDENT_FINALIZATION=PASS' \
-  'PRODUCT_TUN_OFF_POST_DISARM_RECONCILIATION=PASS'; do
-  grep -Fx "$marker" "$product_tun_log" >/dev/null
-done
-assert_tun_native_cleanup installed-product-tun-deadline-and-sigkill
-
-# Confirmed operation remains explicitly experimental and uses the SAME
-# disconnected peer, real root SSH and installed native product lifecycle.
-echo 'REAL_TUN_LAB_STAGE=installed-product-confirmed-supervision'
-supervised_log="$scratch/real-tun-product-supervised.log"
-docker exec -e SC_QA_TUN_PRODUCT_LAB=yes -e SC_QA_TUN_SUPERVISED=yes \
-  "$container" /bin/sh /root/qa-host-tun-path.sh | tee "$supervised_log"
-for marker in \
-  'DIRECT_CONTROLS' 'OFF_DIRECT_TCP_UDP_DNS' 'FRESH_SSH_SINGLE_USE_AND_NEGATIVES' \
-  'ACTIVE_UPDATE_UNINSTALL_REFUSED' 'DISJOINT_FOREIGN_OWNER_PRESERVED' 'SAVED_REAPPLY' \
-  'CONFIRMED_BEYOND_ACTIVATION_DEADLINE' 'ONE_TARGET_FALSE_ALARM_REJECTED' \
-  'HTTPS_AUTHENTICATED_DIRECT_CONTROLS' 'HTTPS_AUTHENTICATED_SELECTED_PATH' \
-  'HTTPS_TLS_HTTP_FAILURE_CLASSES' 'HTTPS_ONE_DESTINATION_PARTIAL_TOLERANCE' \
-  'HTTPS_WRONG_SOURCE_CRITICAL_OFF' 'HTTPS_ONLY_RECONNECT_EXHAUSTION_AND_SAVED_STATE' \
-  'OFF_DIRECT_AUTHENTICATED_HTTPS' \
-  'DNS_FAILURE_AND_TRANSIENT_RECOVERY' 'LIVE_CORE_UPSTREAM_FAILURE_NO_DIRECT_LEAK' \
-  'FINITE_EXHAUSTION_FLAPPING_AND_SAVED_STATE' 'EXPIRED_OFF_AND_REPLAY_REJECTED' \
-  'PROTECTED_UNDERLAY_IMMEDIATE_OFF_NO_RETRY' \
-  'SUPERVISOR_DEAD' 'SUPERVISOR_FAILED' 'SUPERVISOR_HUNG' \
-  'SUPERVISOR_MASKED' 'SUPERVISOR_MISSING' \
-  'CONFIRM_PUBLICATION_CONTROLLER_DEATH' 'HEALTH_PUBLICATION_CONTROLLER_DEATH' \
-  'LEGACY_V1_REAPPLY_REQUIRED_OWNED_OFF' 'LEGACY_V1_INTERRUPTED_DURABLE_STOP' \
-  'COMPLETE_EXPERIMENTAL_ONLY'; do
-  grep -Fx "SUPERVISED_TUN_${marker}=PASS" "$supervised_log" >/dev/null
-done
-assert_tun_native_cleanup installed-product-confirmed-supervision
-
-# Separate short installed IPv4-only drift operation. A public IPv6 route
-# appears only AFTER supervised TUN confirmation. The independent Guard must
-# restore product-owned Off, preserving unrelated route and Direct witness.
-echo 'REAL_TUN_LAB_STAGE=installed-supervised-ipv4only-ipv6-live-drift'
-ipv6_drift_log="$scratch/real-tun-supervised-ipv6-live-drift.log"
-docker exec -e SC_QA_TUN_PRODUCT_LAB=yes -e SC_QA_TUN_SUPERVISED=yes -e SC_QA_TUN_IPV6_DRIFT=yes \
-  "$container" /bin/sh /root/qa-host-tun-path.sh | tee "$ipv6_drift_log"
-for marker in 'DIRECT_CONTROLS' 'IPV6_DIRECT_WITNESS_POSITIVE_CONTROL' \
-  'IPV6_PUBLIC_NO_DIRECT_WHILE_ACTIVE' 'IPV6_PUBLIC_FOREIGN_ROUTE_PRESERVED' \
-  'IPV6_PUBLIC_ROUTE_GUARD_OFF' 'OFF_DIRECT_TCP_UDP_DNS' \
-  'COMPLETE_EXPERIMENTAL_ONLY'; do
-  grep -Fx "SUPERVISED_TUN_${marker}=PASS" "$ipv6_drift_log" >/dev/null
-done
-assert_tun_native_cleanup installed-supervised-ipv4only-ipv6-live-drift
-
-# The dual-stack variant repeats only real confirmation and ongoing path
-# measurement, without duplicating the full failure matrix above.
-supervised_v6_log="$scratch/real-tun-product-supervised-ipv6.log"
-docker exec -e SC_QA_TUN_PRODUCT_LAB=yes -e SC_QA_TUN_SUPERVISED=yes -e SC_QA_TUN_IPV6=yes \
-  "$container" /bin/sh /root/qa-host-tun-path.sh | tee "$supervised_v6_log"
-for marker in 'DIRECT_CONTROLS' 'OFF_DIRECT_TCP_UDP_DNS' 'CONFIRMED_BEYOND_ACTIVATION_DEADLINE' \
-  'HTTPS_AUTHENTICATED_DIRECT_CONTROLS' 'HTTPS_AUTHENTICATED_SELECTED_PATH' \
-  'OFF_DIRECT_AUTHENTICATED_HTTPS' 'DUALSTACK_AUTHENTICATED_HTTPS' \
-  'DUALSTACK_SELECTED_TCP_UDP_DNS' 'COMPLETE_EXPERIMENTAL_ONLY'; do
-  grep -Fx "SUPERVISED_TUN_${marker}=PASS" "$supervised_v6_log" >/dev/null
-done
-assert_tun_native_cleanup installed-product-confirmed-supervision-ipv6
-
-# Separate opt-in product-owned IPv4+IPv6 v4 trial: distinct installed
-# service and independent guard, with real selected/outage TCP/UDP wires.
-echo 'REAL_TUN_LAB_STAGE=installed-product-guarded-dualstack-pending'
-product_v6_log="$scratch/real-tun-product-guarded-ipv6.log"
-docker exec -e SC_QA_TUN_PRODUCT_LAB=yes -e SC_QA_TUN_IPV6=yes \
-  "$container" /bin/sh /root/qa-host-tun-path.sh | tee "$product_v6_log"
-for marker in \
-  'PRODUCT_NATIVE_IPV4_TRANSIT_BASELINE=PASS' \
-  'PRODUCT_NATIVE_IPV4_TRANSIT_ACTIVE=PASS' \
-  'PRODUCT_TUN_IPV6_UNSUPPORTED_INPUT_REJECTED=PASS' \
-  'PRODUCT_TUN_IPV6_REAL_SELECTED=PASS' \
-  'PRODUCT_TUN_IPV6_EXPLICIT_OFF_SAVED_REAPPLY=PASS' \
-  'PRODUCT_NATIVE_PUBLIC_ICMP6_DIRECT_CONTROL=PASS' \
-  'PRODUCT_NATIVE_COLD_ND_AND_PUBLIC_ICMP_BOUNDARY=PASS' \
-  'PRODUCT_NATIVE_VISITOR_REPLY_AND_NEW_EGRESS=PASS' \
-  'PRODUCT_NATIVE_OVERLAP_RETAINED(address)=PASS' \
-  'PRODUCT_NATIVE_OVERLAP_RETAINED(route)=PASS' \
-  'PRODUCT_NATIVE_OVERLAP_RETAINED(rule)=PASS' \
-  'PRODUCT_NATIVE_OVERLAP_RETAINED(nft-child)=PASS' \
-  'PRODUCT_NATIVE_OVERLAP_FOREIGN_PRESERVATION=PASS' \
-  'PRODUCT_NATIVE_MUTATOR_FD3_ACTUAL_MODES=PASS' \
-  'PRODUCT_NATIVE_POST_REARM_FAILURE_FINALIZATION=PASS' \
-  'PRODUCT_NATIVE_LOSS_FAIL_CLOSED(route)=PASS' \
-  'PRODUCT_NATIVE_LOSS_FAIL_CLOSED(rule)=PASS' \
-  'PRODUCT_NATIVE_LOSS_FAIL_CLOSED(capture)=PASS' \
-  'PRODUCT_NATIVE_CORE_SIGKILL_FAILED_PRE_RECOVERY=PASS' \
-  'PRODUCT_NATIVE_LOSS_FAIL_CLOSED(core)=PASS' \
-  'PRODUCT_NATIVE_ROUTE_RULE_CAPTURE_CORE_FAIL_CLOSED=PASS' \
-  'PRODUCT_NATIVE_DURABLE_LINK_PERSIST_RECOVERY=PASS' \
-  'PRODUCT_NATIVE_AMBIGUOUS_INDEPENDENT_STOP_INTENT_RETAINED=PASS' \
-  'PRODUCT_NATIVE_AMBIGUOUS_ROUTE_REMEDIATION=explicit-QA-operator' \
-  'PRODUCT_NATIVE_AMBIGUOUS_ROUTE_EFFECT_RETAINED=PASS' \
-  'PRODUCT_NATIVE_POST_DELETE_SIGKILL_RECOVERY=PASS' \
-  'PRODUCT_NATIVE_GUARD_LOSS_UNCERTAIN_CONTAINED=PASS' \
-  'PRODUCT_NATIVE_GUARD_LOSS_REMEDIATION=explicit-QA-operator' \
-  'PRODUCT_NATIVE_GUARD_LOSS_OPERATOR_ASSISTED_DIRECT=PASS' \
-  'PRODUCT_TUN_IPV6_OUTAGE_FAIL_CLOSED=PASS' \
-  'PRODUCT_TUN_IPV6_GUARD_ROLLBACK=PASS'; do
-  grep -Fx "$marker" "$product_v6_log" >/dev/null
-done
-assert_tun_native_cleanup installed-product-guarded-dualstack
-
-# Real sing-box faults must preserve native Direct HTTP and reject the
-# hosting-outage PASS; the guest must prove COMPLETE cleanup independently
-# of its intentional test exit 1, and the outer host independently verifies.
-for fault in before-hosting after-hosting; do
-  negative_log="$scratch/real-tun-$fault-negative.log"
-  if docker exec -e "SC_QA_TUN_OUTAGE_FAULT=$fault" \
-      "$container" /bin/sh /root/qa-host-tun-path.sh >"$negative_log" 2>&1; then
-    negative_rc=0
-  else
-    negative_rc=$?
-  fi
-  if ! accept_tun_guard_rejection "$fault" "$negative_rc" "$negative_log"; then
-    echo "TUN-loss rejection or cleanup failed validation ($fault; rc=$negative_rc)" >&2
-    cat "$negative_log" >&2
-    exit 1
-  fi
-  assert_tun_native_cleanup "real-tun-$fault-rejected-cleanup"
-  echo "REAL_TUN_HOSTING_FALSE_PASS_REJECTED=PASS (fault=$fault)"
-done
-# Discriminating cleanup-failure test: deliberately retain ONLY our disposable
-# namespace after genuine guard rejection. Both expected guard markers and
-# the native hosting reply must still occur, but acceptance MUST refuse it.
-cleanup_log="$scratch/real-tun-cleanup-failure-negative.log"
-if docker exec -e SC_QA_TUN_OUTAGE_FAULT=before-hosting \
-    -e SC_QA_TUN_CLEANUP_FAULT=retain-namespace \
-    "$container" /bin/sh /root/qa-host-tun-path.sh >"$cleanup_log" 2>&1; then
-  cleanup_rc=0
-else
-  cleanup_rc=$?
-fi
-[[ $cleanup_rc == 97 ]] &&
-  grep -Fx 'REAL_TUN_NEGATIVE_DIRECT_HOSTING=PASS (native reply works without TUN)' "$cleanup_log" >/dev/null &&
-  grep -Fx 'REAL_TUN_FOREIGN_HOSTING_OUTAGE_GUARD=REJECTED (pre-hosting)' "$cleanup_log" >/dev/null &&
-  grep -Fx 'REAL_TUN_LAB_CLEANUP=FAIL (owned namespace still present)' "$cleanup_log" >/dev/null || {
-    echo "Injected cleanup failure did not produce expected guard + distinct cleanup failure (rc=$cleanup_rc)" >&2
-    cat "$cleanup_log" >&2
-    exit 1
-  }
-if accept_tun_guard_rejection before-hosting "$cleanup_rc" "$cleanup_log"; then
-  echo 'Cleanup failure was accepted as a valid negative test' >&2
-  exit 1
-fi
-if grep -F 'REAL_TUN_FOREIGN_HOSTING_OUTAGE=PASS' "$cleanup_log" >/dev/null ||
-   grep -F 'REAL_TUN_LAB_CLEANUP=PASS' "$cleanup_log" >/dev/null; then
-  echo 'Injected cleanup failure emitted a forbidden success marker' >&2
-  cat "$cleanup_log" >&2
-  exit 1
-fi
-if ! docker exec "$container" /sbin/ip netns list | awk '$1 == "scqapeer" { found=1 } END { exit !found }'; then
-  echo 'Injected cleanup fault did not leave its expected owned namespace' >&2
-  exit 1
-fi
-# Recovery touches the single known QA namespace in this already-disposable
-# guest. Never ignore an ambiguous deletion or claim cleanup before recheck.
-docker exec "$container" /sbin/ip netns del scqapeer
-assert_tun_native_cleanup real-tun-injected-cleanup-recovery
-echo 'REAL_TUN_CLEANUP_FAILURE_REJECTED=PASS (guest cleanup failure != expected TUN rejection)'
-# The historical rule-only v2/v3 creation lane was retired; journal
-# decoder/recovery refusal remains in Go regressions. The v4 supervised
-# fixture and Native Core still share installed recovery timers, so run
-# native lifecycle only after the earlier v4 QA has fully settled.
+# The independently prearmed activation and crash recovery path is now
+# exercised by the actual installed Native connect-smart / guard lifecycle.
+# The retired parallel synthetic hosting fault suite is superseded by the
+# installed Native failed-selected-HTTPS / independent guard Direct/off proof.
 echo 'REAL_TUN_LAB_STAGE=installed-native-connect-smart'
 installed_native_log="$scratch/debian13-installed-native.log"
 docker exec -e SC_QA_TUN_INSTALLED_NATIVE=yes \
@@ -2030,83 +1331,14 @@ for marker in INSTALLED_NATIVE_PREARM_DIRECT_BASELINE INSTALLED_NATIVE_SELECTED_
 done
 grep -F 'REAL_TUN_LAB_CLEANUP=PASS' "$installed_native_log" >/dev/null
 assert_tun_native_cleanup installed-native-connect-smart
-# Remove exactly the QA helpers after the legacy and Native trial matrices. This
-# also closes the earlier WordPress intermediate guest-helper cleanup gap.
-# The bounded helper verifies source hashes after authenticating its pinned
-# objects; a path-following checksum reader must not run before those checks.
-docker exec "$container" /usr/bin/python3 -I -B -c "$(cat <<'PYTLSCLEANUP'
-import hashlib, json, os, pathlib, stat
-
-def cleanup_tls_fixture(parent):
-    names = {"qa-root.pem", "qa-server.pem", "qa-server-key.pem", "qa-wrong-name.pem", "qa-wrong-trust.pem",
-             "qa-wrong-root.pem", "qa-expired.pem", "qa-client-auth-only.pem"}
-    owner, root_name, receipt_name = os.geteuid(), "qa-smart-health-tls", "qa-smart-health-tls-receipt.json"
-    def identity(info):
-        return [info.st_dev, info.st_ino, info.st_mode, info.st_uid]
-    parent_fd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-    directory = None
-    try:
-        descriptor = os.open(receipt_name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent_fd)
-        with os.fdopen(descriptor, "rb") as handle:
-            receipt_info = os.fstat(handle.fileno())
-            assert stat.S_ISREG(receipt_info.st_mode) and receipt_info.st_uid == owner \
-                and stat.S_IMODE(receipt_info.st_mode) == 0o600 and receipt_info.st_nlink == 1 and 0 < receipt_info.st_size <= 8192
-            raw = handle.read(8193)
-            assert len(raw) == receipt_info.st_size
-        receipt = json.loads(raw)
-        assert identity(os.fstat(parent_fd)) == receipt["parent"], "TLS fixture cleanup parent changed"
-        directory = os.open(root_name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent_fd)
-        assert identity(os.fstat(directory)) == receipt["directory"], "TLS fixture cleanup directory changed"
-        def unchanged():
-            assert identity(parent.lstat()) == receipt["parent"], "TLS fixture cleanup parent replaced"
-            assert identity(os.stat(root_name, dir_fd=parent_fd, follow_symlinks=False)) == receipt["directory"], "TLS fixture cleanup directory replaced"
-        def check_file(name):
-            descriptor = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
-            with os.fdopen(descriptor, "rb") as handle:
-                info = os.fstat(handle.fileno())
-                assert stat.S_ISREG(info.st_mode) and info.st_uid == owner and info.st_nlink == 1 \
-                    and stat.S_IMODE(info.st_mode) == 0o600 and 0 < info.st_size <= 4096
-                assert identity(info) + [info.st_size, hashlib.sha256(handle.read(4097)).hexdigest()] == receipt["files"][name], "TLS fixture ownership changed"
-                current = os.stat(name, dir_fd=directory, follow_symlinks=False)
-                assert identity(current) + [current.st_size] == receipt["files"][name][:-1], "TLS fixture cleanup file replaced"
-        unchanged()
-        assert set(os.listdir(directory)) == names and set(receipt["files"]) == names, "TLS fixture cleanup set changed"
-        for name in sorted(names):
-            check_file(name)
-        for name in sorted(names):
-            unchanged()
-            check_file(name)
-            os.unlink(name, dir_fd=directory)
-        unchanged()
-        os.rmdir(root_name, dir_fd=parent_fd)
-        assert not os.path.lexists(parent / root_name)
-        descriptor = os.open(receipt_name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent_fd)
-        with os.fdopen(descriptor, "rb") as handle:
-            assert identity(os.fstat(handle.fileno())) == identity(receipt_info) and handle.read(8193) == raw, "TLS cleanup receipt changed"
-        assert identity(parent.lstat()) == receipt["parent"], "TLS fixture cleanup parent replaced"
-        assert identity(os.stat(receipt_name, dir_fd=parent_fd, follow_symlinks=False)) == identity(receipt_info), "TLS cleanup receipt replaced"
-        os.unlink(receipt_name, dir_fd=parent_fd)
-        assert not os.path.lexists(parent / receipt_name)
-    finally:
-        if directory is not None:
-            os.close(directory)
-        os.close(parent_fd)
-
-if __name__ == "__main__":
-    assert os.geteuid() == 0, "TLS fixture cleanup requires the disposable root guest"
-    cleanup_tls_fixture(pathlib.Path("/root"))
-PYTLSCLEANUP
-)"
-echo 'SMART_HEALTH_QA_TLS_FIXTURE_EXACT_CLEANUP=PASS'
+# Retired v4-only TLS cleanup; Native-installed acceptance below remains.
 docker exec "$container" /bin/rm -f /root/qa-tun-config-qa /root/qa-host-tun-path.sh /root/qa-native-dns-policy.sh \
-  /root/qa-tun-guard-unit-lab.sh /root/qa-product-tun-trial.sh /root/qa-tun-sni-client.py /root/qa-tun-native-apps.py \
-  /root/qa-owned-tun-boundary.sh \
-  /root/qa-native-product-tun.sh /root/qa-supervised-product-tun.sh \
-  /root/qa-supervised-product-tun.py /root/qa-smart-health-responder.py /root/qa-smart-health-client.py \
-  /root/qa-tun-dns-peer.py /root/qa-tun-dns-client.py /root/qa-tun-wordpress-fpm.sh \
-  /root/qa-installed-native-connect.sh /root/qa-tun-wp-check.py /root/qa-tun-payload-wire.py /root/qa-tun-ipv6-wire.py
+  /root/qa-tun-sni-client.py /root/qa-tun-native-apps.py \
+  /root/qa-owned-tun-boundary.sh /root/qa-tun-dns-peer.py /root/qa-tun-dns-client.py \
+  /root/qa-tun-wordpress-fpm.sh /root/qa-tun-wp-check.py /root/qa-tun-payload-wire.py \
+  /root/qa-tun-ipv6-wire.py /root/qa-installed-native-connect.sh
 else
-  echo 'NATIVE_TUN_AND_GUARDED_RULE_POSITIVES=NOT_RUN (Debian12 legacy trial only; installed connect-smart tested separately)'
+  echo 'NATIVE_WIRE_LAB=NOT_RUN (Debian12 Native installed test runs separately)'
 fi
 echo '=== Installed real VLESS Proxy Only and owned offline update ==='
 docker cp "$root/scripts/qa/host-proxy-only.sh" "$container:/root/qa-proxy-only.sh"
