@@ -318,3 +318,49 @@ func TestNativeGuardQuiescentWaitIsBounded(t *testing.T) {
 		t.Fatalf("hung or foreign executor admitted or wait unbounded: %v", err)
 	}
 }
+
+// The installed native health verdict must use the actual ordered sing-box
+// route policy. A successful TLS response sent Direct is never VPN proof.
+func TestNativeHealthTargetsUseOrderedRouteAndInlineSets(t *testing.T) {
+	cases := []struct {
+		name, config string
+		want         int
+		invalid      bool
+	}{
+		{"inline-direct", `{"route":{"final":"upstream","rule_set":[{"type":"inline","tag":"iran-public","rules":[{"ip_cidr":["1.0.0.0/8"]}]}],"rules":[{"action":"route","rule_set":["iran-public"],"outbound":"direct"}]}}`, 1, false},
+		{"inline-all-direct", `{"route":{"final":"upstream","rule_set":[{"type":"inline","tag":"iran-public","rules":[{"ip_cidr":["0.0.0.0/0"]}]}],"rules":[{"action":"route","rule_set":["iran-public"],"outbound":"direct"}]}}`, 0, true},
+		{"inline-dns-port-only", `{"route":{"final":"upstream","rule_set":[{"type":"inline","tag":"iran-public","rules":[{"ip_cidr":["0.0.0.0/0"]}]}],"rules":[{"action":"route","rule_set":["iran-public"],"port":53,"outbound":"direct"}]}}`, 2, false},
+		{"vpn-override-before-inline-country", `{"route":{"final":"upstream","rule_set":[{"type":"inline","tag":"iran-public","rules":[{"ip_cidr":["0.0.0.0/0"]}]}],"rules":[{"action":"route","ip_cidr":["1.0.0.1/32"],"outbound":"upstream"},{"action":"route","rule_set":["iran-public"],"outbound":"direct"}]}}`, 1, false},
+		{"IPv6-reject-does-not-reject-IPv4-health", `{"route":{"final":"upstream","rules":[{"action":"reject","ip_version":6,"method":"default"}]}}`, 2, false},
+		{"vpn-before-direct", `{"route":{"final":"upstream","rules":[{"action":"route","ip_cidr":["1.0.0.0/8"],"outbound":"upstream"},{"action":"route","ip_cidr":["0.0.0.0/0"],"outbound":"direct"}]}}`, 1, false},
+		{"direct-before-vpn", `{"route":{"final":"upstream","rules":[{"action":"route","ip_cidr":["0.0.0.0/0"],"outbound":"direct"},{"action":"route","ip_cidr":["1.0.0.0/8"],"outbound":"upstream"}]}}`, 0, true},
+		{"invalid-inline-cidr", `{"route":{"final":"upstream","rule_set":[{"type":"inline","tag":"iran-public","rules":[{"ip_cidr":["broken"]}]}],"rules":[{"action":"route","rule_set":["iran-public"],"outbound":"direct"}]}}`, 0, true},
+		{"unknown-inline-tag", `{"route":{"final":"upstream","rules":[{"action":"route","rule_set":["unknown"],"outbound":"direct"}]}}`, 0, true},
+		{"unsupported-direct-predicate", `{"route":{"final":"upstream","rules":[{"action":"route","unknown_selector":"true","outbound":"direct"}]}}`, 0, true},
+		{"unsupported-direct-domain", `{"route":{"final":"upstream","rules":[{"action":"route","domain":["dns.google"],"outbound":"direct"}]}}`, 0, true},
+		{"unconditional-selected-vpn", `{"route":{"final":"upstream","rules":[{"action":"route","outbound":"upstream"},{"action":"route","ip_cidr":["0.0.0.0/0"],"outbound":"direct"}]}}`, 2, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := nativeHealthTargets([]byte(tc.config), "internet_https")
+			if (err != nil) != tc.invalid || (!tc.invalid && len(got) != tc.want) {
+				t.Fatalf("wrong selected HTTPS proof: selected=%v err=%v want=%d invalid=%t", got, err, tc.want, tc.invalid)
+			}
+		})
+	}
+}
+
+func TestNativeHealthTargetsMatchCompiledSmartRoutingExceptions(t *testing.T) {
+	profile, options := nativePolicyFixture()
+	config, err := NativeSmartRoutingConfig(profile, options, []SmartRoutingRule{
+		{Type: "cidr", Value: "1.0.0.1/32", Via: "direct"},
+		{Type: "cidr", Value: "8.8.8.8/32", Via: "vpn"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := nativeHealthTargets(config, "internet_https")
+	if err != nil || len(got) != 1 || got[0].IP != "8.8.8.8" {
+		t.Fatalf("compiled country/explicit policy was not respected: targets=%+v err=%v", got, err)
+	}
+}

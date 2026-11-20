@@ -609,7 +609,11 @@ pre/post proof that the exact native RPDB rule, selected TUN routing table,
 marked FIB lookup and official nftables OUTPUT capture are still present.
 This is required because a direct `SO_BINDTODEVICE` on the sing-box TUN
 fails to route on supported Debian guests; an unmarked probe could
-wrongly succeed Direct after capture loss. The two fixed target hosts
+wrongly succeed Direct after capture loss. The compiled Core policy must
+independently classify each literal health destination as VPN-bound using
+first-match route precedence, including operator CIDR and inline country
+rule-set Direct exemptions; an HTTPS 200 received Direct is not proof.
+The two fixed target hosts
 use ordinary TLS hostname verification, bounded read/timeout and no
 inherited HTTP proxy; in the synthetic QA scope the pinned test CA and
 fresh nonce/peer-source proof are used instead. No DNS request, arbitrary

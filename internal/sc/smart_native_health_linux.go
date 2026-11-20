@@ -141,48 +141,205 @@ func (m *Manager) stageNativeHealth(session NativeSession, threshold int, scope 
 
 // The configured policy is authoritative, not a process heartbeat. Never
 // accept a health HTTPS target that the Core intentionally routes Direct.
+// Native health proof must follow the compiled Core route decision for each
+// literal HTTPS destination. A successful selected-mark socket alone cannot
+// prove VPN egress if Core's earlier IP or inline Iran rule-set routes Direct.
+// The generated config only uses the match forms understood here; unknown
+// route selectors fail proof rather than silently changing its meaning.
+type nativeHealthRouteRule struct {
+	Action       string   `json:"action"`
+	Outbound     string   `json:"outbound"`
+	IPCIDR       []string `json:"ip_cidr"`
+	RuleSet      []string `json:"rule_set"`
+	Port         *int     `json:"port"`
+	IPIsPrivate  *bool    `json:"ip_is_private"`
+	IPVersion    *int     `json:"ip_version"`
+	Domain       []string `json:"domain"`
+	DomainSuffix []string `json:"domain_suffix"`
+	Sniffer      []string `json:"sniffer"`
+	Timeout      string   `json:"timeout"`
+	Method       string   `json:"method"`
+}
+
+func nativeHealthParseRule(raw json.RawMessage) (nativeHealthRouteRule, error) {
+	var rule nativeHealthRouteRule
+	decoder := json.NewDecoder(strings.NewReader(string(raw)))
+	decoder.DisallowUnknownFields()
+	var trailing any
+	if decoder.Decode(&rule) != nil || !errors.Is(decoder.Decode(&trailing), io.EOF) {
+		return rule, Fault("invalid_state", "native health encountered an unsupported route matcher")
+	}
+	if rule.Port != nil && (*rule.Port < 1 || *rule.Port > 65535) {
+		return rule, Fault("invalid_state", "native health route port invalid")
+	}
+	if rule.IPIsPrivate != nil && !*rule.IPIsPrivate {
+		return rule, Fault("invalid_state", "native health route private matcher invalid")
+	}
+	if rule.IPVersion != nil && *rule.IPVersion != 4 && *rule.IPVersion != 6 {
+		return rule, Fault("invalid_state", "native health route IP version invalid")
+	}
+	return rule, nil
+}
+
+func nativeHealthParsePrefixes(values []string) ([]netip.Prefix, error) {
+	prefixes := make([]netip.Prefix, 0, len(values))
+	for _, text := range values {
+		prefix, err := netip.ParsePrefix(text)
+		if err != nil {
+			return nil, Fault("invalid_state", "native health route prefix invalid")
+		}
+		prefixes = append(prefixes, prefix)
+	}
+	return prefixes, nil
+}
+
 func nativeHealthTargets(config []byte, scope string) ([]nativeProbeTarget, error) {
 	targets := []nativeProbeTarget{{"1.0.0.1", "one.one.one.one", 443}, {"8.8.8.8", "dns.google", 443}}
 	if scope == "synthetic_https" {
 		targets = []nativeProbeTarget{{"8.8.8.8", smartTUNHealthHTTPSName, smartTUNHealthHTTPSPort}, {"198.51.100.42", smartTUNHealthHTTPSName, smartTUNHealthHTTPSPort}}
+	} else if scope != "internet_https" {
+		return nil, Fault("invalid_state", "native health scope invalid")
 	}
 	var document struct {
 		Route struct {
-			Rules []struct {
-				IPCIDR   []string `json:"ip_cidr"`
-				Outbound string   `json:"outbound"`
-				RuleSet  []string `json:"rule_set"`
-			} `json:"rules"`
-			Final string `json:"final"`
+			Final   string            `json:"final"`
+			Rules   []json.RawMessage `json:"rules"`
+			RuleSet []struct {
+				Type  string            `json:"type"`
+				Tag   string            `json:"tag"`
+				Rules []json.RawMessage `json:"rules"`
+			} `json:"rule_set"`
 		} `json:"route"`
 	}
 	if err := json.Unmarshal(config, &document); err != nil || document.Route.Final != "upstream" {
 		return nil, Fault("invalid_state", "native health cannot prove VPN routing policy")
 	}
-	selected := make([]nativeProbeTarget, 0, len(targets))
-	for _, target := range targets {
-		ip, _ := netip.ParseAddr(target.IP)
-		direct := false
-		for _, rule := range document.Route.Rules {
-			if rule.Outbound != "direct" {
-				continue
+	sets := make(map[string][]netip.Prefix, len(document.Route.RuleSet))
+	for _, set := range document.Route.RuleSet {
+		if set.Type != "inline" || set.Tag == "" || len(set.Rules) == 0 {
+			return nil, Fault("invalid_state", "native health inline route set unsupported")
+		}
+		if _, exists := sets[set.Tag]; exists {
+			return nil, Fault("invalid_state", "native health route set ambiguous")
+		}
+		var all []netip.Prefix
+		for _, raw := range set.Rules {
+			var entry struct {
+				IPCIDR []string `json:"ip_cidr"`
 			}
-			for _, cidr := range rule.IPCIDR {
-				p, e := netip.ParsePrefix(cidr)
-				if e != nil {
-					return nil, Fault("invalid_state", "native health route rule invalid")
-				}
-				if p.Contains(ip) {
-					direct = true
-				}
+			decoder := json.NewDecoder(strings.NewReader(string(raw)))
+			decoder.DisallowUnknownFields()
+			var trailing any
+			if decoder.Decode(&entry) != nil || !errors.Is(decoder.Decode(&trailing), io.EOF) || len(entry.IPCIDR) == 0 {
+				return nil, Fault("invalid_state", "native health route set matcher unsupported")
+			}
+			prefixes, err := nativeHealthParsePrefixes(entry.IPCIDR)
+			if err != nil {
+				return nil, err
+			}
+			all = append(all, prefixes...)
+		}
+		sets[set.Tag] = all
+	}
+	type checkedRule struct {
+		rule     nativeHealthRouteRule
+		prefixes []netip.Prefix
+	}
+	rules := make([]checkedRule, 0, len(document.Route.Rules))
+	for _, raw := range document.Route.Rules {
+		rule, err := nativeHealthParseRule(raw)
+		if err != nil {
+			return nil, err
+		}
+		if len(rule.IPCIDR) != 0 && len(rule.RuleSet) != 0 {
+			// Current Core compiler emits these selectors in separate rules.
+			return nil, Fault("invalid_state", "native health combined route matcher unsupported")
+		}
+		prefixes, err := nativeHealthParsePrefixes(rule.IPCIDR)
+		if err != nil {
+			return nil, err
+		}
+		for _, tag := range rule.RuleSet {
+			if _, ok := sets[tag]; !ok {
+				return nil, Fault("invalid_state", "native health route set missing")
 			}
 		}
-		if !direct {
+		if (len(rule.Domain) != 0 || len(rule.DomainSuffix) != 0) && rule.Outbound == "direct" {
+			return nil, Fault("invalid_state", "native health cannot attest Direct-domain route")
+		}
+		switch rule.Action {
+		case "", "route", "bypass", "reject", "sniff", "hijack-dns":
+		default:
+			return nil, Fault("invalid_state", "native health route action unsupported")
+		}
+		if rule.Action == "" || rule.Action == "route" {
+			if rule.Outbound != "direct" && rule.Outbound != "upstream" {
+				return nil, Fault("invalid_state", "native health route outbound unsupported")
+			}
+		}
+		rules = append(rules, checkedRule{rule: rule, prefixes: prefixes})
+	}
+	selected := make([]nativeProbeTarget, 0, len(targets))
+	for _, target := range targets {
+		ip, err := netip.ParseAddr(target.IP)
+		if err != nil {
+			return nil, Fault("invalid_state", "native health target address invalid")
+		}
+		vpn := true // the verified Core final route is upstream
+		for _, checked := range rules {
+			rule := checked.rule
+			if rule.Port != nil && *rule.Port != target.Port ||
+				rule.IPVersion != nil && ((*rule.IPVersion == 4 && !ip.Is4()) || (*rule.IPVersion == 6 && !ip.Is6())) ||
+				rule.IPIsPrivate != nil && !ip.IsPrivate() {
+				continue
+			}
+			if len(checked.prefixes) != 0 {
+				match := false
+				for _, prefix := range checked.prefixes {
+					if prefix.Contains(ip) {
+						match = true
+						break
+					}
+				}
+				if !match {
+					continue
+				}
+			}
+			if len(rule.RuleSet) != 0 {
+				match := false
+				for _, tag := range rule.RuleSet {
+					for _, prefix := range sets[tag] {
+						if prefix.Contains(ip) {
+							match = true
+							break
+						}
+					}
+				}
+				if !match {
+					continue
+				}
+			}
+			// Generated domain-only rules route VPN, never Direct; skip
+			// them without pretending a raw-IP socket has DNS identity.
+			if len(rule.Domain) != 0 || len(rule.DomainSuffix) != 0 {
+				continue
+			}
+			switch rule.Action {
+			case "", "route":
+				vpn = rule.Outbound == "upstream"
+			case "bypass", "reject":
+				vpn = false
+			case "hijack-dns", "sniff":
+				continue
+			}
+			break // first terminal route decision wins, not any later Direct
+		}
+		if vpn {
 			selected = append(selected, target)
 		}
 	}
 	if len(selected) == 0 {
-		return nil, Fault("invalid_state", "all native HTTPS health destinations have Direct exceptions")
+		return nil, Fault("invalid_state", "all native HTTPS health destinations route outside selected VPN")
 	}
 	return selected, nil
 }
