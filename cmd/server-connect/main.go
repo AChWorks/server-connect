@@ -345,19 +345,6 @@ func run(j bool, m *sc.Manager, args []string) int {
 			return output(j, nil, err)
 		}
 		return output(j, status, nil)
-	case "selective-verify-intent":
-		opts := flag.NewFlagSet(name, flag.ContinueOnError)
-		opts.SetOutput(io.Discard)
-		id := opts.String("operation-id", "", "exact previously staged operation ID")
-		revision := opts.Uint64("revision", 0, "exact PREPARED revision")
-		if e := opts.Parse(args); e != nil || len(opts.Args()) != 0 || *id == "" || *revision != 1 {
-			return output(j, nil, sc.Fault("invalid_arguments", "verification requires an exact operation ID and PREPARED revision 1"))
-		}
-		check, err := m.VerifySelectiveIntentLive(*id, *revision)
-		if err != nil {
-			return output(j, nil, err)
-		}
-		return output(j, check, nil)
 	case "smart-tun-trial-apply":
 		opts := flag.NewFlagSet(name, flag.ContinueOnError)
 		opts.SetOutput(io.Discard)
@@ -787,7 +774,7 @@ Commands:
                               no live test, signed-source trust or routing change
   probe --via proxy|direct --url https://example.org
   diagnose-path --via proxy|direct --url https://one.example --url https://two.example
-                              Two to four distinct hosts; diagnostic only
+                              One or more distinct hosts; diagnostic only
   exec -- curl -I https://example.org
   apt -- apt-get update        Strict opt-in APT via trusted native binary
   smart-tun-host-check --endpoint-ip IP --management-peer IP --underlay-if NAME
@@ -800,8 +787,6 @@ Commands:
   selective-stage-intent --endpoint IP --management-peer IP --tunnel-if NAME
                          --destination CIDR [--destination CIDR...]
                               Legacy QA-only unarmed PREPARED intent; no route changes
-  selective-verify-intent --operation-id HEX32 --revision 1
-                              Reinspect exact unarmed intent; no activation
   selective-abandon-intent --operation-id HEX32 --revision 1
                               Remove only exact untouched PREPARED intent
   selective-trial-apply --operation-id HEX32 --revision 1 [--deadline-seconds 600]
@@ -888,10 +873,6 @@ Activation-journal-status shows only safe metadata for the internal v1
 PREPARED/UNCERTAIN journal, never private resource before/intended snapshots.
 Selective-stage-intent makes two non-atomic native observations and records
 an advisory PREPARED intent; it is NOT a guard, host reservation or TUN start.
-Selective-verify-intent performs two fresh, NON-ATOMIC native kernel reads
-against the exact journal operation under the Manager lock. Success is an
-observation receipt, not a reserved route, owner proof, armed guard, or token
-authorizing later apply; external kernel writers are not locked.
 Experimental rule-only trial needs a disconnected disposable systemd Docker guest,
 preinstalled independent recovery units and an enabled live recovery timer.
 It creates one selected-prefix RPDB rule pointing at an EMPTY table. It has
