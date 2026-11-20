@@ -2425,6 +2425,19 @@ class IPv6DriftFixtureOwnershipTests(unittest.TestCase):
                 self.assertEqual(getattr(self, field), [])
 
 
+class InstalledNativeCleanupTests(unittest.TestCase):
+    def test_unstarted_native_trial_cleanup_does_not_mask_a_failure(self):
+        # No host state or absolute installed binary is touched. Reproduce the
+        # source shell's nounset + EXIT trap in a subprocess before Apply.
+        helper = Path(__file__).with_name("host-installed-native-connect.sh")
+        command = '. "$1"; trap "native_installed_cleanup" EXIT; exit 37'
+        result = subprocess.run(
+            ["/bin/sh", "-eu", "-c", command, "sh", str(helper)],
+            capture_output=True, text=True, timeout=5, check=False)
+        self.assertEqual(result.returncode, 37, result.stderr)
+        self.assertNotIn("parameter not set", result.stderr)
+
+
 if __name__ == "__main__":
     result = unittest.main(exit=False).result
     if not result.wasSuccessful():

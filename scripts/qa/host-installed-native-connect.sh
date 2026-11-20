@@ -3,6 +3,11 @@
 # systemd guest. This is the ACTUAL installed connect-smart/Core lifecycle,
 # not the legacy smart-tun-trial-apply or a standalone compiled Core config.
 # Its synthetic peer is not an Internet provider or physical field acceptance.
+# The helper is sourced into a set -u shell whose EXIT trap can run before
+# native_installed_trial reaches its baseline. Always initialize both claims
+# so a preflight/import failure keeps the original diagnostic and full cleanup.
+native_installed_prepared=no
+native_installed_rule_added=no
 native_installed_baseline() {
   test "$(ip -N -j -4 route show table all)" = "$native_installed_routes4" &&
     test "$(ip -N -j -4 rule show)" = "$native_installed_rules4" &&
