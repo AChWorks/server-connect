@@ -141,6 +141,19 @@ Runtime status and health independently attest the same table, hook,
 rules, tuple sets and fingerprint. Merely seeing an active Core never
 establishes selected-path health.
 
+The Debian 12 (`nftables` 1.0.6) installed-Core candidate exposed a
+real version-specific enumeration difference: it lists `table,set,set,chain,rule,rule,rule`,
+where Debian 13 lists `table,chain,set,set,rule,rule,rule`. The initial
+single-order strict parser refused to verify its *own* newly installed
+reply hook, then retained the early precommitted claim and table as
+`UNCERTAIN`. Inspection now admits **only these two exact known layouts**;
+within both, the original set identities and order, chain hook/priority,
+all rule bodies and order, accepted-socket digest, table handle and
+netlink generation-CAS owner checks remain unchanged. No arbitrary nft
+object sorting, table-name-only deletion or broad policy flush is allowed.
+Success requires the exact-candidate Debian 12/13 installed lifecycle CI
+and separate physical evidence; a source fix alone is not acceptance.
+
 On normal Disconnect, Core exit, or a failed preflight, independent
 `ExecStopPost` first recovers the exact owned Core resources, then inspects
 the reply-guard table and deletes only its verified table handle using the

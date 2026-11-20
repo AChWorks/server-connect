@@ -295,10 +295,26 @@ func nativeReplyGuardReceipt(raw string) (uint64, string, error) {
 	if len(rows) != 7 {
 		return 0, "", Fault("service_conflict", "native reply guard nft objects changed")
 	}
-	for i, name := range []string{"table", "chain", "set", "set", "rule", "rule", "rule"} {
-		if len(rows[i]) != 1 || rows[i][name] == nil {
-			return 0, "", Fault("service_conflict", "native reply guard table layout changed")
-		}
+	// nft 1.0.6 (Debian 12) lists table, sets, chain, rules; nft 1.1.3
+	// (Debian 13) lists table, chain, sets, rules. These are the ONLY
+	// accepted layouts. Do not broadly sort objects or adopt reordered
+	// rules: all handles, set identities, rule order and policy expressions
+	// must still match the exact originally committed native owner.
+	isKind := func(index int, name string) bool {
+		return len(rows[index]) == 1 && rows[index][name] != nil
+	}
+	if !isKind(0, "table") || !isKind(4, "rule") ||
+		!isKind(5, "rule") || !isKind(6, "rule") {
+		return 0, "", Fault("service_conflict", "native reply guard table layout changed")
+	}
+	chainIndex, firstSetIndex := 1, 2
+	switch {
+	case isKind(1, "chain") && isKind(2, "set") && isKind(3, "set"):
+		// Debian 13 nft ordering.
+	case isKind(1, "set") && isKind(2, "set") && isKind(3, "chain"):
+		chainIndex, firstSetIndex = 3, 1
+	default:
+		return 0, "", Fault("service_conflict", "native reply guard table layout changed")
 	}
 	var table struct {
 		Family string `json:"family"`
@@ -316,7 +332,7 @@ func nativeReplyGuardReceipt(raw string) (uint64, string, error) {
 		Policy string `json:"policy"`
 	}
 	if strictReplyGuardJSON(rows[0]["table"], &table) != nil ||
-		strictReplyGuardJSON(rows[1]["chain"], &chain) != nil ||
+		strictReplyGuardJSON(rows[chainIndex]["chain"], &chain) != nil ||
 		table.Family != "inet" || table.Name != nativeReplyGuardTable || table.Handle == 0 ||
 		chain.Family != "inet" || chain.Table != nativeReplyGuardTable ||
 		chain.Name != nativeReplyGuardChain || chain.Handle == 0 ||
@@ -326,7 +342,7 @@ func nativeReplyGuardReceipt(raw string) (uint64, string, error) {
 	}
 	all := make([]nativeAcceptedTCPFlow, 0)
 	for i, name := range []string{nativeReplyGuardV4, nativeReplyGuardV6} {
-		flows, err := nativeReplyGuardSetFlows(rows[i+2]["set"], name)
+		flows, err := nativeReplyGuardSetFlows(rows[firstSetIndex+i]["set"], name)
 		if err != nil {
 			return 0, "", err
 		}

@@ -87,6 +87,11 @@ isolated disconnected systemd guests. A deliberately missing authenticated
 selected HTTPS endpoint must also produce autonomous Direct/off. These
 scenarios count as `PASS` **only on successful exact-candidate CI**; they do
 **not** prove a healthy selected HTTPS provider or a physical deployment.
+Debian 12's older `nftables` emits the installed inbound-reply-guard
+sets before the chain; the newer Debian 13 emits chain before sets.
+The native receipt now recognizes exactly these two layouts while still
+checking exact hook/rule order, accepted TCP tuple fingerprint, persisted
+handle and generation-conditional deletion (see SAFETY-RECOVERY).
 Debian 13 retains its distinct older supervised-trial QA, and Debian 12 still
 refuses only the legacy `smart-tun-trial-apply` without changing network state.
 That refusal is **not** a Debian 12 prohibition on `connect-smart`. Separate
