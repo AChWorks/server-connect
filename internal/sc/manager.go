@@ -185,7 +185,7 @@ func (m *Manager) load() (State, error) {
 	if e = json.Unmarshal(b, &s); e != nil {
 		return State{}, errors.New("invalid stored state")
 	}
-	if s.Version != 1 || (s.Desired != "direct" && s.Desired != "proxy" && s.Desired != "smart") || s.Port < 1024 || s.Port > 65535 {
+	if s.Version != 1 || (s.Desired != "direct" && s.Desired != "proxy" && s.Desired != "smart") || s.Port < 1 || s.Port > 65535 {
 		return State{}, errors.New("unsupported or invalid stored state")
 	}
 	return s, nil

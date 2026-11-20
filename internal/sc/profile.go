@@ -254,9 +254,6 @@ func parseVLESS(raw string) (json.RawMessage, string, error) {
 	if name == "" {
 		name = "VLESS profile"
 	}
-	if len(name) > 80 {
-		name = name[:80]
-	}
 	name = strings.Map(func(r rune) rune {
 		if r < 32 || r == 127 {
 			return -1
@@ -287,8 +284,8 @@ func rejectXrayEarlyDataPath(path string) error {
 }
 
 func CoreConfig(p Profile, port int, password string) ([]byte, error) {
-	if port < 1024 || port > 65535 {
-		return nil, errors.New("local port must be between 1024 and 65535")
+	if port < 1 || port > 65535 {
+		return nil, errors.New("local port must be between 1 and 65535")
 	}
 	if password == "" {
 		return nil, errors.New("local proxy authentication is required")

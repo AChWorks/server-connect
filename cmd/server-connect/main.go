@@ -123,7 +123,7 @@ func parseOpts(args []string) (bool, *sc.Manager, []string, error) {
 	if e := opts.Parse(args); e != nil {
 		return *jsonOut, nil, nil, sc.Fault("invalid_arguments", "invalid or unsupported command options")
 	}
-	if *port < 1024 || *port > 65535 {
+	if *port < 1 || *port > 65535 {
 		return *jsonOut, nil, nil, sc.Fault("invalid_arguments", "invalid local proxy port")
 	}
 	return *jsonOut, sc.New(*stateDir, *core, *port), opts.Args(), nil

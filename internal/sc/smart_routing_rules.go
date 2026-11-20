@@ -18,7 +18,10 @@ import (
 )
 
 const smartRoutingRulesFilename = "smart-routing-rules.json"
-const MaxSmartRoutingImportBytes = 64 << 10
+
+// Import input and saved rules share the existing protected-store byte ceiling.
+// Rule-count limits are enforced by the native policy compiler instead.
+const MaxSmartRoutingImportBytes = activationJournalMaxBytes
 const maxSmartRoutingCIDRs = 128
 const maxSmartRoutingDomains = 128
 
@@ -121,7 +124,7 @@ func validateSmartRoutingAsOf(s string, now time.Time) (time.Time, error) {
 	return d, nil
 }
 func validateSmartRoutingDocument(v smartRoutingRulesDocument, now time.Time) error {
-	if v.Version != 1 || v.Revision == 0 || len(v.Manual) > maxSmartRoutingCIDRs+maxSmartRoutingDomains || len(v.Imports) > 16 {
+	if v.Version != 1 || v.Revision == 0 {
 		return routingRuleInvalid()
 	}
 	var cidrs []netip.Prefix
@@ -210,8 +213,7 @@ func strictSmartRoutingRulesJSON(data []byte) (smartRoutingRulesDocument, error)
 		bytes.Equal(bytes.TrimSpace(fields["imports"]), []byte("null")) {
 		return invalid()
 	}
-	if json.Unmarshal(fields["manual"], &manual) != nil || json.Unmarshal(fields["imports"], &imports) != nil ||
-		len(manual) > 256 || len(imports) > 16 {
+	if json.Unmarshal(fields["manual"], &manual) != nil || json.Unmarshal(fields["imports"], &imports) != nil {
 		return invalid()
 	}
 	for _, raw := range manual {
@@ -233,7 +235,7 @@ func strictSmartRoutingRulesJSON(data []byte) (smartRoutingRulesDocument, error)
 		}
 		var rules []json.RawMessage
 		if bytes.Equal(bytes.TrimSpace(m["rules"]), []byte("null")) ||
-			json.Unmarshal(m["rules"], &rules) != nil || len(rules) > 256 {
+			json.Unmarshal(m["rules"], &rules) != nil {
 			return invalid()
 		}
 		for _, entry := range rules {
@@ -412,9 +414,6 @@ func parseSmartRoutingImport(raw []byte) ([]SmartRoutingRule, error) {
 		}
 	}
 	rows := strings.Split(string(raw), "\n")
-	if len(rows) > 512 {
-		return nil, routingRuleInvalid()
-	}
 	rules := make([]SmartRoutingRule, 0, 16)
 	for _, line := range rows {
 		line = strings.TrimSpace(line)

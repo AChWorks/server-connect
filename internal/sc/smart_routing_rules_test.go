@@ -262,3 +262,46 @@ func TestRoutingRulesNativeCompilerPreviewNoNetworkEffects(t *testing.T) {
 		t.Fatal("caller-supplied exceptions bypassed saved rules")
 	}
 }
+
+// There is no protocol limit of 16 independently pinned rule sources; the
+// actual aggregate exception and durable-store constraints still apply.
+func TestRoutingRulesAcceptMoreThanSixteenSources(t *testing.T) {
+	m := rulesManager(t)
+	for i := 1; i <= 20; i++ {
+		raw := []byte(fmt.Sprintf("cidr vpn 11.11.11.%d/32\n", i))
+		sha := sha256.Sum256(raw)
+		name := fmt.Sprintf("list-%02d", i)
+		if _, err := m.ImportSmartRoutingRules(name, "2026-10-01", hex.EncodeToString(sha[:]), "", raw); err != nil {
+			t.Fatalf("source %d: %v", i, err)
+		}
+	}
+	report, err := m.InspectSmartRoutingRules()
+	if err != nil || len(report.Imports) != 20 || len(report.Rules) != 20 {
+		t.Fatalf("imported rule sources were truncated or lost: %+v %v", report, err)
+	}
+	// Do not bypass the actual aggregate compiler limit or conflict checks.
+	raw := []byte("cidr vpn 11.11.11.1/32\n")
+	sha := sha256.Sum256(raw)
+	if _, err := m.ImportSmartRoutingRules("duplicate", "2026-10-01", hex.EncodeToString(sha[:]), "", raw); err == nil {
+		t.Fatal("cross-source duplicate was accepted")
+	}
+}
+
+// A local list can contain comments and blank lines without exhausting a
+// synthetic 512-line/64KiB cap before reaching the actual storage budget.
+func TestRoutingRulesAcceptCommentHeavyImport(t *testing.T) {
+	m := rulesManager(t)
+	raw := []byte(strings.Repeat("# operator annotation for independently verified source\n", 1800) + "cidr vpn 9.9.9.9/32\n")
+	if len(raw) <= 64<<10 || len(raw) >= MaxSmartRoutingImportBytes {
+		t.Fatal("test fixture does not exercise old fake caps within real store budget")
+	}
+	sha := sha256.Sum256(raw)
+	report, err := m.ImportSmartRoutingRules("annotated", "2026-10-01", hex.EncodeToString(sha[:]), "", raw)
+	if err != nil || len(report.Imports) != 1 || len(report.Rules) != 1 {
+		t.Fatalf("comment-heavy import refused: %+v %v", report, err)
+	}
+	again, err := m.InspectSmartRoutingRules()
+	if err != nil || !reflect.DeepEqual(report, again) {
+		t.Fatalf("saved import did not round-trip: %+v %v", again, err)
+	}
+}
