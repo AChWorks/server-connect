@@ -71,7 +71,7 @@ func nativeHealthAdvance(s NativeHealthState, outcome nativeHealthOutcome, now i
 	s.UnhealthyRounds++
 	s.Reason = outcome.Reason
 	// Cumulative budget prevents a flapping provider from resetting the incident forever.
-	if s.Failures >= s.FailureThreshold || s.UnhealthyRounds >= s.FailureThreshold*3 {
+	if s.Failures >= s.FailureThreshold || s.UnhealthyRounds/3 >= s.FailureThreshold {
 		s.Phase = "stopping"
 		return s, true
 	}
@@ -94,8 +94,8 @@ func (m *Manager) readNativeHealth() (NativeHealthState, error) {
 	if dec.Decode(&s) != nil || !errors.Is(dec.Decode(&end), io.EOF) || s.Version != 1 ||
 		!journalHex64.MatchString(s.ConfigSHA256) || len(s.OperationID) != 32 || !trialBootIDPattern.MatchString(s.BootID) ||
 		s.StartedMS <= 0 || s.HeartbeatMS < s.StartedMS || s.LastProbeMS < 0 ||
-		s.Rounds < 0 || s.Rounds > 100000000 || s.Failures < 0 || s.Failures > 10 || s.UnhealthyRounds < 0 || s.UnhealthyRounds > 100000000 ||
-		s.FailureThreshold < 1 || s.FailureThreshold > 10 || s.UnhealthyRounds < s.Failures || len(s.Reason) > 96 ||
+		s.Rounds < 0 || s.Rounds > 100000000 || s.Failures < 0 || s.Failures > s.FailureThreshold || s.UnhealthyRounds < 0 || s.UnhealthyRounds > 100000000 ||
+		s.FailureThreshold < 1 || s.UnhealthyRounds < s.Failures || len(s.Reason) > 96 ||
 		(s.ProbeScope != "internet_https" && s.ProbeScope != "synthetic_https") {
 		return NativeHealthState{}, Fault("invalid_state", "native health record invalid")
 	}
@@ -117,8 +117,8 @@ func (m *Manager) saveNativeHealth(s NativeHealthState) error {
 	return put(filepath.Join(m.Dir, nativeHealthFile), b)
 }
 func (m *Manager) stageNativeHealth(session NativeSession, threshold int, scope string) error {
-	if threshold < 1 || threshold > 10 {
-		return Fault("invalid_arguments", "native health failure threshold must be 1-10")
+	if threshold < 1 {
+		return Fault("invalid_arguments", "native health failure threshold must be positive")
 	}
 	if scope != "internet_https" && scope != "synthetic_https" {
 		return Fault("invalid_arguments", "unsupported native health probe scope")

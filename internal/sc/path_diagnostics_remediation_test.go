@@ -182,7 +182,7 @@ func TestDiagnosticNeverKeepsLifecycleLockAcrossProbe(t *testing.T) {
 
 func TestCheckedPathDiagnosticsStillRejectsPreflightBeforeGuard(t *testing.T) {
 	called := false
-	report, err := runPathDiagnosticsChecked("proxy", []string{"http://one.example"},
+	report, err := runPathDiagnosticsChecked("proxy", []string{"ftp://one.example"},
 		func(string) (ProbeResult, error) { called = true; return ProbeResult{}, nil },
 		func() bool { called = true; return false })
 	if called || ErrorCode(err) != "invalid_arguments" || report.Assessment != "not_tested" {

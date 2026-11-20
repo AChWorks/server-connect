@@ -90,7 +90,7 @@ func TestNativeStartupTransitionCannotFalseStopOnActiveResample(t *testing.T) {
 func TestNativeHealthInvalidPolicyRejectedBeforePrivilegedAdmission(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "health-admission")
 	m := New(dir, "", 0)
-	for _, n := range []int{-1, 11, 100} {
+	for _, n := range []int{-1} {
 		_, err := m.ConnectNativeSmartRouting(NativePolicyOptions{HealthFailureThreshold: n})
 		if ErrorCode(err) != "invalid_arguments" {
 			t.Fatalf("invalid threshold %d got %v", n, err)
@@ -193,7 +193,7 @@ func TestNativeHealthStrictReceiptAndIdleDispatch(t *testing.T) {
 	for _, raw := range []string{
 		string(base) + "{}",
 		strings.Replace(string(base), `"version":1`, `"version":1,"version":1`, 1),
-		strings.Replace(string(base), `"failure_threshold":3`, `"failure_threshold":99`, 1),
+		strings.Replace(string(base), `"failure_threshold":3`, `"failure_threshold":-1`, 1),
 		strings.Replace(string(base), `"phase":"off"`, `"phase":"unknown"`, 1),
 	} {
 		if e := put(filepath.Join(m.Dir, nativeHealthFile), []byte(raw)); e != nil {
@@ -362,5 +362,36 @@ func TestNativeHealthTargetsMatchCompiledSmartRoutingExceptions(t *testing.T) {
 	got, err := nativeHealthTargets(config, "internet_https")
 	if err != nil || len(got) != 1 || got[0].IP != "8.8.8.8" {
 		t.Fatalf("compiled country/explicit policy was not respected: targets=%+v err=%v", got, err)
+	}
+}
+
+// A healthy or degraded provider does not have to fit an arbitrary
+// 10-round threshold. The operator chooses when a slow path warrants Off,
+// while independent kernel leak guards continue to protect routed traffic.
+func TestNativeHealthArbitraryPositiveThresholdAndPersistence(t *testing.T) {
+	m := New(filepath.Join(t.TempDir(), "native-health-threshold"), "", 0)
+	for _, limit := range []int{11, 25, 100} {
+		state := nativeHealthTestState()
+		state.FailureThreshold = limit
+		state.Phase = "healthy"
+		if err := m.withLock(func() error { return m.saveNativeHealth(state) }); err != nil {
+			t.Fatal(err)
+		}
+		loaded, err := m.readNativeHealth()
+		if err != nil || loaded.FailureThreshold != limit {
+			t.Fatalf("positive threshold %d rejected in persisted state: %+v %v", limit, loaded, err)
+		}
+		stop := false
+		for i := 0; i < limit; i++ {
+			var changed bool
+			state, changed = nativeHealthAdvance(state, nativeHealthOutcome{Reason: "selected_tcp_unreachable"}, 50000+int64(i))
+			if i < limit-1 && changed {
+				t.Fatalf("threshold %d stopped early at %d: %+v", limit, i, state)
+			}
+			stop = changed
+		}
+		if !stop || state.Failures != limit || state.Phase != "stopping" {
+			t.Fatalf("threshold %d failed to stop on actual limit: %+v", limit, state)
+		}
 	}
 }

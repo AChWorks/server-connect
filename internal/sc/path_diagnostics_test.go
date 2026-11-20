@@ -17,16 +17,13 @@ func TestPathDiagnosticsPreflightRejectsWithoutNetworkProbe(t *testing.T) {
 		targets    []string
 	}{
 		{"wrong_path", "vpn", []string{validA, validB}},
-		{"missing_target", "proxy", []string{validA}},
 		{"no_targets", "proxy", nil},
-		{"five_targets", "direct", []string{validA, validB, "https://three.example", "https://four.example", "https://five.example"}},
 		{"same_host_case", "proxy", []string{validA, "https://ONE.EXAMPLE/another"}},
 		{"same_host_different_ports", "proxy", []string{"https://one.example:443", "http://one.example:80"}},
 		{"ftp_url", "direct", []string{"ftp://one.example", validB}},
 		{"password_in_url", "proxy", []string{"https://username:secret-token@one.example/test", validB}},
 		{"fragment_url", "proxy", []string{"https://one.example/test#secret-token", validB}},
 		{"scheme_relative", "proxy", []string{"//one.example/path", validB}},
-		{"oversize", "direct", []string{"https://one.example/" + strings.Repeat("z", 2200), validB}},
 		{"newline", "proxy", []string{"https://one.example/\nunsafe", validB}},
 	}
 	for _, tt := range tests {
@@ -133,5 +130,25 @@ func TestPathDiagnosticsDirectLiveHTTPAndNoFallbackToAnotherPath(t *testing.T) {
 	if err == nil || proxy.ReachableCount != 0 || proxy.Assessment != "no_targets_reachable" ||
 		proxy.FallbackAttempted || proxy.TunnelHealthVerified {
 		t.Fatalf("dead/uninstalled proxy silently passed via Direct: %+v err=%v", proxy, err)
+	}
+}
+
+// The operator controls diagnostic breadth. Output remains indexed and
+// classified per target, without becoming evidence of global VPN health.
+func TestPathDiagnosticsAcceptsOneManyAndLongURLs(t *testing.T) {
+	for _, urls := range [][]string{
+		{"https://one.example/" + strings.Repeat("a", 8192)},
+		{"https://one.example", "https://two.example", "https://three.example", "https://four.example", "https://five.example", "https://six.example"},
+	} {
+		calls := 0
+		report, err := runPathDiagnostics("direct", urls, func(string) (ProbeResult, error) {
+			calls++
+			return ProbeResult{Path: "direct", Code: 200, Result: "reachable"}, nil
+		})
+		if err != nil || calls != len(urls) || report.TargetCount != len(urls) ||
+			report.ReachableCount != len(urls) || len(report.Samples) != len(urls) ||
+			report.TunnelHealthVerified || report.ActivationReady || report.FallbackAttempted {
+			t.Fatalf("valid diagnostic breadth rejected or overstated: %+v err=%v calls=%d", report, err, calls)
+		}
 	}
 }

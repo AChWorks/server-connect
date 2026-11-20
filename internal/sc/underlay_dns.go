@@ -10,7 +10,6 @@ import (
 )
 
 const endpointNameTimeout = 3 * time.Second
-const maxEndpointNameAnswers = 32
 
 type endpointNameLookup func(context.Context, string) ([]netip.Addr, error)
 
@@ -86,9 +85,9 @@ func inspectUnderlayWithNameLookup(endpointIP, hostname string, port int, lookup
 		report.Outcome = "name_resolution_failed"
 		return report, Fault("underlay_name_unavailable", "host name resolution failed or timed out before TCP probing")
 	}
-	if len(addrs) == 0 || len(addrs) > maxEndpointNameAnswers {
+	if len(addrs) == 0 {
 		report.Outcome = "name_resolution_unsupported"
-		return report, Fault("underlay_name_unavailable", "hostname returned no answers or exceeded the bounded address limit")
+		return report, Fault("underlay_name_unavailable", "hostname returned no addresses")
 	}
 
 	seen := make(map[netip.Addr]bool, len(addrs))
