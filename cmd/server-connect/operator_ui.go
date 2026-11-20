@@ -94,7 +94,6 @@ func (p operatorPresenter) menu(m *sc.Manager, advanced bool) {
 		fmt.Fprintln(p.out, " 10 Host Preflight   17 Firewall Preflight")
 		fmt.Fprintln(p.out, " 15 Host Drift       16 Activation Journal")
 		fmt.Fprintln(p.out, " 13 Underlay TCP     14 Underlay DNS")
-		fmt.Fprintln(p.out, " 20 Guarded Smart TUN (isolated QA VM ONLY)")
 	}
 	fmt.Fprintln(p.out, "\n  a Toggle advanced tools    0 Exit    q Quit")
 	fmt.Fprint(p.out, p.tint("Choice: ", "36"))
