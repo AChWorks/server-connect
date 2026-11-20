@@ -275,7 +275,12 @@ PYOWNEDABSENCE
   cat /run/sc-qa-owned-core-version
   sha256sum "$core"
 
-  /root/qa-tun-config-qa >"$client_cfg"
+  # Reuse the sole Native compiler for this distinct owned-link QA. The
+  # fixture subsequently replaces only the inbound with its deliberately
+  # addressless, non-auto-managed Core attachment; there is no V4 compiler.
+  SC_QA_TUN_NATIVE_DNS=yes SC_QA_TUN_IPV6=yes \
+    SC_QA_TUN_NATIVE_DNS_MODE=default \
+    /root/qa-tun-config-qa >"$client_cfg"
   python3 - "$client_cfg" <<'PYOWNEDCONFIG'
 import json,sys
 with open(sys.argv[1]) as f:config=json.load(f)
