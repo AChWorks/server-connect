@@ -21,7 +21,7 @@
 | `DEGRADED` / `RECOVERING` | Real path/guard uncertainty under bounded diagnosis or exact-resource recovery. |
 | `UNCERTAIN` | Conflict, incomplete proof or incomplete rollback; preserve evidence and refuse destructive guesses. |
 
-**Beware historical naming:** the developer's `selective-stage-intent` may report `prepared`, but its private **unarmed, non-atomic** journal is **not** the guarded `PREPARED` state above. QA-only v2 RPDB-rule and v3 loopback-route trials also do not create a real TUN or production Activation Guard. Their limits and reproducible tests are recorded in [ACCEPTANCE.md](ACCEPTANCE.md).
+**Historical journal compatibility:** persisted v1 `prepared` selective records were unarmed, non-atomic advisory intent, not the guarded `PREPARED` state above. Creation of new v1/v2/v3 experiments is retired. Strict recognition, exact v1 abandonment and ownership-aware v2/v3 recovery remain until safe cleanup has been demonstrated; none proves active VPN routing. See [ACCEPTANCE.md](ACCEPTANCE.md).
 
 ### Disposable v4 guarded TUN trial (not production acceptance)
 

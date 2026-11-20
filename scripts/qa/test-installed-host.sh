@@ -87,7 +87,6 @@ sh -n scripts/qa/tun-wordpress-fpm.sh
 # The guard feasibility probe must be strictly guest-local and must reject
 # ambiguous kernel identities before the privileged disconnected guest runs.
 sh -n scripts/qa/host-activation-guard.sh
-sh -n scripts/qa/host-product-guard-trial.sh
 sh -n scripts/qa/host-tun-path.sh
 sh -n scripts/qa/host-native-dns-policy.sh
 sh -n scripts/qa/host-product-tun-trial.sh
@@ -2016,17 +2015,10 @@ fi
 docker exec "$container" /sbin/ip netns del scqapeer
 assert_tun_native_cleanup real-tun-injected-cleanup-recovery
 echo 'REAL_TUN_CLEANUP_FAILURE_REJECTED=PASS (guest cleanup failure != expected TUN rejection)'
-# Product code + installed inactive-by-default independent recovery units.
-# The actual RPDB rule is added ONLY in the verified disconnected guest.
-docker cp "$root/scripts/qa/host-product-guard-trial.sh" "$container:/root/qa-product-guard-trial.sh"
-docker exec "$container" /bin/sh /root/qa-product-guard-trial.sh
-assert_network_unchanged product-guard-recovered "$offline_before"
-verify_host_services product-guard-recovered
-# Both legacy supervised TUN and guarded-rule trial fixtures reuse the
-# installed recovery timer but are NOT a supported handoff from the modern
-# Native session. Complete *all* legacy trials first, including their
-# independent recovery executor checks, then run the installed Native
-# lifecycle in the same disposable guest with exact baseline witnesses.
+# The historical rule-only v2/v3 creation lane was retired; journal
+# decoder/recovery refusal remains in Go regressions. The v4 supervised
+# fixture and Native Core still share installed recovery timers, so run
+# native lifecycle only after the earlier v4 QA has fully settled.
 echo 'REAL_TUN_LAB_STAGE=installed-native-connect-smart'
 installed_native_log="$scratch/debian13-installed-native.log"
 docker exec -e SC_QA_TUN_INSTALLED_NATIVE=yes \

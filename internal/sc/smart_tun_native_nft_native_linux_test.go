@@ -18,6 +18,34 @@ import (
 	"time"
 )
 
+// A complete namespace-wide snapshot is required before lab mutation. No
+// default route / foreign interface can exist; a synthetic default via lo is
+// allowed in the disconnected systemd acceptance guest.
+func trialIsolatedNetwork() error {
+	raw, err := nativeIPJSON("-j", "link", "show")
+	if err != nil {
+		return Fault("unsupported_host", "isolated link inventory unavailable")
+	}
+	links, err := selectiveRows(raw)
+	if err != nil || len(links) != 1 || selectiveText(links[0]["ifname"]) != "lo" {
+		return Fault("unsupported_host", "guarded trial requires loopback-only disposable namespace")
+	}
+	routes, err := nativeIPJSON("-j", "-4", "route", "show", "table", "all")
+	if err != nil {
+		return Fault("unsupported_host", "isolated route inventory unavailable")
+	}
+	routeRows, err := selectiveRows(routes)
+	if err != nil {
+		return Fault("unsupported_host", "isolated routes unsupported")
+	}
+	for _, r := range routeRows {
+		if selectiveText(r["dev"]) != "lo" {
+			return Fault("unsupported_host", "disposable routing includes non-loopback device")
+		}
+	}
+	return nil
+}
+
 // This binary is compiled on the build host, then ONLY the exact opt-in test
 // is run in the existing GitHub Actions --network none, systemd Docker guest.
 // No namespace creation, hooks, packet routing or external network is needed.

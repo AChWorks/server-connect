@@ -14,14 +14,7 @@ func stagedTrialRecord(t *testing.T) trialJournal {
 	m := New(privateJournalTempDir(t), "", 0)
 	req := fixtureSelectiveRequest()
 	req.Destinations = []string{"8.8.8.0/24"}
-	_, err := m.stageSelectiveIntentWithInspector(req, func(string, string) (HostPreflight, error) { return fixtureSelectiveHost(), nil })
-	if err != nil {
-		t.Fatal(err)
-	}
-	staged, err := m.observeActivationJournal()
-	if err != nil {
-		t.Fatal(err)
-	}
+	staged := prepareSelectiveFixtureJournal(t, m, req)
 	record := trialJournal{activationJournal: staged, BootID: "01234567-89ab-cdef-0123-456789abcdef", DeadlineUptimeSec: 1000}
 	record.Version, record.Revision, record.Phase, record.IntentType = 2, 2, "trial_pending", trialIntentType
 	if err := validateTrialJournal(record); err != nil {
@@ -147,11 +140,8 @@ func TestGuardedRuleTrialNativeIdentityRefusesForeignAndReplay(t *testing.T) {
 
 // The fixed independent systemd unit always reads DefaultDir; accepting
 // custom state at trial start would create an irrecoverable rule after crash.
-func TestGuardedRuleTrialRejectsUnwatchedCustomState(t *testing.T) {
+func TestLegacyRecoveryRefusesUnwatchedCustomState(t *testing.T) {
 	m := New(privateJournalTempDir(t), "", 0)
-	if _, err := m.BeginGuardedRuleTrial(strings.Repeat("a", 32), 1, 8, ""); ErrorCode(err) != "trial_unsupported" {
-		t.Fatalf("custom state trial could strand an RPDB rule: %v", err)
-	}
 	if _, err := m.RecoverGuardedRuleTrial("", ""); ErrorCode(err) != "trial_unsupported" {
 		t.Fatalf("unwatched recovery dir accepted: %v", err)
 	}
@@ -163,23 +153,19 @@ func TestGuardedRuleTrialRejectsUnwatchedCustomState(t *testing.T) {
 	}
 }
 
-// Only explicitly supported boundaries may terminate the disposable guest
-// controller. Recovery-only points must never be accepted during apply.
+// Experimental creation boundaries must never be revived; only genuine
+// historical recovery failures may use QA crash injection.
 func TestGuardedRuleTrialQACrashBoundaryAdmission(t *testing.T) {
-	for _, phase := range []string{"apply", "recover"} {
-		for _, point := range []string{"", "before-journal", "after-journal", "after-add", "after-delete", "before-recovered-journal", "unknown"} {
-			accepted := point == "" || (phase == "apply" && (point == "before-journal" || point == "after-journal" || point == "after-add")) || (phase == "recover" && (point == "after-delete" || point == "before-recovered-journal"))
+	for _, phase := range []string{"apply", "route-apply", "recover"} {
+		for _, point := range []string{"", "before-journal", "after-journal", "after-add",
+			"after-route", "after-delete", "after-route-delete", "before-recovered-journal", "unknown"} {
+			allowed := point == "" || (phase == "recover" &&
+				(point == "after-delete" || point == "after-route-delete" || point == "before-recovered-journal"))
 			err := trialValidateQACrashPoint(phase, point)
-			if accepted && err != nil {
-				t.Fatalf("%s/%s unexpectedly rejected: %v", phase, point, err)
-			}
-			if !accepted && ErrorCode(err) != "invalid_arguments" {
-				t.Fatalf("%s/%s not rejected: %v", phase, point, err)
+			if allowed && err != nil || !allowed && ErrorCode(err) != "invalid_arguments" {
+				t.Fatalf("unexpected historical QA admission %s/%s: %v", phase, point, err)
 			}
 		}
-	}
-	if ErrorCode(trialValidateQACrashPoint("other", "after-add")) != "invalid_arguments" {
-		t.Fatal("unknown QA phase unexpectedly accepted")
 	}
 }
 

@@ -325,26 +325,6 @@ func run(j bool, m *sc.Manager, args []string) int {
 		}
 		res, e := m.Probe(*via, *target)
 		return output(j, res, e)
-	case "selective-stage-intent":
-		opts := flag.NewFlagSet(name, flag.ContinueOnError)
-		opts.SetOutput(io.Discard)
-		endpoint := opts.String("endpoint", "", "literal existing VPN endpoint IP")
-		management := opts.String("management-peer", "", "literal current SSH/admin peer IP")
-		tunnel := opts.String("tunnel-if", "", "proposed unused TUN interface name")
-		var destinations destinationFlags
-		opts.Var(&destinations, "destination", "explicit public CIDR; repeat per destination")
-		if e := opts.Parse(args); e != nil || len(opts.Args()) != 0 {
-			return output(j, nil, sc.Fault("invalid_arguments", "invalid selective planning/staging options"))
-		}
-		request := sc.SelectivePlanRequest{
-			EndpointIP: *endpoint, ManagementPeerIP: *management,
-			TunnelInterface: *tunnel, Destinations: destinations,
-		}
-		status, err := m.StageSelectiveIntent(request)
-		if err != nil {
-			return output(j, nil, err)
-		}
-		return output(j, status, nil)
 	case "smart-tun-trial-apply":
 		opts := flag.NewFlagSet(name, flag.ContinueOnError)
 		opts.SetOutput(io.Discard)
@@ -541,43 +521,16 @@ func run(j bool, m *sc.Manager, args []string) int {
 		}
 		receipt, err := m.InspectGuardedRuleTrial()
 		return output(j, receipt, err)
-	case "selective-trial-apply", "selective-route-trial-apply", "activation-trial-clear":
+	case "activation-trial-clear":
 		opts := flag.NewFlagSet(name, flag.ContinueOnError)
 		opts.SetOutput(io.Discard)
-		id := opts.String("operation-id", "", "exact staged or recovered operation ID")
-		revision := opts.Uint64("revision", 0, "exact operation revision")
-		deadline := opts.Int("deadline-seconds", 600, "disposable rule trial deadline in seconds")
-		interrupt := opts.Bool("qa-kill-after-rule", false, "legacy disposable-only SIGKILL after rule add")
-		qaPoint := opts.String("qa-kill-at", "", "disposable-only apply interruption point")
-		qaFaultPoint := opts.String("qa-fail-at", "", "disposable-only v3 native error-path injection")
-		if e := opts.Parse(args); e != nil || len(opts.Args()) != 0 {
-			return output(j, nil, sc.Fault("invalid_arguments", "invalid rule trial options"))
+		id := opts.String("operation-id", "", "exact recovered operation ID")
+		revision := opts.Uint64("revision", 0, "exact recovered revision")
+		if e := opts.Parse(args); e != nil || len(opts.Args()) != 0 || *revision != 3 {
+			return output(j, nil, sc.Fault("invalid_arguments", "clear requires exact recovered revision 3"))
 		}
-		if (*interrupt && *qaPoint != "") || (*qaFaultPoint != "" && (*qaPoint != "" || *interrupt)) {
-			return output(j, nil, sc.Fault("invalid_arguments", "only one disposable QA intervention is allowed"))
-		}
-		if *interrupt && name == "selective-route-trial-apply" {
-			return output(j, nil, sc.Fault("invalid_arguments", "legacy rule-only interruption option is unavailable for route trials"))
-		}
-		if name == "activation-trial-clear" {
-			if *deadline != 600 || *interrupt || *qaPoint != "" || *qaFaultPoint != "" || *revision != 3 {
-				return output(j, nil, sc.Fault("invalid_arguments", "clear requires exact recovered revision 3"))
-			}
-			err := m.ClearRecoveredRuleTrial(*id, *revision)
-			return output(j, map[string]any{"operation_id": *id, "cleared": err == nil}, err)
-		}
-		if *interrupt {
-			*qaPoint = "after-add"
-		}
-		if name == "selective-trial-apply" && *qaFaultPoint != "" {
-			return output(j, nil, sc.Fault("invalid_arguments", "QA native fault injection requires v3 route trial"))
-		}
-		if name == "selective-route-trial-apply" {
-			receipt, err := m.BeginGuardedRouteTrial(*id, *revision, *deadline, *qaPoint, *qaFaultPoint)
-			return output(j, receipt, err)
-		}
-		receipt, err := m.BeginGuardedRuleTrial(*id, *revision, *deadline, *qaPoint)
-		return output(j, receipt, err)
+		err := m.ClearRecoveredRuleTrial(*id, *revision)
+		return output(j, map[string]any{"operation_id": *id, "cleared": err == nil}, err)
 	case "selective-abandon-intent":
 		opts := flag.NewFlagSet(name, flag.ContinueOnError)
 		opts.SetOutput(io.Discard)
@@ -784,15 +737,8 @@ Commands:
   host-preflight [--endpoint IP] [--management-peer IP] [--with-nftables]
                               Observe routes/rules and optionally native nftables;
                               no activation or firewall ownership
-  selective-stage-intent --endpoint IP --management-peer IP --tunnel-if NAME
-                         --destination CIDR [--destination CIDR...]
-                              Legacy QA-only unarmed PREPARED intent; no route changes
   selective-abandon-intent --operation-id HEX32 --revision 1
-                              Remove only exact untouched PREPARED intent
-  selective-trial-apply --operation-id HEX32 --revision 1 [--deadline-seconds 600]
-                              DISPOSABLE DOCKER-ONLY rule-only trial; never VPN activation
-  selective-route-trial-apply --operation-id HEX32 --revision 1 [--deadline-seconds 600]
-                              DISPOSABLE DOCKER-ONLY lo route + RPDB rule trial; never VPN activation
+                              Remove only exact untouched historical PREPARED intent
   smart-tun-trial-apply --tunnel-if sctunqa0 --underlay-if scqaedge0
                         --tunnel-ipv4 172.31.99.1/30 --management-peer 10.254.72.2
                         --domestic-cidr 5.22.0.10/32 --protected-cidr 10.254.72.0/30
@@ -871,17 +817,12 @@ Host drift compares separate, non-atomic network observations without changing
 the host, and is never an activation guard or a recovery journal.
 Activation-journal-status shows only safe metadata for the internal v1
 PREPARED/UNCERTAIN journal, never private resource before/intended snapshots.
-Selective-stage-intent makes two non-atomic native observations and records
-an advisory PREPARED intent; it is NOT a guard, host reservation or TUN start.
-Experimental rule-only trial needs a disconnected disposable systemd Docker guest,
-preinstalled independent recovery units and an enabled live recovery timer.
-It creates one selected-prefix RPDB rule pointing at an EMPTY table. It has
-no VPN path, no production activation, no SSH confirmation and no Runtime
-Health Guard. It must expire and cannot be used on a real server.
-Only selective-abandon-intent can discard the exact untouched revision;
-UNCERTAIN and modified journals cannot be abandoned. Even an absent journal
-cannot prove safe networking, guard arming or recovery. These commands may
-initialize a private state directory/lock but never change host routes.
+Historical v1 selective staging and v2/v3 rule/route trial creation are
+retired; no new legacy host route policy can be created by the CLI.
+Only selective-abandon-intent can remove an exact unarmed historical v1
+PREPARED operation. UNCERTAIN or modified journals remain untouched; legacy
+v2/v3 pending/recovered records retain strict ownership-aware recovery and
+exact recovered clearance. An absent journal does not prove safe networking.
 The guarded TUN trial runs the installed pinned sing-box on the synthetic
 disconnected 2-interface Docker guest, using an inert separate CAP_NET_ADMIN
 service, a private operation journal and an independently prearmed systemd
