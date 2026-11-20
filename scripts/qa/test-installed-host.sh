@@ -1408,7 +1408,7 @@ if [[ $qa_version == 12 ]]; then
     /root/qa-installed-native-connect.sh
   assert_network_unchanged debian12-native-dns-final "$offline_before"
   verify_host_services debian12-native-dns-final
-  echo 'DEBIAN12_NATIVE_DNS_WIRE=PASS (real Core/TUN packet paths in isolated guest; installed native guards NOT_RUN)'
+  echo 'DEBIAN12_NATIVE_DNS_WIRE=PASS (source-generated Core/TUN/DNS lab only; installed native lifecycle tested separately)'
 fi
 if [[ $qa_version == 13 ]]; then
 # A REAL Linux TUN+VLESS path is exercised only in the disconnected
@@ -2106,7 +2106,7 @@ docker exec "$container" /bin/sh /root/qa-product-guard-trial.sh
 assert_network_unchanged product-guard-recovered "$offline_before"
 verify_host_services product-guard-recovered
 else
-  echo 'NATIVE_TUN_AND_GUARDED_RULE_POSITIVES=NOT_RUN (Debian12 is not admitted; exact refusal checked separately)'
+  echo 'NATIVE_TUN_AND_GUARDED_RULE_POSITIVES=NOT_RUN (Debian12 legacy trial only; installed connect-smart tested separately)'
 fi
 echo '=== Installed real VLESS Proxy Only and owned offline update ==='
 docker cp "$root/scripts/qa/host-proxy-only.sh" "$container:/root/qa-proxy-only.sh"

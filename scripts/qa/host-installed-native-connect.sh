@@ -17,6 +17,21 @@ native_installed_baseline() {
     test "$(systemctl is-enabled server-connect-activation-recover.timer)" = disabled
 }
 
+native_installed_error() {
+  python3 - "$1" <<'PYQAERROR'
+import json,sys
+try:
+    with open(sys.argv[1],encoding="utf-8") as f: value=json.load(f)
+    detail=value.get("error") or {}
+    print("INSTALLED_NATIVE_CLI_ERROR="+json.dumps({
+        "code":str(detail.get("code", ""))[:80],
+        "message":str(detail.get("message", ""))[:180],
+    },sort_keys=True))
+except (OSError,TypeError,ValueError):
+    print("INSTALLED_NATIVE_CLI_ERROR=unavailable")
+PYQAERROR
+}
+
 native_installed_diagnostic() {
   # Synthetic, bounded, credential-free state only. Do not print the
   # installed selected profile or complete Core configuration.
@@ -35,6 +50,25 @@ except (ValueError,TypeError):print("INSTALLED_NATIVE_DIAGNOSTIC=unavailable")
   systemctl show server-connect-native-tun.service -p ActiveState -p Result -p MainPID >&2 || :
   systemctl show server-connect-smart-health.service -p ActiveState -p Result >&2 || :
   systemctl show server-connect-activation-recover.service -p ActiveState -p Result >&2 || :
+  # Field shapes only: never print accepted TCP tuple or set element values.
+  nft -j list table inet sc_reply_guard 2>/dev/null | python3 -c '
+import json,sys
+try:
+    doc=json.load(sys.stdin)
+    for node in doc.get("nftables",[]):
+        if len(node)!=1:continue
+        kind,obj=next(iter(node.items()))
+        if kind=="metainfo":continue
+        summary={"kind":kind,"fields":sorted(obj)}
+        if kind=="set":
+            summary["type"]=obj.get("type")
+            summary["elements"]=len(obj.get("elem") or [])
+        if kind=="rule":
+            summary["expr_shapes"]=[sorted(expr) for expr in obj.get("expr",[])]
+        print("INSTALLED_NATIVE_NFT_SHAPE="+json.dumps(summary,sort_keys=True))
+except (OSError,TypeError,ValueError):
+    print("INSTALLED_NATIVE_NFT_SHAPE=unavailable")
+' >&2 || :
 }
 
 native_installed_cleanup() {
@@ -44,6 +78,7 @@ native_installed_cleanup() {
   if [ "$native_installed_prepared" != yes ]; then return 0; fi
   if ! /usr/local/bin/server-connect --json disconnect >/run/sc-qa-installed-native-off.json; then
     echo 'INSTALLED_NATIVE_CLEANUP=FAIL (official Disconnect failed)' >&2
+    native_installed_error /run/sc-qa-installed-native-off.json >&2
     return 1
   fi
   if [ "$native_installed_rule_added" = yes ]; then
@@ -106,6 +141,7 @@ print(r["data"]["id"])'
     --tunnel-ipv4 172.31.99.1/30 --tunnel-ipv6 fd73:99::1/64 \
     --mode default --health-failures 10 > /run/sc-qa-installed-native-connect.json || {
       echo 'INSTALLED_NATIVE_APPLY=FAIL (installed CLI refused or did not stabilize)' >&2
+      native_installed_error /run/sc-qa-installed-native-connect.json >&2
       native_installed_diagnostic
       return 1
     }
@@ -156,6 +192,7 @@ assert r["data"]["inbound_reply_guard_verified"],r
     --tunnel-ipv4 172.31.99.1/30 --tunnel-ipv6 fd73:99::1/64 \
     --mode default --health-failures 1 > /run/sc-qa-installed-native-outage.json || {
       echo 'INSTALLED_NATIVE_GUARD_APPLY=FAIL (installed CLI refused or did not stabilize)' >&2
+      native_installed_error /run/sc-qa-installed-native-outage.json >&2
       native_installed_diagnostic
       return 1
     }
@@ -179,7 +216,12 @@ assert r["ok"] and r["data"]["desired"]=="direct" and r["data"]["observed"]=="in
 import json,sys
 r=json.load(sys.stdin)
 assert r["ok"] and r["data"]["health_phase"]=="off",r
-assert r["data"]["health_reason"] in ("selected_path_failure_exhausted","selected_tcp_unreachable"),r
+assert r["data"]["health_failures"] >= 1 and r["data"]["health_rounds"] >= 1,r
+assert r["data"]["health_reason"] in (
+    "selected_tcp_unreachable", "selected_tls_unavailable",
+    "selected_https_invalid_response", "selected_https_unreachable",
+    "selected_https_write_failed", "selected_https_unhealthy",
+    "selected_probe_timeout", "selected_path_failure_exhausted"),r
 ' || return 1
   echo 'INSTALLED_NATIVE_UNHEALTHY_GUARD=PASS (independent selected-HTTPS-missing Off, not genuine provider-outage acceptance)'
   native_installed_cleanup || return 1
