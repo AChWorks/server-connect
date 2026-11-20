@@ -1700,17 +1700,6 @@ accept_tun_guard_rejection() {
   done
 }
 assert_tun_native_cleanup ipv4-direct-rejected-before-tun
-echo 'REAL_TUN_LAB_STAGE=installed-native-connect-smart'
-installed_native_log="$scratch/debian13-installed-native.log"
-docker exec -e SC_QA_TUN_INSTALLED_NATIVE=yes \
-  "$container" /bin/sh /root/qa-host-tun-path.sh | tee "$installed_native_log"
-for marker in INSTALLED_NATIVE_PREARM_DIRECT_BASELINE INSTALLED_NATIVE_SELECTED_PATH \
-              INSTALLED_NATIVE_EXPLICIT_OFF INSTALLED_NATIVE_UNHEALTHY_GUARD \
-              INSTALLED_NATIVE_CLEANUP; do
-  grep -F "${marker}=PASS" "$installed_native_log" >/dev/null
-done
-grep -F 'REAL_TUN_LAB_CLEANUP=PASS' "$installed_native_log" >/dev/null
-assert_tun_native_cleanup installed-native-connect-smart
 echo 'REAL_TUN_LAB_STAGE=execute-guest-path'
 regular_tun_log="$scratch/real-tun-domain-path.log"
 docker exec "$container" /bin/sh /root/qa-host-tun-path.sh | tee "$regular_tun_log"
@@ -2024,6 +2013,22 @@ fi
 docker exec "$container" /sbin/ip netns del scqapeer
 assert_tun_native_cleanup real-tun-injected-cleanup-recovery
 echo 'REAL_TUN_CLEANUP_FAILURE_REJECTED=PASS (guest cleanup failure != expected TUN rejection)'
+# The modern Native Core and the legacy experimental supervised trial
+# exercise the same installed recovery timer but do NOT form a supported
+# continuous product transition. Prove each independently after full
+# lifecycle cleanup: run the legacy trial matrix first, then the native
+# installed acceptance last, with exact baseline witnesses on both sides.
+echo 'REAL_TUN_LAB_STAGE=installed-native-connect-smart'
+installed_native_log="$scratch/debian13-installed-native.log"
+docker exec -e SC_QA_TUN_INSTALLED_NATIVE=yes \
+  "$container" /bin/sh /root/qa-host-tun-path.sh | tee "$installed_native_log"
+for marker in INSTALLED_NATIVE_PREARM_DIRECT_BASELINE INSTALLED_NATIVE_SELECTED_PATH \
+              INSTALLED_NATIVE_EXPLICIT_OFF INSTALLED_NATIVE_UNHEALTHY_GUARD \
+              INSTALLED_NATIVE_CLEANUP; do
+  grep -F "${marker}=PASS" "$installed_native_log" >/dev/null
+done
+grep -F 'REAL_TUN_LAB_CLEANUP=PASS' "$installed_native_log" >/dev/null
+assert_tun_native_cleanup installed-native-connect-smart
 # Remove exactly the QA helpers copied for the completed TUN trials. This
 # also closes the earlier WordPress intermediate guest-helper cleanup gap.
 # The bounded helper verifies source hashes after authenticating its pinned
@@ -2098,7 +2103,7 @@ docker exec "$container" /bin/rm -f /root/qa-tun-config-qa /root/qa-host-tun-pat
   /root/qa-native-product-tun.sh /root/qa-supervised-product-tun.sh \
   /root/qa-supervised-product-tun.py /root/qa-smart-health-responder.py /root/qa-smart-health-client.py \
   /root/qa-tun-dns-peer.py /root/qa-tun-dns-client.py /root/qa-tun-wordpress-fpm.sh \
-  /root/qa-tun-wp-check.py /root/qa-tun-payload-wire.py /root/qa-tun-ipv6-wire.py
+  /root/qa-installed-native-connect.sh /root/qa-tun-wp-check.py /root/qa-tun-payload-wire.py /root/qa-tun-ipv6-wire.py
 # Product code + installed inactive-by-default independent recovery units.
 # The actual RPDB rule is added ONLY in the verified disconnected guest.
 docker cp "$root/scripts/qa/host-product-guard-trial.sh" "$container:/root/qa-product-guard-trial.sh"
