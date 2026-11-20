@@ -535,6 +535,8 @@ REQUIRED_FILES = {
     "server-connect/THIRD-PARTY-LICENSES/publicsuffix-list.dat",
     "server-connect/THIRD-PARTY-LICENSES/chocolate4u-LICENSE",
     "server-connect/THIRD-PARTY-LICENSES/chocolate4u-geoip-ir.json",
+    "server-connect/THIRD-PARTY-LICENSES/dbip-ATTRIBUTION.txt",
+    "server-connect/THIRD-PARTY-LICENSES/dbip-iran-prefixes.json",
 }
 ALLOWED_DIRS = {
     "server-connect",

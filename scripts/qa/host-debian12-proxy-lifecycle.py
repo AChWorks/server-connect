@@ -76,6 +76,8 @@ BUNDLE_FILES = {
     "THIRD-PARTY-LICENSES/publicsuffix-list.dat",
     "THIRD-PARTY-LICENSES/chocolate4u-LICENSE",
     "THIRD-PARTY-LICENSES/chocolate4u-geoip-ir.json",
+    "THIRD-PARTY-LICENSES/dbip-ATTRIBUTION.txt",
+    "THIRD-PARTY-LICENSES/dbip-iran-prefixes.json",
     "install.sh", "release-auth.py", "LICENSE", "manifest.json",
     "checksums.sha256", *UNITS,
 }

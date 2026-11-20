@@ -93,6 +93,16 @@ RELEASE_FILES
   printf '%s\n' THIRD-PARTY-LICENSES/chocolate4u-LICENSE
   printf '%s\n' THIRD-PARTY-LICENSES/chocolate4u-geoip-ir.json
  fi
+ # Historical verified bundles had embedded DB-IP data but no separate
+ # attribution/source pair. Preserve their installed removal/update, but
+ # reject partially present pair members in any installed layout.
+ if [ -e "$1/THIRD-PARTY-LICENSES/dbip-ATTRIBUTION.txt" ] ||
+    [ -L "$1/THIRD-PARTY-LICENSES/dbip-ATTRIBUTION.txt" ] ||
+    [ -e "$1/THIRD-PARTY-LICENSES/dbip-iran-prefixes.json" ] ||
+    [ -L "$1/THIRD-PARTY-LICENSES/dbip-iran-prefixes.json" ]; then
+  printf '%s\n' THIRD-PARTY-LICENSES/dbip-ATTRIBUTION.txt
+  printf '%s\n' THIRD-PARTY-LICENSES/dbip-iran-prefixes.json
+ fi
  printf '%s\n' manifest.json
 }
 verify_release_payload() (
@@ -122,6 +132,10 @@ verify_release_payload() (
    die 'incoming release must contain Chocolate4U source license'
   check_root_file "$root/THIRD-PARTY-LICENSES/chocolate4u-geoip-ir.json" ||
    die 'incoming release must contain pinned Chocolate4U source data'
+  check_root_file "$root/THIRD-PARTY-LICENSES/dbip-ATTRIBUTION.txt" ||
+   die 'incoming release must contain DB-IP Lite attribution'
+  check_root_file "$root/THIRD-PARTY-LICENSES/dbip-iran-prefixes.json" ||
+   die 'incoming release must contain pinned DB-IP Lite modified data'
  fi
  expected=$(release_payload_files "$root")
  if [ "$prior_installed" = yes ] && [ "$(wc -l < "$root/checksums.sha256")" -eq 12 ]; then
