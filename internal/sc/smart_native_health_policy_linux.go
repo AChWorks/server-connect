@@ -179,12 +179,12 @@ var nativeOutputTCPRedirectRule = regexp.MustCompile(`^meta l4proto (?:tcp|6) co
 // Those returns are not generic TCP escapes: their selectors are scoped to
 // the Core's reserved marks and its local-address sets. Keep this a semantic
 // witness, not a rule-count or nftables-version restriction.
-var nativeOutputSafeEarlyReturn = regexp.MustCompile(`^(?:meta mark 0x0*2024|ct mark 0x0*202[34]|ip daddr @inet4_local_address_set|ip6 daddr @inet6_local_address_set) counter(?: packets [0-9]+ bytes [0-9]+)? return$`)
+var nativeOutputSafeEarlyReturn = regexp.MustCompile(`^(?:meta mark 0x0*2024|ct mark 0x0*202[34]|(?:meta nfproto ipv4 )?ip daddr @inet4_local_address_set|(?:meta nfproto ipv6 )?ip6 daddr @inet6_local_address_set) counter(?: packets [0-9]+ bytes [0-9]+)? return$`)
 
 // IPv4-only strict routing can explicitly reject unsupported IPv6. Core may
 // also drop MPTCP SYNs (TCP option 30) without bypassing ordinary TCP capture.
 var nativeOutputSafeEarlyIPv6Reject = regexp.MustCompile(`^meta nfproto ipv6 counter(?: packets [0-9]+ bytes [0-9]+)? reject(?: with icmpx type (?:no-route|admin-prohibited))?$`)
-var nativeOutputSafeEarlyMPTCP = regexp.MustCompile(`^meta l4proto (?:tcp|6) tcp option 30 exists counter(?: packets [0-9]+ bytes [0-9]+)? (?:drop|return)$`)
+var nativeOutputSafeEarlyMPTCP = regexp.MustCompile(`^meta l4proto (?:tcp|6) tcp option (?:30|mptcp) (?:exists|present) counter(?: packets [0-9]+ bytes [0-9]+)? (?:drop|return)$`)
 
 // Any other earlier verdict, NAT diversion, queue, or routing mutation might
 // keep ordinary unmarked TCP away from the later valid-looking redirect.

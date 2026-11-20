@@ -8,6 +8,9 @@
 # so a preflight/import failure keeps the original diagnostic and full cleanup.
 native_installed_prepared=no
 native_installed_rule_added=no
+# Preserve only the synthetic Core-owned output-chain rendering in memory,
+# before independent recovery removes the table. Printed only on QA failure.
+native_installed_output_nat_shape=
 native_installed_baseline() {
   test "$(ip -N -j -4 route show table all)" = "$native_installed_routes4" &&
     test "$(ip -N -j -4 rule show)" = "$native_installed_rules4" &&
@@ -55,6 +58,10 @@ except (ValueError,TypeError):print("INSTALLED_NATIVE_DIAGNOSTIC=unavailable")
   systemctl show server-connect-native-tun.service -p ActiveState -p Result -p MainPID >&2 || :
   systemctl show server-connect-smart-health.service -p ActiveState -p Result >&2 || :
   systemctl show server-connect-activation-recover.service -p ActiveState -p Result >&2 || :
+  if [ -n "$native_installed_output_nat_shape" ]; then
+    printf '%s\n' "$native_installed_output_nat_shape" |
+      sed 's/^/INSTALLED_NATIVE_OUTPUT_NAT=/' >&2
+  fi
   # Field shapes only: never print accepted TCP tuple or set element values.
   nft -j list table inet sc_reply_guard 2>/dev/null | python3 -c '
 import json,sys
@@ -161,6 +168,10 @@ assert r["data"]["inbound_reply_guard_verified"],r
   test "$(systemctl show server-connect-native-tun.service -p ActiveState --value)" = active || return 1
   test "$(systemctl show server-connect-smart-health.timer -p ActiveState --value)" = active || return 1
   test "$(systemctl show server-connect-activation-recover.timer -p ActiveState --value)" = active || return 1
+  native_installed_output_nat_shape=$(nft list chain inet sing-box output) || return 1
+  # nft may print Core's interface/host-local exceptions; in this disconnected
+  # synthetic-only guest none contains credentials or customer destinations.
+  test "${#native_installed_output_nat_shape}" -le 8192 || return 1
 
   # No selected packet is sent before the installed Core and both guards are
   # verified active. An independent native packet counter is fixed BEFORE

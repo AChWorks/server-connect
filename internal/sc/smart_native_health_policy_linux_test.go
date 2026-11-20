@@ -207,8 +207,11 @@ func TestNativeHealthOutputPreRedirectVerdicts(t *testing.T) {
 				"ct mark 0x00002023 counter packets 1 bytes 70 return",
 				"ip daddr @inet4_local_address_set counter packets 1 bytes 70 return",
 				"ip6 daddr @inet6_local_address_set counter packets 1 bytes 70 return",
+				"meta nfproto ipv4 ip daddr @inet4_local_address_set counter packets 1 bytes 70 return",
+				"meta nfproto ipv6 ip6 daddr @inet6_local_address_set counter packets 1 bytes 70 return",
 				"meta nfproto ipv6 counter packets 1 bytes 70 reject",
 				"meta l4proto " + proto + " tcp option 30 exists counter packets 1 bytes 70 drop",
+				"meta l4proto " + proto + " tcp option mptcp present counter packets 1 bytes 70 drop",
 			}
 			// These originate from sing-tun's native mark/conntrack, own-host
 			// address, unsupported family and MPTCP exception paths. No fixed
