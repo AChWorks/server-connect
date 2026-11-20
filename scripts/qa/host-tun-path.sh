@@ -56,7 +56,9 @@ require_guest() {
   test -f /root/qa-tun-native-apps.py
   test -f /root/qa-tun-payload-wire.py
   test -f /root/qa-tun-ipv6-wire.py
-  test -f /root/qa-tun-wordpress-fpm.sh && test -f /root/qa-tun-wp-check.py
+  if [ "$native_dns_trial" != yes ]; then
+    test -f /root/qa-tun-wordpress-fpm.sh && test -f /root/qa-tun-wp-check.py
+  fi
   test -x /usr/bin/apt-get && test -x /usr/bin/git
   test ! -e "$native_apps_dir" && test ! -L "$native_apps_dir"
   test ! -e "$wp_fixture_dir" && test ! -L "$wp_fixture_dir"
@@ -1106,7 +1108,10 @@ if [ "$payload_trial" = yes ]; then
   }
   echo 'REAL_TUN_PAYLOAD_DIRECT_BASELINE=PASS (TCP and UDP independent native counters)'
 fi
-if [ "${SC_QA_TUN_GUARD_LAB-}" != yes ]; then
+# The native DNS-only packet lab has no PHP/WordPress claim. Do not require
+# Debian 13's PHP 8.4 fixture just to exercise the same genuine TUN/Core and
+# independent DNS witnesses in a disconnected Debian 12 guest.
+if [ "${SC_QA_TUN_GUARD_LAB-}" != yes ] && [ "$native_dns_trial" != yes ]; then
   # mkdir is exclusive: only a successfully created QA-owned fixture is
   # eligible for cleanup, including when WordPress setup partially fails.
   mkdir -m 0755 "$wp_fixture_dir"

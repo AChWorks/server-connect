@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Exact QA-only lifecycle in ephemeral Debian 12/13 systemd containers.
-# Debian13 retains the full native experiment. Debian12 proves installed
-# Direct/Proxy Only compatibility and an explicit native-Apply refusal.
+# Debian13 retains the full native product/guard experiment. Debian12 proves
+# installed Direct/Proxy Only and legacy native-Apply refusal, plus a separate
+# disconnected real-Core native TUN DNS packet lab (not product Apply).
 # The original installer/lifecycle guest remains Docker --network none.
 # A separate short-lived connected guest tests online prerequisite acquisition
 # before its own network is disconnected. NEVER run on a production host;
@@ -1343,6 +1344,55 @@ docker exec "$container" test -f "/opt/server-connect/$legacy_link/.owner"
 echo 'INSTALLED_LEGACY_TO_FULL_REINSTALL=PASS (exact historical layout/name, actual installer, private guest)'
 assert_network_unchanged reinstall "$offline_before"
 verify_host_services reinstall
+if [[ $qa_version == 12 ]]; then
+  # This closes the source-generated native DNS *wire* gap on Debian 12,
+  # without implying installed native connect-smart/guards, public IPv6 or
+  # field support. All packets, DNS servers and real VLESS/Core peers remain
+  # in this existing Docker --network none systemd guest.
+  echo 'DEBIAN12_NATIVE_DNS_STAGE=build-disconnected-guest-generator'
+  GOPROXY=off GOTOOLCHAIN=local CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+    go build -trimpath -o "$scratch/tun-config-qa" ./scripts/qa/tun_config_generator.go
+  test -x "$scratch/tun-config-qa"
+  docker cp "$scratch/tun-config-qa" "$container:/root/qa-tun-config-qa"
+  for fixture in tun-dns-peer.py tun-dns-client.py tun-sni-client.py \
+                 tun-native-apps.py tun-payload-wire.py tun-ipv6-wire.py \
+                 host-tun-path.sh; do
+    docker cp "$root/scripts/qa/$fixture" "$container:/root/qa-$fixture"
+  done
+  docker cp "$root/scripts/qa/host-native-dns-policy.sh" "$container:/root/qa-native-dns-policy.sh"
+  # Each mode starts independent selected and native Direct positive controls,
+  # verifies UDP/TCP port-53 precedence and IPv6 UDP/MTU/outage containment,
+  # then removes its own TUN, VETH, namespace, nft and Core resources.
+  tun_netns_before=$(docker exec "$container" /sbin/ip netns list)
+  tun_nft_before=$(docker exec "$container" /usr/sbin/nft -j list ruleset)
+  for native_mode in default bypass_iran; do
+    echo "DEBIAN12_NATIVE_DNS_STAGE=$native_mode"
+    native_dns_log="$scratch/debian12-native-dns-$native_mode.log"
+    docker exec -e SC_QA_TUN_IPV6=yes -e SC_QA_TUN_NATIVE_DNS=yes \
+      -e "SC_QA_TUN_NATIVE_DNS_MODE=$native_mode" \
+      "$container" /bin/sh /root/qa-host-tun-path.sh | tee "$native_dns_log"
+    for marker in NATIVE_DNS_PRE_TUN_POSITIVE_CONTROL NATIVE_DNS_SELECTED_ADDRESS_PRECEDENCE \
+                  NATIVE_IPV6_UDP_MTU NATIVE_IPV6_UDP_REDUCED_UNDERLAY NATIVE_IPV6_UDP_OUTAGE \
+                  NATIVE_DNS_UNMATCHED_VPN_RESOLVER NATIVE_DNS_OUTAGE_FAIL_CLOSED \
+                  NATIVE_DNS_DIRECT_OUTAGE_CONTROL; do
+      grep -Fx "$marker=PASS ($native_mode)" "$native_dns_log" >/dev/null
+    done
+    grep -F 'REAL_TUN_LAB_CLEANUP=PASS' "$native_dns_log" >/dev/null
+    [[ $(docker exec "$container" /sbin/ip netns list) == "$tun_netns_before" ]]
+    [[ $(docker exec "$container" /usr/sbin/nft -j list ruleset) == "$tun_nft_before" ]]
+    docker exec "$container" /bin/sh -c \
+      'test ! -e /sys/class/net/scqaedge0 && test ! -e /sys/class/net/sctunqa0'
+    assert_network_unchanged "debian12-native-dns-$native_mode" "$offline_before"
+    verify_host_services "debian12-native-dns-$native_mode"
+  done
+  docker exec "$container" rm -- /root/qa-tun-config-qa \
+    /root/qa-tun-dns-peer.py /root/qa-tun-dns-client.py /root/qa-tun-sni-client.py \
+    /root/qa-tun-native-apps.py /root/qa-tun-payload-wire.py /root/qa-tun-ipv6-wire.py \
+    /root/qa-host-tun-path.sh /root/qa-native-dns-policy.sh
+  assert_network_unchanged debian12-native-dns-final "$offline_before"
+  verify_host_services debian12-native-dns-final
+  echo 'DEBIAN12_NATIVE_DNS_WIRE=PASS (real Core/TUN packet paths in isolated guest; installed native guards NOT_RUN)'
+fi
 if [[ $qa_version == 13 ]]; then
 # A REAL Linux TUN+VLESS path is exercised only in the disconnected
 # disposable guest; the installed product still has no public TUN Apply.
