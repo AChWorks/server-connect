@@ -56,7 +56,7 @@ require_guest() {
   test -f /root/qa-tun-native-apps.py
   test -f /root/qa-tun-payload-wire.py
   test -f /root/qa-tun-ipv6-wire.py
-  if [ "$native_dns_trial" != yes ]; then
+  if [ "$native_dns_trial" != yes ] && [ "$native_installed_trial_mode" != yes ]; then
     test -f /root/qa-tun-wordpress-fpm.sh && test -f /root/qa-tun-wp-check.py
   fi
   test -x /usr/bin/apt-get && test -x /usr/bin/git
@@ -96,6 +96,14 @@ cleanup() {
   original_rc=$?
   cleanup_failed=no
   trap - EXIT INT TERM
+  if [ "${SC_QA_TUN_INSTALLED_NATIVE-}" = yes ] &&
+     command -v native_installed_cleanup >/dev/null; then
+    if [ "$original_rc" -ne 0 ]; then native_installed_diagnostic; fi
+    if ! native_installed_cleanup; then
+      echo "INSTALLED_NATIVE_FIXTURE_CLEANUP=FAIL (owned native lifecycle uncertain)" >&2
+      cleanup_failed=yes
+    fi
+  fi
   if [ "${SC_QA_TUN_PRODUCT_LAB-}" = yes ] &&
      command -v native_product_cleanup >/dev/null && ! native_product_cleanup; then
     echo 'PRODUCT_NATIVE_QA_FIXTURE_CLEANUP=FAIL (unresolved QA fixture ownership)' >&2
@@ -521,6 +529,21 @@ case "${SC_QA_TUN_GUARD_CLEANUP_FAULT-}" in
   * ) echo 'Invalid real-TUN guard cleanup fault mode' >&2; exit 2 ;;
 esac
 
+# Actual installed native Connect is exclusive of legacy TUN trials,
+# standalone native DNS and all fault-injection fixtures.
+case "${SC_QA_TUN_INSTALLED_NATIVE-}" in
+  '') native_installed_trial_mode=no ;;
+  yes)
+    [ -z "${SC_QA_TUN_PRODUCT_LAB-}" ] && [ -z "${SC_QA_TUN_SUPERVISED-}" ] &&
+    [ -z "${SC_QA_TUN_GUARD_LAB-}" ] && [ -z "${SC_QA_TUN_OWNED_BOUNDARY-}" ] &&
+    [ -z "${SC_QA_TUN_NATIVE_DNS-}" ] && [ -z "${SC_QA_TUN_IPV6-}" ] &&
+    [ -z "${SC_QA_TUN_OUTAGE_FAULT-}" ] && [ -z "${SC_QA_TUN_CLEANUP_FAULT-}" ] || {
+      echo 'INSTALLED_NATIVE_PREFLIGHT=FAIL (requires exclusive disconnected guest)' >&2; exit 2;
+    }
+    native_installed_trial_mode=yes ;;
+  *) echo 'INSTALLED_NATIVE_PREFLIGHT=FAIL (unsupported QA mode)' >&2; exit 2 ;;
+esac
+
 # The dual-stack trial is explicitly opted in, strictly disposable and
 # excluded from manager-death/hosting/cleanup fault-injection scenarios.
 case "${SC_QA_TUN_IPV6-}" in
@@ -744,7 +767,9 @@ ip -n "$peer" link set scqapeer0 up
 # Internet connectivity. Only source-path choice is under test.
 ip -n "$peer" addr add 5.22.0.10/32 dev lo
 ip -n "$peer" addr add 8.8.8.8/32 dev lo
-if [ "$native_dns_trial" = yes ]; then
+if [ "$native_dns_trial" = yes ] || [ "$native_installed_trial_mode" = yes ]; then
+  # The native Core's VPN-detoured resolver uses 1.1.1.1, even when an
+  # unproxied app queried another foreign port-53 address.
   ip -n "$peer" addr add 1.1.1.1/32 dev lo
   ip -n "$peer" addr add 5.22.0.11/32 dev lo
   ip -n "$peer" addr add 9.9.9.9/32 dev lo
@@ -963,7 +988,13 @@ if [ "$native_dns_trial" = yes ]; then
   fi
   echo 'NATIVE_DNS_PEER_DAD_READY=PASS'
 fi
-if [ "$native_dns_trial" = yes ]; then dns_peer_mode=native-v6; else dns_peer_mode=; fi
+if [ "$native_dns_trial" = yes ]; then
+  dns_peer_mode=native-v6
+elif [ "$native_installed_trial_mode" = yes ]; then
+  dns_peer_mode=native-v4
+else
+  dns_peer_mode=
+fi
 ip netns exec "$peer" /usr/bin/python3 -I -B -u /root/qa-tun-dns-peer.py ${dns_peer_mode:+"$dns_peer_mode"} \
   >/run/sc-qa-tun-dns.log 2>&1 &
 dns_pid=$!
@@ -1111,7 +1142,7 @@ fi
 # The native DNS-only packet lab has no PHP/WordPress claim. Do not require
 # Debian 13's PHP 8.4 fixture just to exercise the same genuine TUN/Core and
 # independent DNS witnesses in a disconnected Debian 12 guest.
-if [ "${SC_QA_TUN_GUARD_LAB-}" != yes ] && [ "$native_dns_trial" != yes ]; then
+if [ "${SC_QA_TUN_GUARD_LAB-}" != yes ] && [ "$native_dns_trial" != yes ] && [ "$native_installed_trial_mode" != yes ]; then
   # mkdir is exclusive: only a successfully created QA-owned fixture is
   # eligible for cleanup, including when WordPress setup partially fails.
   mkdir -m 0755 "$wp_fixture_dir"
@@ -1149,7 +1180,7 @@ echo "REAL_TUN_DNS_DIRECT_WITNESS=PASS (native DNS UDP/TCP positive controls)"
 hosting_baseline=$(hosting_reply_packets)
 test "$hosting_baseline" -gt 0 || { echo 'FAIL: no positive control of foreign visitor hosting reply' >&2; exit 1; }
 echo "REAL_TUN_FOREIGN_HOSTING_BASELINE=PASS (foreign visitor request/reply, packets=$hosting_baseline)"
-if [ "${SC_QA_TUN_GUARD_LAB-}" = yes ] || [ "${SC_QA_TUN_PRODUCT_LAB-}" = yes ]; then
+if [ "${SC_QA_TUN_GUARD_LAB-}" = yes ] || [ "${SC_QA_TUN_PRODUCT_LAB-}" = yes ] || [ "$native_installed_trial_mode" = yes ]; then
   # The disposable VETH may still be doing IPv6 duplicate-address detection.
   # Its fe80:: local /128 route appears only after DAD finishes. Capturing
   # before then produces a false rollback failure 25s later even when the
@@ -1191,6 +1222,13 @@ if [ "${SC_QA_TUN_PRODUCT_LAB-}" = yes ]; then
 fi
 if [ "${SC_QA_TUN_OWNED_BOUNDARY-}" = yes ]; then
   owned_tun_boundary_trial
+  exit 0
+fi
+
+# The installed official Core/Guard is a separate, deliberately bounded QA.
+if [ "$native_installed_trial_mode" = yes ]; then
+  . /root/qa-installed-native-connect.sh
+  native_installed_trial
   exit 0
 fi
 
