@@ -5,9 +5,12 @@ import (
 	"bytes"
 	"encoding/json"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/AChWorks/server-connect/internal/sc"
@@ -239,7 +242,13 @@ func TestOperatorMenuConfirmedProfileRemovalUsesExistingManager(t *testing.T) {
 func TestOperatorAdvancedMenuRequiresCompleteExplicitInputs(t *testing.T) {
 	const one = "https://one.example.test/"
 	const two = "https://two.example.test/"
-	const base = "11\n" + one + "\n" + two + "\n"
+	const base = "11\n" + one + "\n" + two + "\n\n"
+	many := []string{one, two, "https://three.example.test/", "https://four.example.test/", "https://five.example.test/"}
+	manyInput := "11\n" + strings.Join(many, "\n") + "\n\n"
+	manyCommand := "diagnose-path --via direct"
+	for _, url := range many {
+		manyCommand += " --url " + url
+	}
 	const endpoint = "198.51.100.17"
 	const digest = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	cases := []struct {
@@ -251,11 +260,16 @@ func TestOperatorAdvancedMenuRequiresCompleteExplicitInputs(t *testing.T) {
 		{"diagnose-invalid-choice", base + "3\n0\n", ""},
 		{"diagnose-nonnumeric-choice", base + "proxy\n0\n", ""},
 		{"diagnose-incomplete-path-eof", base + "1", ""},
+		{"diagnose-first-blank", "11\n\n0\n", ""},
 		{"diagnose-first-cancel", "11\ncancel\n0\n", ""},
-		{"diagnose-second-back", "11\n" + one + "\nback\n0\n", ""},
+		{"diagnose-additional-cancel", "11\n" + one + "\ncancel\n0\n", ""},
+		{"diagnose-additional-back", "11\n" + one + "\nback\n0\n", ""},
+		{"diagnose-additional-incomplete-eof", "11\n" + one + "\n", ""},
 		{"diagnose-first-incomplete-eof", "11\n" + one, ""},
+		{"diagnose-valid-one-direct", "11\n" + one + "\n\n2\n0\n", "diagnose-path --via direct --url " + one},
 		{"diagnose-valid-proxy", base + "1\n0\n", "diagnose-path --via proxy --url " + one + " --url " + two},
 		{"diagnose-valid-direct", base + "2\n0\n", "diagnose-path --via direct --url " + one + " --url " + two},
+		{"diagnose-valid-five-direct", manyInput + "2\n0\n", manyCommand},
 		{"retired-selective-menu", "12\n0\n", ""},
 		{"dns-back-last", "14\nnode.example.test\n" + endpoint + "\nback\n0\n", ""},
 		{"dns-cancel-first", "14\ncancel\n0\n", ""},
@@ -311,6 +325,78 @@ func TestOperatorAdvancedMenuRequiresCompleteExplicitInputs(t *testing.T) {
 			}
 			if _, err := os.Lstat(m.Dir); !os.IsNotExist(err) {
 				t.Fatalf("menu created state without a real operation: %v", err)
+			}
+		})
+	}
+}
+
+// The real CLI validator must reject the entire menu-supplied set before
+// sending even the first request. A successful local Direct diagnostic remains
+// read-only and never grants VPN health or activation proof.
+func TestOperatorPathDiagnosticsMenuSharesValidationAndRedactsTargets(t *testing.T) {
+	var probes atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		probes.Add(1)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+	privateURL := server.URL + "/private/report?token=menu-secret"
+	cases := []struct {
+		name, input string
+		wantProbes  int32
+		wantError   bool
+	}{
+		{"one-valid", "11\n" + privateURL + "\n\n2\n0\n", 1, false},
+		{"duplicate-host", "11\n" + privateURL + "\n" + server.URL + "/different-path\n\n2\n0\n", 0, true},
+		{"credential-url", "11\n" + privateURL + "\nhttps://user:pass@other.example.test/private\n\n2\n0\n", 0, true},
+		{"invalid-scheme", "11\n" + privateURL + "\nfile:///tmp/private\n\n2\n0\n", 0, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			probes.Store(0)
+			m := sc.New(filepath.Join(t.TempDir(), "uninitialized-state"), "", 0)
+			in, wr, err := os.Pipe()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := io.WriteString(wr, tc.input); err != nil {
+				t.Fatal(err)
+			}
+			if err := wr.Close(); err != nil {
+				t.Fatal(err)
+			}
+			old := os.Stdin
+			os.Stdin = in
+			defer func() { os.Stdin = old; in.Close() }()
+			code, out, stderr := hostDriftCapturedOutput(t, func() int {
+				return menuWithRunner(m, func(m *sc.Manager, args ...string) int {
+					return run(true, m, args)
+				})
+			})
+			if code != 0 || stderr != "" {
+				t.Fatalf("menu failed: code=%d stderr=%q", code, stderr)
+			}
+			if tc.wantError && (!strings.Contains(out, `"ok":false`) || !strings.Contains(out, `"code":"invalid_arguments"`)) {
+				t.Fatalf("invalid targets not rejected by CLI: %s", out)
+			}
+			if !tc.wantError && (!strings.Contains(out, `"ok":true`) || !strings.Contains(out, `"all_targets_reachable"`)) {
+				t.Fatalf("valid one-target diagnosis not completed: %s", out)
+			}
+			for _, want := range []string{`"host_network_read_only":true`, `"tunnel_health_verified":false`, `"activation_ready":false`, `"fallback_attempted":false`} {
+				if !strings.Contains(out, want) {
+					t.Fatalf("diagnostic lost safe classification %s: %s", want, out)
+				}
+			}
+			for _, secret := range []string{"menu-secret", "/private/report", "user:pass", "different-path"} {
+				if strings.Contains(out, secret) || strings.Contains(stderr, secret) {
+					t.Fatal("private diagnostic URL or credentials leaked to menu output")
+				}
+			}
+			if got := probes.Load(); got != tc.wantProbes {
+				t.Fatalf("probe count %d, want %d (invalid input must not probe)", got, tc.wantProbes)
+			}
+			if _, err := os.Lstat(m.Dir); !os.IsNotExist(err) {
+				t.Fatal("read-only diagnostic initialized product state")
 			}
 		})
 	}
