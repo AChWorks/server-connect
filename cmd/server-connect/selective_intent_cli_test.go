@@ -186,3 +186,48 @@ func TestSelectiveCLIRefusesGenericPreparedAndPreservesBytes(t *testing.T) {
 		t.Fatal("unrelated generic evidence was altered")
 	}
 }
+
+// A historical PREPARED v1 journal may still need an exact, guarded cleanup.
+// Its obsolete non-atomic live reinspection is not an operator command.
+func TestRetiredSelectiveLiveCLIIsInert(t *testing.T) {
+	if strings.Contains(helpText, "selective-verify-intent") ||
+		strings.Contains(helpText, "Two to four distinct hosts") ||
+		!strings.Contains(helpText, "One or more distinct hosts") {
+		t.Fatal("help advertises a retired reinspection command or an obsolete diagnostics limit")
+	}
+	empty := filepath.Join(t.TempDir(), "not-initialized")
+	m := sc.New(empty, "", 0)
+	for _, args := range [][]string{
+		{"selective-verify-intent"},
+		{"selective-verify-intent", "--operation-id", strings.Repeat("0", 32), "--revision", "1"},
+	} {
+		code, stdout, stderr := hostDriftCapturedOutput(t, func() int { return run(true, m, args) })
+		if code != 1 || stderr != "" || !strings.Contains(stdout, "\"code\":\"unknown_command\"") ||
+			strings.Contains(stdout, "\"data\"") {
+			t.Fatalf("obsolete command unexpectedly dispatched: code=%d stdout=%s stderr=%s", code, stdout, stderr)
+		}
+		if _, err := os.Lstat(empty); !os.IsNotExist(err) {
+			t.Fatalf("retired command initialized product state: %v", err)
+		}
+	}
+
+	existing, path, id := preparedSelectiveCLIFixture(t)
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	code, stdout, stderr := hostDriftCapturedOutput(t, func() int {
+		return run(true, existing, []string{"selective-verify-intent", "--operation-id", id, "--revision", "1"})
+	})
+	if code != 1 || stderr != "" || !strings.Contains(stdout, "\"code\":\"unknown_command\"") {
+		t.Fatalf("retired live verification handled existing operation: %d %s %s", code, stdout, stderr)
+	}
+	after, err := os.ReadFile(path)
+	if err != nil || !bytes.Equal(before, after) {
+		t.Fatalf("retired command modified exact historical journal: %v", err)
+	}
+	if report, err := existing.InspectActivationJournal(); err != nil || !report.Present ||
+		report.Phase != "prepared" || report.OperationID != id {
+		t.Fatalf("historical staged intent was not recoverably preserved: %+v %v", report, err)
+	}
+}
