@@ -127,6 +127,11 @@ print("INSTALLED_NATIVE_NFT_POLICY="+json.dumps({
  "checks":{name:term in text for name,term in checks.items()},
  "chains":re.findall(r"chain ([a-z_]+) \{",text),
  "bytes":len(text)},sort_keys=True))
+# The peer is synthetic and disconnected. Print only TCP/queue/redirect
+# rule lines to explain older nft formatter differences; bound the data.
+lines=[line.strip()[:240] for line in text.splitlines()
+       if "l4proto" in line and ("counter" in line or "queue" in line or "redirect" in line)]
+print("INSTALLED_NATIVE_NFT_RULE_FORMAT="+json.dumps(lines[:8]))
 ' || :
 }
 
