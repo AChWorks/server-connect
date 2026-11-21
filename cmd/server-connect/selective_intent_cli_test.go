@@ -119,27 +119,42 @@ func TestSelectiveIntentCLIAbandonPreparedOnly(t *testing.T) {
 	}
 }
 
-func TestSelectiveStageCLIRejectsInvalidInputsBeforeAnyPersistentState(t *testing.T) {
-	root := t.TempDir()
-	if err := os.Chmod(root, 0700); err != nil {
+// Removed v1/v2/v3 creation must remain inert even when a recoverable
+// historical PREPARED journal already exists. No side effects or silent replay.
+func TestRetiredSelectiveCreationCLIIsInert(t *testing.T) {
+	for _, name := range []string{"selective-stage-intent", "selective-trial-apply", "selective-route-trial-apply"} {
+		if strings.Contains(helpText, name) {
+			t.Fatalf("retired creation command advertised: %s", name)
+		}
+		empty := filepath.Join(t.TempDir(), "not-initialized")
+		m := sc.New(empty, "", 0)
+		code, stdout, stderr := hostDriftCapturedOutput(t, func() int { return run(true, m, []string{name}) })
+		if code != 1 || stderr != "" || !strings.Contains(stdout, "\"code\":\"unknown_command\"") || strings.Contains(stdout, "\"data\"") {
+			t.Fatalf("retired command unexpectedly dispatched: %s %d %s %s", name, code, stdout, stderr)
+		}
+		if _, err := os.Lstat(empty); !os.IsNotExist(err) {
+			t.Fatalf("retired command initialized state: %s %v", name, err)
+		}
+	}
+	m, path, id := preparedSelectiveCLIFixture(t)
+	before, err := os.ReadFile(path)
+	if err != nil {
 		t.Fatal(err)
 	}
-	m := sc.New(filepath.Join(root, "private-state"), "", 0)
-	cases := [][]string{
-		{"selective-stage-intent", "--endpoint", "192.0.2.10", "--management-peer", "198.51.100.11", "--tunnel-if", "bad;iface", "--destination", "8.8.8.0/24"},
-		{"selective-stage-intent", "--endpoint", "192.0.2.10", "--management-peer", "198.51.100.11", "--tunnel-if", "scint0", "--destination", "0.0.0.0/0"},
-		{"selective-stage-intent", "--unexpected", "true"},
-		{"selective-stage-intent", "--endpoint", "192.0.2.10", "--management-peer", "198.51.100.11", "--tunnel-if", "scint0", "--destination", "8.8.8.0/24", "extra"},
+	for _, name := range []string{"selective-stage-intent", "selective-trial-apply", "selective-route-trial-apply"} {
+		code, stdout, stderr := hostDriftCapturedOutput(t, func() int {
+			return run(true, m, []string{name, "--operation-id", id, "--revision", "1"})
+		})
+		if code != 1 || stderr != "" || !strings.Contains(stdout, "\"code\":\"unknown_command\"") {
+			t.Fatalf("retired command touched historical operation: %s %d %s %s", name, code, stdout, stderr)
+		}
+		after, err := os.ReadFile(path)
+		if err != nil || !bytes.Equal(before, after) {
+			t.Fatalf("historical journal changed: %s %v", name, err)
+		}
 	}
-	for _, args := range cases {
-		code, stdout, stderr := hostDriftCapturedOutput(t, func() int { return run(true, m, args) })
-		if code != 1 || stderr != "" || !strings.Contains(stdout, `"ok":false`) ||
-			!strings.Contains(stdout, "invalid_arguments") || strings.Contains(stdout, `"data"`) {
-			t.Fatalf("invalid staged intent fabricated evidence: %d %s %s", code, stdout, stderr)
-		}
-		if _, err := os.Stat(m.Dir); !os.IsNotExist(err) {
-			t.Fatalf("invalid intent touched protected state: %v", err)
-		}
+	if report, err := m.InspectActivationJournal(); err != nil || report.OperationID != id || report.Phase != "prepared" {
+		t.Fatalf("historical journal unreadable after refused creation: %+v %v", report, err)
 	}
 }
 

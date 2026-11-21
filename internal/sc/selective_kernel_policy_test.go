@@ -155,14 +155,9 @@ check restored_unrelated_ipv6 -6 route get 2001:4860:4860::8888`
 			if !found {
 				t.Fatalf("native iproute2 did not expose the expected separate dst/dstlen: %s", raw)
 			}
-			req, host := fixtureSelectiveRequest(), fixtureSelectiveHost()
-			req.Destinations = []string{"8.8.8.128/25"}
-			host.IPv4Rules = json.RawMessage(raw)
-			host.IPv4Routes = json.RawMessage("[{\"dst\":\"default\",\"dev\":\"eth0\"},{\"dst\":\"default\",\"table\":20100,\"dev\":\"eth1\"}]")
-			plan, err := planFromFixture(t, req, host)
-			if ErrorCode(err) != "route_plan_uncertain" || plan.PlanSHA256 != "" || len(plan.Rules) != 0 {
-				t.Fatalf("captured native higher-priority rule was ignored: plan=%+v err=%v", plan, err)
-			}
+			// The historical advisory preview no longer exists. Native
+			// dst/dstlen semantics are tested directly and route ownership
+			// remains observed in this real kernel namespace fixture.
 			continue
 		}
 		if name == "ipv6_table_after_rollback" {
@@ -237,44 +232,5 @@ check restored_unrelated_ipv6 -6 route get 2001:4860:4860::8888`
 	}
 	if t.Failed() {
 		t.Logf("native iproute2 stdout: %s\nnative stderr: %s", stdout, stderr)
-	}
-}
-
-func TestSelectiveKernelPolicyFixtureScope(t *testing.T) {
-	// Independently exercise the public planner's safety claims using the
-	// matching fixture destinations, without executing any namespace script.
-	req, host := fixtureSelectiveRequest(), fixtureSelectiveHost()
-	plan, err := planFromFixture(t, req, host)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(plan.Rules) != 2 || len(plan.Routes) != 2 ||
-		plan.Rules[0].Priority != 30000 || plan.Rules[1].Priority != 30001 ||
-		plan.Routes[0].Table != 20000 || plan.Routes[1].Table != 20000 ||
-		plan.Routes[0].Device != "scplan0" || plan.Routes[1].Device != "scplan0" {
-		t.Fatalf("kernel fixture no longer corresponds to planned route/rule identity: %+v", plan)
-	}
-	if plan.ActivationReady || plan.GuardArmed || plan.OwnershipVerified || !plan.ReadOnly {
-		t.Fatalf("routing fixture promoted advisory preview to activation: %+v", plan)
-	}
-	for _, tc := range []struct {
-		family, destination string
-		priority            int
-	}{
-		{"ipv6", "2606:4700:4700::/48", 30000},
-		{"ipv4", "8.8.8.0/24", 30001},
-	} {
-		found := false
-		for _, rule := range plan.Rules {
-			if rule.Family == tc.family && rule.Destination == tc.destination {
-				if rule.Priority != tc.priority {
-					t.Fatalf("unexpected planner priority for %s: %d", tc.destination, rule.Priority)
-				}
-				found = true
-			}
-		}
-		if !found {
-			t.Fatalf("missing planned route for %s", tc.destination)
-		}
 	}
 }

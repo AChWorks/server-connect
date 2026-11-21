@@ -123,7 +123,7 @@ func (m *Manager) stageNativeHealth(session NativeSession, threshold int, scope 
 	if scope != "internet_https" && scope != "synthetic_https" {
 		return Fault("invalid_arguments", "unsupported native health probe scope")
 	}
-	now, e := smartTUNUptimeMillis()
+	now, e := nativeUptimeMillis()
 	if e != nil {
 		return e
 	}
@@ -375,7 +375,7 @@ func probeNativeHTTPS(ctx context.Context, iface string, target nativeProbeTarge
 		if _, e := rand.Read(nonce); e != nil {
 			return nativeHealthOutcome{Reason: "nonce_unavailable"}
 		}
-		proof := smartTUNHealthExchangeWithDeadline(ctx, conn, smartTUNHealthProbe{family: 4, protocol: "https", address: target.IP, expectedSource: target.IP}, nonce)
+		proof := smartTUNHealthExchangeWithDeadline(ctx, conn, smartTUNHealthProbe{expectedSource: target.IP}, nonce)
 		if proof.Result == "pass" && proof.StatusCode == 200 && ctx.Err() == nil {
 			return nativeHealthOutcome{OK: true, Reason: "selected_https_verified"}
 		}
@@ -440,7 +440,7 @@ func nativeHealthGuardRoles() error {
 		timer    bool
 		expected string
 	}{{trialRecoveryUnit, false, ""}, {trialRecoveryTimer, true, trialRecoveryUnit}, {smartTUNHealthUnit, false, ""}, {smartTUNHealthTimer, true, smartTUNHealthUnit}} {
-		_, f, e := observeSmartTUNManagedUnit(role.name)
+		_, f, e := observeNativeManagedUnit(role.name)
 		if e != nil {
 			return e
 		}
@@ -476,10 +476,10 @@ func awaitNativeGuardExecutors(timeout time.Duration, check func() error) error 
 	}
 }
 func nativeGuardExecutorsQuiescent() error {
-	if _, _, err := observeSmartTUNIdleRecoveryService(); err != nil {
+	if _, _, err := observeNativeIdleRecoveryService(); err != nil {
 		return err
 	}
-	_, _, err := observeSmartTUNIdleHealthService()
+	_, _, err := observeNativeIdleHealthService()
 	return err
 }
 
@@ -510,17 +510,16 @@ func (m *Manager) reconcileNativeIdleGuardServices(store *activationJournalDir, 
 	if err := m.nativeMainPIDZero(); err != nil {
 		return err
 	}
-	legacy, err := observeSmartTUNTrialUnit(context.Background())
-	if err != nil || !legacy.stopped() {
-		return Fault("guard_pending", "legacy Smart TUN Core may still own recovery guards")
+	if err := retiredV4UnitAbsent(); err != nil {
+		return err
 	}
-	_, recoveryTimer, err := observeSmartTUNRecoveryUnit(trialRecoveryTimer)
+	_, recoveryTimer, err := observeNativeRecoveryUnit(trialRecoveryTimer)
 	if err != nil || recoveryTimer["ActiveState"] != "inactive" ||
 		recoveryTimer["UnitFileState"] != "disabled" || recoveryTimer["Result"] != "success" ||
 		recoveryTimer["Unit"] != trialRecoveryUnit {
 		return Fault("guard_unavailable", "independent recovery timer not disarmed")
 	}
-	_, healthTimer, err := observeSmartTUNHealthUnit(smartTUNHealthTimer)
+	_, healthTimer, err := observeNativeHealthUnit(smartTUNHealthTimer)
 	if err != nil || healthTimer["ActiveState"] != "inactive" ||
 		healthTimer["UnitFileState"] != "disabled" || healthTimer["Result"] != "success" ||
 		healthTimer["Unit"] != smartTUNHealthUnit {
@@ -533,18 +532,18 @@ func (m *Manager) reconcileNativeIdleGuardServices(store *activationJournalDir, 
 	inspect := func() error {
 		return inspectNativeAdmission(context.Background(), nativeSystemRunner{}, scope)
 	}
-	_, err = reconcileIdleSmartTUNServices(smartTUNIdleReconcileOperations{
-		observeHealth:   observeSmartTUNIdleHealthService,
-		observeRecovery: observeSmartTUNIdleRecoveryService,
+	_, err = reconcileIdleNativeGuardServices(nativeIdleReconcileOperations{
+		observeHealth:   observeNativeIdleHealthService,
+		observeRecovery: observeNativeIdleRecoveryService,
 		inspectNative:   inspect,
 		resetFailed: func(unit string) error {
-			return smartTUNTrialSystemctl("reset-failed", unit)
+			return nativeGuardSystemctl("reset-failed", unit)
 		},
 		verifyFinal: func() error {
 			if err := trialGuardUnits(false); err != nil {
 				return err
 			}
-			if _, err := smartTUNHealthUnits(false, nil); err != nil {
+			if _, err := nativeHealthUnits(false, nil); err != nil {
 				return err
 			}
 			if err := m.nativeMainPIDZero(); err != nil {
@@ -558,7 +557,7 @@ func (m *Manager) reconcileNativeIdleGuardServices(store *activationJournalDir, 
 
 func (m *Manager) armNativeHealthGuards() error {
 	for _, name := range []string{trialRecoveryUnit, trialRecoveryTimer, smartTUNHealthUnit, smartTUNHealthTimer} {
-		_, f, e := observeSmartTUNManagedUnit(name)
+		_, f, e := observeNativeManagedUnit(name)
 		if e != nil {
 			return e
 		}
@@ -570,7 +569,7 @@ func (m *Manager) armNativeHealthGuards() error {
 		}
 	}
 	for _, name := range []string{trialRecoveryTimer, smartTUNHealthTimer} {
-		if err := smartTUNTrialSystemctl("enable", "--now", name); err != nil {
+		if err := nativeGuardSystemctl("enable", "--now", name); err != nil {
 			return err
 		}
 	}
@@ -578,11 +577,11 @@ func (m *Manager) armNativeHealthGuards() error {
 }
 func (m *Manager) disarmNativeHealthGuards() error {
 	for _, name := range []string{smartTUNHealthTimer, trialRecoveryTimer} {
-		_, _, e := observeSmartTUNManagedUnit(name)
+		_, _, e := observeNativeManagedUnit(name)
 		if e != nil {
 			return e
 		}
-		if e = smartTUNTrialSystemctl("disable", "--now", name); e != nil {
+		if e = nativeGuardSystemctl("disable", "--now", name); e != nil {
 			return e
 		}
 	}
@@ -730,7 +729,7 @@ func (m *Manager) RunNativeHealthRound() (NativeHealthState, error) {
 		return s, err
 	}
 	boot, be := trialBootIdentity()
-	now, te := smartTUNUptimeMillis()
+	now, te := nativeUptimeMillis()
 	guard := nativeHealthGuardRoles()
 	observed, oe := m.nativeActivity()
 	reason := ""
@@ -817,7 +816,7 @@ func (m *Manager) RunNativeHealthRound() (NativeHealthState, error) {
 		if newBoot, e := trialBootIdentity(); e != nil || newBoot != s.BootID {
 			return Fault("guard_pending", "native boot changed during health round")
 		}
-		if now, e = smartTUNUptimeMillis(); e != nil {
+		if now, e = nativeUptimeMillis(); e != nil {
 			return e
 		}
 		s, stop = nativeHealthAdvance(latest, outcome, now)
@@ -865,7 +864,7 @@ func (m *Manager) SuperviseNativeHealth() (NativeHealthState, error) {
 	if err != nil {
 		return s, err
 	}
-	now, te := smartTUNUptimeMillis()
+	now, te := nativeUptimeMillis()
 	boot, be := trialBootIdentity()
 	reason := ""
 	if be != nil || te != nil || boot != s.BootID || now < s.StartedMS {
@@ -905,7 +904,7 @@ func (m *Manager) SuperviseNativeHealth() (NativeHealthState, error) {
 func (m *Manager) NativeHealthGuardMode() (string, error) {
 	mode := "legacy"
 	err := m.withLock(func() error {
-		phase, e := m.pendingSmartTUNTrial()
+		phase, e := m.pendingLegacyActivationJournal()
 		if e != nil {
 			return e
 		}
@@ -953,7 +952,7 @@ func (m *Manager) cleanupIdleNativeHealthGuardsUnlocked() error {
 		if _, e := m.readNativeSession(); !errors.Is(e, os.ErrNotExist) {
 			return Fault("guard_pending", "cannot disarm guard while native claim exists")
 		}
-		phase, e := m.pendingSmartTUNTrial()
+		phase, e := m.pendingLegacyActivationJournal()
 		if e != nil {
 			return e
 		}

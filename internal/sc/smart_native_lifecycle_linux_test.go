@@ -11,7 +11,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"testing"
 	"time"
 )
@@ -520,32 +519,24 @@ func TestNativePreflightRequiresSavedDesiredProfile(t *testing.T) {
 	}
 }
 
-// Both data planes touch the same host networking. A leftover native
-// session must block even the disposable legacy trial before any guard
-// arming or kernel admission is attempted.
-func TestLegacySmartTUNAdmissionRejectsNativeReceipt(t *testing.T) {
+// A retired journal must keep its private bytes and block Native admission,
+// never become a second simultaneously active network-policy owner.
+func TestRetiredV4JournalBlocksNativeAdmission(t *testing.T) {
 	m := New(filepath.Join(t.TempDir(), "state"), "", 0)
 	if err := m.prepare(); err != nil {
 		t.Fatal(err)
 	}
-	session := NativeSession{
-		Version: 1, Selected: "0123456789abcdef",
-		InterfaceName: "sctun0", UnderlayIF: "eth0",
-		ConfigSHA256: strings.Repeat("a", 64),
-	}
-	raw, err := json.Marshal(session)
-	if err != nil {
+	raw := []byte(`{"version":4,"intent_type":"smart_tun_pending_trial_v4"}`)
+	if err := put(filepath.Join(m.Dir, activationJournalFilename), raw); err != nil {
 		t.Fatal(err)
 	}
-	if err := put(filepath.Join(m.Dir, nativeSessionFile), raw); err != nil {
-		t.Fatal(err)
+	phase, err := m.pendingLegacyActivationJournal()
+	if err != nil || phase == "" {
+		t.Fatalf("retired operation not blocked: %q %v", phase, err)
 	}
-	err = m.withActivationJournalLock(syscall.Fsync, func(store *activationJournalDir) error {
-		_, e := m.admitSmartTUNTrialLocked(store, SmartTUNCandidateOptions{}, "")
-		return e
-	})
-	if ErrorCode(err) != "guard_pending" {
-		t.Fatalf("unfinalized native session must block legacy unit: %v", err)
+	again, err := os.ReadFile(filepath.Join(m.Dir, activationJournalFilename))
+	if err != nil || !bytes.Equal(raw, again) {
+		t.Fatalf("retired operation mutated by admission: %v", err)
 	}
 }
 

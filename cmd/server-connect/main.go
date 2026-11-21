@@ -68,14 +68,6 @@ func output(j bool, value any, err error) int {
 // Keep the real operator command's JSON exit/error contract testable without
 // invoking privileged systemd/network operations in CLI unit tests. Verified
 // partial effects must be serialized even when a later step fails.
-func runIdleGuardReconcile(j bool, reconcile func() (sc.SmartTUNIdleGuardReconcileResult, error)) int {
-	result, err := reconcile()
-	return output(j, result, err)
-}
-
-// Status may fail after safely loading desired state. Keep that bounded
-// diagnostic visible for operators without changing unrelated CLI errors.
-// An unavailable state load has no trustworthy partial report to display.
 func outputStatus(j bool, report sc.Status, err error) int {
 	if err != nil && report.Desired == "" {
 		return output(j, nil, err)
@@ -325,117 +317,7 @@ func run(j bool, m *sc.Manager, args []string) int {
 		}
 		res, e := m.Probe(*via, *target)
 		return output(j, res, e)
-	case "selective-stage-intent":
-		opts := flag.NewFlagSet(name, flag.ContinueOnError)
-		opts.SetOutput(io.Discard)
-		endpoint := opts.String("endpoint", "", "literal existing VPN endpoint IP")
-		management := opts.String("management-peer", "", "literal current SSH/admin peer IP")
-		tunnel := opts.String("tunnel-if", "", "proposed unused TUN interface name")
-		var destinations destinationFlags
-		opts.Var(&destinations, "destination", "explicit public CIDR; repeat per destination")
-		if e := opts.Parse(args); e != nil || len(opts.Args()) != 0 {
-			return output(j, nil, sc.Fault("invalid_arguments", "invalid selective planning/staging options"))
-		}
-		request := sc.SelectivePlanRequest{
-			EndpointIP: *endpoint, ManagementPeerIP: *management,
-			TunnelInterface: *tunnel, Destinations: destinations,
-		}
-		status, err := m.StageSelectiveIntent(request)
-		if err != nil {
-			return output(j, nil, err)
-		}
-		return output(j, status, nil)
-	case "smart-tun-trial-apply":
-		opts := flag.NewFlagSet(name, flag.ContinueOnError)
-		opts.SetOutput(io.Discard)
-		tunnel := opts.String("tunnel-if", "", "disposable TUN name")
-		underlay := opts.String("underlay-if", "", "disposable peer underlay")
-		tunnelIPv4 := opts.String("tunnel-ipv4", "", "private guest TUN CIDR")
-		vmDNSResolver := opts.String("vm-dns-resolver", "", "supervised QEMU-only owned-link DNS: 1.1.1.1 or 9.9.9.9")
-		tunnelIPv6 := opts.String("tunnel-ipv6", "", "optional synthetic private IPv6 TUN CIDR")
-		ipv6VPN := opts.String("ipv6-vpn-cidr", "", "synthetic IPv6 VPN exception")
-		ipv6Direct := opts.String("ipv6-direct-cidr", "", "synthetic IPv6 Direct exception")
-		peer := opts.String("management-peer", "", "synthetic guest management peer")
-		deadline := opts.Int("deadline-seconds", 600, "independent mandatory rollback deadline")
-		saved := opts.Bool("saved", false, "revalidate and apply the saved disposable trial policy")
-		supervised := opts.Bool("supervised", false, "enable fresh confirmation and bounded health in the disposable fixture only")
-		healthInterval := opts.Int("health-interval", 15, "selected-path probe interval in seconds")
-		healthGrace := opts.Int("health-grace", 30, "bounded startup grace in seconds")
-		healthFailures := opts.Int("health-failures", 3, "consecutive unhealthy rounds before reconnect")
-		healthAttempts := opts.Int("health-attempts", 3, "maximum reconnect attempts for this operation")
-		healthRecovery := opts.Int("health-recovery-seconds", 120, "overall outage recovery deadline")
-		qaKill := opts.String("qa-kill-at", "", "isolated guest SIGKILL after-journal or after-start")
-		var domestic, protected, domesticIPv6 destinationFlags
-		opts.Var(&domestic, "domestic-cidr", "synthetic domestic CIDR; repeat")
-		opts.Var(&protected, "protected-cidr", "explicit guest control CIDR; repeat")
-		opts.Var(&domesticIPv6, "domestic-ipv6-cidr", "synthetic IPv6 domestic CIDR; repeat")
-		if e := opts.Parse(args); e != nil || len(opts.Args()) != 0 {
-			return output(j, nil, sc.Fault("invalid_arguments", "invalid guarded TUN trial options"))
-		}
-		health := sc.SmartTUNHealthOptions{IntervalSeconds: *healthInterval,
-			StartupGraceSeconds: *healthGrace, FailureThreshold: *healthFailures,
-			MaxAttempts: *healthAttempts, RecoverySeconds: *healthRecovery}
-		explicitHealth := false
-		opts.Visit(func(option *flag.Flag) {
-			if strings.HasPrefix(option.Name, "health-") {
-				explicitHealth = true
-			}
-		})
-		if explicitHealth && !*supervised {
-			return output(j, nil, sc.Fault("invalid_arguments", "health options require --supervised"))
-		}
-		if *saved {
-			mixedPolicy := false
-			opts.Visit(func(option *flag.Flag) {
-				switch option.Name {
-				case "saved", "deadline-seconds", "qa-kill-at", "supervised", "health-interval", "health-grace", "health-failures", "health-attempts", "health-recovery-seconds":
-				default:
-					mixedPolicy = true
-				}
-			})
-			if mixedPolicy {
-				return output(j, nil, sc.Fault("invalid_arguments", "--saved cannot be combined with explicit routing or management options"))
-			}
-			if *supervised {
-				result, err := m.BeginSavedSupervisedSmartTUNTrial(*deadline, health, *qaKill)
-				return output(j, result, err)
-			}
-			result, err := m.BeginSavedSmartTUNTrial(*deadline, *qaKill)
-			return output(j, result, err)
-		}
-		var ipv6Exceptions []sc.SmartTUNCIDRException
-		if *ipv6VPN != "" {
-			ipv6Exceptions = append(ipv6Exceptions, sc.SmartTUNCIDRException{CIDR: *ipv6VPN, Via: "vpn"})
-		}
-		if *ipv6Direct != "" {
-			ipv6Exceptions = append(ipv6Exceptions, sc.SmartTUNCIDRException{CIDR: *ipv6Direct, Via: "direct"})
-		}
-		candidate := sc.SmartTUNCandidateOptions{
-			TunnelInterface: *tunnel, UnderlayInterface: *underlay,
-			TunnelIPv4: *tunnelIPv4, TunnelIPv6: *tunnelIPv6,
-			DNSResolverIPv4: *vmDNSResolver,
-			DomesticCIDRs:   domestic, ProtectedCIDRs: protected,
-			DomesticIPv6CIDRs: domesticIPv6, IPv6Exceptions: ipv6Exceptions,
-		}
-		if *supervised {
-			result, err := m.BeginSupervisedSmartTUNTrial(candidate, *peer, *deadline, health, *qaKill)
-			return output(j, result, err)
-		}
-		result, err := m.BeginSmartTUNTrial(candidate, *peer, *deadline, *qaKill)
-		return output(j, result, err)
-	case "smart-tun-trial-confirm":
-		opts := flag.NewFlagSet(name, flag.ContinueOnError)
-		opts.SetOutput(io.Discard)
-		id := opts.String("operation-id", "", "exact pending operation ID")
-		revision := opts.Uint64("revision", 0, "exact challenge control revision")
-		challenge := opts.String("challenge", "", "single-use operation confirmation challenge")
-		qaKill := opts.String("qa-kill-at", "", "disposable-only confirmation publication interruption")
-		if e := opts.Parse(args); e != nil || len(opts.Args()) != 0 {
-			return output(j, nil, sc.Fault("invalid_arguments", "invalid supervised TUN confirmation options"))
-		}
-		result, err := m.ConfirmSmartTUNTrial(*id, *revision, *challenge, *qaKill)
-		return output(j, result, err)
-	case "smart-tun-trial-health":
+	case "native-health-executor":
 		opts := flag.NewFlagSet(name, flag.ContinueOnError)
 		opts.SetOutput(io.Discard)
 		qaKill := opts.String("qa-kill-at", "", "disposable-only health publication interruption")
@@ -457,47 +339,7 @@ func run(j bool, m *sc.Manager, args []string) int {
 			e := m.CleanupIdleNativeHealthGuards()
 			return output(j, map[string]string{"native_health": "off"}, e)
 		}
-		result, err := m.RunSmartTUNHealthRound(*qaKill)
-		return output(j, result, err)
-	case "smart-tun-trial-policy":
-		if len(args) != 0 {
-			return output(j, nil, sc.Fault("invalid_arguments", "saved trial policy inspection accepts no options"))
-		}
-		result, err := m.InspectSavedSmartTUNTrialPolicy()
-		return output(j, result, err)
-	case "smart-tun-trial-disconnect":
-		opts := flag.NewFlagSet(name, flag.ContinueOnError)
-		opts.SetOutput(io.Discard)
-		id := opts.String("operation-id", "", "exact current trial operation ID")
-		revision := opts.Uint64("revision", 0, "exact current trial revision")
-		qaKill := opts.String("qa-kill-at", "", "disposable-only stop or cleanup interruption point")
-		if e := opts.Parse(args); e != nil || len(opts.Args()) != 0 {
-			return output(j, nil, sc.Fault("invalid_arguments", "invalid guarded TUN disconnect options"))
-		}
-		result, err := m.DisconnectSmartTUNTrial(*id, *revision, *qaKill)
-		return output(j, result, err)
-	case "smart-tun-trial-reconcile-idle-guard":
-		if len(args) != 0 {
-			return output(j, nil, sc.Fault("invalid_arguments", "idle recovery guard reconciliation takes no options"))
-		}
-		return runIdleGuardReconcile(j, m.ReconcileIdleSmartTUNRecoveryGuard)
-	case "smart-tun-trial-status":
-		if len(args) != 0 {
-			return output(j, nil, sc.Fault("invalid_arguments", "guarded TUN status accepts no options"))
-		}
-		result, err := m.InspectSmartTUNTrial()
-		return output(j, result, err)
-	case "smart-tun-trial-clear":
-		opts := flag.NewFlagSet(name, flag.ContinueOnError)
-		opts.SetOutput(io.Discard)
-		id := opts.String("operation-id", "", "exact recovered trial operation ID")
-		revision := opts.Uint64("revision", 0, "exact recovered revision")
-		qaKill := opts.String("qa-kill-at", "", "disposable-only cleanup interruption point")
-		if e := opts.Parse(args); e != nil || len(opts.Args()) != 0 {
-			return output(j, nil, sc.Fault("invalid_arguments", "invalid guarded TUN clearance options"))
-		}
-		err := m.ClearSmartTUNTrialWithQAKill(*id, *revision, *qaKill)
-		return output(j, map[string]any{"cleared": err == nil}, err)
+		return output(j, nil, sc.Fault("guard_pending", "retired v4 Health operation is unsupported; verify owned cleanup before Native activation"))
 	case "activation-trial-recover", "activation-trial-status":
 		qaPoint, qaFaultPoint := "", ""
 		if name == "activation-trial-recover" {
@@ -541,43 +383,16 @@ func run(j bool, m *sc.Manager, args []string) int {
 		}
 		receipt, err := m.InspectGuardedRuleTrial()
 		return output(j, receipt, err)
-	case "selective-trial-apply", "selective-route-trial-apply", "activation-trial-clear":
+	case "activation-trial-clear":
 		opts := flag.NewFlagSet(name, flag.ContinueOnError)
 		opts.SetOutput(io.Discard)
-		id := opts.String("operation-id", "", "exact staged or recovered operation ID")
-		revision := opts.Uint64("revision", 0, "exact operation revision")
-		deadline := opts.Int("deadline-seconds", 600, "disposable rule trial deadline in seconds")
-		interrupt := opts.Bool("qa-kill-after-rule", false, "legacy disposable-only SIGKILL after rule add")
-		qaPoint := opts.String("qa-kill-at", "", "disposable-only apply interruption point")
-		qaFaultPoint := opts.String("qa-fail-at", "", "disposable-only v3 native error-path injection")
-		if e := opts.Parse(args); e != nil || len(opts.Args()) != 0 {
-			return output(j, nil, sc.Fault("invalid_arguments", "invalid rule trial options"))
+		id := opts.String("operation-id", "", "exact recovered operation ID")
+		revision := opts.Uint64("revision", 0, "exact recovered revision")
+		if e := opts.Parse(args); e != nil || len(opts.Args()) != 0 || *revision != 3 {
+			return output(j, nil, sc.Fault("invalid_arguments", "clear requires exact recovered revision 3"))
 		}
-		if (*interrupt && *qaPoint != "") || (*qaFaultPoint != "" && (*qaPoint != "" || *interrupt)) {
-			return output(j, nil, sc.Fault("invalid_arguments", "only one disposable QA intervention is allowed"))
-		}
-		if *interrupt && name == "selective-route-trial-apply" {
-			return output(j, nil, sc.Fault("invalid_arguments", "legacy rule-only interruption option is unavailable for route trials"))
-		}
-		if name == "activation-trial-clear" {
-			if *deadline != 600 || *interrupt || *qaPoint != "" || *qaFaultPoint != "" || *revision != 3 {
-				return output(j, nil, sc.Fault("invalid_arguments", "clear requires exact recovered revision 3"))
-			}
-			err := m.ClearRecoveredRuleTrial(*id, *revision)
-			return output(j, map[string]any{"operation_id": *id, "cleared": err == nil}, err)
-		}
-		if *interrupt {
-			*qaPoint = "after-add"
-		}
-		if name == "selective-trial-apply" && *qaFaultPoint != "" {
-			return output(j, nil, sc.Fault("invalid_arguments", "QA native fault injection requires v3 route trial"))
-		}
-		if name == "selective-route-trial-apply" {
-			receipt, err := m.BeginGuardedRouteTrial(*id, *revision, *deadline, *qaPoint, *qaFaultPoint)
-			return output(j, receipt, err)
-		}
-		receipt, err := m.BeginGuardedRuleTrial(*id, *revision, *deadline, *qaPoint)
-		return output(j, receipt, err)
+		err := m.ClearRecoveredRuleTrial(*id, *revision)
+		return output(j, map[string]any{"operation_id": *id, "cleared": err == nil}, err)
 	case "selective-abandon-intent":
 		opts := flag.NewFlagSet(name, flag.ContinueOnError)
 		opts.SetOutput(io.Discard)
@@ -605,22 +420,6 @@ func run(j bool, m *sc.Manager, args []string) int {
 		}
 		result, err := m.DiagnosePath(*via, urls)
 		return output(j, result, err)
-	case "smart-tun-host-check":
-		opts := flag.NewFlagSet(name, flag.ContinueOnError)
-		opts.SetOutput(io.Discard)
-		endpoint := opts.String("endpoint-ip", "", "literal operator-pinned IPv4 for the selected VLESS endpoint")
-		peer := opts.String("management-peer", "", "literal management peer used only for read-only route inspection")
-		underlay := opts.String("underlay-if", "", "expected current underlay interface")
-		resolver := opts.String("dns-resolver", "", "explicit literal IPv4 resolver, required when selected endpoint is a hostname")
-		resolverPort := opts.Int("dns-port", 53, "explicit DNS resolver port")
-		if e := opts.Parse(args); e != nil || len(opts.Args()) != 0 {
-			return output(j, nil, sc.Fault("invalid_arguments", "invalid selected Smart TUN host check options"))
-		}
-		report, err := m.InspectSelectedSmartTUNHost(*endpoint, *peer, *underlay, *resolver, *resolverPort)
-		if report.Mode == "" {
-			return output(j, nil, err)
-		}
-		return output(j, report, err)
 	case "host-preflight":
 		opts := flag.NewFlagSet(name, flag.ContinueOnError)
 		opts.SetOutput(io.Discard)
@@ -777,66 +576,14 @@ Commands:
                               One or more distinct hosts; diagnostic only
   exec -- curl -I https://example.org
   apt -- apt-get update        Strict opt-in APT via trusted native binary
-  smart-tun-host-check --endpoint-ip IP --management-peer IP --underlay-if NAME
-                       [--dns-resolver IP --dns-port 53]
-                              Read-only selected VLESS hostname/DNS, TCP, routes and
-                              native nft observation; never admits host-wide Apply
   host-preflight [--endpoint IP] [--management-peer IP] [--with-nftables]
                               Observe routes/rules and optionally native nftables;
                               no activation or firewall ownership
-  selective-stage-intent --endpoint IP --management-peer IP --tunnel-if NAME
-                         --destination CIDR [--destination CIDR...]
-                              Legacy QA-only unarmed PREPARED intent; no route changes
   selective-abandon-intent --operation-id HEX32 --revision 1
-                              Remove only exact untouched PREPARED intent
-  selective-trial-apply --operation-id HEX32 --revision 1 [--deadline-seconds 600]
-                              DISPOSABLE DOCKER-ONLY rule-only trial; never VPN activation
-  selective-route-trial-apply --operation-id HEX32 --revision 1 [--deadline-seconds 600]
-                              DISPOSABLE DOCKER-ONLY lo route + RPDB rule trial; never VPN activation
-  smart-tun-trial-apply --tunnel-if sctunqa0 --underlay-if scqaedge0
-                        --tunnel-ipv4 172.31.99.1/30 --management-peer 10.254.72.2
-                        --domestic-cidr 5.22.0.10/32 --protected-cidr 10.254.72.0/30
-                        [--tunnel-ipv6 fd73:99::1/64 --domestic-ipv6-cidr 2606:4700:5::/64
-                         --ipv6-vpn-cidr 2606:4700:5::10/128 --ipv6-direct-cidr 2606:4700:8::9/128]
-                        [--deadline-seconds 600]
-                              Guarded genuine sing-box TUN: historical Docker fixture
-                              or exactly admitted non-Docker US01 Debian 13 QEMU VM.
-                              Never a general-host or production activation.
-                              Unconfirmed by default; NOT production Apply
-  smart-tun-trial-apply --supervised --tunnel-if scqavm0 --underlay-if ens3
-                       --tunnel-ipv4 172.31.99.1/30 --management-peer 10.0.2.2
-                       --domestic-cidr 5.22.0.10/32 --protected-cidr 10.0.2.2/32
-                              US01 IPv4-only QEMU VM QA lane. Saved CIDR rules
-                              (up to eight, excluding the VPN health witness)
-                              are included atomically; no general-host Apply.
-                       [--vm-dns-resolver 1.1.1.1]
-                              Optional supervised VM-only approved resolver
-                              (1.1.1.1 or 9.9.9.9) on the owned TUN. Refused elsewhere;
-                              DNS is NOT verified by the current VM Health witness.
-  smart-tun-trial-apply --saved [--deadline-seconds 600]
-                              Revalidate saved trial settings; always a new guarded operation
-  smart-tun-trial-apply --supervised [--saved] [--health-interval 15]
-                       [--health-grace 30] [--health-failures 3]
-                       [--health-attempts 3] [--health-recovery-seconds 120]
-                              Experimental confirmed lifecycle with independent
-                              runtime health and no-reboot product-owned rollback.
-                              Intervals and total recovery are seconds; bounds apply.
-  smart-tun-trial-confirm --operation-id HEX32 --revision N --challenge HEX
-                              Confirm once from a genuinely NEW root SSH connection.
-                              Old shells and multiplexed SSH channels are rejected.
-  smart-tun-trial-health      Bounded installed health executor; never general Apply
-  smart-tun-trial-policy      Inspect saved non-secret trial policy; never activates routing
-  smart-tun-trial-status      Experimental TUN operation/recovery receipt
-  smart-tun-trial-reconcile-idle-guard
-                             Reconcile only exact failed, quiescent Health and
-                             Recovery services after proven QA VM Direct/off;
-                             never automatically bypass a failed guard
-  smart-tun-trial-disconnect --operation-id HEX32 --revision N
-                              Stop exactly this trial, verify native rollback and finalize
-  smart-tun-trial-clear --operation-id HEX32 --revision N
-                              Finalize only the exact verified recovered trial
+                              Remove only exact untouched historical PREPARED intent
+  native-health-executor      Installed internal Native Health Guard executor
   activation-trial-status     Inspect v2 rule-only or v3 loopback route+rule trial
-  activation-trial-recover    Independent systemd timeout/reboot recovery (v2/v3/v4)
+  activation-trial-recover    Independent native + historical v2/v3 recovery executor
   activation-trial-clear --operation-id HEX32 --revision 3
                               Clear exact recovered v2/v3 experimental trial journal
   host-drift --baseline FILE Compare a prior private preflight JSON with now
@@ -871,29 +618,17 @@ Host drift compares separate, non-atomic network observations without changing
 the host, and is never an activation guard or a recovery journal.
 Activation-journal-status shows only safe metadata for the internal v1
 PREPARED/UNCERTAIN journal, never private resource before/intended snapshots.
-Selective-stage-intent makes two non-atomic native observations and records
-an advisory PREPARED intent; it is NOT a guard, host reservation or TUN start.
-Experimental rule-only trial needs a disconnected disposable systemd Docker guest,
-preinstalled independent recovery units and an enabled live recovery timer.
-It creates one selected-prefix RPDB rule pointing at an EMPTY table. It has
-no VPN path, no production activation, no SSH confirmation and no Runtime
-Health Guard. It must expire and cannot be used on a real server.
-Only selective-abandon-intent can discard the exact untouched revision;
-UNCERTAIN and modified journals cannot be abandoned. Even an absent journal
-cannot prove safe networking, guard arming or recovery. These commands may
-initialize a private state directory/lock but never change host routes.
-The guarded TUN trial runs the installed pinned sing-box on the synthetic
-disconnected 2-interface Docker guest, using an inert separate CAP_NET_ADMIN
-service, a private operation journal and an independently prearmed systemd
-deadline. Exact-operation Disconnect or expiry restores the native baseline;
-interrupted stop/cleanup retains recovery evidence. Saved trial settings and
-the selected profile survive Off. --saved performs fresh admission/prearm
-and creates a new operation; it never resumes an old activation. Without
---supervised, the trial cannot be confirmed. --supervised adds one-use fresh
-root SSH confirmation, bounded selected-path health and independent liveness
-recovery ONLY in that fixture. It never grants general ACTIVE_VERIFIED.
-Synthetic CIDRs and unaccepted general-host, field and reboot safety still
-prohibit physical/production-host use.
+Historical v1 selective staging and v2/v3 rule/route trial creation are
+retired; no new legacy host route policy can be created by the CLI.
+Only selective-abandon-intent can remove an exact unarmed historical v1
+PREPARED operation. UNCERTAIN or modified journals remain untouched; legacy
+v2/v3 pending/recovered records retain strict ownership-aware recovery and
+exact recovered clearance. An absent journal does not prove safe networking.
+The retired v4 disposable TUN Apply/Confirm/Disconnect experimental
+CLI is no longer available. The product's actual Smart Routing path is
+connect-smart + native-status + disconnect, with the independently supervised
+Native Health/Recovery systemd roles retained. Historical journal recovery
+does not authorize activating or trusting old trials.
 An explicit underlay-tcp probe binds a TCP socket to the kernel-selected
 interface and sends no application data. With --hostname, current host name
 resolution must include the explicit pinned --endpoint IP before TCP probing.

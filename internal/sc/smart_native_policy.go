@@ -5,8 +5,13 @@ import (
 	"errors"
 	"fmt"
 	"net/netip"
+	"regexp"
 	"time"
 )
+
+// A Linux interface name is a kernel identity, shared by Native TUN,
+// underlay preflight and owned-resource recovery.
+var nativeInterfaceName = regexp.MustCompile("^[a-zA-Z0-9_.-]{1,15}$")
 
 // NativePolicyOptions describes a proposed sing-box-owned Linux TUN policy.
 // Compiling it changes no host resources and does not authorize activation.
@@ -36,10 +41,8 @@ const NativePolicyRuleIndex = 14200
 const NativePolicyOutputMark = 0x2024
 
 // NativePolicyTunMTU is the virtual TUN MTU for the current official-Core
-// native policy, not the physical underlay MTU. The separately retained
-// experimental manager-owned native trial has its own fixed 1400-byte link
-// and journal; do not alter that trial while its recovery path is needed.
-// A 1400-byte current-native TUN fragmented IPv6 UDP above a 1352-byte
+// native policy, not the physical underlay MTU. A historical 1400-byte
+// experimental TUN fragmented IPv6 UDP above a 1352-byte
 // application body, and those fragments did not reach the selected peer.
 const NativePolicyTunMTU = 9000
 
@@ -48,8 +51,8 @@ const NativePolicyTunMTU = 9000
 // are not implemented by this compiler; callers MUST NOT treat a successful
 // compile or sing-box check as permission to activate on a hosting server.
 func NativeSmartRoutingConfig(profile Profile, opts NativePolicyOptions, operator []SmartRoutingRule) ([]byte, error) {
-	if !smartTUNDeviceName.MatchString(opts.InterfaceName) ||
-		!smartTUNDeviceName.MatchString(opts.UnderlayInterface) ||
+	if !nativeInterfaceName.MatchString(opts.InterfaceName) ||
+		!nativeInterfaceName.MatchString(opts.UnderlayInterface) ||
 		opts.InterfaceName == opts.UnderlayInterface ||
 		opts.InterfaceName == "lo" || opts.UnderlayInterface == "lo" {
 		return nil, errors.New("invalid native TUN or underlay interface")

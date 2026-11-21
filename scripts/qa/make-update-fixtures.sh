@@ -51,7 +51,7 @@ for variant in valid invalid-unit; do
     cd "$dest"
     sha256sum bin/server-connect bin/sing-box bin/libcronet.so \
       server-connect.service server-connect-activation-recover.service \
-      server-connect-activation-recover.timer server-connect-smart-tun.service server-connect-native-tun.service \
+      server-connect-activation-recover.timer server-connect-native-tun.service \
       server-connect-smart-health.service server-connect-smart-health.timer install.sh release-auth.py LICENSE \
       THIRD-PARTY-LICENSES/sing-box-LICENSE THIRD-PARTY-LICENSES/golang.org-x-net-LICENSE \
       THIRD-PARTY-LICENSES/publicsuffix-LICENSE THIRD-PARTY-LICENSES/publicsuffix-list.dat \

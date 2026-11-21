@@ -7,74 +7,38 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
-	"sync"
+	"syscall"
 	"testing"
 )
 
-func testSelectiveInspection(string, string) (HostPreflight, error) {
-	return fixtureSelectiveHost(), nil
-}
-
-func stagedSelectiveTestJournal(t *testing.T, m *Manager) activationJournal {
+// Prepare a historical v1 journal through the shared persistence API.
+// This is test-only: released builds must never create fresh selective trials.
+func prepareSelectiveFixtureJournal(t *testing.T, m *Manager, request SelectivePlanRequest) activationJournal {
 	t.Helper()
-	receipt, err := m.stageSelectiveIntentWithInspector(fixtureSelectiveRequest(), testSelectiveInspection)
+	plan, err := planFromFixture(t, request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	changes, err := selectiveJournalChanges(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	binding := &selectiveJournalBinding{
+		Endpoint: plan.Endpoint, ManagementPeer: plan.ManagementPeer,
+		TunnelInterface: plan.TunnelInterface, RouteTable: plan.RouteTable,
+	}
+	record, err := m.prepareActivationJournalWithOptions(plan.ObservationSHA256, plan.PlanSHA256, changes, binding, syscall.Fsync)
 	if err != nil {
 		t.Fatal(err)
 	}
 	got, err := m.observeActivationJournal()
-	if err != nil || got.OperationID != receipt.OperationID ||
-		got.Revision != receipt.Revision || got.IntentType != selectiveIntentType || got.Selective == nil {
-		t.Fatalf("staged selective journal not durable and self-identifying: %+v %+v %v", got, receipt, err)
+	if err != nil || got.OperationID != record.OperationID || got.IntentType != selectiveIntentType {
+		t.Fatalf("historical journal fixture is not valid: %+v %v", got, err)
 	}
 	return got
 }
-
-func TestSelectiveStageReceiptSurvivesOtherManagerRemoval(t *testing.T) {
-	dir := privateJournalTempDir(t)
-	first := New(dir, "", 0)
-	second := New(dir, "", 0)
-	var operation string
-	receipt, err := first.stageSelectiveIntentWithAfterCommit(fixtureSelectiveRequest(), testSelectiveInspection,
-		func(a activationJournal) {
-			operation = a.OperationID
-			status, err := second.AbandonSelectiveIntent(a.OperationID, a.Revision)
-			if err != nil || status.OperationID != a.OperationID || status.Phase != "absent" {
-				t.Fatalf("other manager could not remove A: %+v %v", status, err)
-			}
-		})
-	if err != nil || receipt.OperationID != operation || receipt.Phase != "prepared" || !receipt.Present ||
-		receipt.Revision != 1 || !receipt.RequiresOperatorReview || receipt.GuardArmed || receipt.ActivationReady {
-		t.Fatalf("stage receipt returned missing/unrelated operation: %+v %v", receipt, err)
-	}
-	actual, err := New(dir, "", 0).InspectActivationJournal()
-	if err != nil || actual.Phase != "absent" || actual.Present {
-		t.Fatalf("test did not create intended interleaving: %+v %v", actual, err)
-	}
-}
-
-func TestSelectiveStageReceiptSurvivesReplacementOperation(t *testing.T) {
-	dir := privateJournalTempDir(t)
-	first, other := New(dir, "", 0), New(dir, "", 0)
-	var a, b string
-	receipt, err := first.stageSelectiveIntentWithAfterCommit(fixtureSelectiveRequest(), testSelectiveInspection,
-		func(record activationJournal) {
-			a = record.OperationID
-			if _, err := other.AbandonSelectiveIntent(a, 1); err != nil {
-				t.Fatal(err)
-			}
-			replacement, err := other.stageSelectiveIntentWithInspector(fixtureSelectiveRequest(), testSelectiveInspection)
-			if err != nil {
-				t.Fatal(err)
-			}
-			b = replacement.OperationID
-		})
-	if err != nil || a == "" || b == "" || a == b || receipt.OperationID != a || receipt.OperationID == b {
-		t.Fatalf("stage A returned B after A was replaced: A=%s B=%s receipt=%+v err=%v", a, b, receipt, err)
-	}
-	live, err := New(dir, "", 0).InspectActivationJournal()
-	if err != nil || live.OperationID != b || live.OperationID == receipt.OperationID {
-		t.Fatalf("the interleaving did not actually replace A with B: %+v %v", live, err)
-	}
+func stagedSelectiveTestJournal(t *testing.T, m *Manager) activationJournal {
+	return prepareSelectiveFixtureJournal(t, m, fixtureSelectiveRequest())
 }
 
 func TestSelectiveAbandonReceiptSurvivesReplacementOperation(t *testing.T) {
@@ -83,11 +47,7 @@ func TestSelectiveAbandonReceiptSurvivesReplacementOperation(t *testing.T) {
 	a := stagedSelectiveTestJournal(t, owner)
 	var b string
 	receipt, err := owner.abandonSelectiveIntentWithAfterRemove(a.OperationID, a.Revision, func() {
-		replacement, err := other.stageSelectiveIntentWithInspector(fixtureSelectiveRequest(), testSelectiveInspection)
-		if err != nil {
-			t.Fatal(err)
-		}
-		b = replacement.OperationID
+		b = stagedSelectiveTestJournal(t, other).OperationID
 	})
 	if err != nil || b == "" || b == a.OperationID || receipt.Phase != "absent" || receipt.Present ||
 		receipt.OperationID != a.OperationID || receipt.OperationID == b || receipt.Revision != 1 ||
@@ -97,45 +57,6 @@ func TestSelectiveAbandonReceiptSurvivesReplacementOperation(t *testing.T) {
 	live, err := other.InspectActivationJournal()
 	if err != nil || live.OperationID != b || live.Phase != "prepared" {
 		t.Fatalf("actual B did not persist after A removal: %+v %v", live, err)
-	}
-}
-
-func TestSelectiveTwoManagersSerializeStagingUnderOneLock(t *testing.T) {
-	dir := privateJournalTempDir(t)
-	managers := []*Manager{New(dir, "", 0), New(dir, "", 0)}
-	var start sync.WaitGroup
-	start.Add(1)
-	results := make([]ActivationJournalStatus, 2)
-	errs := make([]error, 2)
-	var done sync.WaitGroup
-	done.Add(2)
-	for i, m := range managers {
-		go func(i int, manager *Manager) {
-			defer done.Done()
-			start.Wait()
-			results[i], errs[i] = manager.stageSelectiveIntentWithInspector(fixtureSelectiveRequest(), testSelectiveInspection)
-		}(i, m)
-	}
-	start.Done()
-	done.Wait()
-	success := 0
-	var committed string
-	for i, err := range errs {
-		if err == nil {
-			success++
-			committed = results[i].OperationID
-			continue
-		}
-		if ErrorCode(err) != "activation_journal_conflict" || results[i].OperationID != "" {
-			t.Fatalf("concurrent stage returned another operation or unclassified result: %+v %v", results[i], err)
-		}
-	}
-	if success != 1 || committed == "" {
-		t.Fatalf("expected exactly one successful journal write: success=%d", success)
-	}
-	persisted, err := New(dir, "", 0).observeActivationJournal()
-	if err != nil || persisted.OperationID != committed {
-		t.Fatalf("cross-manager race lost committed operation: %+v %v", persisted, err)
 	}
 }
 

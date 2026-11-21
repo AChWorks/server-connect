@@ -19,10 +19,10 @@ import (
 	"time"
 )
 
-// Experimental, rule-only transaction: the routing table stays EMPTY. This
-// exercises the product journal, native RPDB, independent systemd deadline,
-// interruption and reboot reconciliation without starting a VPN or diverting
-// traffic. No non-disposable host may invoke this development operation.
+// Historical v2 rule-only and v3 loopback-route journal recovery. Creation
+// of new v2/v3 experiments is retired; existing records still require exact
+// owned-rule/route cleanup by the installed independent recovery timer.
+// Neither format represents a production VPN activation.
 const (
 	trialIntentType      = "guarded_rule_trial_v2"
 	trialRouteIntentType = "guarded_loopback_route_trial_v3"
@@ -252,34 +252,6 @@ func trialSingleRule(record trialJournal) (PlannedRule, error) {
 	return rule, nil
 }
 
-// A complete namespace-wide snapshot is required before lab mutation. No
-// default route / foreign interface can exist; a synthetic default via lo is
-// allowed in the disconnected systemd acceptance guest.
-func trialIsolatedNetwork() error {
-	raw, err := nativeIPJSON("-j", "link", "show")
-	if err != nil {
-		return Fault("unsupported_host", "isolated link inventory unavailable")
-	}
-	links, err := selectiveRows(raw)
-	if err != nil || len(links) != 1 || selectiveText(links[0]["ifname"]) != "lo" {
-		return Fault("unsupported_host", "guarded trial requires loopback-only disposable namespace")
-	}
-	routes, err := nativeIPJSON("-j", "-4", "route", "show", "table", "all")
-	if err != nil {
-		return Fault("unsupported_host", "isolated route inventory unavailable")
-	}
-	routeRows, err := selectiveRows(routes)
-	if err != nil {
-		return Fault("unsupported_host", "isolated routes unsupported")
-	}
-	for _, r := range routeRows {
-		if selectiveText(r["dev"]) != "lo" {
-			return Fault("unsupported_host", "disposable routing includes non-loopback device")
-		}
-	}
-	return nil
-}
-
 // A competing runtime unit or mask can exist while systemctl reports a
 // loaded/static installed /etc unit (which has HIGHER precedence than /run).
 // Never trust that name collision as a clean, uniquely owned guard. A
@@ -394,47 +366,26 @@ func trialGuardUnits(armed bool) error {
 
 func sha256Hex(data []byte) string { sum := sha256.Sum256(data); return hex.EncodeToString(sum[:]) }
 
-// These explicit SIGKILL boundaries are available ONLY in the loopback-only,
-// disconnected disposable systemd guest. Invalid phase/point combinations are
-// rejected before writing the private journal or changing kernel state.
+// Retained solely for historical v2/v3 pending-journal recovery QA.
+// Creation-time crash/fault boundaries are retired with the old entrypoints.
 func trialValidateQACrashPoint(phase, point string) error {
 	if point == "" {
 		return nil
 	}
-	switch phase {
-	case "apply", "route-apply":
-		if point == "before-journal" || point == "after-journal" || point == "after-add" ||
-			(phase == "route-apply" && point == "after-route") {
-			return nil
-		}
-	case "recover":
-		if point == "after-delete" || point == "before-recovered-journal" || point == "after-route-delete" {
-			return nil
-		}
+	if phase == "recover" && (point == "after-delete" || point == "before-recovered-journal" || point == "after-route-delete") {
+		return nil
 	}
-	return Fault("invalid_arguments", "unsupported rule-trial QA crash boundary")
+	return Fault("invalid_arguments", "unsupported rule-trial recovery QA crash boundary")
 }
 
-// These error-path probes are restricted to the same strict disposable
-// systemd Docker guest as the v3 trial. They exercise the real native-ip
-// command failure handler (with a deliberately invalid, non-mutating command)
-// and the recovered-journal persistence error branch. They do NOT simulate
-// Linux netlink EIO or a physical disk/fsync failure.
 func trialValidateQAFaultPoint(phase, point string) error {
 	if point == "" {
 		return nil
 	}
-	switch phase {
-	case "route-apply":
-		if point == "route-add" || point == "rule-add" {
-			return nil
-		}
-	case "recover":
-		if point == "route-delete" || point == "recovered-journal-write" {
-			return nil
-		}
+	if phase == "recover" && (point == "route-delete" || point == "recovered-journal-write") {
+		return nil
 	}
-	return Fault("invalid_arguments", "unsupported v3 disposable QA failure boundary")
+	return Fault("invalid_arguments", "unsupported historical recovery QA fault boundary")
 }
 
 func trialRunIPWithQAFault(actual, requested string, args ...string) error {
@@ -581,177 +532,6 @@ func trialRunIP(args ...string) error {
 	return nil
 }
 
-// Activation is deliberately unavailable. This experimental path only adds a
-// route-less RPDB rule to an otherwise unused table, then MUST expire. A
-// successful trial is NOT a working tunnel, safe production activation, or
-// evidence of live foreign transport.
-func (m *Manager) BeginGuardedRuleTrial(operationID string, revision uint64, ttlSeconds int, qaCrashPoint string) (TrialReceipt, error) {
-	return m.beginGuardedTrial(operationID, revision, ttlSeconds, qaCrashPoint, "", false)
-}
-
-// The v3 lab path inserts a real native IPv4 route via lo into the isolated
-// table BEFORE the matching rule. It still cannot transport any VPN traffic.
-func (m *Manager) BeginGuardedRouteTrial(operationID string, revision uint64, ttlSeconds int, qaCrashPoint, qaFaultPoint string) (TrialReceipt, error) {
-	return m.beginGuardedTrial(operationID, revision, ttlSeconds, qaCrashPoint, qaFaultPoint, true)
-}
-
-func (m *Manager) beginGuardedTrial(operationID string, revision uint64, ttlSeconds int, qaCrashPoint, qaFaultPoint string, withRoute bool) (TrialReceipt, error) {
-	// The fixed independent systemd unit has exactly one private state root.
-	// A custom --state-dir would arm a watchdog that can never find this
-	// transaction, leaving a real kernel rule unowned after controller death.
-	if m.Dir != DefaultDir {
-		return TrialReceipt{}, Fault("trial_unsupported", "guarded trial requires the installed default private state directory")
-	}
-	phase := "apply"
-	if withRoute {
-		phase = "route-apply"
-	}
-	if err := trialValidateQACrashPoint(phase, qaCrashPoint); err != nil {
-		return TrialReceipt{}, err
-	}
-	if err := trialValidateQAFaultPoint(phase, qaFaultPoint); err != nil {
-		return TrialReceipt{}, err
-	}
-	if qaCrashPoint != "" && qaFaultPoint != "" {
-		return TrialReceipt{}, Fault("invalid_arguments", "only one disposable QA intervention is allowed")
-	}
-	if !journalHex32.MatchString(operationID) || revision != 1 || ttlSeconds < 4 || ttlSeconds > 600 {
-		return TrialReceipt{}, Fault("invalid_arguments", "exact staged revision and trial deadline (4-600s) required")
-	}
-	if err := nativeTrialApplyPlatform(); err != nil {
-		return TrialReceipt{}, err
-	}
-	if err := trialDisposableContext(); err != nil {
-		return TrialReceipt{}, err
-	}
-	if err := trialIsolatedNetwork(); err != nil {
-		return TrialReceipt{}, err
-	}
-	if err := trialGuardScheduled(); err != nil {
-		return TrialReceipt{}, err
-	}
-	boot, err := trialBootIdentity()
-	if err != nil {
-		return TrialReceipt{}, err
-	}
-	uptime, err := trialUptime()
-	if err != nil {
-		return TrialReceipt{}, err
-	}
-	var receipt TrialReceipt
-	err = m.withActivationJournalLock(syscall.Fsync, func(store *activationJournalDir) error {
-		record, id, err := loadActivationJournalLocked(store)
-		if err != nil {
-			return err
-		}
-		if subtle.ConstantTimeCompare([]byte(operationID), []byte(record.OperationID)) != 1 || record.Revision != revision {
-			return Fault("activation_journal_conflict", "guard trial requires exact staged operation")
-		}
-		if _, err := selectiveRequestFromValidatedJournal(record); err != nil {
-			return err
-		}
-		if len(record.Changes) != 2 {
-			return Fault("trial_unsupported", "guarded trial currently supports one IPv4 prefix only")
-		}
-		trial := trialJournal{activationJournal: record, BootID: boot, DeadlineUptimeSec: uptime + int64(ttlSeconds)}
-		trial.Version, trial.Revision, trial.Phase, trial.IntentType = 2, 2, "trial_pending", trialIntentType
-		if withRoute {
-			trial.Version, trial.IntentType, trial.RouteDevice = 3, trialRouteIntentType, "lo"
-		}
-		if err := validateTrialJournal(trial); err != nil {
-			return err
-		}
-		req, err := selectiveRequestFromValidatedJournal(record)
-		if err != nil {
-			return err
-		}
-		intent, err := validateSelectiveRequest(req)
-		if err != nil {
-			return err
-		}
-		for i := 0; i < 2; i++ {
-			host, err := InspectHostRoutes(req.EndpointIP, req.ManagementPeerIP)
-			if err != nil {
-				return Fault("route_plan_uncertain", "fresh native trial observation failed")
-			}
-			plan, err := buildSelectivePlan(intent, host)
-			if err != nil {
-				return Fault("route_plan_uncertain", "fresh trial plan cannot be compared")
-			}
-			if plan.PlanSHA256 != record.PlanSHA256 || plan.ObservationSHA256 != record.ObservationSHA256 {
-				return Fault("route_plan_changed", "trial kernel state no longer matches staged operation")
-			}
-		}
-		rule, err := trialSingleRule(trial)
-		if err != nil {
-			return err
-		}
-		rows, err := trialNativeRules()
-		if err != nil {
-			return err
-		}
-		present, err := trialRulePresence(rows, rule)
-		if err != nil {
-			return err
-		}
-		if present {
-			return Fault("trial_resource_conflict", "rule already exists before guarded trial")
-		}
-		var route PlannedRoute
-		if withRoute {
-			route, err = trialSingleRoute(trial)
-			if err != nil {
-				return err
-			}
-			routePresent, err := trialNativeRoutePresence(route)
-			if err != nil {
-				return err
-			}
-			if routePresent {
-				return Fault("trial_resource_conflict", "route exists before guarded trial")
-			}
-			if err := trialNoForeignTableRules(rows, rule); err != nil {
-				return err
-			}
-		}
-		if err := trialGuardScheduled(); err != nil {
-			return err
-		}
-		if err := trialQAKillAt("before-journal", qaCrashPoint); err != nil {
-			return err
-		}
-		if err := writeTrialLocked(store, trial, &id); err != nil {
-			return err
-		}
-		if err := trialQAKillAt("after-journal", qaCrashPoint); err != nil {
-			return err
-		}
-		// Durable pending record and independently active timer PRECEDE the one
-		// kernel effect. Crash before or after add is recoverable by inspection.
-		receipt = trialReceipt(trial, true, false)
-		if withRoute {
-			if err := trialRunIPWithQAFault("route-add", qaFaultPoint, trialRouteCommand(route, "add")...); err != nil {
-				return err
-			}
-			if err := trialQAKillAt("after-route", qaCrashPoint); err != nil {
-				return err
-			}
-		}
-		if err := trialRunIPWithQAFault("rule-add", qaFaultPoint, "-4", "rule", "add", "pref", strconv.Itoa(rule.Priority), "to", rule.Destination,
-			"table", strconv.Itoa(rule.Table), "protocol", trialProtocol); err != nil {
-			return err
-		}
-		if err := trialQAKillAt("after-add", qaCrashPoint); err != nil {
-			return err
-		}
-		return nil
-	})
-	if err != nil {
-		return TrialReceipt{}, err
-	}
-	return receipt, nil
-}
-
 // Called from a standalone systemd oneshot: no dependency on sing-box or a
 // living initiating shell. The v2 record must survive a process crash. A
 // changed boot ID triggers recovery immediately, not a new 600s allowance.
@@ -782,8 +562,6 @@ func (m *Manager) RecoverGuardedRuleTrial(qaCrashPoint, qaFaultPoint string) (Tr
 				return TrialReceipt{Phase: "absent", ExperimentOnly: true}, nil
 			case 1:
 				return TrialReceipt{Phase: "unarmed_prepared", ExperimentOnly: true}, nil
-			case smartTUNTrialVersion:
-				return recoverSmartTUNTrialJournalLocked(store, selected.identity, selected.tun)
 			case 2, 3:
 				return recoverLegacyGuardedTrialLocked(store, selected.identity, selected.trial, qaCrashPoint, qaFaultPoint)
 			default:
@@ -800,7 +578,6 @@ type trialRecoverySelection struct {
 	version  int
 	identity activationJournalFileIdentity
 	trial    trialJournal
-	tun      smartTUNTrialJournal
 }
 
 func (m *Manager) recoverGuardedTrialWithHandler(qaCrashPoint, qaFaultPoint string,
@@ -830,17 +607,6 @@ func selectTrialRecoveryLocked(store *activationJournalDir, qaCrashPoint, qaFaul
 	}
 	if err := rejectAmbiguousJournalJSON(raw); err != nil {
 		return trialRecoverySelection{}, err
-	}
-	var marker struct {
-		Version int `json:"version"`
-	}
-	if err := json.Unmarshal(raw, &marker); err == nil && marker.Version == smartTUNTrialVersion &&
-		qaCrashPoint == "" && qaFaultPoint == "" {
-		record, err := decodeSmartTUNTrial(raw)
-		if err != nil {
-			return trialRecoverySelection{}, err
-		}
-		return trialRecoverySelection{version: smartTUNTrialVersion, identity: identity, tun: record}, nil
 	}
 	record, err := decodeTrialJournal(raw)
 	if err != nil {

@@ -356,14 +356,6 @@ func nativeReplyGuardReceipt(raw string) (uint64, string, error) {
 	return table.Handle, nativeAcceptedTCPFingerprint(all), nil
 }
 
-func nativeReplyGuardShape(raw string) error {
-	_, _, err := nativeReplyGuardReceipt(raw)
-	return err
-}
-func nativeReplyGuardHandle(raw string) (uint64, error) {
-	h, _, err := nativeReplyGuardReceipt(raw)
-	return h, err
-}
 func inspectNativeReplyGuardSnapshot(ctx context.Context, reader nativeReplyGuardReader) (bool, uint64, string, error) {
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
@@ -436,11 +428,6 @@ func installNativeReplyGuardWithHandle(ctx context.Context, runner nativeReplyGu
 	}
 	return handle, nil
 }
-func installNativeReplyGuard(ctx context.Context, runner nativeReplyGuardWriter) error {
-	_, err := installNativeReplyGuardWithHandle(ctx, runner, nil, nativeAcceptedTCPFingerprint(nil))
-	return err
-}
-
 func recoverNativeReplyGuard(ctx context.Context, runner nativeReplyGuardCASRunner, expectedHandle uint64, expectedFingerprint string) error {
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()

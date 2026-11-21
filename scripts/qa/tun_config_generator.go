@@ -1,112 +1,45 @@
 //go:build linux
 
-// QA-only config generator. The pinned test credentials and IPs are synthetic;
-// no real VPN profile, release artifact, or production Apply is involved.
+// This is an isolated-guest-only configuration generator for Native DNS
+// packet witnesses. It imports only the same official-Core Native compiler
+// used by the installed product; there is no parallel TUN policy engine.
 package main
 
 import (
 	"encoding/json"
 	"fmt"
-	"github.com/AChWorks/server-connect/internal/sc"
 	"os"
+
+	"github.com/AChWorks/server-connect/internal/sc"
 )
 
 func main() {
+	mode := os.Getenv("SC_QA_TUN_NATIVE_DNS_MODE")
+	if os.Getenv("SC_QA_TUN_NATIVE_DNS") != "yes" ||
+		os.Getenv("SC_QA_TUN_IPV6") != "yes" ||
+		(mode != "default" && mode != "bypass_iran") {
+		fmt.Fprintln(os.Stderr, "Native DNS QA requires an explicit mode and dual-stack isolation")
+		os.Exit(2)
+	}
 	profile := sc.Profile{Outbound: json.RawMessage(`{"type":"vless","tag":"upstream","server":"10.254.72.2","server_port":19182,"uuid":"c2902f3a-1c25-41ef-a8dc-760b483aa247"}`)}
-	// A separate, packet-proved laboratory exercises the *current native*
-	// compiler, not the historical SmartTUNCandidateConfig fixture.
-	if os.Getenv("SC_QA_TUN_NATIVE_DNS") == "yes" {
-		mode := os.Getenv("SC_QA_TUN_NATIVE_DNS_MODE")
-		if os.Getenv("SC_QA_TUN_IPV6") != "yes" || (mode != "default" && mode != "bypass_iran") {
-			fmt.Fprintln(os.Stderr, "Native DNS QA requires dual-stack and an explicit native mode")
-			os.Exit(2)
-		}
-		raw, err := sc.NativeSmartRoutingConfig(profile, sc.NativePolicyOptions{
-			InterfaceName: "sctunqa0", UnderlayInterface: "scqaedge0",
-			IPv4Address: "172.31.99.1/30", IPv6Address: "fd73:99::1/64",
-			Mode: mode,
-		}, []sc.SmartRoutingRule{
-			{Type: "cidr", Value: "5.22.0.11/32", Via: "vpn"},
-			{Type: "cidr", Value: "9.9.9.9/32", Via: "direct"},
-			// This /128 is inside the actually bundled October 2026 Iran
-			// IPv6 estimate (2001:470:f486::/48), unlike the original
-			// 2606:4700 fixtures. Still an offline synthetic test address.
-			{Type: "cidr", Value: "2001:470:f486::11/128", Via: "vpn"},
-			{Type: "cidr", Value: "2606:4700:5::10/128", Via: "vpn"},
-			{Type: "cidr", Value: "2606:4700:5::11/128", Via: "direct"},
-			{Type: "cidr", Value: "2606:4700:8::9/128", Via: "direct"},
-		})
-		if err != nil {
-			fmt.Fprintln(os.Stderr, "Native DNS QA compiler failed:", err)
-			os.Exit(1)
-		}
-		if _, err = os.Stdout.Write(raw); err != nil {
-			fmt.Fprintln(os.Stderr, "Native DNS QA output failed")
-			os.Exit(1)
-		}
-		return
-	}
-	opts := sc.SmartTUNCandidateOptions{
-		TunnelInterface:   "sctunqa0",
-		UnderlayInterface: "scqaedge0",
-		TunnelIPv4:        "172.31.99.1/30",
-		ProtectedCIDRs:    []string{"10.254.72.0/30"},
-		// Test prefix denotes the simulated domestic endpoint in the guest.
-		// This is NOT an authenticated or complete Iran-prefix database.
-		DomesticCIDRs: []string{"5.22.0.10/32"},
-		DomainExceptions: []sc.SmartTUNDomainException{
-			{Domain: "scqa.example.org", Suffix: true, Via: "vpn"},
-			{Domain: "only-exact.test", Via: "vpn"},
-		},
-	}
-	// Fail-closed IPv4 input trials are configuration generation ONLY;
-	// the disconnected guest never starts a TUN using these invalid values.
-	switch os.Getenv("SC_QA_TUN_IPV4_ADMISSION") {
-	case "":
-	case "broad-operator-direct":
-		opts.Exceptions = []sc.SmartTUNCIDRException{{CIDR: "20.0.0.0/8", Via: "direct"}}
-	case "aggregate-operator-direct":
-		for i := 0; i < 65; i++ {
-			opts.Exceptions = append(opts.Exceptions, sc.SmartTUNCIDRException{
-				CIDR: fmt.Sprintf("20.%d.0.0/24", i), Via: "direct",
-			})
-		}
-	case "broad-domestic-direct":
-		opts.DomesticCIDRs = []string{"8.0.0.0/7"}
-	case "aggregate-domestic-direct":
-		opts.DomesticCIDRs = []string{"8.0.0.0/8", "9.0.0.0/8", "11.0.0.0/8"}
-	case "domestic-rfc1918-overlap":
-		opts.DomesticCIDRs = []string{"172.0.0.0/8"}
-	case "domestic-link-local-overlap":
-		opts.DomesticCIDRs = []string{"169.0.0.0/8"}
-	case "domestic-special-anycast":
-		opts.DomesticCIDRs = []string{"192.88.99.2/32"}
-	default:
-		fmt.Fprintln(os.Stderr, "Unsupported isolated IPv4 admission QA mode")
-		os.Exit(2)
-	}
-	// Dual-stack is an isolated-guest-only explicitly opted-in proof.
-	// All addresses below are synthetic: no real Iran/foreign classification.
-	switch os.Getenv("SC_QA_TUN_IPV6") {
-	case "":
-	case "yes":
-		opts.TunnelIPv6 = "fd73:99::1/64"
-		opts.DomesticIPv6CIDRs = []string{"2606:4700:5::/64"}
-		opts.IPv6Exceptions = []sc.SmartTUNCIDRException{
-			{CIDR: "2606:4700:5::10/128", Via: "vpn"},
-			{CIDR: "2606:4700:8::9/128", Via: "direct"},
-		}
-	default:
-		fmt.Fprintln(os.Stderr, "Unsupported isolated IPv6 QA mode")
-		os.Exit(2)
-	}
-	cfg, err := sc.SmartTUNCandidateConfig(profile, opts)
+	raw, err := sc.NativeSmartRoutingConfig(profile, sc.NativePolicyOptions{
+		InterfaceName: "sctunqa0", UnderlayInterface: "scqaedge0",
+		IPv4Address: "172.31.99.1/30", IPv6Address: "fd73:99::1/64",
+		Mode: mode,
+	}, []sc.SmartRoutingRule{
+		{Type: "cidr", Value: "5.22.0.11/32", Via: "vpn"},
+		{Type: "cidr", Value: "9.9.9.9/32", Via: "direct"},
+		{Type: "cidr", Value: "2001:470:f486::11/128", Via: "vpn"},
+		{Type: "cidr", Value: "2606:4700:5::10/128", Via: "vpn"},
+		{Type: "cidr", Value: "2606:4700:5::11/128", Via: "direct"},
+		{Type: "cidr", Value: "2606:4700:8::9/128", Via: "direct"},
+	})
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "QA candidate generation failed:", err)
+		fmt.Fprintln(os.Stderr, "Native DNS QA config failed:", err)
 		os.Exit(1)
 	}
-	if _, err = os.Stdout.Write(cfg); err != nil {
-		fmt.Fprintln(os.Stderr, "QA output failed")
+	if _, err := os.Stdout.Write(raw); err != nil {
+		fmt.Fprintln(os.Stderr, "Native DNS QA output failed")
 		os.Exit(1)
 	}
 }

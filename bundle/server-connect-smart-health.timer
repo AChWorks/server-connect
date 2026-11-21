@@ -1,5 +1,5 @@
 [Unit]
-Description=Server Connect experimental selected-path health schedule
+Description=Server Connect Native selected-path health schedule
 Documentation=https://github.com/AChWorks/server-connect
 
 [Timer]

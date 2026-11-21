@@ -95,7 +95,7 @@ func healthTLSExchange(t *testing.T, leaf string, respond func(string) []byte) S
 		t.Fatal(err)
 	}
 	result := smartTUNHealthExchangeWithDeadline(ctx, connection,
-		smartTUNHealthProbe{protocol: "https", expectedSource: "127.0.0.1"}, nonce)
+		smartTUNHealthProbe{expectedSource: "127.0.0.1"}, nonce)
 	select {
 	case err := <-done:
 		if err != nil {
@@ -250,42 +250,6 @@ func TestSmartTUNHTTPSRequiresBoundedExactFreshHTTPResponse(t *testing.T) {
 	}
 }
 
-func TestSmartTUNHTTPSPartialTargetsAndProtocolIsolation(t *testing.T) {
-	for _, dual := range []bool{false, true} {
-		for _, failAll := range []bool{false, true} {
-			result := runSmartTUNHealthProbes(context.Background(), dual,
-				func(_ context.Context, p smartTUNHealthProbe) SmartTUNHTTPSResult {
-					if p.protocol == "https" {
-						if failAll || p.target%2 == 0 {
-							return SmartTUNHTTPSResult{Result: "http_status", StatusCode: 503}
-						}
-						return SmartTUNHTTPSResult{Result: "pass", StatusCode: 200}
-					}
-					return SmartTUNHTTPSResult{Result: "pass"}
-				})
-			wantReason := "healthy_partial_targets"
-			if failAll {
-				wantReason = "vpn_ipv4_https_failed"
-			}
-			if result.VPNHealthy == failAll || !result.UnderlayHealthy || !result.IPv4TCP || !result.IPv4UDP || !result.IPv4DNS ||
-				result.IPv6TCP != dual || result.IPv6UDP != dual || result.IPv6DNS != dual || result.Reason != wantReason ||
-				!validSmartTUNHTTPSEvidence(result, dual) {
-				t.Fatalf("HTTPS outage borrowed TCP health or lost alternate evidence: %+v", result)
-			}
-		}
-	}
-	result := runSmartTUNHealthTestProbes(context.Background(), true, func(_ context.Context, p smartTUNHealthProbe) string {
-		if p.protocol == "https" && p.family == 6 {
-			return "tls_identity_failed"
-		}
-		return "pass"
-	})
-	if result.VPNHealthy || result.Reason != "vpn_ipv6_https_failed" || !result.IPv4HTTPS || result.IPv6HTTPS ||
-		!validSmartTUNHTTPSEvidence(result, true) {
-		t.Fatalf("IPv4 HTTPS borrowed as IPv6 evidence: %+v", result)
-	}
-}
-
 func TestSmartTUNHTTPSCancellationClosesHandshakeAndPartialResponse(t *testing.T) {
 	for _, stage := range []string{"handshake", "body"} {
 		t.Run(stage, func(t *testing.T) {
@@ -330,7 +294,7 @@ func TestSmartTUNHTTPSCancellationClosesHandshakeAndPartialResponse(t *testing.T
 			}
 			result := make(chan SmartTUNHTTPSResult, 1)
 			go func() {
-				result <- smartTUNHealthExchangeWithDeadline(ctx, connection, smartTUNHealthProbe{protocol: "https", expectedSource: "127.0.0.1"}, bytes.Repeat([]byte{8}, 16))
+				result <- smartTUNHealthExchangeWithDeadline(ctx, connection, smartTUNHealthProbe{expectedSource: "127.0.0.1"}, bytes.Repeat([]byte{8}, 16))
 			}()
 			select {
 			case <-ready:
@@ -368,33 +332,32 @@ func TestSmartTUNHTTPSMalformedHandshakeIsDistinctFromHTTP(t *testing.T) {
 		_, _ = server.Read(buf)
 		_, _ = io.WriteString(server, "HTTP/1.1 200 OK\r\n\r\n")
 	}()
-	got := smartTUNHealthExchangeWithDeadline(ctx, client, smartTUNHealthProbe{protocol: "https", expectedSource: "8.8.8.8"}, bytes.Repeat([]byte{1}, 16))
+	got := smartTUNHealthExchangeWithDeadline(ctx, client, smartTUNHealthProbe{expectedSource: "8.8.8.8"}, bytes.Repeat([]byte{1}, 16))
 	<-done
 	if got != (SmartTUNHTTPSResult{Result: "tls_handshake_failed"}) {
 		t.Fatalf("plaintext TCP became TLS or HTTP proof: %+v", got)
 	}
 }
 
-func TestSmartTUNHTTPSCanceledRoundRetainsCriticalSourceEvidence(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	observed := make(chan struct{})
-	evidence := runSmartTUNHealthTestProbes(ctx, true, func(_ context.Context, p smartTUNHealthProbe) string {
-		if p.target == 2 && p.protocol == "https" {
-			close(observed)
-			return "path_mismatch"
+// Cancel only after a completed close-delimited TLS read. Retained in
+// active Native HTTPS QA after retiring the obsolete TCP/UDP/DNS probe lab.
+type healthCancelAfterReadConn struct {
+	net.Conn
+	cancel    context.CancelFunc
+	readError error
+	completed bool
+}
+
+func (c *healthCancelAfterReadConn) Read(p []byte) (int, error) {
+	n, err := c.Conn.Read(p)
+	if !c.completed && err == io.EOF {
+		c.completed = true
+		c.cancel()
+		if c.readError != nil {
+			err = c.readError
 		}
-		if p.target == 3 && p.protocol == "https" {
-			<-observed
-			cancel()
-		}
-		return "pass"
-	})
-	if evidence.VPNHealthy || evidence.Reason != "vpn_path_mismatch" ||
-		evidence.HTTPSResults[2] != (SmartTUNHTTPSResult{Result: "path_mismatch", StatusCode: 200}) ||
-		!validSmartTUNHTTPSEvidence(evidence, true) {
-		t.Fatalf("alternate HTTPS success/cancellation hid a Direct source: %+v", evidence)
 	}
+	return n, err
 }
 
 // The peer performs a real TLS handshake and sends complete HTTP records.
@@ -455,7 +418,7 @@ func healthTLSReadCompletion(t *testing.T, parent context.Context, respond func(
 	}()
 	connection := &healthCancelAfterReadConn{Conn: client, cancel: cancel, readError: readError}
 	result := smartTUNHealthExchangeWithDeadline(ctx, connection,
-		smartTUNHealthProbe{protocol: "https", expectedSource: "8.8.8.8"}, nonce)
+		smartTUNHealthProbe{expectedSource: "8.8.8.8"}, nonce)
 	close(exchanged)
 	select {
 	case err := <-done:

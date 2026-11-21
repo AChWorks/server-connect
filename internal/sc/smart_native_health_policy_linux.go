@@ -58,8 +58,8 @@ func (nativeHealthKernelReader) output(ctx context.Context, binary string, args 
 func inspectNativeHealthPolicy(ctx context.Context, r interface {
 	output(context.Context, string, ...string) (string, error)
 }, p nativeRedirectRecovery, targets []nativeProbeTarget) error {
-	if len(targets) == 0 || !smartTUNDeviceName.MatchString(p.TunnelIF) ||
-		!smartTUNDeviceName.MatchString(p.UnderlayIF) || p.Table != NativePolicyTableIndex || p.Rule != NativePolicyRuleIndex {
+	if len(targets) == 0 || !nativeInterfaceName.MatchString(p.TunnelIF) ||
+		!nativeInterfaceName.MatchString(p.UnderlayIF) || p.Table != NativePolicyTableIndex || p.Rule != NativePolicyRuleIndex {
 		return Fault("guard_unavailable", "invalid native health policy identity")
 	}
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)

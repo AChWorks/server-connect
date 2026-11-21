@@ -201,7 +201,7 @@ func verifyExpectedFlowBeforeDial(expected string, initial, current underlayRout
 	validKind := func(kind string) bool {
 		return kind == "" || kind == "unicast" || (expected == "lo" && kind == "local")
 	}
-	if !smartTUNDeviceName.MatchString(expected) ||
+	if !nativeInterfaceName.MatchString(expected) ||
 		initial.Device != expected || current.Device != expected ||
 		!validKind(initial.Kind) || !validKind(current.Kind) ||
 		!sameUnderlayRoute(initial, current) {

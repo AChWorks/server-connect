@@ -63,19 +63,9 @@ func TestRoutingRegistryR1IPv6SpecialPurposeRejectsAllEntryPaths(t *testing.T) {
 					t.Fatalf("import accepted special-purpose IPv6 %s via %s", cidr, via)
 				}
 				assertRoutingRegistryUnchanged(t, m, original)
-				p, o := smartTUNFixture()
-				o.TunnelIPv6 = "fd73:99::1/64"
-				o.DomesticIPv6CIDRs = []string{"2001:4860::/32"}
-				o.IPv6Exceptions = []SmartTUNCIDRException{{CIDR: cidr, Via: via}}
-				if _, err := SmartTUNCandidateConfig(p, o); err == nil {
-					t.Fatalf("native candidate accepted IPv6 special purpose %s via %s", cidr, via)
-				}
-				// Synthetic domestic source is separately supplied to the
-				// preview compiler and must not evade the same IANA admission.
-				o.IPv6Exceptions = nil
-				o.DomesticIPv6CIDRs = []string{cidr}
-				if _, err := SmartTUNCandidateConfig(p, o); err == nil {
-					t.Fatalf("native domestic policy accepted special IPv6 %s", cidr)
+				profile, opts := nativePolicyFixture()
+				if _, err := NativeSmartRoutingConfig(profile, opts, []SmartRoutingRule{{Type: "cidr", Value: cidr, Via: via}}); err == nil {
+					t.Fatalf("Native accepted invalid IPv6 rule %s via %s", cidr, via)
 				}
 			}
 		})
@@ -89,12 +79,9 @@ func TestRoutingRegistryR1AllowOrdinaryPublicIPv6(t *testing.T) {
 			if _, err := m.AddSmartRoutingRule(SmartRoutingRule{Type: "cidr", Value: cidr, Via: "direct"}); err != nil {
 				t.Fatal(err)
 			}
-			p, o := smartTUNFixture()
-			o.TunnelIPv6 = "fd73:99::1/64"
-			o.DomesticIPv6CIDRs = []string{"2001:4860::/32"}
-			o.IPv6Exceptions = []SmartTUNCIDRException{{CIDR: cidr, Via: "direct"}}
-			if _, err := SmartTUNCandidateConfig(p, o); err != nil {
-				t.Fatalf("native compiler rejected accepted IPv6: %v", err)
+			profile, opts := nativePolicyFixture()
+			if _, err := NativeSmartRoutingConfig(profile, opts, []SmartRoutingRule{{Type: "cidr", Value: cidr, Via: "direct"}}); err != nil {
+				t.Fatalf("Native rejected valid public IPv6 rule: %v", err)
 			}
 		})
 	}
@@ -116,10 +103,9 @@ func TestRoutingRegistryR2PSLRejectsWholePublicSuffixes(t *testing.T) {
 				t.Fatalf("import accepted whole PSL suffix %s", root)
 			}
 			assertRoutingRegistryUnchanged(t, m, original)
-			p, o := smartTUNFixture()
-			o.DomainExceptions = []SmartTUNDomainException{{Domain: root, Suffix: true, Via: "vpn"}}
-			if _, err := SmartTUNCandidateConfig(p, o); err == nil {
-				t.Fatalf("native compiler accepted whole suffix %s", root)
+			profile, opts := nativePolicyFixture()
+			if _, err := NativeSmartRoutingConfig(profile, opts, []SmartRoutingRule{{Type: "suffix", Value: root, Via: "vpn"}}); err == nil {
+				t.Fatalf("Native accepted invalid public suffix %s", root)
 			}
 		})
 	}
@@ -132,10 +118,9 @@ func TestRoutingRegistryR2PSLAcceptsRegistrantDomains(t *testing.T) {
 			if _, err := m.AddSmartRoutingRule(SmartRoutingRule{Type: "suffix", Value: name, Via: "vpn"}); err != nil {
 				t.Fatalf("manual rejected registrable suffix: %v", err)
 			}
-			p, o := smartTUNFixture()
-			o.DomainExceptions = []SmartTUNDomainException{{Domain: name, Suffix: true, Via: "vpn"}}
-			if _, err := SmartTUNCandidateConfig(p, o); err != nil {
-				t.Fatalf("native rejected registrable suffix: %v", err)
+			profile, opts := nativePolicyFixture()
+			if _, err := NativeSmartRoutingConfig(profile, opts, []SmartRoutingRule{{Type: "suffix", Value: name, Via: "vpn"}}); err != nil {
+				t.Fatalf("Native rejected registrable public suffix: %v", err)
 			}
 			// Imported path must use same policy, with a different valid source/rule.
 			raw := []byte("suffix vpn " + name + "\n")

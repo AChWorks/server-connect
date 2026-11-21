@@ -56,11 +56,9 @@ MTU, not a statement about the physical underlay MTU. The previous 1400-byte
 native setting fragmented ordinary IPv6 UDP application bodies above 1352
 bytes, and the selected pinned gVisor path did not deliver those fragments.
 Avoiding premature fragmentation at this bounded payload size does not prove
-arbitrary IPv6 fragment reassembly or PMTUD. The **separate, older experimental
-manager-owned TUN trial** still creates a 1400-byte link: its existing exact
-journal/alias/link-hash recovery and collision checks must remain unchanged
-until that obsolete trial is safely retired. The official-Core native path
-uses its own compile/Apply lifecycle rather than that legacy link creator.
+arbitrary IPv6 fragment reassembly or PMTUD. The obsolete parallel manager-owned v4 trial has been retired from the
+installable code. Official-Core Native alone creates the active TUN; a
+persisted legacy claim still blocks unsafe in-place replacement or adoption.
 
 The native systemd unit uses ExecStartPre to check the desired mode, selected
 profile, config receipt, underlay and vacant native policy resources. Its
@@ -95,19 +93,15 @@ handle and generation-conditional deletion. The independent Native Health
 inspector also recognizes Debian 12 numeric TCP protocol `6` and Debian 13
 `tcp`, but still requires the actual TCP counter and all other read-only
 selected route and capture evidence (see SAFETY-RECOVERY).
-Debian 13 retains its distinct older supervised-trial QA, and Debian 12 still
-refuses only the legacy `smart-tun-trial-apply` without changing network state.
-That refusal is **not** a Debian 12 prohibition on `connect-smart`. Separate
-**historical Debian 12 and 13 Incus native** results
-are limited to their recorded source and installed QA artifacts; see the
-[acceptance evidence lanes](ACCEPTANCE.md#test-lanes-and-field-regression-lessons).
+The old v4 supervised trial and its service are no longer part of the
+new package or installed acceptance. Debian 12 and 13 instead run the same
+Native `connect-smart` acceptance matrix.
 Earlier single-VM tests demonstrated narrower SIGKILL/foreign-object cases;
 they are not a different production runtime. The native policy has also passed
 synthetic independent VLESS/Direct witnesses in rootless namespaces. These
 are **development-candidate proofs**, not authenticated real Iran/foreign-provider
-field paths, trustworthy Direct domain identity or production admission. The
-legacy experimental trial remains only until its distinct recovery consumers
-can safely be retired.
+field paths, trustworthy Direct domain identity or production admission. Historical journals remain detectable and blocking; they are never
+promoted to Native activation authority.
 
 Native port-53 traffic uses the same address policy as other transports: the
 Core first honors private/local destinations and validated operator IP/CIDR
@@ -204,13 +198,11 @@ saved profile and routing rules are never erased by a health fault.
 This limited native guard candidate is **not** complete field acceptance,
 SSH confirmation, authenticated distribution or production authorization.
 
-The older detailed native resource-ledger and trial descriptions below
-document the **existing experimental code**, not the selected production
-implementation. The canonical [PROJECT-SPEC.md](PROJECT-SPEC.md) and
-[SAFETY-RECOVERY.md](SAFETY-RECOVERY.md) still govern all hosting, SSH,
-Direct/off, VPN no-leak and third-party ownership claims. Keep the historical
-OWN-ABA and stale FakeIP negative tests. Avoid adding a second generalized
-network framework to solve the new path.
+The old custom routing/resource engine is no longer compiled. The single
+Native official-Core path has the recovery and foreign-ownership limits
+documented in [Safety and recovery](SAFETY-RECOVERY.md). Historical v1/v2/v3
+journal readers remain for exact refusal/abandon and independent recovery;
+unknown v4 state is never automatically adopted.
 
 ## Components and lifecycle
 
@@ -258,158 +250,26 @@ The VPN server's *outer transport* needs an independently reachable bootstrap pa
 
 Track **desired, observed, pending/uncertain and last verified safe** states separately. An observed process, successful Direct probe, route-plan fingerprint or private intent journal is not proof of safe TUN activation. Exact transaction semantics and recovery belong to [SAFETY-RECOVERY.md](SAFETY-RECOVERY.md).
 
-## Inert product units and disposable native integration
+## Installed Native units and recovery
 
-The installer temporarily carries two separate TUN units while the
-replacement is being accepted. `server-connect-smart-tun.service` remains
-a static, unenabled legacy disposable-QA trial unit; the native candidate
-uses default-disabled server-connect-native-tun.service. They cannot both
-be activated for one host and neither proves general-host support by
-being installed. The native unit uses systemd `LoadCredential`, independent
-preflight, and a post-stop Core recovery action; the legacy unit retains
-its original operation-specific guard and timer. The ordinary Proxy Only
-service stays unprivileged. Installer digest checks and rollback include
-both units, but this is transitional: retire the old experimental unit and
-its test lane together when native acceptance makes them unnecessary.
+The Native package installs only `server-connect-native-tun.service` as its
+official-Core TUN executor, plus the independently supervised
+`server-connect-smart-health` and `server-connect-activation-recover`
+service/timer pairs. These are inactive by default. `connect-smart` stages
+operation-bound recovery claims and verifies both Guard roles before starting
+the Core. `ExecStopPost` provides independent native cleanup on ordinary stop,
+Core failure and interrupted start. Verified Direct/off retains saved profiles
+and routing settings; an ownership conflict preserves evidence and reports
+uncertainty. A pending or unknown legacy journal blocks fresh Native admission.
 
-`smart-tun-trial-apply` is limited to the known disconnected Docker/systemd
-fixture, with an exact synthetic VLESS endpoint and IPv4 or opt-in IPv4+IPv6
-policy. Its default pending mode uses the v4 journal's distinct
-`smart_tun_native_pending_trial_v1` intent with a required typed native ledger;
-it expires without confirmation. The explicit `--supervised` mode adds a
-separate strict lifecycle record for one-use fresh management confirmation,
-selected-path health and bounded reconnect. Older v4 automatic-policy and
-native-pending records retain their original recovery semantics and cannot
-be interpreted as confirmed supervised authority. All of these modes remain
-experimental and unavailable for general-host Apply.
-
-The supervised health role is a separate bounded systemd oneshot, scheduled
-by an inert-at-install timer. The independent recovery role checks both its
-unit provenance/state and its operation-bound progress deadline; an active
-timer alone cannot prove healthy supervision. The health role also checks the
-independent recovery role before continuing. Network probes execute outside
-the shared operation lock, followed by exact-state revalidation before any
-result is published. The service execution deadline bounds a stalled health
-process even if it stops making progress while holding the lock. Reconnect
-retains the native containment policy, restarts only the selected owned core,
-and must acquire fresh attachment and selected-path proof before reporting
-experimental recovery. The attempt and elapsed-time budgets span flapping
-within an outage incident. Exhaustion ends in exact owned recovery or retained
-uncertainty; it never creates an unlimited restart loop.
-
-The independent executor selects the journal version and runs its recovery
-handler under one continuous manager lock. Concurrent Apply cannot publish
-a new journal between version selection and legacy interpretation.
-
-The manager validates the selected profile, pinned core, native baseline and
-reserved resource absence, then independently prearms the installed recovery
-oneshot/timer outside the shared journal lock. It repeats admission under the
-lock and persists the operation before any native network mutation. Native ownership binds
-the network namespace, actual interface index, complete addresses and relevant
-dependencies, exact route/rule receipts, and the nftables table and ordered
-child handles. The original host fingerprint remains diagnostic evidence; it
-is not a restoration snapshot or permission to delete changed foreign state.
-
-The manager creates an exclusive, initially nonpersistent TUN, configures its
-addresses and disables automatic IPv6 address generation, then durably records
-the observed identity before making the link persistent. The official core
-attaches to this link with an empty address list, explicit gVisor stack,
-`auto_route=false`, `auto_redirect=false` and `dns_mode=disabled`. The manager
-owns capture routes, RPDB entries and one operation-specific nftables table.
-Core socket marks are injected into the narrowly supported native profile so
-the outer VPN and core Direct outbounds use the underlay without recursion.
-The existing Proxy Only profile-import behavior is unchanged.
-
-**Experimental DNS ownership (exact supervised Debian13 QEMU guest only):** an
-explicit allowlisted IPv4 resolver (currently only `1.1.1.1` or `9.9.9.9`)
-may be attached as a route-only `~.` domain to the *product-owned* TUN link
-through `resolvectl`, with a durable effect intent
-before mutation, exact link-index/readback receipts and the same pinned journal
-lock as native network mutators. The existing `ens3`/global resolver is never
-modified. The independent Guard must verify the receipted link setting during
-pending supervision and refuse a foreign/resolver mismatch during cleanup;
-removing the precisely owned TUN also removes its link-scoped DNS state. This
-optional QA setting does **not** enable sing-box DNS hijack or constitute
-trusted DNS/IP correlation, geographic domain policy, full DNS health
-verification or general-host DNS support. Unsupported systemd-resolved/link
-identity or resolver states are refused before a new guarded operation.
-A bounded disposable-only `--qa-kill-at after-native-dns-effect` SIGKILL
-boundary tests recovery after the first DNS setter but before the routing
-`~.` domain is installed. At `effect_possible`, only no DNS/no domain,
-expected DNS/no domain, and expected DNS/`~.` can authorize owned cleanup.
-A route-only `~.` without the expected DNS is foreign or ambiguous and must
-retain the journal and recovery evidence rather than silently remove the link.
-An executor failure can make
-`guard_scheduled=false` and report `guard_unavailable` even while the
-systemd Timer remains armed; this field represents verified effective Guard
-readiness, not the Timer's raw `ActiveState`. After an exact guest-only
-foreign-resolver collision is resolved and all owned network resources are
-observed absent, use `smart-tun-trial-reconcile-idle-guard` to reset an
-independently proven idle failed recovery service. Never discard the journal
-or force-clean an unknown owner merely to get a green status.
-
-Native OUTPUT capture and a separate POSTROUTING containment chain classify
-the same protected paths. OUTPUT route hooks can change the packet's route
-while later OUTPUT hooks still observe the initial output interface. The guard
-therefore checks the final selected interface in POSTROUTING. Its final drop
-applies only to host-origin packets with no ingress interface; forwarded
-traffic retains its existing owner. The guard classifies eligible traffic
-independently of the capture mark, so losing a capture rule or RPDB entry is
-not permission to fall through to Direct. Connection-tracking reply direction
-protects hosted replies without
-exempting new outbound connections to the visitor's IP. Explicit local link
-control exceptions are bounded to the fixture underlay; they do not advertise
-arbitrary ICMP, fragmentation or PMTUD support. The existing core compiler
-retains protected/operator/domestic/default precedence and rejects unsupported
-or untrusted policy inputs.
-
-Each native resource-changing phase records durable intent. Successful
-observations produce resource receipts; initial nonpersistent TUN setup is
-one FD-scoped phase whose complete identity is recorded before persistence.
-An effect that exists without its receipt is not adopted merely because its
-name or attributes look expected. Mutating native subprocesses inherit the
-existing operation lock and a parent-death signal; recovery must not run past
-an outstanding command after controller death. Core attachment also requires
-a bounded link-event observation and durable verified-start receipt. Missing
-or lost observation remains uncertainty, even if a later snapshot looks normal.
-
-Exact-operation Disconnect persists stop intent, contains the core, then
-removes proven routes/rules/link while the complete independent guard remains
-present for a receipted active policy. Before policy creation, or after an
-unreceipted policy is conclusively absent and outstanding mutators are excluded,
-cleanup may proceed without a guard. A present unreceipted graph remains uncertain. It removes the nftables guard last using a stable observed generation
-and an exact table-handle deletion conditioned on that generation. A concurrent
-committed nftables change invalidates deletion instead of allowing recursive
-foreign-child removal. Supported disjoint changes survive Off; overlapping,
-replaced or uninspectable dependencies retain resources and evidence. Only
-verified removal and protected underlay observations permit truthful Direct
-finalization. The precise ordering and uncertainty cases are in
-[Safety and recovery](SAFETY-RECOVERY.md#native-ownership-and-containment).
-
-One private saved trial policy holds validated, non-secret settings separately
-from the transient sing-box credential and operation journal. Explicit Off,
-timeout and cleanup preserve this policy and the selected profile. Saved
-reapply validates them again, repeats admission and independent prearm, and
-creates a fresh operation/deadline. Stored policy alone is never authority to
-start a service or restore a prior active state. Unresolved operations block
-Proxy Only and installer transitions and prevent status from claiming Direct.
-
-Supported foreign nftables coexistence is limited to observed non-rewriting
-filtering/counters and the admitted passive statement forms. NAT, packet or
-metadata rewriting, redirection/duplication/forwarding, userspace queueing,
-connection-tracking assignment and offload are unsupported and must remain
-absent while routed. A later privileged path-affecting change can invalidate
-routing assumptions before the periodic executor observes it; stopping the core
-is not instantaneous containment against such a new foreign policy.
-
-This boundary does not authenticate arbitrary simultaneous privileged writers,
-route/rule generations, geographic data or DNS-to-IP correlation. Fresh root
-SSH confirmation applies only to the admitted disposable transport; provider
-console attestation, general permanent commitment, field-tested Runtime Health
-Guard and physical power-loss recovery remain unavailable. General production
-activation remains unavailable. Legacy automatic-policy cleanup has additional
-[ownership limits](SAFETY-RECOVERY.md#automatic-policy-ownership-limit); it is not
-used as native-transaction deletion authority.
+The retired `server-connect-smart-tun.service` is not in the new signed
+release manifest. The installer refuses to adopt an old copy of it in place.
+An authorized disposable QA host may first uninstall the old owned release
+and reset only its verified test-owned state, then install a fresh Native
+candidate. Production migration is not implied. The Debian 12/13 installed
+QA matrix runs actual Native `connect-smart`, DNS selected-path packet
+witnesses, Core exit/Off and exact rollback, not a second custom data plane.
+Source, guest and field acceptance remain distinct.
 
 ## Optional inbound website connectivity
 
@@ -421,4 +281,4 @@ The connector must not change aaPanel/Nginx virtual hosts, intercept another tun
 
 Target only **tested** Linux OS/kernel/architecture/sing-box combinations with systemd and the required TUN/network capabilities. Acquire immutable verified bytes via official online, operator-hosted HTTPS mirror, or manual offline upload; all invoke one shared installer. Keep host-specific package, signature and installation rules in [OFFLINE-DISTRIBUTION.md](OFFLINE-DISTRIBUTION.md).
 
-Operational safety details live in [SAFETY-RECOVERY.md](SAFETY-RECOVERY.md); real scenario coverage and known limits in [ACCEPTANCE.md](ACCEPTANCE.md). Existing development-only unarmed selective plans and loopback RPDB trials remain code/test diagnostics, **not** release-blocking implementations of Smart Routing.
+Operational safety details live in [SAFETY-RECOVERY.md](SAFETY-RECOVERY.md); real scenario coverage and known limits in [ACCEPTANCE.md](ACCEPTANCE.md).

@@ -67,8 +67,8 @@ func (m *Manager) readNativeSession() (NativeSession, error) {
 	var trailing any
 	if decoder.Decode(&session) != nil || !errors.Is(decoder.Decode(&trailing), io.EOF) ||
 		session.Version != 1 || !idPattern.MatchString(session.Selected) ||
-		!smartTUNDeviceName.MatchString(session.InterfaceName) ||
-		!smartTUNDeviceName.MatchString(session.UnderlayIF) ||
+		!nativeInterfaceName.MatchString(session.InterfaceName) ||
+		!nativeInterfaceName.MatchString(session.UnderlayIF) ||
 		session.InterfaceName == session.UnderlayIF ||
 		session.InterfaceName == "lo" || session.UnderlayIF == "lo" || len(session.ConfigSHA256) != 64 {
 		return NativeSession{}, Fault("invalid_state", "invalid native recovery claim")
@@ -466,7 +466,7 @@ func (m *Manager) prepareNativeReplyGuardBeforeCoreStart() error {
 		if err != nil {
 			return Fault("guard_unavailable", "current native boot identity unavailable")
 		}
-		now, err := smartTUNUptimeMillis()
+		now, err := nativeUptimeMillis()
 		if err != nil {
 			return Fault("guard_unavailable", "native uptime unavailable")
 		}
@@ -540,7 +540,7 @@ func (m *Manager) NativePreflightInstalled() error {
 		if err != nil {
 			return Fault("guard_unavailable", "current native boot identity unavailable")
 		}
-		now, err := smartTUNUptimeMillis()
+		now, err := nativeUptimeMillis()
 		if err != nil {
 			return Fault("guard_unavailable", "native uptime unavailable")
 		}
@@ -770,10 +770,10 @@ func (m *Manager) connectNativeSmartRoutingUnlocked(opts NativePolicyOptions) (N
 	// The private journal and Manager share the SAME .lock inode.
 	// Acquire it once; never nest withLock and withActivationJournalLock.
 	err := m.withActivationJournalLock(syscall.Fsync, func(store *activationJournalDir) error {
-		if phase, err := m.pendingSmartTUNTrial(); err != nil {
+		if phase, err := m.pendingLegacyActivationJournal(); err != nil {
 			return err
 		} else if phase != "" {
-			return Fault("guard_pending", "old TUN trial must be reconciled before native Smart Routing")
+			return Fault("guard_pending", "historical activation journal must be resolved before Native Smart Routing")
 		}
 		if _, err := m.readNativeSession(); err == nil {
 			return Fault("guard_pending", "existing native session requires Disconnect")
@@ -930,9 +930,6 @@ func (m *Manager) connectNativeSmartRoutingUnlocked(opts NativePolicyOptions) (N
 		return result, Fault("guard_pending", "native Core never stabilized and recovery is uncertain")
 	}
 	return result, Fault("service_state_unavailable", "native Core did not stabilize; Direct restored")
-}
-func (m *Manager) DisconnectNativeSmartRouting() error {
-	return m.withNativeTransition(m.disconnectNativeSmartRoutingUnlocked)
 }
 func (m *Manager) disconnectNativeSmartRoutingUnlocked() error {
 	if err := m.nativeUnitOwnership(); err != nil {
@@ -1093,7 +1090,7 @@ func (m *Manager) NativeStatus() (NativeConnectionStatus, error) {
 			return Fault("guard_pending", "native health record missing or unbound")
 		}
 		boot, bootErr := trialBootIdentity()
-		now, timeErr := smartTUNUptimeMillis()
+		now, timeErr := nativeUptimeMillis()
 		if bootErr != nil || timeErr != nil || boot != health.BootID || now < health.HeartbeatMS || now-health.HeartbeatMS > nativeHealthLeaseMS {
 			return Fault("guard_unavailable", "native health supervision is stale or on a different boot")
 		}

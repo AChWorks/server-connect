@@ -123,29 +123,3 @@ func validateSelectiveJournalRecord(record activationJournal) error {
 	}
 	return nil
 }
-
-// Retain exact unarmed-v1 journal reconstruction for historical guarded
-// rule/route-trial admission. Removing the obsolete live reinspection API
-// must not strand an existing prepared operation or bypass journal validation.
-func selectiveRequestFromValidatedJournal(record activationJournal) (SelectivePlanRequest, error) {
-	if record.IntentType != selectiveIntentType || record.Selective == nil ||
-		record.Phase != "prepared" || record.Revision != 1 {
-		return SelectivePlanRequest{}, Fault("activation_journal_conflict", "legacy guarded trial requires an exact unarmed selective PREPARED intent")
-	}
-	if err := validateSelectiveJournalRecord(record); err != nil {
-		return SelectivePlanRequest{}, err
-	}
-	req := SelectivePlanRequest{
-		EndpointIP: record.Selective.Endpoint, ManagementPeerIP: record.Selective.ManagementPeer,
-		TunnelInterface: record.Selective.TunnelInterface,
-		Destinations:    make([]string, 0, len(record.Changes)/2),
-	}
-	for i := 0; i < len(record.Changes); i += 2 {
-		var route PlannedRoute
-		if err := json.Unmarshal(record.Changes[i].Intended, &route); err != nil {
-			return SelectivePlanRequest{}, activationJournalError("validated selective resource cannot be reconstructed")
-		}
-		req.Destinations = append(req.Destinations, route.Destination)
-	}
-	return req, nil
-}

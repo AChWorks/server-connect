@@ -64,14 +64,8 @@ func TestGuardedRouteTrialV3JournalAndReceipt(t *testing.T) {
 			}
 		})
 	}
-	if err := trialValidateQACrashPoint("route-apply", "after-route"); err != nil {
-		t.Fatal(err)
-	}
-	if ErrorCode(trialValidateQACrashPoint("apply", "after-route")) != "invalid_arguments" {
-		t.Fatal("v2 route interruption accepted")
-	}
-	if ErrorCode(trialValidateQACrashPoint("route-apply", "after-route-delete")) != "invalid_arguments" {
-		t.Fatal("recovery point accepted during route apply")
+	if ErrorCode(trialValidateQACrashPoint("route-apply", "after-route")) != "invalid_arguments" {
+		t.Fatal("retired v3 creation interruption was accepted")
 	}
 }
 
@@ -140,8 +134,8 @@ func TestGuardedRouteTrialV3QAFaultAdmission(t *testing.T) {
 		allowed      bool
 	}{
 		{"route-apply", "", true},
-		{"route-apply", "route-add", true},
-		{"route-apply", "rule-add", true},
+		{"route-apply", "route-add", false},
+		{"route-apply", "rule-add", false},
 		{"recover", "route-delete", true},
 		{"recover", "recovered-journal-write", true},
 		{"apply", "route-add", false},
@@ -173,7 +167,7 @@ func TestGuardedRouteTrialQANativeCommandError(t *testing.T) {
 	}
 	// Even when the caller supplies a would-be route mutation, the named QA
 	// boundary executes ONLY a deliberately invalid, non-mutating ip command.
-	if code := ErrorCode(trialRunIPWithQAFault("route-add", "route-add", "-4", "route", "add", "9.9.9.0/24", "dev", "lo")); code != "trial_kernel_error" {
+	if code := ErrorCode(trialRunIPWithQAFault("route-delete", "route-delete", "-4", "route", "add", "9.9.9.0/24", "dev", "lo")); code != "trial_kernel_error" {
 		t.Fatalf("QA native command failure incorrectly accepted: %s", code)
 	}
 }

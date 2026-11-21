@@ -113,10 +113,10 @@ for type in timer service; do
   [[ "$state" == not-found ]] || die "watchdog unit already exists or unknown ($type=$state)"
 done
 "$manager" --json status | python3 -c 'import json,sys; r=json.load(sys.stdin); assert r["ok"] and r["data"]["desired"]=="direct" and r["data"]["observed"]=="inactive"' || die "product not Direct/off"
-for cmd in smart-tun-trial-status activation-journal-status; do
+for cmd in activation-journal-status; do
   "$manager" --json "$cmd" | python3 -c 'import json,sys; r=json.load(sys.stdin); assert r["ok"] and r["data"]["phase"]=="absent"' || die "active or unknown native journal"
 done
-for name in server-connect-smart-health.timer server-connect-activation-recover.timer server-connect-smart-tun.service; do
+for name in server-connect-smart-health.timer server-connect-activation-recover.timer server-connect-native-tun.service; do
   [[ "$(systemctl show "$name" -p ActiveState --value)" == inactive ]] || die "active/uncertain product guard or TUN"
 done
 need iptables -S FORWARD

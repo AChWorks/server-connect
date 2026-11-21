@@ -56,7 +56,6 @@ UNITS = (
     "server-connect.service",
     "server-connect-activation-recover.service",
     "server-connect-activation-recover.timer",
-    "server-connect-smart-tun.service",
     "server-connect-native-tun.service",
     "server-connect-smart-health.service",
     "server-connect-smart-health.timer",

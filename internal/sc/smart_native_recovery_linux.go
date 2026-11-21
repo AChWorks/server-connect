@@ -90,7 +90,7 @@ func recoverNativeRedirect(parent context.Context, r nativeKernelRunner, p nativ
 // current-boot, consumed Core-start claim and independently stopped Core may
 // allow ONLY this orphan layout after separate absence/collision checks.
 func recoverNativeRedirectWithVerifiedOrphan(parent context.Context, r nativeKernelRunner, p nativeRedirectRecovery, claimedCoreStart bool) error {
-	if !smartTUNDeviceName.MatchString(p.TunnelIF) || !smartTUNDeviceName.MatchString(p.UnderlayIF) ||
+	if !nativeInterfaceName.MatchString(p.TunnelIF) || !nativeInterfaceName.MatchString(p.UnderlayIF) ||
 		p.TunnelIF == p.UnderlayIF || p.TunnelIF == "lo" || p.UnderlayIF == "lo" ||
 		p.Table != NativePolicyTableIndex || p.Rule != NativePolicyRuleIndex {
 		return errors.New("invalid native recovery scope")
