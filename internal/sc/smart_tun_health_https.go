@@ -36,14 +36,6 @@ type SmartTUNHTTPSResult struct {
 	StatusCode int    `json:"status_code"`
 }
 
-func smartTUNHealthNotRunEvidence() SmartTUNHealthEvidence {
-	result := SmartTUNHealthEvidence{}
-	for i := range result.HTTPSResults {
-		result.HTTPSResults[i].Result = "not_run"
-	}
-	return result
-}
-
 func smartTUNHealthTLSConfig() *tls.Config {
 	// A fresh pool contains only the exact QA root, never system or environment
 	// trust. The ordinary verifier checks chain, SAN, wall time and serverAuth.

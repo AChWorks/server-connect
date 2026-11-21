@@ -1,7 +1,7 @@
-# Inert until an exact disposable supervised operation arms this role.
+# Inert until an exact Native session arms its independently verified Health role.
 # The independent activation-recover timer checks this executor and its lease.
 [Unit]
-Description=Server Connect experimental selected-path health round
+Description=Server Connect Native selected-path health executor
 Documentation=https://github.com/AChWorks/server-connect
 After=local-fs.target
 

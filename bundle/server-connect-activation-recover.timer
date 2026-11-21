@@ -1,5 +1,5 @@
 [Unit]
-Description=Server Connect guarded-rule trial deadline and reboot monitor
+Description=Server Connect Native and historical activation recovery watchdog
 Documentation=https://github.com/AChWorks/server-connect
 
 [Timer]

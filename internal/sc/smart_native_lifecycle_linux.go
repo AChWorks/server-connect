@@ -773,7 +773,7 @@ func (m *Manager) connectNativeSmartRoutingUnlocked(opts NativePolicyOptions) (N
 		if phase, err := m.pendingLegacyActivationJournal(); err != nil {
 			return err
 		} else if phase != "" {
-			return Fault("guard_pending", "old TUN trial must be reconciled before native Smart Routing")
+			return Fault("guard_pending", "historical activation journal must be resolved before Native Smart Routing")
 		}
 		if _, err := m.readNativeSession(); err == nil {
 			return Fault("guard_pending", "existing native session requires Disconnect")

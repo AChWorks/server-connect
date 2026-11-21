@@ -322,33 +322,26 @@ Default confirmation window: **600 seconds**, operator configurable. High-risk r
 
 If an existing resource was replaced or altered by another owner, classify `UNCERTAIN`, preserve it and require controlled operator recovery instead of deleting/overwriting it. Reobserve native kernel identity and all relevant foreign dependencies before cleanup: an `ip route`/RPDB protocol tag or a matching rule number alone is **not authenticated proof of Server Connect ownership**, and a Manager lock cannot exclude independent privileged writers.
 
-### Fresh management confirmation evidence
+### Fresh management confirmation — pending production acceptance
 
-For the disposable supervised native lifecycle, confirmation is deliberately
-limited to a new authenticated root OpenSSH connection over the admitted guest
-management path. An operation challenge is issued only after native capture is
-complete. Its monotonic boot-relative time, operation, configuration and control
-revision bind the confirmation. The original Apply shell and a new channel on an
-older SSH multiplexed connection cannot satisfy that requirement.
+The former **v4 disposable supervised trial** implemented an experimental
+fresh-root-OpenSSH challenge using process ancestry, socket identity and
+monotonic session timing. That implementation and its confirmation CLI have
+been retired. **Current Native `connect-smart` does not issue or validate
+a fresh SSH challenge or provider-console confirmation.** Historical v4
+observations are not current Native authentication or field evidence.
 
-The observer verifies the caller's actual process ancestry, trusted installed
-OpenSSH executable identity, root session ownership and network namespace. A
-bounded read-only Linux `SOCK_DIAG_BY_FAMILY` dump binds an established TCP tuple,
-inode and kernel socket cookie to a descriptor held by that ancestor. The oldest
-transport-owning session process must have started strictly after the challenge;
-process lifetime, ancestry, descriptor and socket generation are checked again
-before returning evidence. `SSH_CONNECTION`, `SSH_CLIENT`, process names and
-operator-supplied timestamps are not authentication. Ambiguous, missing or
-changed evidence refuses confirmation. Provider-console confirmation and
-non-root/sudo management sessions require their own future accepted proof; they
-are not silently treated as equivalent to this root-only fixture.
+The current Native candidate instead uses a durable, configuration-bound,
+current-boot one-use Core-start claim, independently armed Health/Recovery
+roles and a narrowly owned inbound-reply guard. These safeguards protect
+startup and existing accepted connections but do **not** prove that a
+new management connection can reach the host after activation.
 
-The kernel's [process lifetime documentation](https://www.kernel.org/doc/html/latest/filesystems/proc.html)
-and [socket diagnostic UAPI](https://github.com/torvalds/linux/blob/v6.12/include/uapi/linux/inet_diag.h)
-explain the observation boundary. OpenSSH's [per-session executable split](https://www.openssh.com/releasenotes.html)
-is handled through the installed `sshd` / `sshd-session` executable identities.
-These are Linux/session observations, not an external management attestation or
-a general physical-host acceptance claim.
+For future production acceptance, an independently verified, fresh
+operation-bound SSH session or explicitly approved provider-console
+confirmation remains required under the Activation Guard contract above.
+Neither source tests nor disconnected installed-guest QA satisfy this
+physical management-access requirement.
 
 ## Runtime Health Guard
 

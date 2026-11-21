@@ -375,7 +375,7 @@ func probeNativeHTTPS(ctx context.Context, iface string, target nativeProbeTarge
 		if _, e := rand.Read(nonce); e != nil {
 			return nativeHealthOutcome{Reason: "nonce_unavailable"}
 		}
-		proof := smartTUNHealthExchangeWithDeadline(ctx, conn, smartTUNHealthProbe{family: 4, protocol: "https", address: target.IP, expectedSource: target.IP}, nonce)
+		proof := smartTUNHealthExchangeWithDeadline(ctx, conn, smartTUNHealthProbe{expectedSource: target.IP}, nonce)
 		if proof.Result == "pass" && proof.StatusCode == 200 && ctx.Err() == nil {
 			return nativeHealthOutcome{OK: true, Reason: "selected_https_verified"}
 		}

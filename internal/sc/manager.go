@@ -270,7 +270,7 @@ func (m *Manager) Select(id string) error {
 		if phase, err := m.pendingLegacyActivationJournal(); err != nil {
 			return err
 		} else if phase != "" {
-			return Fault("guard_pending", "reconcile the guarded TUN trial before changing the selected profile")
+			return Fault("guard_pending", "resolve the historical activation journal before changing the selected profile")
 		}
 		if _, e := m.readNativeSession(); e == nil {
 			return Fault("guard_pending", "finish native recovery before profile changes")
@@ -296,7 +296,7 @@ func (m *Manager) Remove(id string) error {
 		if phase, err := m.pendingLegacyActivationJournal(); err != nil {
 			return err
 		} else if phase != "" {
-			return Fault("guard_pending", "reconcile the guarded TUN trial before removing a profile")
+			return Fault("guard_pending", "resolve the historical activation journal before removing a profile")
 		}
 		if _, e := m.readNativeSession(); e == nil {
 			return Fault("guard_pending", "finish native recovery before profile changes")
@@ -770,7 +770,7 @@ func (m *Manager) connectLocked(observe func() (string, error)) error {
 	if phase, err := m.pendingLegacyActivationJournal(); err != nil {
 		return err
 	} else if phase != "" {
-		return Fault("guard_pending", "guarded TUN trial must be reconciled before Proxy Only activation")
+		return Fault("guard_pending", "historical activation journal must be resolved before Proxy Only activation")
 	}
 	s, err := m.load()
 	if err != nil {
@@ -952,7 +952,7 @@ func (m *Manager) disconnectProxyOnlyLocked() error {
 	if phase, err := m.pendingLegacyActivationJournal(); err != nil {
 		return err
 	} else if phase != "" {
-		return Fault("guard_pending", "cannot claim Direct while a guarded TUN trial remains")
+		return Fault("guard_pending", "cannot claim Direct while a historical activation journal remains")
 	}
 	if e := m.systemctl("stop"); e != nil {
 		return e

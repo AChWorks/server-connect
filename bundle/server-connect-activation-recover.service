@@ -1,5 +1,5 @@
 [Unit]
-Description=Server Connect independent guarded-rule trial recovery
+Description=Server Connect independent Native and historical activation recovery
 Documentation=https://github.com/AChWorks/server-connect
 After=local-fs.target
 
