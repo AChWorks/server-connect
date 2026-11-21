@@ -203,72 +203,26 @@ systemd services and kernel routing are never reset by this bookkeeping
 repair. This does not grant production admission or assume a failed guard is
 healthy while an operation remains active.
 
-The native fingerprint includes preexisting guest nftables objects. Native
-transactions additionally require durable per-object ownership receipts; legacy
-automatic-policy trials have the narrower ownership limit described below.
-If a running pending TUN loses its independently verified recovery timer or
-executor, an explicit recovery invocation must stop **only the provenance-verified TUN
-service immediately**, even before the recorded deadline. Loss of the guard
-is never permission to keep an active pending interception running. A recovered result requires the intent-specific restoration proof: exact native
-delta removal for the new intent, or full native IP/nftables equality for legacy
-automatic policy. Unresolved stop, credential or ownership conflicts retain the
-operation and block Direct/Proxy Only. A lost timer is reported honestly as
-`guard_scheduled=false`; it never grants broader deletion authority.
-Exact operation-ID/revision clearance disarms the remaining guard after
-rechecking the credential. For the default pending mode, this is an observed-loss containment path in the
-isolated guest; it does not establish independent guard-liveness supervision.
-The explicitly supervised mode below adds that role within the same fixture.
-Neither mode establishes the production Runtime Health Guard.
+The installed Native systemd roles and their operation-bound resource
+receipts—not a retired v4 trial journal—are authoritative for Core stop,
+cleanup and failed-executor bookkeeping. Before any fresh Connect or
+installer mutation, the manager establishes Direct intent, no active
+owned operation/guard job or PID, and exact service/timer quiescence.
+Only a verified idle owned unit may have stale `failed` systemd
+bookkeeping normalized. A pending or unknown historical journal,
+unexpected service activity, failed stop or ambiguous kernel/foreign
+ownership keeps the recovery evidence and blocks Native activation.
+Neither the installer nor idle health checks reset unrelated units.
 
-The dedicated trial Disconnect is bound to the exact current operation and
-revision. It durably records deactivation intent before stopping the trusted
-unit, verifies the intent-specific native restoration, and finalizes only that operation.
-A stale command cannot stop a replacement trial. Cleanup intent must be durable
-before deleting a credential, so authorized removal can be resumed without
-accepting an unexplained missing credential from a running or recovered trial.
-An already visible cleanup phase is not proof that an earlier directory fsync
-succeeded. Every cleanup retry must establish a successful durability barrier
-for the exact current operation before removing its credential; a failed barrier
-preserves the credential and recovery evidence for another attempt.
-Conflicting or uninspectable foreign ownership and changed credential/unit provenance
-retain evidence and block a successful Direct claim. Supported disjoint changes
-do not require a native transaction to overwrite the host with an old snapshot. The independent executor resumes durable
-stop and cleanup intent while its timer is armed; status inspection alone must
-not advance either phase. After native restoration and credential removal,
-a crash following timer disarm may leave only a cleanup journal. That interval
-requires an exact-operation retry of Disconnect or clearance at revision 4;
-it is not claimed as autonomous timer recovery. The retained journal continues
-to block installer/lifecycle changes until finalization succeeds.
-
-The selected profile and validated, non-secret saved trial settings survive
-Off. Saved reapply binds the policy and profile across both admission passes,
-repeats guard prearming, and creates a new operation instead of restoring old
-authority. Invalid or missing saved input is rejected before prearm. A saved
-policy change detected during prearm blocks TUN activation and reconciles only
-an uncommitted guard; it cannot disarm another journaled operation.
-
-Native and legacy trial recovery share one owned core-stop proof. Without a
-durable core-start attempt, recovery is observation-only: both the original and
-a fresh same-owned unit observation must prove `inactive`/`dead`, successful and
-without live work. Unexpected activity is left unchanged so a recovery command
-cannot erase the conflict before the next attempt. A started operation still
-contains its owned core when the credential is missing or changed, while
-retaining that credential conflict.
-
-An acknowledged `systemctl stop` may leave an already failed service in `failed`
-([systemd stop handling](https://github.com/systemd/systemd/blob/v257/src/core/unit.c)).
-Before normalizing that bookkeeping, require the same installed unit identity
-and digest, no queued job or main/control PID, and a released systemd cgroup.
-During [systemd's inactive/failed cleanup](https://github.com/systemd/systemd/blob/v257/src/core/cgroup.c),
-the path is released only after recursive emptiness.
-Only that quiescent, authenticated core, with a durable core-start attempt and
-an unchanged operation-bound credential, may have its failed state reset. Then
-reobserve the same unit as `inactive`/`dead` with no live work before declaring
-containment complete. Preserve the original pre-stop state for credential-trust
-decisions. Query/stop/reset uncertainty, residual work or changed provenance
-retains recovery evidence and native protection. This deactivation-only action
-does not reset a failed guard or authorize another activation.
-
+The current Native lifecycle does not use the retired trial's
+`--saved` reapply, manually created addressless TUN, experimental
+confirmation socket, v4 operation credential, or custom RPDB/nftables
+engine. Profiles and saved operator routing rules survive Off; a fresh
+`connect-smart` revalidates them and establishes a new one-use,
+current-boot Guard claim. Detailed Native stop, orphan RPDB recovery,
+inbound-reply guard, kernel ownership and selected-path Health contracts
+follow below and define current installed QA acceptance independently
+of historical trial evidence.
 
 #### Single official-Core Native lifecycle
 

@@ -583,7 +583,7 @@ Commands:
                               Remove only exact untouched historical PREPARED intent
   native-health-executor      Installed internal Native Health Guard executor
   activation-trial-status     Inspect v2 rule-only or v3 loopback route+rule trial
-  activation-trial-recover    Independent systemd timeout/reboot recovery (v2/v3/v4)
+  activation-trial-recover    Independent native + historical v2/v3 recovery executor
   activation-trial-clear --operation-id HEX32 --revision 3
                               Clear exact recovered v2/v3 experimental trial journal
   host-drift --baseline FILE Compare a prior private preflight JSON with now

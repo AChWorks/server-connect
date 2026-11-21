@@ -15,8 +15,9 @@ import (
 // authorization to activate a network or proof that a guard is armed.
 // Version 1 has exactly two phases: PREPARED@revision=1, meaning no network
 // mutation occurred, and UNCERTAIN@revision=2, which cannot be abandoned.
-// New v1 creation is retired; historical v2/v3/v4 recovery has separate
-// persisted formats and must never be accepted as this unarmed journal.
+// New v1 creation is retired. Historical v2/v3 recovery uses separate
+// persisted formats; retired v4/unknown records are never silently adopted
+// or interpreted as this unarmed journal.
 const (
 	activationJournalFilename = "route-activation-journal.json"
 	activationJournalVersion  = 1
