@@ -32,7 +32,7 @@ tar -xzf "$CORE_ARCHIVE" -C "$work/extract"
 up="$work/extract/sing-box-1.14.3-linux-amd64"
 [ -f "$up/sing-box" ] && [ -f "$up/libcronet.so" ] && [ -f "$up/LICENSE" ] || { echo 'Expected upstream binary/library/license missing' >&2;exit 1; }
 [ "$(uname -m)" = x86_64 ] || { echo 'This local builder currently supports linux/amd64 only' >&2;exit 1; }
-GOTOOLCHAIN=local GOPROXY=off CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags '-s -w' -o "$work/server-connect/bin/server-connect" ./cmd/server-connect
+GOTOOLCHAIN=local GOPROXY=off CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -buildvcs=false -trimpath -ldflags '-s -w' -o "$work/server-connect/bin/server-connect" ./cmd/server-connect
 cp "$up/sing-box" "$work/server-connect/bin/sing-box"
 cp "$up/libcronet.so" "$work/server-connect/bin/libcronet.so"
 cp "$up/LICENSE" "$work/server-connect/THIRD-PARTY-LICENSES/sing-box-LICENSE"

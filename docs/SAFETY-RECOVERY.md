@@ -98,6 +98,33 @@ Runtime status and health independently attest the same table, hook,
 rules, tuple sets and fingerprint. Merely seeing an active Core never
 establishes selected-path health.
 
+**Native startup packet admission (unmerged candidate):** An observed
+release-blocking Direct TCP SYN escaped while `desired=smart` and the
+systemd Core unit was already `active` but the TUN did not yet exist. The
+manager must install a distinct, one-operation `inet sc_pre_<operation-id>`
+nft OUTPUT filter **before publishing `desired=smart`**, not merely
+before `systemctl start`. The independent Health/Recovery roles and narrow
+accepted-reply guard are prearmed first; the temporary filter blocks new
+unmarked public underlay egress except the verified Core endpoint and
+explicit bootstrap resolvers, while protecting reply, loopback and
+connected/private flows. A precommitted private digest-bound plan,
+exact rule/chain/handle receipt, and generation-conditional deletion
+prevent name-only cleanup or adoption of a foreign table. It is **not**
+a permanent kill switch, second router, or an off-mode block.
+
+A `Type=exec`/PID-active Core does **not** release the filter. Admission
+requires independent actual TUN, kernel RPDB, marked selected route and
+official-Core redirect proof; status remains starting while the filter is
+armed. On failed start or unverified release the owned recovery path
+must first restore exact Direct/off and remove precisely its own filter
+alongside Core and reply guard resources. The guard retains a bounded
+pre-Core grace only while the real packet filter is independently
+verified. A post-CLI check alone misses the earlier state-commit gap;
+the disposable VM packet-capture regression is
+[`native-startup-concurrent-syn.py`](../scripts/qa/native-startup-concurrent-syn.py).
+No physical-server/no-leak or public release conclusion follows from VM
+observations alone.
+
 The Debian 12 (`nftables` 1.0.6) installed-Core candidate exposed a
 real version-specific enumeration difference: it lists `table,set,set,chain,rule,rule,rule`,
 where Debian 13 lists `table,chain,set,set,rule,rule,rule`. The initial

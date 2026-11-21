@@ -735,9 +735,17 @@ func (m *Manager) RunNativeHealthRound() (NativeHealthState, error) {
 	reason := ""
 	if be != nil || te != nil || boot != s.BootID || now < s.StartedMS {
 		reason = "native_boot_identity_changed"
+	} else if permitted, barrierErr := m.nativeGuardedStartupGrace(claim, s, now); barrierErr != nil {
+		reason = "native_startup_guard_unverified"
+	} else if permitted {
+		if guard != nil {
+			reason = "runtime_guard_unavailable"
+		} else {
+			return s, nil
+		}
 	} else if m.nativeStartupGraceApplies(s, now, observed, oe) {
-		// No kernel capture yet: tolerate the timer prearm window, not a live
-		// Core with a missing guard.
+		// Before the Core exists, the original prearmed timers have a
+		// bounded grace; once active, only the verified packet gate qualifies.
 		return s, nil
 	} else if guard != nil {
 		reason = "runtime_guard_unavailable"
@@ -873,12 +881,22 @@ func (m *Manager) SuperviseNativeHealth() (NativeHealthState, error) {
 		reason = "native_health_executor_stale"
 	} else {
 		activity, activityErr := m.nativeActivity()
-		if m.nativeStartupGraceApplies(s, now, activity, activityErr) {
-			// A first scheduled timer can fire before the second is armed;
-			// until the Core exists, there is no traffic interception.
+		permitted, barrierErr := m.nativeGuardedStartupGrace(claim, s, now)
+		if barrierErr != nil {
+			reason = "native_startup_guard_unverified"
+		} else if permitted {
+			if e := nativeHealthGuardRoles(); e != nil {
+				reason = "runtime_guard_unavailable"
+			} else {
+				return s, nil
+			}
+		} else if m.nativeStartupGraceApplies(s, now, activity, activityErr) {
+			// The pre-Core inactive window cannot bypass a lost live barrier.
 			return s, nil
 		}
-		if e := nativeHealthGuardRoles(); e != nil {
+		if reason != "" {
+			// Preserve the recorded fatal barrier/guard reason.
+		} else if e := nativeHealthGuardRoles(); e != nil {
 			reason = "runtime_guard_unavailable"
 		} else if activityErr != nil || activity != "active" {
 			reason = "native_core_unavailable"

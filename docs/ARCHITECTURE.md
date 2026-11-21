@@ -50,6 +50,15 @@ Connect/Disconnect lifecycle. The Manager uses one shared state/journal lock
 to read the saved profile and rules, validates the compiled official sing-box
 config, checks free policy slots, and stages a private digest-bound recovery
 claim before requesting systemd activation. No second Go router is created.
+The short-lived Native startup OUTPUT containment is one additional
+**admission/rollback guard**, not a second traffic classifier: after
+the independent timers and accepted-reply guard are armed, it blocks
+new unmarked public underlay egress until the Core has actually installed
+its own TUN/policy. Only then may the manager report Smart active and
+remove the exact receipt-bound containment table. Crucially,
+`desired=smart` is persisted **after** that barrier is installed and
+independently verified; otherwise an application may emit Direct packets
+while Smart has been requested but the TUN is not yet effective.
 
 The current official-Core native TUN config uses a 9000-byte **virtual**
 MTU, not a statement about the physical underlay MTU. The previous 1400-byte

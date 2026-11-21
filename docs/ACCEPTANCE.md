@@ -37,6 +37,23 @@ For a candidate that incorporates the two-source Iran country policy, independen
 
 For a candidate that suppresses AAAA by default when selected IPv6 egress is unverified, prove **ordinary unforced dual-stack HTTPS** on actual WordPress API/download, aaPanel-equivalent and a large download on the exact real selected foreign VPN path, *not* merely `curl -4`. Verify normal A responses and a properly scoped empty AAAA response through the **actual installed TUN**; test literal IPv6 failure and independent underlay no-leak packet counters, before/after selected exit failures; verify protected public SSH and established HTTP replies. On an environment with genuinely working selected exit IPv6, test explicit opt-in positive IPv6 DNS/literal TCP/TLS and failure/no-leak. Mark unavailable global/provider IPv6 **UNSUPPORTED/NOT_RUN**, never a PASS. Retest Core SIGKILL, short provider outage, real reboot and original kernel restoration on the exact candidate before stable release.
 
+### Concurrent Native startup packet-leak regression
+
+Use the [rooted disposable-VM packet witness](../scripts/qa/native-startup-concurrent-syn.py)
+**only** after independent hypervisor console/snapshot and exact-target
+authorization. Against an independently verified real foreign selected
+peer, prearm its independent failback, capture underlay TCP SYNs to a pinned
+foreign destination, and issue concurrent **unmarked TCP** attempts
+immediately after `desired=smart` becomes visible, including **before**
+`connect-smart` returns. Require no direct underlay SYNs in the observed
+window, a real selected HTTPS exit, actual TUN+kernel readiness before
+CLI success, and five byte/semantic-equivalent host inventories plus SSH
+after verified Direct/off. Capture/compare the exact installed
+source/bundle/OS and packet witness; a lone post-return probe does not
+cover this failure. Do not infer no-leak for other peers, protocols, IPv6
+or physical hosts from that one destination and VM. Host-wide tests
+without independent rescue remain **NOT_RUN**, not PASS.
+
 ## Test lanes and field-regression lessons
 
 These are **different evidence levels**, not interchangeable versions of a PASS:
