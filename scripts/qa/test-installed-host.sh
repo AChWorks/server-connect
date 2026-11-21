@@ -88,7 +88,6 @@ sh -n scripts/qa/host-activation-guard.sh
 sh -n scripts/qa/host-tun-path.sh
 sh -n scripts/qa/host-native-dns-policy.sh
 sh -n scripts/qa/host-native-docker-recovery.sh
-sh -n scripts/qa/host-owned-tun-boundary.sh
 bash scripts/qa/test-installer-rollback-backups.sh
 PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/qa/test-activation-guard-inspect.py
 # Separate reboot-scheduling QA remains a disposable-container proof only.
@@ -1250,7 +1249,6 @@ docker cp "$root/scripts/qa/host-tun-path.sh" "$container:/root/qa-host-tun-path
 docker cp "$root/scripts/qa/host-installed-native-connect.sh" "$container:/root/qa-installed-native-connect.sh"
 docker cp "$root/scripts/qa/host-native-dns-policy.sh" "$container:/root/qa-native-dns-policy.sh"
 # Retired v4-only TLS staging and receipt fixture; Native-installed acceptance below remains.
-docker cp "$root/scripts/qa/host-owned-tun-boundary.sh" "$container:/root/qa-owned-tun-boundary.sh"
 # Independently check resources omitted from the standard route/rule/link
 # digest, in addition to the guest's own explicit cleanup verdict.
 tun_netns_before=$(docker exec "$container" /sbin/ip netns list)
@@ -1299,23 +1297,9 @@ for native_mode in default bypass_iran; do
   assert_tun_native_cleanup "native-dns-$native_mode-cleanup"
 done
 
-# First native feasibility gate for an explicit manager-owned TUN boundary.
-# It reuses the disconnected topology; no production Apply is enabled.
-echo 'REAL_TUN_LAB_STAGE=addressless-owned-tun-boundary'
-owned_tun_log="$scratch/real-tun-owned-boundary.log"
-docker exec -e SC_QA_TUN_OWNED_BOUNDARY=yes -e SC_QA_TUN_IPV6=yes \
-  "$container" /bin/sh /root/qa-host-tun-path.sh | tee "$owned_tun_log"
-for marker in \
-  'OWNED_TUN_ADDRESSLESS_GVISOR_CONFIG=PASS' \
-  'OWNED_TUN_NO_CORE_ROUTE_RULE_NFT_CREATION=PASS' \
-  'OWNED_TUN_REAL_DUALSTACK_AND_PAYLOAD=PASS' \
-  'OWNED_TUN_MARKED_DIRECT_AND_HOSTING=PASS' \
-  'OWNED_TUN_SIGKILL_PRESERVES_FOREIGN_OBJECTS=PASS' \
-  'OWNED_TUN_RENAME_REPLACEMENT_GRACEFUL_PRESERVED=PASS' \
-  'OWNED_TUN_NATIVE_BOUNDARY_CLEANUP=PASS'; do
-  grep -Fx "$marker" "$owned_tun_log" >/dev/null
-done
-assert_tun_native_cleanup addressless-owned-tun-boundary
+# The separate precreated/addressless-gVisor owner experiment is retired.
+# Current Native foreign-object refusal and exact owned cleanup are tested
+# in the source Go real-kernel, Docker-crash and installed Core/Guard suites.
 # The independently prearmed activation and crash recovery path is now
 # exercised by the actual installed Native connect-smart / guard lifecycle.
 # The retired parallel synthetic hosting fault suite is superseded by the
@@ -1334,7 +1318,7 @@ assert_tun_native_cleanup installed-native-connect-smart
 # Retired v4-only TLS cleanup; Native-installed acceptance below remains.
 docker exec "$container" /bin/rm -f /root/qa-tun-config-qa /root/qa-host-tun-path.sh /root/qa-native-dns-policy.sh \
   /root/qa-tun-sni-client.py /root/qa-tun-native-apps.py \
-  /root/qa-owned-tun-boundary.sh /root/qa-tun-dns-peer.py /root/qa-tun-dns-client.py \
+  /root/qa-tun-dns-peer.py /root/qa-tun-dns-client.py \
   /root/qa-tun-wordpress-fpm.sh /root/qa-tun-wp-check.py /root/qa-tun-payload-wire.py \
   /root/qa-tun-ipv6-wire.py /root/qa-installed-native-connect.sh
 else

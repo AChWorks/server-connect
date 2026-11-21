@@ -104,9 +104,6 @@ cleanup() {
       cleanup_failed=yes
     fi
   fi
-  if [ "${SC_QA_TUN_OWNED_BOUNDARY-}" = yes ] && ! owned_boundary_cleanup; then
-    cleanup_failed=yes
-  fi
   for pid in "$client_pid" "$server_pid" "$origin_pid" "$hosting_pid" "$udp_pid" "$dns_pid" "$tls_pid" "$native_apps_pid" "$wp_pid" "$payload_pid" "$ipv6_pid"; do
     if [ -n "$pid" ]; then
       kill "$pid" 2>/dev/null || :
@@ -439,33 +436,21 @@ case "${SC_QA_TUN_NATIVE_DNS-}" in
     native_dns_trial=yes ;;
   *) echo 'NATIVE_DNS_QA=FAIL (unsupported mode)' >&2; exit 2 ;;
 esac
-case "${SC_QA_TUN_OWNED_BOUNDARY-}" in
-  '') ;;
-  yes)
-    [ "$native_installed_trial_mode" != yes ] && [ "$native_dns_trial" != yes ] || {
-      echo 'OWNED_TUN_BOUNDARY=FAIL (requires separate native fixture)' >&2; exit 2;
-    }
-    . /root/qa-owned-tun-boundary.sh ;;
-  *) echo 'OWNED_TUN_BOUNDARY=FAIL (unsupported mode)' >&2; exit 2 ;;
-esac
 case "${SC_QA_TUN_IPV6-}" in
   '') ;;
   yes) ipv6_trial=yes ;;
   *) echo 'NATIVE_IPV6_QA=FAIL (unsupported mode)' >&2; exit 2 ;;
 esac
 if [ "$native_installed_trial_mode" = yes ] &&
-   { [ "$native_dns_trial" = yes ] || [ "$ipv6_trial" = yes ] ||
-     [ -n "${SC_QA_TUN_OWNED_BOUNDARY-}" ]; }; then
+   { [ "$native_dns_trial" = yes ] || [ "$ipv6_trial" = yes ]; }; then
    echo 'INSTALLED_NATIVE_QA=FAIL (requires exclusive connected-manager fixture)' >&2
    exit 2
 fi
-if { [ "$native_dns_trial" = yes ] || [ -n "${SC_QA_TUN_OWNED_BOUNDARY-}" ]; } &&
-   [ "$ipv6_trial" != yes ]; then
+if [ "$native_dns_trial" = yes ] && [ "$ipv6_trial" != yes ]; then
    echo 'NATIVE_QA=FAIL (dual-stack fixture requires explicit IPv6)' >&2
    exit 2
 fi
-if [ "$native_installed_trial_mode" != yes ] && [ "$native_dns_trial" != yes ] &&
-   [ -z "${SC_QA_TUN_OWNED_BOUNDARY-}" ]; then
+if [ "$native_installed_trial_mode" != yes ] && [ "$native_dns_trial" != yes ]; then
    echo 'NATIVE_QA=FAIL (no supported fixture selected)' >&2
    exit 2
 fi
@@ -899,7 +884,7 @@ echo "REAL_TUN_DNS_DIRECT_WITNESS=PASS (native DNS UDP/TCP positive controls)"
 hosting_baseline=$(hosting_reply_packets)
 test "$hosting_baseline" -gt 0 || { echo 'FAIL: no positive control of foreign visitor hosting reply' >&2; exit 1; }
 echo "REAL_TUN_FOREIGN_HOSTING_BASELINE=PASS (foreign visitor request/reply, packets=$hosting_baseline)"
-if [ "$native_installed_trial_mode" = yes ] || [ -n "${SC_QA_TUN_OWNED_BOUNDARY-}" ]; then
+if [ "$native_installed_trial_mode" = yes ]; then
   # The disposable VETH may still be doing IPv6 duplicate-address detection.
   # Its fe80:: local /128 route appears only after DAD finishes. Capturing
   # before then produces a false rollback failure 25s later even when the
@@ -930,13 +915,6 @@ if [ "$native_installed_trial_mode" = yes ] || [ -n "${SC_QA_TUN_OWNED_BOUNDARY-
   guard_rules_before=$(ip -N -j -4 rule show)
   guard_v6_routes_before=$(ip -N -j -6 route show table all)
   guard_v6_rules_before=$(ip -N -j -6 rule show)
-fi
-
-# Separate installed-product guard trial reuses the identical peer paths
-# but starts the real TUN through its installed manager/systemd ownership.
-if [ "${SC_QA_TUN_OWNED_BOUNDARY-}" = yes ]; then
-  owned_tun_boundary_trial
-  exit 0
 fi
 
 # The installed official Core/Guard is a separate, deliberately bounded QA.
