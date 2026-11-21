@@ -117,11 +117,31 @@ func TestNativeStartupKernelReceiptRefusesAlteredOrForeignObject(t *testing.T) {
 // source CI users. Genuine nftables JSON and generation-CAS behavior must
 // agree with the verified script before any physical installed-host Apply.
 func TestNativeStartupRealKernelNamespaceLifecycle(t *testing.T) {
+	// Root inside a CI/container image is NOT authorization to mutate its
+	// host network. Require an actual, separate network namespace relative
+	// to the container/host PID 1, and the kernel tools needed for the test.
 	if os.Geteuid() != 0 {
 		t.Skip("requires root in an isolated network namespace")
 	}
+	self, err := os.Stat("/proc/self/ns/net")
+	if err != nil {
+		t.Skipf("cannot verify network namespace isolation: %v", err)
+	}
+	init, err := os.Stat("/proc/1/ns/net")
+	if err != nil {
+		t.Skipf("cannot verify init network namespace: %v", err)
+	}
+	if os.SameFile(self, init) {
+		t.Skip("not an isolated network namespace")
+	}
+	if _, err = exec.LookPath("nft"); err != nil {
+		t.Skip("nft tool unavailable in isolated namespace")
+	}
+	if _, err = exec.LookPath("ip"); err != nil {
+		t.Skip("iproute2 unavailable in isolated namespace")
+	}
 	if b, e := exec.Command("ip", "link", "show", "eth0").CombinedOutput(); e == nil {
-		t.Fatalf("refusing potential real underlay host namespace: %s", b)
+		t.Fatalf("refusing namespace with a potential real underlay: %s", b)
 	}
 	p, _ := nativeStartupFixture(t)
 	ctx := context.Background()
