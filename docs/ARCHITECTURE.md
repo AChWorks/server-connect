@@ -173,9 +173,16 @@ operation-bound `SIGUSR1` request is checked against the current persisted
 restart attempt, Core PID, current boot, owned service/guard identities and
 the exact installed nft OUTPUT containment barrier **before and after**
 stopping the old child. The barrier is installed **before** any intentional
-Core process exit and remains effective until the new child has a distinct
-kernel PID, a valid native TUN/policy redirect and fresh selected-path proof.
-Only then can the temporary barrier be released. The exact existing
+Core process exit and remains effective while the new child and its native
+TUN/kernel interception are established. After independently verifying a
+**distinct Core PID/start time** and effective TUN, RPDB and redirect policy,
+the manager releases the **exact receipt-owned temporary barrier**; the
+restored Core-owned interception then protects the selected path while
+fresh selected HTTPS is reprobed. Only positive selected-path proof changes
+Health to `healthy`. Failed reproof remains `recovering` under independently
+verified interception and the bounded retry budget, or triggers owned
+Direct/off recovery when its safety or budget conditions fail. The temporary
+barrier is **not** retained through selected HTTPS reproof. The existing
 `ExecStopPost=native-recover`, `Restart=no`, independently scheduled guards
 and one-use owned kernel cleanup are **not** bypassed. An unexpected Core exit
 without an already committed barrier is fatal and proceeds to owned
