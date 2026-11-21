@@ -200,13 +200,16 @@ assert r["data"]["inbound_reply_guard_verified"],r
   echo 'INSTALLED_NATIVE_EXPLICIT_OFF=PASS (installed lifecycle, five exact inventories, independent guards inert)'
 
   # Real installed Health Executor must independently retire a session that
-  # has no authenticated selected HTTPS target. This is NOT a provider-outage
-  # test and does not establish healthy real Internet HTTPS. The first phase
-  # above independently established a working selected VLESS data path.
+  # has no authenticated selected HTTPS target. Disable the separate bounded
+  # Core-process restart policy HERE to isolate old Health->owned-Off behavior:
+  # otherwise default three supervised attempts are a different test (with
+  # their own time budget), not a single failed HTTPS probe.
+  # This is NOT a provider-outage test and does not establish healthy public
+  # Internet HTTPS. The first phase proved the working selected data path.
   native_installed_prepared=yes
   "$sc" --json connect-smart --underlay-if scqaedge0 --tunnel-if sctunqa0 \
     --tunnel-ipv4 172.31.99.1/30 --tunnel-ipv6 fd73:99::1/64 \
-    --mode default --health-failures 1 > /run/sc-qa-installed-native-outage.json || {
+    --mode default --health-failures 1 --core-restart-attempts 0 > /run/sc-qa-installed-native-outage.json || {
       echo 'INSTALLED_NATIVE_GUARD_APPLY=FAIL (installed CLI refused or did not stabilize)' >&2
       native_installed_error /run/sc-qa-installed-native-outage.json >&2
       native_installed_diagnostic

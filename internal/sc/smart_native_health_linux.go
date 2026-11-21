@@ -4,9 +4,9 @@ package sc
 
 // Native Smart Routing reuses the two already-installed independent guard
 // timers. No second tunnel, route owner, firewall manager or always-on daemon.
-// A failed selected path is re-probed for a finite interval while the official
-// Core retains its fail-closed native policy. We intentionally do not restart
-// the Core: its ExecStopPost must restore Direct on every Core exit.
+// A failed selected path is re-probed while official Core interception is
+// intact. A confirmed recoverable outage may request a bounded, guarded Core
+// process replacement; unexpected Core exit still uses owned ExecStopPost.
 
 import (
 	"bufio"
@@ -33,20 +33,32 @@ const nativeHealthLeaseMS int64 = 35000 // health oneshot: 20s max; next tick: 5
 const nativeHealthGraceMS int64 = 20000
 
 type NativeHealthState struct {
-	Version          int    `json:"version"`
-	OperationID      string `json:"operation_id"`
-	ConfigSHA256     string `json:"config_sha256"`
-	BootID           string `json:"boot_id"`
-	StartedMS        int64  `json:"started_uptime_ms"`
-	HeartbeatMS      int64  `json:"heartbeat_uptime_ms"`
-	LastProbeMS      int64  `json:"last_probe_uptime_ms"`
-	Rounds           int    `json:"rounds"`
-	Failures         int    `json:"failures"`
-	UnhealthyRounds  int    `json:"unhealthy_rounds"`
-	FailureThreshold int    `json:"failure_threshold"`
-	Phase            string `json:"phase"`
-	Reason           string `json:"reason"`
-	ProbeScope       string `json:"probe_scope"`
+	Version            int    `json:"version"`
+	OperationID        string `json:"operation_id"`
+	ConfigSHA256       string `json:"config_sha256"`
+	BootID             string `json:"boot_id"`
+	StartedMS          int64  `json:"started_uptime_ms"`
+	HeartbeatMS        int64  `json:"heartbeat_uptime_ms"`
+	LastProbeMS        int64  `json:"last_probe_uptime_ms"`
+	Rounds             int    `json:"rounds"`
+	Failures           int    `json:"failures"`
+	UnhealthyRounds    int    `json:"unhealthy_rounds"`
+	FailureThreshold   int    `json:"failure_threshold"`
+	Phase              string `json:"phase"`
+	Reason             string `json:"reason"`
+	ProbeScope         string `json:"probe_scope"`
+	RestartLimit       int    `json:"core_restart_limit,omitempty"`
+	RestartAttempts    int    `json:"core_restart_attempts,omitempty"`
+	RestartBackoffMS   int64  `json:"core_restart_backoff_ms,omitempty"`
+	RestartDeadlineMS  int64  `json:"core_restart_deadline_ms,omitempty"`
+	RestartIncidentMS  int64  `json:"core_restart_incident_ms,omitempty"`
+	RestartNextMS      int64  `json:"core_restart_next_ms,omitempty"`
+	RestartOriginalPID int    `json:"core_restart_original_pid,omitempty"`
+	RestartInFlight    bool   `json:"core_restart_in_flight,omitempty"`
+	RestartResult      string `json:"core_restart_result,omitempty"`
+	RestartFromPID     int    `json:"last_core_restart_from_pid,omitempty"`
+	RestartToPID       int    `json:"last_core_restart_to_pid,omitempty"`
+	RestartToStarted   uint64 `json:"last_core_restart_to_started,omitempty"`
 }
 
 type nativeHealthOutcome struct {
@@ -96,14 +108,22 @@ func (m *Manager) readNativeHealth() (NativeHealthState, error) {
 		s.StartedMS <= 0 || s.HeartbeatMS < s.StartedMS || s.LastProbeMS < 0 ||
 		s.Rounds < 0 || s.Rounds > 100000000 || s.Failures < 0 || s.Failures > s.FailureThreshold || s.UnhealthyRounds < 0 || s.UnhealthyRounds > 100000000 ||
 		s.FailureThreshold < 1 || s.UnhealthyRounds < s.Failures || len(s.Reason) > 96 ||
-		(s.ProbeScope != "internet_https" && s.ProbeScope != "synthetic_https") {
+		(s.ProbeScope != "internet_https" && s.ProbeScope != "synthetic_https") ||
+		s.RestartLimit < 0 || s.RestartLimit > 20 || s.RestartAttempts < 0 || s.RestartAttempts > s.RestartLimit ||
+		(s.RestartLimit > 0 && (s.RestartBackoffMS < 100 || s.RestartBackoffMS > 30000 ||
+			s.RestartDeadlineMS < 10000 || s.RestartDeadlineMS > 300000)) ||
+		s.RestartIncidentMS < 0 || s.RestartNextMS < 0 || s.RestartOriginalPID < 0 ||
+		s.RestartFromPID < 0 || s.RestartToPID < 0 ||
+		(s.Phase == "recovering" && (s.RestartLimit == 0 || s.RestartIncidentMS <= 0)) ||
+		(s.RestartInFlight && (s.RestartAttempts == 0 || s.RestartOriginalPID <= 1 ||
+			s.Phase != "recovering")) || len(s.RestartResult) > 96 {
 		return NativeHealthState{}, Fault("invalid_state", "native health record invalid")
 	}
 	if _, e := hex.DecodeString(s.OperationID); e != nil {
 		return NativeHealthState{}, Fault("invalid_state", "native health operation invalid")
 	}
 	switch s.Phase {
-	case "starting", "healthy", "degraded", "stopping", "off", "uncertain":
+	case "starting", "healthy", "degraded", "recovering", "stopping", "off", "uncertain":
 	default:
 		return NativeHealthState{}, Fault("invalid_state", "native health phase invalid")
 	}
@@ -116,9 +136,14 @@ func (m *Manager) saveNativeHealth(s NativeHealthState) error {
 	}
 	return put(filepath.Join(m.Dir, nativeHealthFile), b)
 }
-func (m *Manager) stageNativeHealth(session NativeSession, threshold int, scope string) error {
+func (m *Manager) stageNativeHealth(session NativeSession, threshold int, scope string,
+	attempts int, backoffMS, deadlineMS int64) error {
 	if threshold < 1 {
 		return Fault("invalid_arguments", "native health failure threshold must be positive")
+	}
+	if attempts < 0 || attempts > 20 || (attempts > 0 && (backoffMS < 100 ||
+		backoffMS > 30000 || deadlineMS < 10000 || deadlineMS > 300000)) {
+		return Fault("invalid_arguments", "invalid Core restart attempts/backoff/deadline policy")
 	}
 	if scope != "internet_https" && scope != "synthetic_https" {
 		return Fault("invalid_arguments", "unsupported native health probe scope")
@@ -136,7 +161,9 @@ func (m *Manager) stageNativeHealth(session NativeSession, threshold int, scope 
 		return Fault("guard_unavailable", "native operation randomness unavailable")
 	}
 	return m.saveNativeHealth(NativeHealthState{Version: 1, OperationID: hex.EncodeToString(id), ConfigSHA256: session.ConfigSHA256, BootID: boot,
-		StartedMS: now, HeartbeatMS: now, FailureThreshold: threshold, Phase: "starting", Reason: "awaiting_selected_probe", ProbeScope: scope})
+		StartedMS: now, HeartbeatMS: now, FailureThreshold: threshold, Phase: "starting",
+		Reason: "awaiting_selected_probe", ProbeScope: scope, RestartLimit: attempts,
+		RestartBackoffMS: backoffMS, RestartDeadlineMS: deadlineMS})
 }
 
 // The configured policy is authoritative, not a process heartbeat. Never
@@ -606,6 +633,13 @@ func (m *Manager) withNativeTransition(fn func() error) error {
 	return fn()
 }
 func (m *Manager) stopNativeHealthOperation(id, reason string) (bool, error) {
+	return m.stopNativeHealthOperationExpected(id, reason, nil)
+}
+
+// The Recovery guard can inspect concurrently with a successful health
+// publication. An observed fault may retire only that precise generation;
+// never stop a newly recovered Core based on a stale pre-restart snapshot.
+func (m *Manager) stopNativeHealthOperationExpected(id, reason string, expected *NativeHealthState) (bool, error) {
 	stopped := false
 	err := m.withNativeTransition(func() error {
 		shouldStop := false
@@ -624,7 +658,16 @@ func (m *Manager) stopNativeHealthOperation(id, reason string) (bool, error) {
 			if s.OperationID != id || s.OperationID != claim.HealthOperationID || s.ConfigSHA256 != claim.ConfigSHA256 {
 				return nil
 			}
+			if expected != nil && s != *expected {
+				return nil
+			}
+			wasRecovering := s.Phase == "recovering"
 			s.Phase = "stopping"
+			if wasRecovering || s.RestartAttempts > 0 {
+				s.RestartResult = reason
+			}
+			s.RestartInFlight = false
+			s.RestartOriginalPID = 0
 			if reason != "selected_path_failure_exhausted" {
 				s.Reason = reason
 			}
@@ -728,6 +771,9 @@ func (m *Manager) RunNativeHealthRound() (NativeHealthState, error) {
 	if err != nil {
 		return s, err
 	}
+	if s.Phase == "recovering" {
+		return m.advanceNativeCoreRecovery(s, claim, targets)
+	}
 	boot, be := trialBootIdentity()
 	now, te := nativeUptimeMillis()
 	guard := nativeHealthGuardRoles()
@@ -735,13 +781,24 @@ func (m *Manager) RunNativeHealthRound() (NativeHealthState, error) {
 	reason := ""
 	if be != nil || te != nil || boot != s.BootID || now < s.StartedMS {
 		reason = "native_boot_identity_changed"
+	} else if permitted, barrierErr := m.nativeGuardedStartupGrace(claim, s, now); barrierErr != nil {
+		reason = "native_startup_guard_unverified"
+	} else if permitted {
+		if guard != nil {
+			reason = "runtime_guard_unavailable"
+		} else {
+			return s, nil
+		}
 	} else if m.nativeStartupGraceApplies(s, now, observed, oe) {
-		// No kernel capture yet: tolerate the timer prearm window, not a live
-		// Core with a missing guard.
+		// Before the Core exists, the original prearmed timers have a
+		// bounded grace; once active, only the verified packet gate qualifies.
 		return s, nil
 	} else if guard != nil {
 		reason = "runtime_guard_unavailable"
 	} else if oe != nil || observed != "active" {
+		reason = "native_core_unavailable"
+	} else if _, _, childErr := m.nativeCoreChildIdentity(); childErr != nil {
+		// The installed systemd parent is not proof that sing-box survived.
 		reason = "native_core_unavailable"
 	}
 	if reason != "" {
@@ -777,8 +834,21 @@ func (m *Manager) RunNativeHealthRound() (NativeHealthState, error) {
 		s.Phase, s.Reason = "off", "native_policy_unverified"
 		return s, nil
 	}
+	probeCore, _, identityErr := m.nativeCoreChildIdentity()
+	if identityErr != nil {
+		stopped, err := m.stopNativeHealthOperationExpected(s.OperationID, "native_core_unavailable", &s)
+		if err != nil {
+			return s, err
+		}
+		if stopped {
+			s.Phase, s.Reason = "off", "native_core_unavailable"
+			return s, nil
+		}
+		return s, Fault("guard_pending", "Core identity proof was superseded")
+	}
 	outcome := runNativeHealthProbes(context.Background(), claim.InterfaceName, s.ProbeScope, targets, probeNativeHTTPS)
 	stop := false
+	coreChanged := false
 	err = m.withLock(func() error {
 		current, e := m.readNativeSession()
 		if e != nil {
@@ -804,6 +874,10 @@ func (m *Manager) RunNativeHealthRound() (NativeHealthState, error) {
 		if activity, e := m.nativeActivity(); e != nil || activity != "active" {
 			return Fault("guard_pending", "Core stopped before selected-path proof was published")
 		}
+		if identity, _, e := m.nativeCoreChildIdentity(); e != nil || identity != probeCore {
+			coreChanged = true
+			return Fault("guard_unavailable", "Core process identity changed during selected-path health proof")
+		}
 		if e = nativeHealthGuardRoles(); e != nil {
 			return Fault("guard_unavailable", "native guard lost during probe round")
 		}
@@ -820,10 +894,30 @@ func (m *Manager) RunNativeHealthRound() (NativeHealthState, error) {
 			return e
 		}
 		s, stop = nativeHealthAdvance(latest, outcome, now)
+		if stop {
+			var recovering bool
+			s, recovering = nativeEnterCoreRecovery(s, now)
+			if recovering {
+				stop = false
+			}
+		}
 		return m.saveNativeHealth(s)
 	})
 	if err != nil {
+		if coreChanged {
+			stopped, stopErr := m.stopNativeHealthOperationExpected(s.OperationID, "native_core_identity_changed", &s)
+			if stopErr != nil {
+				return s, stopErr
+			}
+			if stopped {
+				s.Phase, s.Reason = "off", "native_core_identity_changed"
+				return s, nil
+			}
+		}
 		return s, err
+	}
+	if s.Phase == "recovering" {
+		return m.advanceNativeCoreRecovery(s, claim, targets)
 	}
 	if stop {
 		stopped, e := m.stopNativeHealthOperation(s.OperationID, "selected_path_failure_exhausted")
@@ -871,26 +965,77 @@ func (m *Manager) SuperviseNativeHealth() (NativeHealthState, error) {
 		reason = "native_boot_identity_changed"
 	} else if now-s.HeartbeatMS > nativeHealthLeaseMS {
 		reason = "native_health_executor_stale"
+	} else if s.Phase == "recovering" {
+		if now >= s.RestartIncidentMS+s.RestartDeadlineMS || s.RestartLimit == 0 {
+			reason = "core_restart_deadline_exhausted"
+		} else if err := nativeHealthGuardRoles(); err != nil {
+			reason = "runtime_guard_unavailable"
+		} else if activity, err := m.nativeActivity(); err != nil || activity != "active" {
+			reason = "native_core_unavailable"
+		} else if s.RestartInFlight && claim.StartupGuardPhase == "armed" {
+			// The Core may temporarily have no child or TUN; only a live,
+			// exact, independently verified pre-TUN filter makes that safe.
+			if plan, err := m.readNativeStartupPlan(claim); err != nil {
+				reason = "native_restart_barrier_unverified"
+			} else if err := requireNativeStartupGuardClaim(context.Background(), nativeSystemRunner{}, plan, claim.StartupGuardHandle); err != nil {
+				reason = "native_restart_barrier_unverified"
+			} else {
+				return s, nil
+			}
+		} else {
+			// During backoff, barrier release or selected reproof, the new
+			// Core must own the full kernel policy. An absent child or
+			// hijacked route is immediately fatal.
+			if _, _, err := m.nativeCoreChildIdentity(); err != nil {
+				reason = "native_core_unavailable"
+			} else {
+				raw, err := readRegular(filepath.Join(m.Dir, nativeConfigFile))
+				if err != nil {
+					reason = "native_config_unavailable"
+				} else if targets, err := nativeHealthTargets(raw, s.ProbeScope); err != nil {
+					reason = "native_selected_proof_unavailable"
+				} else if err := inspectNativeHealthPolicy(context.Background(), nativeHealthKernelReader{}, claim.recoveryScope(), targets); err != nil {
+					reason = "native_policy_unverified"
+				} else {
+					return s, nil
+				}
+			}
+		}
 	} else {
 		activity, activityErr := m.nativeActivity()
-		if m.nativeStartupGraceApplies(s, now, activity, activityErr) {
-			// A first scheduled timer can fire before the second is armed;
-			// until the Core exists, there is no traffic interception.
+		permitted, barrierErr := m.nativeGuardedStartupGrace(claim, s, now)
+		if barrierErr != nil {
+			reason = "native_startup_guard_unverified"
+		} else if permitted {
+			if e := nativeHealthGuardRoles(); e != nil {
+				reason = "runtime_guard_unavailable"
+			} else {
+				return s, nil
+			}
+		} else if m.nativeStartupGraceApplies(s, now, activity, activityErr) {
+			// The pre-Core inactive window cannot bypass a lost live barrier.
 			return s, nil
 		}
-		if e := nativeHealthGuardRoles(); e != nil {
+		if reason != "" {
+			// Preserve the recorded fatal barrier/guard reason.
+		} else if e := nativeHealthGuardRoles(); e != nil {
 			reason = "runtime_guard_unavailable"
 		} else if activityErr != nil || activity != "active" {
+			reason = "native_core_unavailable"
+		} else if _, _, childErr := m.nativeCoreChildIdentity(); childErr != nil {
 			reason = "native_core_unavailable"
 		}
 	}
 	if reason != "" {
-		stopped, e := m.stopNativeHealthOperation(s.OperationID, reason)
+		stopped, e := m.stopNativeHealthOperationExpected(s.OperationID, reason, &s)
 		if e != nil {
 			return s, e
 		}
 		if !stopped {
-			return s, Fault("guard_pending", "health result superseded by another native session")
+			// A fresh health/recovery generation superseded our read.
+			// The next scheduled independent guard performs new checks.
+			current, readErr := m.readNativeHealth()
+			return current, readErr
 		}
 		s.Phase, s.Reason = "off", reason
 		return s, nil

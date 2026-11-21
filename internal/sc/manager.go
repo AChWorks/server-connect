@@ -760,6 +760,13 @@ func (m *Manager) Connect() error {
 		if err := EnsureCore(m.Core); err != nil {
 			return err
 		}
+		// After the native stop hook proves Direct, it may leave a private
+		// configuration with no live claim (notably across a real reboot).
+		// Reconcile it only after independently proving exact Off ownership,
+		// without attempting a systemd stop while holding the Manager lock.
+		if err := m.reconcileNativeOffConfigForProxy(); err != nil {
+			return err
+		}
 		return m.withLock(func() error { return m.connectLocked(m.unitActive) })
 	})
 }

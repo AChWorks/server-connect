@@ -15,6 +15,10 @@ PrivateTmp=yes
 ProtectKernelTunables=yes
 ProtectKernelModules=yes
 ProtectControlGroups=yes
-CapabilityBoundingSet=CAP_NET_ADMIN
-AmbientCapabilities=CAP_NET_ADMIN
+# The independent Recovery Guard verifies the exact supervised sing-box
+# child executable via /proc/<pid>/exe. Linux ptrace read checks require
+# its capabilities to cover the managed Core's CAP_NET_RAW as well. Grant
+# only the Core's existing NET_ADMIN/NET_RAW set; do not add SYS_PTRACE.
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW
 UMask=0077

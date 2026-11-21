@@ -98,6 +98,37 @@ Runtime status and health independently attest the same table, hook,
 rules, tuple sets and fingerprint. Merely seeing an active Core never
 establishes selected-path health.
 
+**Native startup packet admission (unmerged candidate):** An observed
+release-blocking Direct TCP SYN escaped while `desired=smart` and the
+systemd Core unit was already `active` but the TUN did not yet exist. The
+manager must install a distinct, one-operation `inet sc_pre_<operation-id>`
+nft OUTPUT filter **before publishing `desired=smart`**, not merely
+before `systemctl start`. The independent Health/Recovery roles and narrow
+accepted-reply guard are prearmed first; the temporary filter blocks new
+unmarked public egress on **all** host interfaces. Only the official Core's
+output-marked sockets (`0x2024`), proven accepted-session replies,
+loopback and validated connected/private destinations are exempt. There is
+**no** public operating-system DNS exception and **no** general IP/port
+exception for the VPN peer: either could allow unrelated applications
+to bypass VPN-required startup containment. A precommitted private
+digest-bound plan,
+exact rule/chain/handle receipt, and generation-conditional deletion
+prevent name-only cleanup or adoption of a foreign table. It is **not**
+a permanent kill switch, second router, or an off-mode block.
+
+A `Type=exec`/PID-active Core does **not** release the filter. Admission
+requires independent actual TUN, kernel RPDB, marked selected route and
+official-Core redirect proof; status remains starting while the filter is
+armed. On failed start or unverified release the owned recovery path
+must first restore exact Direct/off and remove precisely its own filter
+alongside Core and reply guard resources. The guard retains a bounded
+pre-Core grace only while the real packet filter is independently
+verified. A post-CLI check alone misses the earlier state-commit gap;
+the disposable VM packet-capture regression is
+[`native-startup-concurrent-syn.py`](../scripts/qa/native-startup-concurrent-syn.py).
+No physical-server/no-leak or public release conclusion follows from VM
+observations alone.
+
 The Debian 12 (`nftables` 1.0.6) installed-Core candidate exposed a
 real version-specific enumeration difference: it lists `table,set,set,chain,rule,rule,rule`,
 where Debian 13 lists `table,chain,set,set,rule,rule,rule`. The initial
@@ -359,6 +390,42 @@ On confirmed failure, prevent **unobserved** Direct bypass while the Smart Routi
 **Deferred, not an MVP/release requirement:** an operator-selected persistent block for VPN-designated destinations while the VPN is **off** (formerly `hold_selected_egress`) would be a different explicit policy. Do not build, apply or test it as part of the first release without a new Owner decision. The current Direct/off state has no such product-owned blocking.
 
 **Initial reconnect candidate, subject to field calibration:** at most **3 automatic attempts per confirmed outage incident**, with short increasing delays and an overall recovery deadline; allow operator adjustment of the bounded attempt/time budget. Flapping must not reset the incident budget into an endless loop; reconnect only the selected VPN transport, **never replay interrupted application requests or arbitrary host operations**. Exhaustion triggers verified `restore_direct` and **no further automatic retries until an explicit new enable action**. Critical guard, ownership or protected-host-access failures bypass the retry delay and restore the safest available host baseline immediately. Report the failure cause, attempt count, last result and true current mode in status and credential-safe local logs. **Optional outage/recovery notifications are Owner-deferred**; no mandatory external alerting service, delivery dependency or separate notification worker in the first release. **Cloudflare Tunnel**, if separately enabled, has its own connector health: an unselected/failed website-origin check must not tear down healthy outbound Smart Routing.
+
+### Current Native guarded Core-process candidate (Draft PR #126)
+
+The original sing-box Core now executes as a directly supervised child inside
+its existing managed systemd unit. The supervisor is **not** an unguarded
+systemd restart facility: a Health-confirmed selected-path failure can request
+at most the configured operation-wide number of restarts, only after installing
+an exact, operation-bound, verified nft OUTPUT barrier ahead of Core teardown.
+Each attempt must observe a changed physical process PID, recreated Core
+kernel interception and a fresh selected HTTPS proof; the initial defaults are
+3 attempts, 1 s exponential backoff and 60 s incident deadline. Restarts
+require both independent guard roles and the original operation claim; spent
+attempts are never replenished by a flapping provider. If the child exits
+unexpectedly without prearmed restart containment, the supervisor exits so
+`ExecStopPost=native-recover` restores the exact owned Direct/off state,
+rather than risking a Direct leak by improvising a restart. An incomplete
+ownership or cleanup proof is `UNCERTAIN`.
+
+A verified Direct/off native stop may leave an inert private Core config
+behind. The first subsequent Proxy Only Connect can remove **that file only**
+under the existing transition lock after proving a matching final Off health
+receipt, trusted service/guard ownership and zero remaining native Core work
+or reserved network resources; it can never adopt or delete kernel objects
+on the strength of a retired receipt. Ambiguous artifacts still require
+operator diagnosis and explicit owned recovery.
+
+The independent Recovery service is permitted the same minimal
+`CAP_NET_ADMIN CAP_NET_RAW` capability set as the actual supervised Core
+so its signed process verifier can read `/proc/<pid>/exe` under Linux's
+capability-sensitive ptrace-read check. It receives **no** `CAP_SYS_PTRACE`,
+additional service or persistent reboot authority.
+
+Neither this code nor old-head field evidence constitutes physical acceptance
+of the new PID-replacement path. Current new-head source tests exercise a
+real (unprivileged) child PID replacement and fail-closed exits, not installed
+kernel/TUN/SSH safety under actual systemd, reboot or foreign network writers.
 
 ## Required proof
 
