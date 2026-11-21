@@ -161,6 +161,34 @@ func TestNativeRestartBudgetBackoffAndFlapNoReset(t *testing.T) {
 	}
 }
 
+// Linux checks /proc/PID/exe with PTRACE_MODE_READ_FSCREDS. Recovery is a
+// separate systemd unit: it must have the bounded capability superset of
+// its inspected Core, or a legitimate child is misclassified as missing.
+func TestIndependentRecoveryServiceCanAttestCoreExe(t *testing.T) {
+	unit, err := os.ReadFile("../../bundle/server-connect-activation-recover.service")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, line := range []string{
+		"CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW",
+		"AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW",
+		"NoNewPrivileges=yes",
+	} {
+		if !strings.Contains(string(unit), line+"\n") {
+			t.Fatalf("independent Recovery lost required, bounded Core identity capability: %s", line)
+		}
+	}
+	if strings.Contains(string(unit), "CAP_SYS_PTRACE") {
+		for _, line := range strings.Split(string(unit), "\n") {
+			if strings.HasPrefix(line, "CapabilityBoundingSet=") || strings.HasPrefix(line, "AmbientCapabilities=") {
+				if strings.Contains(line, "CAP_SYS_PTRACE") {
+					t.Fatal("Recovery must not require global ptrace authority")
+				}
+			}
+		}
+	}
+}
+
 func TestNativeSupervisorStartupRequiresCommittedSmartPrearm(t *testing.T) {
 	claim := NativeSession{Selected: "0123456789abcdef", ConfigSHA256: strings.Repeat("b", 64),
 		HealthOperationID: strings.Repeat("a", 32), CoreStartAttempted: true,

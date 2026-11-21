@@ -416,6 +416,12 @@ or reserved network resources; it can never adopt or delete kernel objects
 on the strength of a retired receipt. Ambiguous artifacts still require
 operator diagnosis and explicit owned recovery.
 
+The independent Recovery service is permitted the same minimal
+`CAP_NET_ADMIN CAP_NET_RAW` capability set as the actual supervised Core
+so its signed process verifier can read `/proc/<pid>/exe` under Linux's
+capability-sensitive ptrace-read check. It receives **no** `CAP_SYS_PTRACE`,
+additional service or persistent reboot authority.
+
 Neither this code nor old-head field evidence constitutes physical acceptance
 of the new PID-replacement path. Current new-head source tests exercise a
 real (unprivileged) child PID replacement and fail-closed exits, not installed
