@@ -86,6 +86,43 @@ func TestRoutingRulesCLIWorkflowAndMenuParity(t *testing.T) {
 		t.Fatalf("menu output drift: exit=%d out=%s err=%s", code, out, errOut)
 	}
 }
+
+// A real installed CLI preview must accept the documented minimal arguments
+// and compile exactly the same dual-stack default as guarded connect-smart.
+// Preview only validates the pinned official Core policy; it never applies TUN.
+func TestRoutingRulesCLIPreviewMatchesConnectSmartIPv6Default(t *testing.T) {
+	core := os.Getenv("SC_TEST_SINGBOX")
+	if core == "" {
+		t.Skip("NOT_RUN: pinned official sing-box binary was not supplied")
+	}
+	m := sc.New(filepath.Join(t.TempDir(), "rules-state"), core, sc.DefaultPort)
+	profile, err := m.Import([]byte("vless://c2902f3a-1c25-41ef-a8dc-760b483aa247@8.8.8.8:443?type=tcp&security=none#QA"), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Select(profile.ID); err != nil {
+		t.Fatal(err)
+	}
+	minimal := []string{"smart-routing-rules", "preview-native", "--tunnel-if", "sctun0", "--underlay-if", "ens3", "--tunnel-ipv4", "172.31.99.1/30"}
+	rc, inferred, stderr := captureRulesCommand(t, m, minimal...)
+	if rc != 0 || inferred["ok"] != true || stderr != "" {
+		t.Fatalf("default preview rejects the same IPv6 policy as connect-smart: rc=%d reply=%+v stderr=%s", rc, inferred, stderr)
+	}
+	rc, explicit, stderr := captureRulesCommand(t, m, append(append([]string{}, minimal...), "--tunnel-ipv6", nativeDefaultTunnelIPv6)...)
+	if rc != 0 || explicit["ok"] != true || stderr != "" {
+		t.Fatalf("explicit preview refused: rc=%d reply=%+v stderr=%s", rc, explicit, stderr)
+	}
+	a, b := ruleResult(t, inferred), ruleResult(t, explicit)
+	if a["native_config_sha256"] != b["native_config_sha256"] || a["core_config_accepted"] != true ||
+		a["applied"] != false || a["activation_ready"] != false || a["general_host_admitted"] != false {
+		t.Fatalf("default preview diverges from explicit guarded TUN policy or implies activation: %+v / %+v", a, b)
+	}
+	report, err := m.InspectSmartRoutingRules()
+	if err != nil || report.ActivationReady || report.GeneralHostAdmitted {
+		t.Fatalf("preview modified authorization: %+v %v", report, err)
+	}
+}
+
 func TestRoutingRulesCLIRejectsUntrustedInputBeforeStateWrite(t *testing.T) {
 	m := rulesCLIManager(t)
 	for _, args := range [][]string{

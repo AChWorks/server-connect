@@ -15,7 +15,11 @@ import (
 	"github.com/AChWorks/server-connect/internal/sc"
 )
 
-const managerVersion = "0.1.0-dev"
+const (
+	managerVersion = "0.1.0-dev"
+	// Preview must compile exactly the same default dual-stack TUN as connect-smart.
+	nativeDefaultTunnelIPv6 = "fd73:99::1/64"
+)
 
 type envelope struct {
 	OK    bool      `json:"ok"`
@@ -203,7 +207,7 @@ func run(j bool, m *sc.Manager, args []string) int {
 		underlay := opts.String("underlay-if", "", "the host network underlay interface")
 		tun := opts.String("tunnel-if", "sctun0", "dedicated Server Connect TUN name")
 		ipv4 := opts.String("tunnel-ipv4", "172.31.99.1/30", "dedicated private IPv4 TUN CIDR")
-		ipv6 := opts.String("tunnel-ipv6", "fd73:99::1/64", "dedicated private IPv6 TUN CIDR")
+		ipv6 := opts.String("tunnel-ipv6", nativeDefaultTunnelIPv6, "dedicated private IPv6 TUN CIDR")
 		mode := opts.String("mode", "bypass_iran", "default|bypass_iran")
 		healthThreshold := opts.Int("health-failures", 3, "positive consecutive selected HTTPS failure rounds before Direct/off")
 		healthQA := opts.Bool("health-synthetic-qa", false, "synthetic-only HTTPS fixture; not field proof")

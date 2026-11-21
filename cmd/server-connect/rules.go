@@ -85,7 +85,7 @@ func runSmartRoutingRules(jsonMode bool, m *sc.Manager, args []string) int {
 		tunnel := opts.String("tunnel-if", "", "proposed TUN interface")
 		underlay := opts.String("underlay-if", "", "proposed underlay interface")
 		v4 := opts.String("tunnel-ipv4", "", "private IPv4 TUN interface")
-		v6 := opts.String("tunnel-ipv6", "", "optional private IPv6 TUN interface")
+		v6 := opts.String("tunnel-ipv6", nativeDefaultTunnelIPv6, "private IPv6 TUN interface; same default as connect-smart")
 		mode := opts.String("mode", "bypass_iran", "default or bypass_iran")
 		selectedIPv6 := opts.Bool("enable-selected-ipv6", false, "selected VPN exit IPv6 independently verified")
 		iranCoverage := opts.String("iran-coverage", "consensus", "consensus or dbip")
