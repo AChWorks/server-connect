@@ -288,6 +288,24 @@ func (m *Manager) nativeRestartWaitOrVerifyUnlocked(s NativeHealthState, claim N
 	return s, err
 }
 
+// A completed Core replacement has already committed a new native-session
+// generation (armed -> released). The caller's old claim MUST NOT be used for
+// backoff checks. Let the next independently scheduled Health round reread it.
+// In particular, a failed selected HTTPS reproof is not itself guard loss.
+func nativeFinishCoreReplacementRound(s NativeHealthState,
+	fail func(NativeHealthState, string) (NativeHealthState, error)) (NativeHealthState, error) {
+	if s.Phase == "healthy" || s.RestartInFlight {
+		return s, nil
+	}
+	if s.Phase != "recovering" {
+		return fail(s, "core_restart_result_unverified")
+	}
+	if s.RestartAttempts >= s.RestartLimit {
+		return fail(s, "core_restart_attempts_exhausted")
+	}
+	return s, nil
+}
+
 func (m *Manager) advanceNativeCoreRecovery(s NativeHealthState, claim NativeSession, targets []nativeProbeTarget) (NativeHealthState, error) {
 	// Every in-flight restart remains subject to the independent timer and
 	// operation-wide deadline, including between process exit and new TUN.
@@ -310,13 +328,7 @@ func (m *Manager) advanceNativeCoreRecovery(s NativeHealthState, claim NativeSes
 		if err != nil {
 			return m.failNativeCoreRecovery(s, "core_restart_guard_or_policy_unverified")
 		}
-		if next.Phase == "healthy" {
-			return next, nil
-		}
-		if next.RestartInFlight {
-			return next, nil
-		}
-		s = next
+		return nativeFinishCoreReplacementRound(next, m.failNativeCoreRecovery)
 	}
 	if s.RestartAttempts >= s.RestartLimit || s.RestartLimit == 0 {
 		return m.failNativeCoreRecovery(s, "core_restart_attempts_exhausted")

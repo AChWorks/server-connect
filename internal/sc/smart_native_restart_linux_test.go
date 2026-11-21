@@ -118,6 +118,59 @@ func TestRetiredPlanReconciliationRequiresTwoIndependentOffChecks(t *testing.T) 
 	// An already-absent plan is a safe idempotent no-op in the manager.
 }
 
+func TestNativeCompletedCoreReplacementDefersUntilFreshReleasedClaim(t *testing.T) {
+	// A real selected-peer outage left the new Core alive with a changed
+	// PID, phase recovering, and a newly released startup receipt. Continuing
+	// in the same invocation used its stale armed claim, made Health exit 1
+	// with "recovery backoff ownership changed", and induced false Off.
+	base := nativeHealthTestState()
+	base.RestartLimit = 3
+	base.RestartAttempts = 1
+	base.RestartDeadlineMS = 60000
+	base.RestartBackoffMS = 1000
+	base.RestartIncidentMS = 5000
+	base.RestartNextMS = 14000
+	base.Phase = "recovering"
+	base.RestartResult = "fresh_core_selected_path_unavailable"
+	base.RestartFromPID = 13650
+	base.RestartToPID = 15059
+	failCalls := 0
+	fail := func(s NativeHealthState, reason string) (NativeHealthState, error) {
+		failCalls++
+		s.Phase, s.Reason = "off", reason
+		return s, nil
+	}
+	got, err := nativeFinishCoreReplacementRound(base, fail)
+	if err != nil || got != base || failCalls != 0 {
+		t.Fatalf("a fresh, still-guarded Core was incorrectly retired: result=%+v error=%v calls=%d", got, err, failCalls)
+	}
+	for _, tc := range []struct {
+		name       string
+		state      NativeHealthState
+		failReason string
+	}{
+		{"last-attempt-exhausted", func() NativeHealthState { x := base; x.RestartAttempts = 3; return x }(), "core_restart_attempts_exhausted"},
+		{"untrusted-phase", func() NativeHealthState { x := base; x.Phase = "off"; return x }(), "core_restart_result_unverified"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			before := failCalls
+			got, err := nativeFinishCoreReplacementRound(tc.state, fail)
+			if err != nil || got.Phase != "off" || got.Reason != tc.failReason || failCalls != before+1 {
+				t.Fatalf("invalid replacement result did not stop: %+v err=%v calls=%d", got, err, failCalls)
+			}
+		})
+	}
+	for _, phase := range []string{"healthy", "recovering"} {
+		state := base
+		state.Phase = phase
+		state.RestartInFlight = true
+		before := failCalls
+		if got, err := nativeFinishCoreReplacementRound(state, fail); err != nil || got != state || failCalls != before {
+			t.Fatalf("live or healthy replacement result incorrectly terminated: %+v err=%v", got, err)
+		}
+	}
+}
+
 func TestNativeRestartBudgetBackoffAndFlapNoReset(t *testing.T) {
 	base := nativeHealthTestState()
 	base.RestartLimit = 3
