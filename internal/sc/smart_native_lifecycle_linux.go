@@ -35,6 +35,10 @@ type NativeSession struct {
 	ReplyGuardHandle      uint64 `json:"reply_guard_handle,omitempty"`
 	ReplyGuardFingerprint string `json:"reply_guard_fingerprint,omitempty"`
 	CoreStartAttempted    bool   `json:"core_start_attempted,omitempty"`
+	StartupGuardName      string `json:"startup_guard_name,omitempty"`
+	StartupGuardSHA256    string `json:"startup_guard_sha256,omitempty"`
+	StartupGuardHandle    uint64 `json:"startup_guard_handle,omitempty"`
+	StartupGuardPhase     string `json:"startup_guard_phase,omitempty"`
 }
 type NativeConnectionStatus struct {
 	Desired              string `json:"desired"`
@@ -51,6 +55,11 @@ type NativeConnectionStatus struct {
 	HealthFailures       int    `json:"health_failures"`
 	HealthRounds         int    `json:"health_rounds"`
 	HealthOperationID    string `json:"health_operation_id,omitempty"`
+	CoreRestartAttempts  int    `json:"core_restart_attempts,omitempty"`
+	CoreRestartLimit     int    `json:"core_restart_limit,omitempty"`
+	CoreRestartResult    string `json:"core_restart_result,omitempty"`
+	CoreRestartFromPID   int    `json:"last_core_restart_from_pid,omitempty"`
+	CoreRestartToPID     int    `json:"last_core_restart_to_pid,omitempty"`
 }
 
 func (m *Manager) readNativeSession() (NativeSession, error) {
@@ -90,6 +99,32 @@ func (m *Manager) readNativeSession() (NativeSession, error) {
 		}
 		if _, err := hex.DecodeString(session.ReplyGuardFingerprint); err != nil {
 			return NativeSession{}, Fault("invalid_state", "invalid native reply guard fingerprint")
+		}
+	}
+	if session.StartupGuardName == "" {
+		if session.StartupGuardSHA256 != "" || session.StartupGuardHandle != 0 || session.StartupGuardPhase != "" {
+			return NativeSession{}, Fault("invalid_state", "native startup guard claim incomplete")
+		}
+	} else {
+		if !nativeStartupTablePattern.MatchString(session.StartupGuardName) ||
+			session.StartupGuardName != "sc_pre_"+session.HealthOperationID ||
+			len(session.StartupGuardSHA256) != 64 {
+			return NativeSession{}, Fault("invalid_state", "native startup guard claim invalid")
+		}
+		if _, err := hex.DecodeString(session.StartupGuardSHA256); err != nil {
+			return NativeSession{}, Fault("invalid_state", "native startup guard checksum invalid")
+		}
+		switch session.StartupGuardPhase {
+		case "preparing":
+			if session.StartupGuardHandle != 0 {
+				return NativeSession{}, Fault("invalid_state", "native startup guard preparing receipt invalid")
+			}
+		case "armed", "releasing", "released":
+			if session.StartupGuardHandle == 0 {
+				return NativeSession{}, Fault("invalid_state", "native startup guard handle absent")
+			}
+		default:
+			return NativeSession{}, Fault("invalid_state", "native startup guard phase invalid")
 		}
 	}
 	return session, nil
@@ -398,9 +433,14 @@ func inspectNativeAdmissionWithReplyGuard(ctx context.Context, r nativeKernelRun
 			return Fault("service_conflict", "native TUN interface exists")
 		}
 	}
-	underlay, err := r.output(ctx, "ip", "-o", "link", "show", "dev", p.UnderlayIF)
-	if err != nil || strings.TrimSpace(underlay) == "" {
-		return Fault("service_state_unavailable", "underlay interface not available")
+	// A verified Off reconciliation has lost the retired session's underlay
+	// name. It checks *all* reserved resources and the recorded TUN identity,
+	// but must not invent a new underlay owner or require the old NIC on reboot.
+	if p.UnderlayIF != "" {
+		underlay, err := r.output(ctx, "ip", "-o", "link", "show", "dev", p.UnderlayIF)
+		if err != nil || strings.TrimSpace(underlay) == "" {
+			return Fault("service_state_unavailable", "underlay interface not available")
+		}
 	}
 	if committedReplyHandle != 0 {
 		return requireNativeReplyGuardClaim(ctx, r, committedReplyHandle, committedFingerprint)
@@ -418,6 +458,18 @@ func (s NativeSession) recoveryScope() nativeRedirectRecovery {
 func nativeDesiredMatchesClaim(state State, session NativeSession) error {
 	if state.Desired != "smart" || state.Selected != session.Selected {
 		return Fault("guard_pending", "native Smart Routing is not the saved desired mode and profile")
+	}
+	return nil
+}
+
+// While an activation is being prearmed, leave the public desired mode
+// Direct until the independent timers, reply guard AND outbound packet
+// containment have been durably committed and observed in the kernel.
+// NativePreflightInstalled uses the stricter smart-only claim after promotion.
+func nativePendingPrearmMatches(state State, session NativeSession) error {
+	if state.Desired != "direct" || state.Selected == "" || state.Selected != session.Selected ||
+		session.CoreStartAttempted {
+		return Fault("guard_pending", "native guarded activation is not a fresh Direct-to-Smart transition")
 	}
 	return nil
 }
@@ -455,7 +507,7 @@ func (m *Manager) prepareNativeReplyGuardBeforeCoreStart() error {
 		if err != nil {
 			return err
 		}
-		if err := nativeDesiredMatchesClaim(state, session); err != nil {
+		if err := nativePendingPrearmMatches(state, session); err != nil {
 			return err
 		}
 		health, err := m.readNativeHealth()
@@ -513,6 +565,112 @@ func (m *Manager) prepareNativeReplyGuardBeforeCoreStart() error {
 		return put(filepath.Join(m.Dir, nativeSessionFile), raw)
 	})
 }
+
+// Prepare an independently recoverable packet gate BEFORE starting the Core.
+// On an interrupted nft write, ExecStopPost can still identify the one-use
+// precommitted plan and reconcile its exact table without adopting another.
+func (m *Manager) prepareNativeStartupBarrierBeforeCoreStart() error {
+	if err := m.nativeUnitOwnership(); err != nil {
+		return err
+	}
+	return m.withLock(func() error {
+		session, err := m.readNativeSession()
+		if err != nil {
+			return err
+		}
+		if session.CoreStartAttempted || session.StartupGuardName != "" || session.ReplyGuardHandle == 0 {
+			return Fault("guard_pending", "native startup containment requires an unused guarded claim")
+		}
+		if err = m.validateNativeSessionConfig(session); err != nil {
+			return err
+		}
+		health, err := m.readNativeHealth()
+		if err != nil {
+			return err
+		}
+		boot, err := trialBootIdentity()
+		if err != nil {
+			return err
+		}
+		now, err := nativeUptimeMillis()
+		if err != nil {
+			return err
+		}
+		if err = nativeFreshPrearm(session, health, boot, now); err != nil {
+			return err
+		}
+		if err = nativeHealthGuardRoles(); err != nil {
+			return err
+		}
+		if err = requireNativeReplyGuardClaim(context.Background(), nativeSystemRunner{}, session.ReplyGuardHandle, session.ReplyGuardFingerprint); err != nil {
+			return err
+		}
+		state, err := m.load()
+		if err != nil {
+			return err
+		}
+		if err = nativePendingPrearmMatches(state, session); err != nil {
+			return err
+		}
+		return m.stageNativeStartupUnderLock(&session)
+	})
+}
+
+// Publish Smart only after the independent kernel containment, reply
+// preservation and both guard roles are all armed. This closes the
+// previously packet-witnessed interval after desired=smart but before
+// effective interception. A failed commit cleans only task-owned effects.
+func (m *Manager) commitNativeGuardedSmartDesire() error {
+	return m.withLock(func() error {
+		session, e := m.readNativeSession()
+		if e != nil {
+			return e
+		}
+		if session.StartupGuardPhase != "armed" || session.StartupGuardHandle == 0 ||
+			session.ReplyGuardHandle == 0 {
+			return Fault("guard_pending", "native guards not yet committed")
+		}
+		state, e := m.load()
+		if e != nil {
+			return e
+		}
+		if e = nativePendingPrearmMatches(state, session); e != nil {
+			return e
+		}
+		health, e := m.readNativeHealth()
+		if e != nil {
+			return e
+		}
+		boot, e := trialBootIdentity()
+		if e != nil {
+			return e
+		}
+		now, e := nativeUptimeMillis()
+		if e != nil {
+			return e
+		}
+		if e = nativeFreshPrearm(session, health, boot, now); e != nil {
+			return e
+		}
+		if e = nativeHealthGuardRoles(); e != nil {
+			return e
+		}
+		if e = requireNativeReplyGuardClaim(context.Background(), nativeSystemRunner{},
+			session.ReplyGuardHandle, session.ReplyGuardFingerprint); e != nil {
+			return e
+		}
+		p, e := m.readNativeStartupPlan(session)
+		if e != nil {
+			return e
+		}
+		if e = requireNativeStartupGuardClaim(context.Background(), nativeSystemRunner{}, p, session.StartupGuardHandle); e != nil {
+			return e
+		}
+		state.Desired = "smart"
+		return m.save(state)
+	})
+}
+
 func (m *Manager) NativePreflightInstalled() error {
 	if err := m.nativeUnitOwnership(); err != nil {
 		return err
@@ -547,13 +705,21 @@ func (m *Manager) NativePreflightInstalled() error {
 		if err := nativeFreshPrearm(session, health, boot, now); err != nil {
 			return err
 		}
-		if session.ReplyGuardHandle == 0 || session.ReplyGuardFingerprint == "" || session.CoreStartAttempted {
-			return Fault("guard_pending", "Core start requires a committed, unused early reply guard")
+		if session.ReplyGuardHandle == 0 || session.ReplyGuardFingerprint == "" || session.CoreStartAttempted ||
+			session.StartupGuardPhase != "armed" || session.StartupGuardHandle == 0 {
+			return Fault("guard_pending", "Core start requires committed, unused reply and outbound containment guards")
 		}
 		if err := nativeHealthGuardRoles(); err != nil {
 			return err
 		}
 		if err := inspectNativeAdmissionWithReplyGuard(context.Background(), nativeSystemRunner{}, session.recoveryScope(), session.ReplyGuardHandle, session.ReplyGuardFingerprint); err != nil {
+			return err
+		}
+		guardPlan, err := m.readNativeStartupPlan(session)
+		if err != nil {
+			return err
+		}
+		if err := requireNativeStartupGuardClaim(context.Background(), nativeSystemRunner{}, guardPlan, session.StartupGuardHandle); err != nil {
 			return err
 		}
 		// An independent restart may not reuse a previous session even if
@@ -607,11 +773,25 @@ func (m *Manager) NativeRecoverInstalled() error {
 			nativeSystemRunner{}, nativeSystemRunner{}, session, health, boot); err != nil {
 			return err
 		}
+		if err := m.recoverNativeStartupWithSession(context.Background(), nativeSystemRunner{}, session); err != nil {
+			return err
+		}
 		// Only after the exact owned network resources are independently
 		// verified absent may the shutdown/crash hook finish the session.
 		// This also avoids an enabled-on-reboot unit inheriting a contradictory
 		// Direct desired state plus a stale recovery receipt.
-		return m.finalizeNativeRecoveryLocked()
+		if err := m.finalizeNativeRecoveryLocked(); err != nil {
+			return err
+		}
+		// The private plan is inert after the one-use receipt has been
+		// retired. A crash here leaves only an unreferenced state file,
+		// never a new authority to manipulate a host firewall.
+		if session.StartupGuardName != "" {
+			if err := os.Remove(filepath.Join(m.Dir, nativeStartupFile)); err != nil {
+				return err
+			}
+		}
+		return nil
 	})
 }
 
@@ -640,6 +820,8 @@ func (m *Manager) finalizeNativeRecoveryLocked() error {
 			return Fault("invalid_state", "native health recovery identity mismatch")
 		}
 		health.Phase = "off"
+		health.RestartInFlight = false
+		health.RestartOriginalPID = 0
 		if health.Reason == "awaiting_selected_probe" || health.Reason == "selected_https_verified" {
 			health.Reason = "native_core_stopped"
 		}
@@ -668,6 +850,12 @@ func (m *Manager) ConnectNativeSmartRouting(opts NativePolicyOptions) (NativeCon
 	if opts.HealthFailureThreshold < 0 {
 		return NativeConnectionStatus{Desired: "smart", Observed: "not_started", CoreUnit: nativeSmartUnit, SelectedVPNPathProof: "not_run"},
 			Fault("invalid_arguments", "native health failure threshold must be nonnegative (0 selects default)")
+	}
+	if opts.CoreRestartAttempts < 0 || opts.CoreRestartAttempts > 20 ||
+		(opts.CoreRestartAttempts > 0 && (opts.CoreRestartBackoffMS < 0 || opts.CoreRestartBackoffMS > 30000 ||
+			opts.CoreRestartDeadlineMS < 0 || opts.CoreRestartDeadlineMS > 300000)) {
+		return NativeConnectionStatus{Desired: "smart", Observed: "not_started", CoreUnit: nativeSmartUnit, SelectedVPNPathProof: "not_run"},
+			Fault("invalid_arguments", "Core restart attempts (0..20), initial backoff (0..30000 ms) or deadline (0..300000 ms) invalid")
 	}
 	var report NativeConnectionStatus
 	err := m.withNativeTransition(func() error { var e error; report, e = m.connectNativeSmartRoutingUnlocked(opts); return e })
@@ -836,7 +1024,14 @@ func (m *Manager) connectNativeSmartRoutingUnlocked(opts NativePolicyOptions) (N
 		if threshold == 0 {
 			threshold = 3
 		}
-		if e := m.stageNativeHealth(session, threshold, healthScope); e != nil {
+		backoff, deadline := opts.CoreRestartBackoffMS, opts.CoreRestartDeadlineMS
+		if backoff == 0 {
+			backoff = 1000
+		}
+		if deadline == 0 {
+			deadline = 60000
+		}
+		if e := m.stageNativeHealth(session, threshold, healthScope, opts.CoreRestartAttempts, backoff, deadline); e != nil {
 			return e
 		}
 		stagedHealth, e := m.readNativeHealth()
@@ -851,10 +1046,9 @@ func (m *Manager) connectNativeSmartRoutingUnlocked(opts NativePolicyOptions) (N
 		if err := put(filepath.Join(m.Dir, nativeSessionFile), claim); err != nil {
 			return err
 		}
-		state.Desired = "smart"
-		if err := m.save(state); err != nil {
-			return err
-		}
+		// Do not expose requested Smart until the real outbound gate is
+		// installed and verified: concurrent unmarked traffic must not see
+		// a Smart request while still able to emit a Direct SYN.
 		result.Selected = state.Selected
 		result.RecoveryClaimPresent = true
 		return nil
@@ -888,6 +1082,21 @@ func (m *Manager) connectNativeSmartRoutingUnlocked(opts NativePolicyOptions) (N
 		}
 		return result, Fault("guard_unavailable", "early native reply guard failed; Direct restored")
 	}
+	// This short-lived nft OUTPUT gate is effective BEFORE the Core can
+	// start; a systemd Type=exec success must never expose a Direct SYN gap.
+	if err := m.prepareNativeStartupBarrierBeforeCoreStart(); err != nil {
+		if cleanup := m.disconnectNativeSmartRoutingUnlocked(); cleanup != nil {
+			return result, Fault("guard_pending", "native outbound containment failed and recovery is uncertain")
+		}
+		return result, Fault("guard_unavailable", "native outbound containment unavailable; Direct restored")
+	}
+	// The effective nft barrier MUST precede publication of desired=smart.
+	if err := m.commitNativeGuardedSmartDesire(); err != nil {
+		if cleanup := m.disconnectNativeSmartRoutingUnlocked(); cleanup != nil {
+			return result, Fault("guard_pending", "native guarded mode commit failed and recovery remains uncertain")
+		}
+		return result, Fault("guard_unavailable", "native guarded mode commit failed; Direct restored")
+	}
 	// Never hold Manager lock while systemd's independent stop hook may need it.
 	if err := m.nativeControl("start"); err != nil {
 		if cleanup := m.disconnectNativeSmartRoutingUnlocked(); cleanup != nil {
@@ -895,34 +1104,53 @@ func (m *Manager) connectNativeSmartRoutingUnlocked(opts NativePolicyOptions) (N
 		}
 		return result, Fault("service_state_unavailable", "native Core failed to start; Direct restored")
 	}
-	for i := 0; i < 25; i++ {
+	// A Type=exec systemd unit can become active before the Core creates
+	// the TUN/redirect rules. Keep the outbound guard armed across this
+	// bounded readiness interval; never report active from PID state alone.
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
 		observed, err := m.nativeActivity()
 		if err == nil && observed == "active" {
-			// The Core can be active while an owned early reply hook was
-			// externally replaced. Treat that as a safety failure and let
-			// the independent native stop path restore Direct.
-			var handle uint64
-			var fingerprint string
-			if e := m.withLock(func() error {
-				claim, e := m.readNativeSession()
-				if e == nil {
-					handle, fingerprint = claim.ReplyGuardHandle, claim.ReplyGuardFingerprint
-				}
-				return e
-			}); e == nil {
-				e = requireNativeReplyGuardClaim(context.Background(), nativeSystemRunner{}, handle, fingerprint)
-				if e == nil {
-					result.Observed = "active"
-					result.ReplyGuardVerified = true
-					// Neither active Core nor reply preservation alone
-					// proves the selected VPN data path or broader safety.
-					return result, nil
-				}
+			var session NativeSession
+			e := m.withLock(func() error { var readErr error; session, readErr = m.readNativeSession(); return readErr })
+			if e == nil {
+				e = requireNativeReplyGuardClaim(context.Background(), nativeSystemRunner{}, session.ReplyGuardHandle, session.ReplyGuardFingerprint)
 			}
-			if cleanup := m.disconnectNativeSmartRoutingUnlocked(); cleanup != nil {
-				return result, Fault("guard_pending", "native reply guard lost after activation and rollback is uncertain")
+			if e != nil {
+				if cleanup := m.disconnectNativeSmartRoutingUnlocked(); cleanup != nil {
+					return result, Fault("guard_pending", "native guard changed and recovery remains uncertain")
+				}
+				return result, Fault("guard_unavailable", "native reply guard changed; Direct restored")
 			}
-			return result, Fault("guard_unavailable", "native reply guard not verified; Direct restored")
+			if e = m.nativeReadyKernelPolicy(session, "internet_https"); e == nil {
+				e = m.releaseNativeStartupAfterReady(session)
+				if e == nil {
+					e = m.finishNativeStartupRelease(session)
+				}
+				if e != nil {
+					if cleanup := m.disconnectNativeSmartRoutingUnlocked(); cleanup != nil {
+						return result, Fault("guard_pending", "native startup barrier release failed and recovery remains uncertain")
+					}
+					return result, Fault("guard_unavailable", "native startup barrier release failed; Direct restored")
+				}
+				result.Observed = "active"
+				result.ReplyGuardVerified = true
+				return result, nil
+			}
+			// Readiness is transient, but *only* while the verified kernel
+			// barrier remains in place. If it changes, fail and recover now.
+			plan, pErr := m.readNativeStartupPlan(session)
+			if pErr == nil {
+				pErr = requireNativeStartupGuardClaim(context.Background(), nativeSystemRunner{}, plan, session.StartupGuardHandle)
+			}
+			if pErr != nil {
+				if cleanup := m.disconnectNativeSmartRoutingUnlocked(); cleanup != nil {
+					return result, Fault("guard_pending", "native startup containment lost and recovery remains uncertain")
+				}
+				return result, Fault("guard_unavailable", "native startup containment lost; Direct restored")
+			}
+		} else if observed == "failed" {
+			break
 		}
 		time.Sleep(150 * time.Millisecond)
 	}
@@ -1052,6 +1280,11 @@ func (m *Manager) NativeStatus() (NativeConnectionStatus, error) {
 			result.HealthFailures = health.Failures
 			result.HealthRounds = health.Rounds
 			result.HealthOperationID = health.OperationID
+			result.CoreRestartAttempts = health.RestartAttempts
+			result.CoreRestartLimit = health.RestartLimit
+			result.CoreRestartResult = health.RestartResult
+			result.CoreRestartFromPID = health.RestartFromPID
+			result.CoreRestartToPID = health.RestartToPID
 		} else if !errors.Is(healthErr, os.ErrNotExist) {
 			return healthErr
 		}
@@ -1085,6 +1318,9 @@ func (m *Manager) NativeStatus() (NativeConnectionStatus, error) {
 			return err
 		}
 		result.Observed = observed
+		if health.Phase == "recovering" && observed == "active" {
+			result.Observed = "recovering" // parent alive != independently verified selected Core path
+		}
 		if healthErr != nil || health.ConfigSHA256 != session.ConfigSHA256 ||
 			health.OperationID != session.HealthOperationID {
 			return Fault("guard_pending", "native health record missing or unbound")
@@ -1104,6 +1340,38 @@ func (m *Manager) NativeStatus() (NativeConnectionStatus, error) {
 		}
 		if err := requireNativeReplyGuardClaim(context.Background(), nativeSystemRunner{}, session.ReplyGuardHandle, session.ReplyGuardFingerprint); err != nil {
 			return err
+		}
+		// Do not advertise an active, usable TUN before the independent
+		// kernel interception has been verified and its pre-TUN barrier
+		// has been released.
+		if session.StartupGuardName != "" {
+			plan, e := m.readNativeStartupPlan(session)
+			if e != nil {
+				return e
+			}
+			switch session.StartupGuardPhase {
+			case "released":
+				present, e := nativeStartupPresent(context.Background(), nativeSystemRunner{}, plan.Name)
+				if e != nil || present {
+					return Fault("guard_pending", "released native startup barrier remains or is unobservable")
+				}
+			case "armed", "releasing":
+				if e = requireNativeStartupGuardClaim(context.Background(), nativeSystemRunner{}, plan, session.StartupGuardHandle); e != nil {
+					return e
+				}
+				result.Observed = "starting"
+				result.ReplyGuardVerified = true
+				result.GuardVerified = true
+				return nil
+			default:
+				return Fault("guard_pending", "native startup containment not committed")
+			}
+		}
+		// The Native unit's MainPID is now a supervisor. A still-running
+		// supervisor is not a live, verified sing-box child; never publish
+		// a recent selected path solely from systemd's active parent.
+		if _, _, e := m.nativeCoreChildIdentity(); e != nil {
+			return Fault("guard_unavailable", "native Core child process is not independently verified")
 		}
 		result.ReplyGuardVerified = true
 		result.GuardVerified = true

@@ -10,13 +10,24 @@ Server Connect is an offline-first Linux connectivity manager for servers, inclu
 | --- | --- | --- |
 | **Direct** | Original host networking, with no Server Connect-owned VPN routing or blocking rules | Implemented; source and installed-host QA |
 | **Proxy Only** | Opt-in local HTTP/SOCKS proxy for compatible applications | Implemented; real pinned-Core and installed-host QA |
-| **Smart Routing (TUN)** | Iranian, private and protected paths Direct; other public outbound traffic through the selected VPN, with validated operator exceptions | Native official-Core `connect-smart` and independent Guard/Recovery tested in disconnected Debian 12/13 installed-host QA, including synthetic selected TCP/UDP/DNS, Direct exceptions, no selected Direct leak and exact Direct/off restoration. Real public-provider HTTPS, physical SSH/hosting and broader field paths remain unaccepted. |
+| **Smart Routing (TUN)** | Iranian, private and protected paths Direct; other public outbound traffic through the selected VPN, with validated operator exceptions | Official-Core `connect-smart` and independent Health/Recovery tested in Debian installed-host QA; a prior exact candidate additionally passed physical IRPT-101 selected-IPv4, foreign SSH/HTTP and reboot/cleanup cases. The **new** post-reboot reconciliation and Core-process restart candidate still requires a fresh exact-HEAD installed physical acceptance run; neither REALITY nor positive selected public IPv6 is proven. |
 
 For a real Smart Routing session, existing/new SSH administration, aaPanel and foreign-client website replies must remain reachable; VPN-required traffic must not escape Direct while routed or degraded. A verified Disconnect or guard-driven switch to Direct must remove precisely owned VPN-only rules while **preserving saved profiles and routing settings**. A healthy Core process, selected HTTPS probe or synthetic guest run alone does not prove all TCP/UDP/DNS/IPv4/IPv6 and provider paths.
 
 **Implemented development components:** Go menu/CLI with structured JSON, private profiles, saved routing rules, pinned sing-box, common offline installer, signed-aware QA acquisition for official/mirror/offline sources, and an independently supervised native TUN candidate. Obsolete parallel v1/v2/v3/v4 trial creation and the v4 experimental service are retired in the development source; historical operation state remains a fail-closed installation/Native activation blocker until explicitly reconciled. Field-path safety and the first stable release are **not accepted**. Consult [Acceptance](docs/ACCEPTANCE.md) and live [Issues](https://github.com/AChWorks/server-connect/issues) rather than treating historical PR or CI results as approval of the current host.
 
 ## Operator and developer entry points
+
+The guarded `connect-smart` CLI defaults to 3 Core-process replacements
+per explicit activation, a 1000 ms initial backoff and a 60000 ms
+per-incident deadline. Use `--core-restart-attempts`,
+`--core-restart-backoff-ms` and `--core-restart-deadline-ms` on
+an **authorized QA host** to tune the bounded behavior; `--core-restart-attempts 0`
+disables automatic process replacements. An unexpected unguarded Core
+exit still stops into verified owned Direct/off (or explicit uncertainty)
+rather than improvising a restart. The new source and local process
+tests do not prove installed systemd/TUN safety; see the next physical
+gate in [Acceptance](docs/ACCEPTANCE.md).
 
 The installed CLI offers an interactive menu and script-friendly `--json` commands. On a **development or separately authorized QA installation**, useful inspection commands include:
 
@@ -27,7 +38,7 @@ server-connect --json smart-routing-data
 server-connect --json smart-routing-rules list
 ```
 
-`mode-overview` reports desired versus observed state; `native-status` exposes bounded native guard/health observations. These commands are **diagnostics**, not proofs of field-safe activation. Status inspection may initialize private manager state/locks; it does not intentionally change host routes. The menu header distinguishes requested **Direct**, **Proxy Only** and **Smart Routing** from observed state, including native starting/degraded/synthetic-QA health and uncertain recovery; a running native Core is not independent VPN-path proof and failed recovery must not be labeled verified Direct/off.
+`mode-overview` reports desired versus observed state; `native-status` exposes bounded native guard/health observations and, for managed Core recovery, consumed attempts, result and last confirmed before/after PID. These commands are **diagnostics**, not proofs of field-safe activation. Status inspection may initialize private manager state/locks; it does not intentionally change host routes. The menu header distinguishes requested **Direct**, **Proxy Only** and **Smart Routing** from observed state, including native starting/degraded/recovering/synthetic-QA health and uncertain recovery; a running native Core is not independent VPN-path proof and failed recovery must not be labeled verified Direct/off.
 
 On a **separately authorized, recoverable QA host only**, menu option **21 Smart Routing (guarded QA)** requests the underlay interface, `bypass_iran` (estimated Iran Direct / other public VPN) or `default` (all public destinations, including Iran, through VPN except protected/private and explicitly authorized Direct exceptions) policy, and an exact `CONNECT-SMART` acknowledgement before invoking the existing guarded `connect-smart` CLI path. Option **22 Native Guard / Recovery Status** invokes `native-status`. Option **7 Disconnect / Return to Direct** invokes the same owned-resource `disconnect` as the CLI for Proxy Only and native Smart Routing. None of these menu options admits general hosts, proves the actual selected VPN/Direct packet paths or authorizes a production change.
 

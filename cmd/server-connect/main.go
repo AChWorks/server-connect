@@ -212,6 +212,9 @@ func run(j bool, m *sc.Manager, args []string) int {
 		ipv6 := opts.String("tunnel-ipv6", nativeDefaultTunnelIPv6, "dedicated private IPv6 TUN CIDR")
 		mode := opts.String("mode", "bypass_iran", "default|bypass_iran")
 		healthThreshold := opts.Int("health-failures", 3, "positive consecutive selected HTTPS failure rounds before Direct/off")
+		coreRestarts := opts.Int("core-restart-attempts", 3, "maximum Core-process restarts per Smart activation; 0 disables")
+		coreBackoff := opts.Int64("core-restart-backoff-ms", 1000, "initial Core restart retry backoff in milliseconds")
+		coreDeadline := opts.Int64("core-restart-deadline-ms", 60000, "total Core restart recovery incident deadline in milliseconds")
 		healthQA := opts.Bool("health-synthetic-qa", false, "synthetic-only HTTPS fixture; not field proof")
 		selectedIPv6 := opts.Bool("enable-selected-ipv6", false, "allow IPv6 via VPN only after selected exit IPv6 capability is verified")
 		iranCoverage := opts.String("iran-coverage", "consensus", "consensus (DB-IP and Chocolate4U agreement) or dbip")
@@ -222,7 +225,9 @@ func run(j bool, m *sc.Manager, args []string) int {
 			InterfaceName: *tun, UnderlayInterface: *underlay,
 			IPv4Address: *ipv4, IPv6Address: *ipv6, Mode: *mode,
 			HealthFailureThreshold: *healthThreshold, HealthSyntheticQA: *healthQA,
-			EnableSelectedIPv6: *selectedIPv6, IranCoverage: *iranCoverage,
+			CoreRestartAttempts: *coreRestarts, CoreRestartBackoffMS: *coreBackoff,
+			CoreRestartDeadlineMS: *coreDeadline,
+			EnableSelectedIPv6:    *selectedIPv6, IranCoverage: *iranCoverage,
 		})
 		return output(j, report, e)
 	case "native-status":
@@ -237,6 +242,11 @@ func run(j bool, m *sc.Manager, args []string) int {
 		}
 		e := m.NativePreflightInstalled()
 		return output(j, map[string]bool{"native_preflight_ok": e == nil}, e)
+	case "native-core-supervise":
+		if len(args) != 0 || os.Geteuid() != 0 {
+			return output(j, nil, sc.Fault("invalid_arguments", "installed native Core supervisor only"))
+		}
+		return output(j, nil, m.RunNativeCoreSupervisor())
 	case "native-recover":
 		if len(args) != 0 {
 			return output(j, nil, sc.Fault("invalid_arguments", "installed native service recovery takes no options"))
@@ -563,12 +573,15 @@ Commands:
   connect-smart --underlay-if NAME [--tunnel-if NAME] [--tunnel-ipv4 CIDR]
                 [--tunnel-ipv6 CIDR] [--mode default|bypass_iran]
                 [--health-failures POSITIVE_NUMBER] [--health-synthetic-qa]
+                [--core-restart-attempts N] [--core-restart-backoff-ms N]
+                [--core-restart-deadline-ms N]
                 [--enable-selected-ipv6] [--iran-coverage consensus|dbip]
                              IPv6 requires verified selected exit; default IR is two-source consensus
                              Start guarded native sing-box Smart Routing
                              Synthetic health only on isolated test hosts
   native-status              Read native service, guard and HTTPS health scope
   native-preflight           Installed systemd ExecStartPre only
+  native-core-supervise      Installed Core MainPID supervisor only
   native-recover             Installed systemd ExecStopPost only
   ready                      Verify owned authenticated listener (not upstream)
   disconnect                 Restore Direct from owned Proxy Only/Native TUN

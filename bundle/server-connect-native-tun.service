@@ -12,7 +12,10 @@ Type=exec
 WorkingDirectory=/opt/server-connect/current/bin
 LoadCredential=native-config:/var/lib/server-connect/native-tun.json
 ExecStartPre=/opt/server-connect/current/bin/server-connect native-preflight
-ExecStart=/opt/server-connect/current/bin/sing-box run -c /run/credentials/server-connect-native-tun.service/native-config
+# Keep systemd's verified ExecStopPost as the ultimate cleanup owner.
+# A tiny managed parent can restart the child Core only behind an independently
+# receipted nft barrier; unexpected child death still exits into ExecStopPost.
+ExecStart=/opt/server-connect/current/bin/server-connect native-core-supervise
 ExecStopPost=/opt/server-connect/current/bin/server-connect native-recover
 Restart=no
 KillMode=control-group
