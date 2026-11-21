@@ -32,8 +32,7 @@ func (r nativeStartupFake) output(_ context.Context, binary string, args ...stri
 func nativeStartupFixture(t *testing.T) (nativeStartupPlan, nativeStartupFake) {
 	t.Helper()
 	p := nativeStartupPlan{Version: 1, Name: "sc_pre_" + strings.Repeat("a", 32),
-		UnderlayIF: "eth0", PeerIPs: []string{"204.11.2.217"}, PeerPort: 18479,
-		DirectPrefixes: []string{"193.111.235.0/25"}, Resolvers: []string{"1.1.1.1"}}
+		UnderlayIF: "eth0", DirectPrefixes: []string{"193.111.235.0/25"}}
 	rules, e := nativeStartupRules(p)
 	if e != nil {
 		t.Fatal(e)
@@ -62,17 +61,18 @@ func TestNativeStartupBarrierHasEarlyOutboundRejectAndNarrowExceptions(t *testin
 	if !strings.Contains(script, "type filter hook output priority -100;") ||
 		!strings.Contains(script, "ct direction reply accept") ||
 		!strings.Contains(script, "meta mark 0x2024 accept") ||
-		!strings.Contains(script, "ip daddr 204.11.2.217 tcp dport 18479 accept") ||
-		!strings.Contains(script, "ip daddr 1.1.1.1 udp dport 53 accept") ||
-		!strings.Contains(script, "oifname \"eth0\" ip daddr 0.0.0.0/0 reject") ||
-		!strings.Contains(script, "oifname \"eth0\" ip6 daddr ::/0 reject") {
+		strings.Contains(script, "204.11.2.217") ||
+		strings.Contains(script, " dport 53 accept") ||
+		strings.Contains(script, "oifname \"eth0\" ip daddr 0.0.0.0/0 reject") ||
+		!strings.Contains(script, "ip daddr 0.0.0.0/0 reject") ||
+		!strings.Contains(script, "ip6 daddr ::/0 reject") {
 		t.Fatal("pre-core barrier omitted a required outbound containment or bootstrap rule")
 	}
 	for _, bad := range []nativeStartupPlan{
-		{Version: 1, Name: "sc_pre_$(touch /tmp/unsafe)", UnderlayIF: "eth0", PeerIPs: p.PeerIPs, PeerPort: p.PeerPort},
-		{Version: 1, Name: p.Name, UnderlayIF: "eth0", PeerIPs: []string{"127.0.0.1;drop"}, PeerPort: 443},
-		{Version: 1, Name: p.Name, UnderlayIF: "eth0", PeerIPs: p.PeerIPs, PeerPort: 0},
-		{Version: 1, Name: p.Name, UnderlayIF: "eth0", PeerIPs: p.PeerIPs, PeerPort: 443, DirectPrefixes: []string{"0.0.0.0/0"}},
+		{Version: 1, Name: "sc_pre_$(touch /tmp/unsafe)", UnderlayIF: "eth0"},
+		{Version: 1, Name: p.Name, UnderlayIF: "eth0;drop"},
+		{Version: 1, Name: p.Name, UnderlayIF: "lo"},
+		{Version: 1, Name: p.Name, UnderlayIF: "eth0", DirectPrefixes: []string{"0.0.0.0/0"}},
 	} {
 		if _, e := nativeStartupScript(bad); e == nil {
 			t.Fatalf("unsafe startup barrier accepted: %+v", bad)
@@ -93,7 +93,7 @@ func TestNativeStartupKernelReceiptRefusesAlteredOrForeignObject(t *testing.T) {
 	}
 	variants := []struct{ name, body string }{
 		{"altered-mark", strings.Replace(r.body, `"right":8228`, `"right":8227`, 1)},
-		{"changed-peer", strings.Replace(r.body, "204.11.2.217", "204.11.2.218", 1)},
+		{"changed-direct-prefix", strings.Replace(r.body, "193.111.235.0", "193.111.235.128", 1)},
 		{"removed-reject", strings.Replace(r.body, `"reject":{"expr":"port-unreachable","type":"icmp"}`, `"accept":null`, 1)},
 		{"extra-object", strings.Replace(r.body, "]}", `,{"table":{"family":"ip","name":"intruder"}}]}`, 1)},
 	}

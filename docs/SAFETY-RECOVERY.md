@@ -105,9 +105,13 @@ manager must install a distinct, one-operation `inet sc_pre_<operation-id>`
 nft OUTPUT filter **before publishing `desired=smart`**, not merely
 before `systemctl start`. The independent Health/Recovery roles and narrow
 accepted-reply guard are prearmed first; the temporary filter blocks new
-unmarked public underlay egress except the verified Core endpoint and
-explicit bootstrap resolvers, while protecting reply, loopback and
-connected/private flows. A precommitted private digest-bound plan,
+unmarked public egress on **all** host interfaces. Only the official Core's
+output-marked sockets (`0x2024`), proven accepted-session replies,
+loopback and validated connected/private destinations are exempt. There is
+**no** public operating-system DNS exception and **no** general IP/port
+exception for the VPN peer: either could allow unrelated applications
+to bypass VPN-required startup containment. A precommitted private
+digest-bound plan,
 exact rule/chain/handle receipt, and generation-conditional deletion
 prevent name-only cleanup or adoption of a foreign table. It is **not**
 a permanent kill switch, second router, or an off-mode block.

@@ -6,8 +6,8 @@ package sc
 // between systemd Type=exec reporting success and sing-box installing its TUN
 // and auto_redirect policy. It is NOT a second router or a Direct/off kill switch.
 // The barrier never authorizes routing: it temporarily rejects new unmarked
-// public underlay egress while preserving reply, local/on-link and selected
-// Core bootstrap traffic. Only exact, receipt-bound nft objects are removed.
+// public underlay egress while preserving reply, local/on-link and only
+// officially marked Core bootstrap traffic. Only exact, receipt-bound nft objects are removed.
 import (
 	"context"
 	"crypto/sha256"
@@ -16,13 +16,11 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
-	"os"
 	"path/filepath"
 	"reflect"
 	"regexp"
 	"sort"
 	"strings"
-	"time"
 )
 
 const nativeStartupFile = "native-startup.json"
@@ -35,10 +33,7 @@ type nativeStartupPlan struct {
 	Version        int      `json:"version"`
 	Name           string   `json:"name"`
 	UnderlayIF     string   `json:"underlay_if"`
-	PeerIPs        []string `json:"peer_ips"`
-	PeerPort       uint16   `json:"peer_port"`
 	DirectPrefixes []string `json:"direct_prefixes"`
-	Resolvers      []string `json:"resolvers"`
 }
 
 type nativeStartupRule struct {
@@ -79,8 +74,7 @@ func nativeStartupReject(family string) any {
 func nativeStartupRules(p nativeStartupPlan) ([]nativeStartupRule, error) {
 	if p.Version != 1 || !nativeStartupTablePattern.MatchString(p.Name) ||
 		!nativeInterfaceName.MatchString(p.UnderlayIF) || p.UnderlayIF == "lo" ||
-		p.PeerPort == 0 || len(p.PeerIPs) == 0 || len(p.PeerIPs) > 64 ||
-		len(p.DirectPrefixes) > 64 || len(p.Resolvers) > 64 {
+		len(p.DirectPrefixes) > 64 {
 		return nil, Fault("invalid_state", "native startup guard plan invalid")
 	}
 	r := []nativeStartupRule{
@@ -98,36 +92,6 @@ func nativeStartupRules(p nativeStartupPlan) ([]nativeStartupRule, error) {
 		}
 		r = append(r, nativeStartupRule{family + " daddr " + item + " accept",
 			[]any{nativeStartupPayload(family, item), nativeStartupAccept()}})
-	}
-	appendIPs := func(items []string, purpose string) error {
-		old := ""
-		for _, address := range items {
-			a, e := netip.ParseAddr(address)
-			if e != nil || !a.IsValid() || a.IsUnspecified() || a.IsMulticast() ||
-				a.Is4In6() || (old != "" && address <= old) || a.String() != address {
-				return Fault("invalid_state", "native startup guard addresses invalid")
-			}
-			old = address
-			family := "ip"
-			if a.Is6() {
-				family = "ip6"
-			}
-			port := p.PeerPort
-			if purpose == "resolver" {
-				port = 53
-			}
-			for _, proto := range []string{"tcp", "udp"} {
-				r = append(r, nativeStartupRule{fmt.Sprintf("%s daddr %s %s dport %d accept", family, address, proto, port),
-					[]any{nativeStartupPayload(family, address), nativeStartupPort(proto, port), nativeStartupAccept()}})
-			}
-		}
-		return nil
-	}
-	if err := appendIPs(p.PeerIPs, "peer"); err != nil {
-		return nil, err
-	}
-	if err := appendIPs(p.Resolvers, "resolver"); err != nil {
-		return nil, err
 	}
 	old := ""
 	for _, cidr := range p.DirectPrefixes {
@@ -149,8 +113,11 @@ func nativeStartupRules(p nativeStartupPlan) ([]nativeStartupRule, error) {
 		if family == "ip6" {
 			cidr = "::/0"
 		}
-		r = append(r, nativeStartupRule{fmt.Sprintf("oifname \"%s\" %s daddr %s reject", p.UnderlayIF, family, cidr),
-			[]any{nativeStartupMeta("oifname", p.UnderlayIF), nativeStartupPayload(family, cidr), nativeStartupReject(family)}})
+		// Smart is host-wide, not confined to the chosen physical NIC.
+		// Any unmarked non-protected public egress must remain blocked
+		// even if a second/default WAN path appears during activation.
+		r = append(r, nativeStartupRule{fmt.Sprintf("%s daddr %s reject", family, cidr),
+			[]any{nativeStartupPayload(family, cidr), nativeStartupReject(family)}})
 	}
 	return r, nil
 }
@@ -168,52 +135,16 @@ func nativeStartupScript(plan nativeStartupPlan) (string, error) {
 	b.WriteString(" }\n}\n")
 	return b.String(), nil
 }
-func nativeStartupPlanFor(session NativeSession, profile Profile) (nativeStartupPlan, error) {
+func nativeStartupPlanFor(session NativeSession) (nativeStartupPlan, error) {
 	if len(session.HealthOperationID) != 32 || !journalHex64.MatchString(session.ConfigSHA256) {
 		return nativeStartupPlan{}, Fault("invalid_state", "native startup operation identity unavailable")
 	}
-	var remote struct {
-		Server string `json:"server"`
-		Port   uint16 `json:"server_port"`
-	}
-	var fields map[string]json.RawMessage
-	if json.Unmarshal(profile.Outbound, &fields) != nil ||
-		json.Unmarshal(fields["server"], &remote.Server) != nil ||
-		json.Unmarshal(fields["server_port"], &remote.Port) != nil ||
-		remote.Server == "" || remote.Port == 0 {
-		return nativeStartupPlan{}, Fault("invalid_state", "selected Core bootstrap endpoint unavailable")
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
-	defer cancel()
-	var ips []netip.Addr
-	if a, e := netip.ParseAddr(remote.Server); e == nil {
-		ips = []netip.Addr{a.Unmap()}
-	} else {
-		lookup, e := net.DefaultResolver.LookupIPAddr(ctx, remote.Server)
-		if e != nil {
-			return nativeStartupPlan{}, Fault("guard_unavailable", "selected bootstrap name resolution unavailable")
-		}
-		for _, item := range lookup {
-			if a, ok := netip.AddrFromSlice(item.IP); ok {
-				ips = append(ips, a.Unmap())
-			}
-		}
-	}
-	names := map[string]bool{}
-	for _, a := range ips {
-		if a.IsValid() && !a.IsUnspecified() && !a.IsMulticast() {
-			names[a.String()] = true
-		}
-	}
-	if len(names) == 0 {
-		return nativeStartupPlan{}, Fault("guard_unavailable", "no usable selected upstream endpoint")
-	}
+	// Only exact already-connected prefixes may bypass the temporary
+	// filter. The official Core's marked sockets (0x2024) are the sole
+	// permitted public bootstrap path; a peer IP/port or OS resolver
+	// exception could let unrelated applications leak direct traffic.
 	p := nativeStartupPlan{Version: 1, Name: "sc_pre_" + session.HealthOperationID,
-		UnderlayIF: session.UnderlayIF, PeerPort: remote.Port}
-	for addr := range names {
-		p.PeerIPs = append(p.PeerIPs, addr)
-	}
-	sort.Strings(p.PeerIPs)
+		UnderlayIF: session.UnderlayIF}
 	iface, e := net.InterfaceByName(session.UnderlayIF)
 	if e != nil {
 		return nativeStartupPlan{}, Fault("guard_unavailable", "native underlay interface missing")
@@ -233,25 +164,9 @@ func nativeStartupPlanFor(session NativeSession, profile Profile) (nativeStartup
 		p.DirectPrefixes = append(p.DirectPrefixes, value)
 	}
 	sort.Strings(p.DirectPrefixes)
-	// Only pinned OS bootstrap resolvers, not arbitrary public UDP/53, may
-	// traverse the temporary guard. Localhost resolvers are already permitted.
-	raw, e := os.ReadFile("/etc/resolv.conf")
-	if e != nil {
-		return nativeStartupPlan{}, Fault("guard_unavailable", "host resolver inventory unavailable")
-	}
-	resolvers := map[string]bool{}
-	for _, line := range strings.Split(string(raw), "\n") {
-		f := strings.Fields(strings.SplitN(line, "#", 2)[0])
-		if len(f) >= 2 && f[0] == "nameserver" {
-			if addr, e := netip.ParseAddr(f[1]); e == nil && addr.IsValid() && !addr.IsUnspecified() {
-				resolvers[addr.Unmap().String()] = true
-			}
-		}
-	}
-	for value := range resolvers {
-		p.Resolvers = append(p.Resolvers, value)
-	}
-	sort.Strings(p.Resolvers)
+	// Public OS resolver addresses are NOT blanket exemptions. The
+	// Core's marked bootstrap sockets are already allowed above; otherwise
+	// any unrelated host app could leak raw DNS while desired=smart.
 	if _, e := nativeStartupRules(p); e != nil {
 		return nativeStartupPlan{}, e
 	}
@@ -513,8 +428,8 @@ func (m *Manager) recoverNativeStartupWithSession(ctx context.Context, r nativeR
 // Bounded helper for writing a fresh private, one-use startup plan before
 // installing the nft table. A preexisting unrelated system nft table is never
 // accepted by this staging operation.
-func (m *Manager) stageNativeStartupUnderLock(session *NativeSession, profile Profile) error {
-	p, e := nativeStartupPlanFor(*session, profile)
+func (m *Manager) stageNativeStartupUnderLock(session *NativeSession) error {
+	p, e := nativeStartupPlanFor(*session)
 	if e != nil {
 		return e
 	}

@@ -53,8 +53,11 @@ claim before requesting systemd activation. No second Go router is created.
 The short-lived Native startup OUTPUT containment is one additional
 **admission/rollback guard**, not a second traffic classifier: after
 the independent timers and accepted-reply guard are armed, it blocks
-new unmarked public underlay egress until the Core has actually installed
-its own TUN/policy. Only then may the manager report Smart active and
+new unmarked public egress **across interfaces** until the Core has
+installed its TUN/policy. Only official-Core-marked bootstrap sockets,
+proven accepted replies and connected/private destinations are exempt.
+There is no blanket public OS DNS or selected peer-IP/port bypass.
+Only then may the manager report Smart active and
 remove the exact receipt-bound containment table. Crucially,
 `desired=smart` is persisted **after** that barrier is installed and
 independently verified; otherwise an application may emit Direct packets

@@ -53,6 +53,15 @@ source/bundle/OS and packet witness; a lone post-return probe does not
 cover this failure. Do not infer no-leak for other peers, protocols, IPv6
 or physical hosts from that one destination and VM. Host-wide tests
 without independent rescue remain **NOT_RUN**, not PASS.
+For a hostname-based selected VPN, also test its bootstrap with a
+**temporarily configured public OS resolver** (and a separately armed
+DNS/Direct restore), verifying selected foreign HTTPS delivery and
+exact original DNS/SSH/profile/kernel state after Off. The temporary
+nft barrier must never allow unmarked UDP/TCP 53 to the public resolver
+or unmarked application sockets to the selected peer's public IP/port,
+even when selected Core bootstrap is allowed by its official output mark.
+A single successful VM DNS/provider combination is bounded evidence,
+not acceptance for all resolvers or target networks.
 
 ## Test lanes and field-regression lessons
 

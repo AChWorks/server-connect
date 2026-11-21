@@ -602,11 +602,7 @@ func (m *Manager) prepareNativeStartupBarrierBeforeCoreStart() error {
 		if err = nativePendingPrearmMatches(state, session); err != nil {
 			return err
 		}
-		profile, err := m.profile(session.Selected)
-		if err != nil {
-			return err
-		}
-		return m.stageNativeStartupUnderLock(&session, profile)
+		return m.stageNativeStartupUnderLock(&session)
 	})
 }
 
