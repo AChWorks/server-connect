@@ -17,7 +17,9 @@ import (
 
 const (
 	managerVersion = "0.1.0-dev"
-	// Preview must compile exactly the same default dual-stack TUN as connect-smart.
+	// Preview and guarded Connect must derive the same default native policy.
+	nativeDefaultTunnelName = "sctun0"
+	nativeDefaultTunnelIPv4 = "172.31.99.1/30"
 	nativeDefaultTunnelIPv6 = "fd73:99::1/64"
 )
 
@@ -205,8 +207,8 @@ func run(j bool, m *sc.Manager, args []string) int {
 		opts := flag.NewFlagSet(name, flag.ContinueOnError)
 		opts.SetOutput(io.Discard)
 		underlay := opts.String("underlay-if", "", "the host network underlay interface")
-		tun := opts.String("tunnel-if", "sctun0", "dedicated Server Connect TUN name")
-		ipv4 := opts.String("tunnel-ipv4", "172.31.99.1/30", "dedicated private IPv4 TUN CIDR")
+		tun := opts.String("tunnel-if", nativeDefaultTunnelName, "dedicated Server Connect TUN name")
+		ipv4 := opts.String("tunnel-ipv4", nativeDefaultTunnelIPv4, "dedicated private IPv4 TUN CIDR")
 		ipv6 := opts.String("tunnel-ipv6", nativeDefaultTunnelIPv6, "dedicated private IPv6 TUN CIDR")
 		mode := opts.String("mode", "bypass_iran", "default|bypass_iran")
 		healthThreshold := opts.Int("health-failures", 3, "positive consecutive selected HTTPS failure rounds before Direct/off")
@@ -545,8 +547,8 @@ Commands:
   smart-routing-rules import --source ID --as-of YYYY-MM-DD --sha256 HEX --file FILE|-
                              [--replaces-sha256 HEX] for explicit source replacement
   smart-routing-rules remove-source --source ID --sha256 HEX
-  smart-routing-rules preview-native --tunnel-if NAME --underlay-if NAME
-                                     --tunnel-ipv4 CIDR [--tunnel-ipv6 CIDR]
+  smart-routing-rules preview-native --underlay-if NAME [--tunnel-if NAME]
+                                     [--tunnel-ipv4 CIDR] [--tunnel-ipv6 CIDR]
                                      [--mode default|bypass_iran]
                                      [--iran-coverage consensus|dbip] [--enable-selected-ipv6]
                               Compiles saved rules with official sing-box;

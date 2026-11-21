@@ -82,15 +82,14 @@ func runSmartRoutingRules(jsonMode bool, m *sc.Manager, args []string) int {
 	case "preview-native":
 		opts := flag.NewFlagSet(action, flag.ContinueOnError)
 		opts.SetOutput(io.Discard)
-		tunnel := opts.String("tunnel-if", "", "proposed TUN interface")
+		tunnel := opts.String("tunnel-if", nativeDefaultTunnelName, "proposed TUN interface; same default as connect-smart")
 		underlay := opts.String("underlay-if", "", "proposed underlay interface")
-		v4 := opts.String("tunnel-ipv4", "", "private IPv4 TUN interface")
+		v4 := opts.String("tunnel-ipv4", nativeDefaultTunnelIPv4, "private IPv4 TUN interface; same default as connect-smart")
 		v6 := opts.String("tunnel-ipv6", nativeDefaultTunnelIPv6, "private IPv6 TUN interface; same default as connect-smart")
 		mode := opts.String("mode", "bypass_iran", "default or bypass_iran")
 		selectedIPv6 := opts.Bool("enable-selected-ipv6", false, "selected VPN exit IPv6 independently verified")
 		iranCoverage := opts.String("iran-coverage", "consensus", "consensus or dbip")
-		if err := opts.Parse(args); err != nil || len(opts.Args()) != 0 ||
-			*tunnel == "" || *underlay == "" || *v4 == "" {
+		if err := opts.Parse(args); err != nil || len(opts.Args()) != 0 || *underlay == "" {
 			return output(jsonMode, nil, routingOptionsError())
 		}
 		report, err := m.PreviewNativeSmartRouting(sc.NativePolicyOptions{

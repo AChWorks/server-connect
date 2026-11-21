@@ -87,8 +87,8 @@ func TestRoutingRulesCLIWorkflowAndMenuParity(t *testing.T) {
 	}
 }
 
-// A real installed CLI preview must accept the documented minimal arguments
-// and compile exactly the same dual-stack default as guarded connect-smart.
+// A real installed CLI preview must accept only a required underlay interface
+// and compile exactly the same default TUN policy as guarded connect-smart.
 // Preview only validates the pinned official Core policy; it never applies TUN.
 func TestRoutingRulesCLIPreviewMatchesConnectSmartIPv6Default(t *testing.T) {
 	core := os.Getenv("SC_TEST_SINGBOX")
@@ -103,12 +103,12 @@ func TestRoutingRulesCLIPreviewMatchesConnectSmartIPv6Default(t *testing.T) {
 	if err := m.Select(profile.ID); err != nil {
 		t.Fatal(err)
 	}
-	minimal := []string{"smart-routing-rules", "preview-native", "--tunnel-if", "sctun0", "--underlay-if", "ens3", "--tunnel-ipv4", "172.31.99.1/30"}
+	minimal := []string{"smart-routing-rules", "preview-native", "--underlay-if", "ens3"}
 	rc, inferred, stderr := captureRulesCommand(t, m, minimal...)
 	if rc != 0 || inferred["ok"] != true || stderr != "" {
 		t.Fatalf("default preview rejects the same IPv6 policy as connect-smart: rc=%d reply=%+v stderr=%s", rc, inferred, stderr)
 	}
-	rc, explicit, stderr := captureRulesCommand(t, m, append(append([]string{}, minimal...), "--tunnel-ipv6", nativeDefaultTunnelIPv6)...)
+	rc, explicit, stderr := captureRulesCommand(t, m, append(append([]string{}, minimal...), "--tunnel-if", nativeDefaultTunnelName, "--tunnel-ipv4", nativeDefaultTunnelIPv4, "--tunnel-ipv6", nativeDefaultTunnelIPv6)...)
 	if rc != 0 || explicit["ok"] != true || stderr != "" {
 		t.Fatalf("explicit preview refused: rc=%d reply=%+v stderr=%s", rc, explicit, stderr)
 	}
