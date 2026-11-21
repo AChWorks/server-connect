@@ -231,22 +231,3 @@ func VerifyInstallerTarget(manifestPath string) (InstallerTargetVerification, er
 	}
 	return InstallerTargetVerification{Target: target, Verified: true}, nil
 }
-
-const nativeTrialPlatformRefusal = "native trials require Debian 13; Debian 12 installation supports Direct/Proxy Only only"
-
-func requireNativeTrialTarget(target string) error {
-	if target != "debian-13-amd64" {
-		return Fault("trial_unsupported", nativeTrialPlatformRefusal)
-	}
-	return nil
-}
-
-// New Apply admission only. Recovery and inspection deliberately keep their
-// existing identity/ownership checks, even if the OS has since changed.
-func nativeTrialApplyPlatform() error {
-	target, err := currentInstallerHostTarget()
-	if err != nil {
-		return Fault("trial_unsupported", nativeTrialPlatformRefusal)
-	}
-	return requireNativeTrialTarget(target)
-}

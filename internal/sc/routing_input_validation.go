@@ -59,10 +59,6 @@ func canonicalRoutePrefixFamily(raw string, ipv6 bool) (netip.Prefix, error) {
 	return p, nil
 }
 
-func canonicalRoutePrefix(raw string) (netip.Prefix, error) {
-	return canonicalRoutePrefixFamily(raw, false)
-}
-
 func routePrefixesOverlap(a, b netip.Prefix) bool {
 	return a.Addr().Is4() == b.Addr().Is4() && (a.Contains(b.Addr()) || b.Contains(a.Addr()))
 }

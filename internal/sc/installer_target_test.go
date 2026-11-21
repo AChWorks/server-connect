@@ -148,15 +148,3 @@ func TestInstallerMetadataReaderTrustAndBounds(t *testing.T) {
 	}
 	refuse(empty, uid, 128)
 }
-
-func TestDebian12InstallationDoesNotAdmitNativeTrials(t *testing.T) {
-	if err := requireNativeTrialTarget("debian-13-amd64"); err != nil {
-		t.Fatalf("existing native target refused: %v", err)
-	}
-	for _, target := range []string{"debian-12-amd64", "debian-14-amd64", "", "debian-13-arm64"} {
-		err := requireNativeTrialTarget(target)
-		if ErrorCode(err) != "trial_unsupported" || err.Error() != nativeTrialPlatformRefusal {
-			t.Fatalf("new installation target widened native Apply: %q, %v", target, err)
-		}
-	}
-}

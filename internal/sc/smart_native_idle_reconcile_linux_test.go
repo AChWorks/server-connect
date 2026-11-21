@@ -5,6 +5,10 @@ import (
 	"testing"
 )
 
+func parseNativeIdleRecoveryService(raw []byte) (bool, error) {
+	return parseNativeIdleManagedService(raw, trialRecoveryUnit)
+}
+
 func idleRecoveryObservation() string {
 	return "Id=" + trialRecoveryUnit + "\n" +
 		"LoadState=loaded\nFragmentPath=" + trialGuardUnitDir + trialRecoveryUnit + "\n" +

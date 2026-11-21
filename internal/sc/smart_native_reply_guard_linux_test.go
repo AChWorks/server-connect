@@ -12,6 +12,16 @@ import (
 	"testing"
 )
 
+func nativeReplyGuardShape(raw string) error {
+	_, _, err := nativeReplyGuardReceipt(raw)
+	return err
+}
+
+func installNativeReplyGuard(ctx context.Context, runner nativeReplyGuardWriter) error {
+	_, err := installNativeReplyGuardWithHandle(ctx, runner, nil, nativeAcceptedTCPFingerprint(nil))
+	return err
+}
+
 const nativeReplyGuardFixtureJSON = `{"nftables":[
  {"metainfo":{"version":"1.1.3","release_name":"qa","json_schema_version":1}},
  {"table":{"family":"inet","name":"sc_reply_guard","handle":10}},

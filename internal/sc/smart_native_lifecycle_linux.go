@@ -931,9 +931,6 @@ func (m *Manager) connectNativeSmartRoutingUnlocked(opts NativePolicyOptions) (N
 	}
 	return result, Fault("service_state_unavailable", "native Core did not stabilize; Direct restored")
 }
-func (m *Manager) DisconnectNativeSmartRouting() error {
-	return m.withNativeTransition(m.disconnectNativeSmartRoutingUnlocked)
-}
 func (m *Manager) disconnectNativeSmartRoutingUnlocked() error {
 	if err := m.nativeUnitOwnership(); err != nil {
 		return err

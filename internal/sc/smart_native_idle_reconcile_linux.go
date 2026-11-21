@@ -68,10 +68,6 @@ func parseNativeIdleManagedService(raw []byte, name string) (failed bool, err er
 	return invalid()
 }
 
-func parseNativeIdleRecoveryService(raw []byte) (bool, error) {
-	return parseNativeIdleManagedService(raw, trialRecoveryUnit)
-}
-
 // Reobserve provenance before and after the detailed systemd process/job
 // query. The first-party unit and manifest must match across observations.
 func observeNativeIdleManagedService(name string) (nativeGuardUnitIdentity, bool, error) {
