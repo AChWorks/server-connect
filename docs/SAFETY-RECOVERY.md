@@ -391,6 +391,36 @@ On confirmed failure, prevent **unobserved** Direct bypass while the Smart Routi
 
 **Initial reconnect candidate, subject to field calibration:** at most **3 automatic attempts per confirmed outage incident**, with short increasing delays and an overall recovery deadline; allow operator adjustment of the bounded attempt/time budget. Flapping must not reset the incident budget into an endless loop; reconnect only the selected VPN transport, **never replay interrupted application requests or arbitrary host operations**. Exhaustion triggers verified `restore_direct` and **no further automatic retries until an explicit new enable action**. Critical guard, ownership or protected-host-access failures bypass the retry delay and restore the safest available host baseline immediately. Report the failure cause, attempt count, last result and true current mode in status and credential-safe local logs. **Optional outage/recovery notifications are Owner-deferred**; no mandatory external alerting service, delivery dependency or separate notification worker in the first release. **Cloudflare Tunnel**, if separately enabled, has its own connector health: an unselected/failed website-origin check must not tear down healthy outbound Smart Routing.
 
+### Current Native guarded Core-process candidate (Draft PR #126)
+
+The original sing-box Core now executes as a directly supervised child inside
+its existing managed systemd unit. The supervisor is **not** an unguarded
+systemd restart facility: a Health-confirmed selected-path failure can request
+at most the configured operation-wide number of restarts, only after installing
+an exact, operation-bound, verified nft OUTPUT barrier ahead of Core teardown.
+Each attempt must observe a changed physical process PID, recreated Core
+kernel interception and a fresh selected HTTPS proof; the initial defaults are
+3 attempts, 1 s exponential backoff and 60 s incident deadline. Restarts
+require both independent guard roles and the original operation claim; spent
+attempts are never replenished by a flapping provider. If the child exits
+unexpectedly without prearmed restart containment, the supervisor exits so
+`ExecStopPost=native-recover` restores the exact owned Direct/off state,
+rather than risking a Direct leak by improvising a restart. An incomplete
+ownership or cleanup proof is `UNCERTAIN`.
+
+A verified Direct/off native stop may leave an inert private Core config
+behind. The first subsequent Proxy Only Connect can remove **that file only**
+under the existing transition lock after proving a matching final Off health
+receipt, trusted service/guard ownership and zero remaining native Core work
+or reserved network resources; it can never adopt or delete kernel objects
+on the strength of a retired receipt. Ambiguous artifacts still require
+operator diagnosis and explicit owned recovery.
+
+Neither this code nor old-head field evidence constitutes physical acceptance
+of the new PID-replacement path. Current new-head source tests exercise a
+real (unprivileged) child PID replacement and fail-closed exits, not installed
+kernel/TUN/SSH safety under actual systemd, reboot or foreign network writers.
+
 ## Required proof
 
 The exact evidence and negative/physical test matrix lives in [ACCEPTANCE.md](ACCEPTANCE.md). Safety claims require at least authentic fresh SSH/hosting reply preservation, independent Direct versus VPN path evidence, expiry/replay/kill/reboot scenarios, competing host-network rules, and **failure of both the VPN and the guard itself**. Simulated or Docker-reset tests do not establish physical power-loss recovery.

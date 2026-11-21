@@ -31,6 +31,41 @@ Owner-approved **proportional recovery** requires representative evidence for no
 | Optional foreign Direct-first probing | **Not a prerequisite** for initial static exception support. If shipped, Direct success is path-bound and failures affect only **new** flows, without replaying transactions or flapping | Separate opted-in functional and negative cases |
 | Optional Cloudflare website ingress | **Not a first outbound-only release gate.** If advertised later: approved hostname/origin, official cloudflared identity, reachable Cloudflare egress (Direct or verified VPN), fresh uncached **origin** request, independent connector failure/credentials/DNS/TLS checks | Actual external origin receipt plus separated cloudflared/outbound health |
 
+### Next physical acceptance gate — Draft PR #126 combined lifecycle
+
+After exact-new-HEAD source/CI success and a fresh Owner-authorized IRPT-101
+admission, rerun the following with independent SSH heartbeat, fresh SSH and
+hosted-HTTP client, packet capture and the five baseline IPv4/IPv6 RPDB,
+routes and nft inventories. Record `PASS`, `FAIL` or `NOT_RUN` for the
+**new installed HEAD** (prior field results are not transferable).
+
+1. Start Native Smart, reboot while active and verify native Core/timers are
+   inactive, owned kernel policy is absent and the baseline is restored; the
+   **first Proxy Only Connect** must work without manual Disconnect. Repeat
+   Smart/Off and idempotent reconciliation; leave saved rules/profiles intact.
+2. Establish selected VPN-path health, cause a recoverable remote-peer
+   outage while Core stays running, and observe the authenticated supervisor
+   replace the **actual Core PID** under a prearmed OUTPUT barrier. Capture
+   no unmarked foreign public Direct packet while TUN is absent/recreated;
+   require new-PID, TUN/redirect and positive selected HTTPS proof **together**
+   before marking healthy.
+3. Force up to three failed replacements with measured backoff/deadline and
+   a flapping selected peer; counters must not reset or permit unlimited
+   retries, and exhausted sessions must end in exactly verified owned
+   Direct/off with ordinary host access restored.
+4. During activation/replacement inject loss of Health or Recovery guard,
+   an unexpected Core SIGKILL, expired boot/claim, changing kernel owners,
+   a conflicting nft/RPDB slot and concurrent operator Disconnect. Verify
+   fail-closed, explicit `UNCERTAIN` where needed, no adopted foreign
+   resources and no unexpected auto-restart/boot replay.
+5. Recheck Iranian Direct, existing/fresh foreign SSH, hosted HTTP reply,
+   DNS/UDP/TCP and selected IPv4; positive selected global IPv6 and REALITY
+   remain separate **NOT_RUN** until independently supported and tested.
+
+The new source regression tests do **not** replace this installed-host gate.
+No Merge/Release/Production until author-separated independent review and
+separate Owner approval.
+
 ### Exact-candidate hybrid-IP and dual-stack acceptance (current development)
 
 For a candidate that incorporates the two-source Iran country policy, independently verify the **actual pinned source hashes, CIDR intersection, excluded second-source-only cloud addresses, operator `--iran-coverage dbip` fallback, stored CIDR VPN precedence, offline package source/license pair and refusal of missing/tampered members**, plus old installed-release removal/update. Country agreement alone does not prove current physical location. Future GeoSite Direct activation requires authenticated DNS/IP correlation and separate negative source-spoofing evidence.

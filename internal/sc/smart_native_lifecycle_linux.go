@@ -55,6 +55,11 @@ type NativeConnectionStatus struct {
 	HealthFailures       int    `json:"health_failures"`
 	HealthRounds         int    `json:"health_rounds"`
 	HealthOperationID    string `json:"health_operation_id,omitempty"`
+	CoreRestartAttempts  int    `json:"core_restart_attempts,omitempty"`
+	CoreRestartLimit     int    `json:"core_restart_limit,omitempty"`
+	CoreRestartResult    string `json:"core_restart_result,omitempty"`
+	CoreRestartFromPID   int    `json:"last_core_restart_from_pid,omitempty"`
+	CoreRestartToPID     int    `json:"last_core_restart_to_pid,omitempty"`
 }
 
 func (m *Manager) readNativeSession() (NativeSession, error) {
@@ -428,9 +433,14 @@ func inspectNativeAdmissionWithReplyGuard(ctx context.Context, r nativeKernelRun
 			return Fault("service_conflict", "native TUN interface exists")
 		}
 	}
-	underlay, err := r.output(ctx, "ip", "-o", "link", "show", "dev", p.UnderlayIF)
-	if err != nil || strings.TrimSpace(underlay) == "" {
-		return Fault("service_state_unavailable", "underlay interface not available")
+	// A verified Off reconciliation has lost the retired session's underlay
+	// name. It checks *all* reserved resources and the recorded TUN identity,
+	// but must not invent a new underlay owner or require the old NIC on reboot.
+	if p.UnderlayIF != "" {
+		underlay, err := r.output(ctx, "ip", "-o", "link", "show", "dev", p.UnderlayIF)
+		if err != nil || strings.TrimSpace(underlay) == "" {
+			return Fault("service_state_unavailable", "underlay interface not available")
+		}
 	}
 	if committedReplyHandle != 0 {
 		return requireNativeReplyGuardClaim(ctx, r, committedReplyHandle, committedFingerprint)
@@ -810,6 +820,8 @@ func (m *Manager) finalizeNativeRecoveryLocked() error {
 			return Fault("invalid_state", "native health recovery identity mismatch")
 		}
 		health.Phase = "off"
+		health.RestartInFlight = false
+		health.RestartOriginalPID = 0
 		if health.Reason == "awaiting_selected_probe" || health.Reason == "selected_https_verified" {
 			health.Reason = "native_core_stopped"
 		}
@@ -838,6 +850,12 @@ func (m *Manager) ConnectNativeSmartRouting(opts NativePolicyOptions) (NativeCon
 	if opts.HealthFailureThreshold < 0 {
 		return NativeConnectionStatus{Desired: "smart", Observed: "not_started", CoreUnit: nativeSmartUnit, SelectedVPNPathProof: "not_run"},
 			Fault("invalid_arguments", "native health failure threshold must be nonnegative (0 selects default)")
+	}
+	if opts.CoreRestartAttempts < 0 || opts.CoreRestartAttempts > 20 ||
+		(opts.CoreRestartAttempts > 0 && (opts.CoreRestartBackoffMS < 0 || opts.CoreRestartBackoffMS > 30000 ||
+			opts.CoreRestartDeadlineMS < 0 || opts.CoreRestartDeadlineMS > 300000)) {
+		return NativeConnectionStatus{Desired: "smart", Observed: "not_started", CoreUnit: nativeSmartUnit, SelectedVPNPathProof: "not_run"},
+			Fault("invalid_arguments", "Core restart attempts (0..20), initial backoff (0..30000 ms) or deadline (0..300000 ms) invalid")
 	}
 	var report NativeConnectionStatus
 	err := m.withNativeTransition(func() error { var e error; report, e = m.connectNativeSmartRoutingUnlocked(opts); return e })
@@ -1006,7 +1024,14 @@ func (m *Manager) connectNativeSmartRoutingUnlocked(opts NativePolicyOptions) (N
 		if threshold == 0 {
 			threshold = 3
 		}
-		if e := m.stageNativeHealth(session, threshold, healthScope); e != nil {
+		backoff, deadline := opts.CoreRestartBackoffMS, opts.CoreRestartDeadlineMS
+		if backoff == 0 {
+			backoff = 1000
+		}
+		if deadline == 0 {
+			deadline = 60000
+		}
+		if e := m.stageNativeHealth(session, threshold, healthScope, opts.CoreRestartAttempts, backoff, deadline); e != nil {
 			return e
 		}
 		stagedHealth, e := m.readNativeHealth()
@@ -1255,6 +1280,11 @@ func (m *Manager) NativeStatus() (NativeConnectionStatus, error) {
 			result.HealthFailures = health.Failures
 			result.HealthRounds = health.Rounds
 			result.HealthOperationID = health.OperationID
+			result.CoreRestartAttempts = health.RestartAttempts
+			result.CoreRestartLimit = health.RestartLimit
+			result.CoreRestartResult = health.RestartResult
+			result.CoreRestartFromPID = health.RestartFromPID
+			result.CoreRestartToPID = health.RestartToPID
 		} else if !errors.Is(healthErr, os.ErrNotExist) {
 			return healthErr
 		}
@@ -1288,6 +1318,9 @@ func (m *Manager) NativeStatus() (NativeConnectionStatus, error) {
 			return err
 		}
 		result.Observed = observed
+		if health.Phase == "recovering" && observed == "active" {
+			result.Observed = "recovering" // parent alive != independently verified selected Core path
+		}
 		if healthErr != nil || health.ConfigSHA256 != session.ConfigSHA256 ||
 			health.OperationID != session.HealthOperationID {
 			return Fault("guard_pending", "native health record missing or unbound")
@@ -1333,6 +1366,12 @@ func (m *Manager) NativeStatus() (NativeConnectionStatus, error) {
 			default:
 				return Fault("guard_pending", "native startup containment not committed")
 			}
+		}
+		// The Native unit's MainPID is now a supervisor. A still-running
+		// supervisor is not a live, verified sing-box child; never publish
+		// a recent selected path solely from systemd's active parent.
+		if _, _, e := m.nativeCoreChildIdentity(); e != nil {
+			return Fault("guard_unavailable", "native Core child process is not independently verified")
 		}
 		result.ReplyGuardVerified = true
 		result.GuardVerified = true

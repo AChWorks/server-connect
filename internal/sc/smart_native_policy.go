@@ -21,6 +21,9 @@ type NativePolicyOptions struct {
 	IPv4Address            string
 	IPv6Address            string
 	Mode                   string // "default" or "bypass_iran"
+	CoreRestartAttempts    int    // bounded per-operation process restarts; 0 disables
+	CoreRestartBackoffMS   int64  // 0 selects 1000ms
+	CoreRestartDeadlineMS  int64  // 0 selects 60000ms
 	HealthFailureThreshold int    // 0 selects conservative default 3 consecutive rounds
 	HealthSyntheticQA      bool   // explicit synthetic HTTPS QA scope, not field acceptance
 	EnableSelectedIPv6     bool   // operator opt-in for selected VPN exit IPv6 after external verification

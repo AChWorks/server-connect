@@ -159,18 +159,56 @@ IPv4 HTTPS/TLS over the selected Core, not Iranian geography or general
 DNS/UDP/IPv6 policy, and a successful HTTPS endpoint alone cannot certify
 the separate production Activation Guard.
 
-A transient failed round is `degraded`; any other independently healthy
-selected target prevents a one-site false alarm. Short recovered outages
-require fresh selected HTTPS before re-entering `healthy`. A selected number
-of consecutive failures (default **3**; an explicit positive integer with
-**0** selecting the default at Connect), or a
-non-replenishing cumulative budget of three times that threshold (evaluated
-with overflow-safe division), triggers exact Core stop and its
-existing owner-checked `ExecStopPost` Direct restoration. **No blind Core
-restart or unconfirmed boot auto-resume** is introduced: while the Core
-remains active, its transport may reconnect and subsequent independent
-health rounds can prove recovery; otherwise Direct/off is final until a
-new explicit Connect. The second timer detects a stalled/unavailable
+A transient failed round is `degraded`; independent selected HTTPS/TLS
+targets avoid treating one unreachable site as a total VPN outage. A confirmed
+selected-path failure threshold (default **3** consecutive failed rounds, with
+the existing cumulative-flapping cutoff) enters `recovering` only while the
+**original managed Core child is still running**, the independent guards
+remain effective, the selected kernel capture is intact, and its original
+one-use operation receipt still owns the session.
+
+The installed Native systemd unit now runs a **small managed supervisor as
+MainPID**, with official sing-box as its direct child. An authenticated
+operation-bound `SIGUSR1` request is checked against the current persisted
+restart attempt, Core PID, current boot, owned service/guard identities and
+the exact installed nft OUTPUT containment barrier **before and after**
+stopping the old child. The barrier is installed **before** any intentional
+Core process exit and remains effective until the new child has a distinct
+kernel PID, a valid native TUN/policy redirect and fresh selected-path proof.
+Only then can the temporary barrier be released. The exact existing
+`ExecStopPost=native-recover`, `Restart=no`, independently scheduled guards
+and one-use owned kernel cleanup are **not** bypassed. An unexpected Core exit
+without an already committed barrier is fatal and proceeds to owned
+Direct/off recovery; a blind `systemctl restart` or `SIGHUP` is not a safe
+fallback.
+
+`connect-smart` selects at most **3 Core-process restarts per activation**
+by default, an initial **1000 ms** exponential backoff (bounded at 30 seconds)
+and **60000 ms** per-outage deadline, configurable with
+`--core-restart-attempts` (`0` disables process restart),
+`--core-restart-backoff-ms`, and `--core-restart-deadline-ms`. Even after
+an initially successful retry, its operation-wide consumed attempt counter
+**never resets** on flapping. A retry requires a new PID and fresh selected
+HTTPS; selected-path failure after a replacement consumes the attempt and
+continues under verified Core interception/backoff. On exhaustion, lost
+ownership/guard, Core crash or expired deadline, stop the owned unit and
+recover the precise Direct/off state; an incomplete cleanup remains
+`UNCERTAIN`, never guessed as safe. `native-status` exposes the remaining
+guarded mode, attempts, last result and the last verified before/after PID.
+These are source-level implementation properties awaiting new-head physical
+fault injection, not production or multi-protocol field guarantees.
+
+A recovered Direct/off Native stop hook may retain only an inert private
+`native-tun.json` even though its one-use kernel claim has been retired.
+Before the first Proxy Only Connect, the shared native transition lock and
+Manager lock now permit a **private-file-only reconciliation** *if and only if*
+the plan digest matches a persisted final `off` receipt, no native or proxy
+operation/job/guard is live, the root-owned units are trusted, and the reserved
+TUN/RPDB/routes/nft slots are independently empty. No missing claim may
+authorize kernel deletion; ambiguous or foreign resources retain
+`guard_pending`. The selected profile and routing preferences are preserved.
+
+The second timer detects a stalled/unavailable
 health executor, and the health executor checks the recovery timer. On a
 fresh Connect after Core `SIGKILL` (including an older candidate without a
 native health record), systemd's retained `failed` state is normalized **before** prearming timers, but only after the prior operation
