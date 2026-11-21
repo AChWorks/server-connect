@@ -168,8 +168,8 @@ The builder accepts exactly these target identities; omitting its optional targe
 
 | QA package target | Installed development evidence | Native Smart Routing acceptance boundary |
 | --- | --- | --- |
-| `debian-12-amd64` | Clean-source offline install, Direct/Proxy Only, retained profiles and exact network baseline | Experimental guarded native `connect-smart`, selected VLESS and recovery proved **only on an isolated disposable Incus VM** |
-| `debian-13-amd64` | Clean-source offline install, Direct/Proxy Only, retained profiles and exact network baseline | Same isolated native QA lane, plus Core-crash, authenticated private SSH and manual route-exception witnesses |
+| `debian-12-amd64` | Clean-source offline install, Direct/Proxy Only, retained profiles and exact network baseline | Disconnected installed Docker/systemd QA exercises the official-Core Native `connect-smart`, synthetic selected VLESS TCP/UDP/DNS versus Direct, independent recovery and exact Direct/off; earlier Incus evidence is revision-bound |
+| `debian-13-amd64` | Clean-source offline install, Direct/Proxy Only, retained profiles and exact network baseline | Same installed Native QA, plus separately recorded revision-bound physical/Incus crash, management and route-exception observations; no general-host or public-provider approval |
 
 After verifying payload ownership and checksums, the installer uses the bundled manager to bind a bounded, unambiguous manifest to the **actual** Debian version and native Linux/amd64 host. Opposite-version, missing, malformed, duplicate and unsupported targets fail before product state or service changes. This read-only check needs no Python dependency or host-version override. It is not publisher authentication or a general ABI/transport support claim. Recovery and inspection of existing native records retain their own ownership checks. Retired experimental v4 and selective-trial commands are not available in the new package; the current Native `connect-smart` tests on both Debian 12 and 13 do **not** grant general-host activation or production support.
 
