@@ -543,6 +543,16 @@ func (m *Manager) nativeGuardedStartupGrace(claim NativeSession, health NativeHe
 	if e = requireNativeStartupGuardClaim(context.Background(), nativeSystemRunner{}, p, claim.StartupGuardHandle); e != nil {
 		return false, e
 	}
+	// A guard which remains armed for the entire Smart lifetime must not
+	// keep a genuinely READY child in startup grace forever. Once the
+	// distinct sing-box child and actual native TUN/RPDB/redirect are
+	// independently proved, let Health run its normal HTTPS probe while
+	// retaining the *same* effective guard against unexpected Core death.
+	if _, _, e := m.nativeCoreChildIdentity(); e == nil {
+		if e := m.nativeReadyKernelPolicy(claim, health.ProbeScope); e == nil {
+			return false, nil
+		}
+	}
 	return true, nil
 }
 
