@@ -1729,12 +1729,14 @@ if [ "$stage" = payload-copy ]; then
   cat > /usr/bin/install <<'QA_KILL_INSTALL'
 #!/bin/sh
 /usr/bin/install.scqa-held "$@" || exit $?
-case " $* " in
- *" /opt/.server-connect-release."*"/bin/server-connect "*)
-  : >/root/scqa-copy-sigkill-witness
-  kill -KILL "$PPID"
-  exit 137 ;;
-esac
+for destination do
+  case "$destination" in
+   /opt/.server-connect-release.*/bin/server-connect)
+    : >/root/scqa-copy-sigkill-witness
+    kill -KILL "$PPID"
+    exit 137 ;;
+  esac
+done
 QA_KILL_INSTALL
   chmod 0755 /usr/bin/install
 else
@@ -1743,18 +1745,23 @@ else
   cat > /usr/bin/mv <<'QA_KILL_MV'
 #!/bin/sh
 /usr/bin/mv.scqa-held "$@" || exit $?
-case " $* " in
- *"/opt/server-connect/releases/0.1.0-dev-"*)
-  : >/root/scqa-release-sigkill-witness
-  kill -KILL "$PPID"
-  exit 137 ;;
-esac
+for destination do
+  case "$destination" in
+   /opt/server-connect/releases/0.1.0-dev-*)
+    : >/root/scqa-release-sigkill-witness
+    kill -KILL "$PPID"
+    exit 137 ;;
+  esac
+done
 QA_KILL_MV
   chmod 0755 /usr/bin/mv
 fi
 QA_KILL_SETUP
   if docker exec "$container" /usr/bin/env -i HOME=/root     PATH=/usr/sbin:/usr/bin:/sbin:/bin LC_ALL=C     /bin/sh /root/server-connect/install.sh --offline     >"$scratch/first-kill-$kill_stage.stdout" 2>"$scratch/first-kill-$kill_stage.stderr"; then
     echo "Installer incorrectly survived $kill_stage SIGKILL" >&2
+    cat "$scratch/first-kill-$kill_stage.stdout" >&2
+    cat "$scratch/first-kill-$kill_stage.stderr" >&2
+    docker exec "$container" /bin/sh -c 'ls -la /opt/.server-connect-release.* /var/lib/server-connect/.first-* 2>&1 || :'
     exit 1
   fi
   docker exec "$container" /bin/sh -s "$kill_stage" <<'QA_KILL_RESTORE'
