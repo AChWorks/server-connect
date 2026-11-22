@@ -4,10 +4,13 @@ package sc
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -169,6 +172,11 @@ func TestNativeStartupRealKernelNamespaceLifecycle(t *testing.T) {
 	if e != nil || present {
 		t.Fatalf("nft startup barrier remained: %v %v", present, e)
 	}
+	// A confirmed removed table is retryable under the durable releasing
+	// receipt after an interruption, even before final receipt retirement.
+	if e = nativeStartupRecover(ctx, runner, p, handle, "releasing"); e != nil {
+		t.Fatal(e)
+	}
 	if e = nativeStartupRecover(ctx, runner, p, handle, "released"); e != nil {
 		t.Fatal(e)
 	}
@@ -199,4 +207,216 @@ func TestNativePrearmMustRemainDirectUntilPacketContainment(t *testing.T) {
 			}
 		})
 	}
+}
+
+// Model only this operation's exact nft table, without mutating the host.
+// A real nft deletion may succeed just before ExecStopPost is interrupted.
+type nativeStartupReleaseRunner struct {
+	nativeStartupFake
+	present      bool
+	generation   uint32
+	fails        int
+	deletes      int
+	beforeDelete func() error
+}
+
+func (r *nativeStartupReleaseRunner) output(ctx context.Context, binary string, args ...string) (string, error) {
+	if binary == "nft" && strings.Join(args, " ") == "list tables" && !r.present {
+		return "table inet unrelated_owner\n", nil
+	}
+	if !r.present {
+		return "", fmt.Errorf("owned nft table absent")
+	}
+	return r.nativeStartupFake.output(ctx, binary, args...)
+}
+
+func (r *nativeStartupReleaseRunner) replyGuardGeneration() (uint32, error) {
+	return r.generation, nil
+}
+func (r *nativeStartupReleaseRunner) deleteReplyGuardCAS(handle uint64, generation uint32) error {
+	if !r.present || handle != 5 || generation != r.generation {
+		return fmt.Errorf("unexpected CAS handle or generation")
+	}
+	if r.beforeDelete != nil {
+		if err := r.beforeDelete(); err != nil {
+			return err
+		}
+	}
+	if r.fails > 0 {
+		r.fails--
+		return fmt.Errorf("injected nft generation-conditional deletion failure")
+	}
+	r.present = false
+	r.generation++
+	r.deletes++
+	return nil
+}
+
+func nativeStartupReleaseFixture(t *testing.T) (*Manager, NativeSession, *nativeStartupReleaseRunner) {
+	t.Helper()
+	p, fake := nativeStartupFixture(t)
+	m := New(filepath.Join(t.TempDir(), "state"), "", 0)
+	raw, err := json.Marshal(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256(raw)
+	session := NativeSession{Version: 1, Selected: "0123456789abcdef", InterfaceName: "sctun0",
+		UnderlayIF: p.UnderlayIF, ConfigSHA256: strings.Repeat("b", 64),
+		HealthOperationID: strings.Repeat("a", 32), StartupGuardName: p.Name,
+		StartupGuardSHA256: hex.EncodeToString(digest[:]), StartupGuardPhase: "armed", StartupGuardHandle: 5}
+	claim, err := json.Marshal(session)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := m.withLock(func() error {
+		if err := m.save(State{Version: 1, Desired: "direct", Port: m.Port}); err != nil {
+			return err
+		}
+		if err := put(filepath.Join(m.Dir, nativeStartupFile), raw); err != nil {
+			return err
+		}
+		return put(filepath.Join(m.Dir, nativeSessionFile), claim)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return m, session, &nativeStartupReleaseRunner{nativeStartupFake: fake, present: true, generation: 5}
+}
+
+func TestNativeLifetimeBarrierInterruptedRelease(t *testing.T) {
+	ctx := context.Background()
+	t.Run("deleted-before-finalization-recovers-idempotently", func(t *testing.T) {
+		m, claim, r := nativeStartupReleaseFixture(t)
+		r.beforeDelete = func() error {
+			state, err := m.load()
+			if err != nil || state.Desired != "direct" {
+				return fmt.Errorf("Direct not durable before deletion: %v", err)
+			}
+			current, err := m.readNativeSession()
+			if err != nil || current.StartupGuardPhase != "releasing" ||
+				current.StartupGuardHandle != claim.StartupGuardHandle || current.HealthOperationID != claim.HealthOperationID {
+				return fmt.Errorf("release intent not durable before deletion: %+v, %v", current, err)
+			}
+			return nil
+		}
+		if err := m.withLock(func() error {
+			return m.recoverNativeStartupWithSession(ctx, r, claim)
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if r.present || r.deletes != 1 {
+			t.Fatal("owned nft deletion did not complete")
+		}
+		// Simulate SIGKILL after kernel CAS succeeded, before final receipt retirement.
+		persisted, err := m.readNativeSession()
+		if err != nil || persisted.StartupGuardPhase != "releasing" {
+			t.Fatalf("lost durable release intent: %+v %v", persisted, err)
+		}
+		if err := m.withLock(func() error {
+			if err := m.recoverNativeStartupWithSession(ctx, r, persisted); err != nil {
+				return err
+			}
+			if err := m.recoverNativeStartupWithSession(ctx, r, persisted); err != nil {
+				return err
+			}
+			return m.finalizeNativeRecoveryLocked()
+		}); err != nil {
+			t.Fatalf("interrupted cleanup could not complete: %v", err)
+		}
+		if _, err := m.readNativeSession(); !os.IsNotExist(err) {
+			t.Fatalf("recovery claim not retired: %v", err)
+		}
+		if r.deletes != 1 {
+			t.Fatalf("idempotent retry deleted twice: %d", r.deletes)
+		}
+	})
+	t.Run("failed-delete-stays-owned-and-retries", func(t *testing.T) {
+		m, claim, r := nativeStartupReleaseFixture(t)
+		r.fails = 1
+		if err := m.withLock(func() error { return m.recoverNativeStartupWithSession(ctx, r, claim) }); err == nil {
+			t.Fatal("injected CAS failure was ignored")
+		}
+		persisted, err := m.readNativeSession()
+		if err != nil || persisted.StartupGuardPhase != "releasing" || !r.present || r.deletes != 0 {
+			t.Fatalf("failed deletion lost original guard/intent: %+v %v", persisted, err)
+		}
+		if err := m.withLock(func() error {
+			if err := m.recoverNativeStartupWithSession(ctx, r, persisted); err != nil {
+				return err
+			}
+			return m.finalizeNativeRecoveryLocked()
+		}); err != nil {
+			t.Fatalf("retry failed: %v", err)
+		}
+		if r.present || r.deletes != 1 {
+			t.Fatal("retry did not remove exact original guard once")
+		}
+	})
+	t.Run("changed-or-foreign-table-is-refused", func(t *testing.T) {
+		m, claim, r := nativeStartupReleaseFixture(t)
+		r.fails = 1
+		if err := m.withLock(func() error { return m.recoverNativeStartupWithSession(ctx, r, claim) }); err == nil {
+			t.Fatal("injected first delete should fail")
+		}
+		persisted, err := m.readNativeSession()
+		if err != nil || persisted.StartupGuardPhase != "releasing" {
+			t.Fatalf("lost release intent: %v", err)
+		}
+		original := r.body
+		r.body = strings.Replace(original, `"handle":5`, `"handle":6`, 1)
+		if r.body == original {
+			t.Fatal("fixture did not change table handle")
+		}
+		if err := m.withLock(func() error { return m.recoverNativeStartupWithSession(ctx, r, persisted) }); err == nil || r.deletes != 0 {
+			t.Fatalf("modified nft owner accepted: %v deletes=%d", err, r.deletes)
+		}
+		r.body = original
+		originalListing := r.listing
+		r.listing += "table inet sc_pre_" + strings.Repeat("c", 32) + "\n"
+		if err := m.withLock(func() error { return m.recoverNativeStartupWithSession(ctx, r, persisted) }); err == nil || r.deletes != 0 {
+			t.Fatalf("foreign parallel nft owner accepted: %v deletes=%d", err, r.deletes)
+		}
+		r.listing = originalListing
+		if err := m.withLock(func() error {
+			return put(filepath.Join(m.Dir, nativeStartupFile), []byte(`{"version":1,"name":"tampered"}`))
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if err := m.withLock(func() error { return m.recoverNativeStartupWithSession(ctx, r, persisted) }); err == nil || r.deletes != 0 {
+			t.Fatalf("tampered original release plan accepted: %v deletes=%d", err, r.deletes)
+		}
+		current, err := m.readNativeSession()
+		if err != nil || current != persisted {
+			t.Fatalf("foreign collision altered receipt: %+v %v", current, err)
+		}
+	})
+	t.Run("no-premature-intent-or-absent-armed-acceptance", func(t *testing.T) {
+		m, claim, r := nativeStartupReleaseFixture(t)
+		if err := m.withLock(func() error { return m.save(State{Version: 1, Desired: "smart", Port: m.Port}) }); err != nil {
+			t.Fatal(err)
+		}
+		if err := m.withLock(func() error { return m.recoverNativeStartupWithSession(ctx, r, claim) }); err == nil || !r.present {
+			t.Fatalf("pre-Direct nft removal accepted: %v", err)
+		}
+		current, err := m.readNativeSession()
+		if err != nil || current.StartupGuardPhase != "armed" {
+			t.Fatalf("premature release intent: %+v %v", current, err)
+		}
+		if err := m.withLock(func() error { return m.save(State{Version: 1, Desired: "direct", Port: m.Port}) }); err != nil {
+			t.Fatal(err)
+		}
+		otherOperation := claim
+		otherOperation.HealthOperationID = strings.Repeat("c", 32)
+		if err := m.withLock(func() error { return m.recoverNativeStartupWithSession(ctx, r, otherOperation) }); err == nil || !r.present {
+			t.Fatalf("different session adopted operation: %v", err)
+		}
+		r.present = false
+		if err := m.withLock(func() error { return m.recoverNativeStartupWithSession(ctx, r, claim) }); err == nil {
+			t.Fatal("absent guard accepted without durable release intent")
+		}
+		current, err = m.readNativeSession()
+		if err != nil || current.StartupGuardPhase != "armed" {
+			t.Fatalf("missing original guard advanced state: %+v %v", current, err)
+		}
+	})
 }

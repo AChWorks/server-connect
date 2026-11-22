@@ -351,12 +351,20 @@ func nativeStartupRecover(ctx context.Context, r nativeReplyGuardCASRunner,
 		}
 		return nil
 	}
-	handle, e := nativeStartupReceipt(ctx, r, p)
-	if e != nil {
-		return e
-	}
-	if expectedHandle != 0 && expectedHandle != handle {
-		return Fault("service_conflict", "native startup containment handle changed")
+	// A committed handle must be checked against the complete original
+	// policy and against parallel sc_pre owners before the generation-CAS
+	// delete. A preparing receipt has no handle yet; it may only remove an
+	// independently verified exact instance of its staged plan.
+	handle := expectedHandle
+	if handle != 0 {
+		if e := requireNativeStartupGuardClaim(ctx, r, p, handle); e != nil {
+			return e
+		}
+	} else {
+		handle, e = nativeStartupReceipt(ctx, r, p)
+		if e != nil {
+			return e
+		}
 	}
 	after, e := r.replyGuardGeneration()
 	if e != nil || before == 0 || before != after {
@@ -476,15 +484,48 @@ func (m *Manager) ensureNativeStopBarrierLocked() error {
 	}
 }
 
-// Used by recovery after exact Core-owned routing teardown. No generic
-// firewall flush, no deletion by table name alone and no foreign adoption.
+// Called with the Manager lock only after exact Core-owned networking has
+// been independently restored and desired=direct has been saved. A lifetime
+// guard's final removal must have durable intent BEFORE the nft CAS: if the
+// process dies after deletion, retry may accept an absent table only under
+// this same operation's releasing receipt (never under an armed claim).
 func (m *Manager) recoverNativeStartupWithSession(ctx context.Context, r nativeReplyGuardCASRunner, session NativeSession) error {
 	if session.StartupGuardName == "" {
 		return nil
 	} // independently verified historical claims
-	p, e := m.readNativeStartupPlan(session)
-	if e != nil {
-		return e
+	state, err := m.load()
+	if err != nil {
+		return err
+	}
+	if state.Desired != "direct" {
+		return Fault("guard_pending", "native lifetime guard release requires durable Direct")
+	}
+	current, err := m.readNativeSession()
+	if err != nil {
+		return err
+	}
+	if current != session {
+		return Fault("guard_pending", "native lifetime guard release belongs to another operation")
+	}
+	p, err := m.readNativeStartupPlan(session)
+	if err != nil {
+		return err
+	}
+	if session.StartupGuardPhase == "armed" {
+		// Never authorize an already-absent or altered guard with a newly
+		// written release intent. Validate the original plan and table handle
+		// before the fsynced operation receipt is changed to releasing.
+		if err := requireNativeStartupGuardClaim(ctx, r, p, session.StartupGuardHandle); err != nil {
+			return err
+		}
+		session.StartupGuardPhase = "releasing"
+		raw, err := json.Marshal(session)
+		if err != nil {
+			return err
+		}
+		if err := put(filepath.Join(m.Dir, nativeSessionFile), raw); err != nil {
+			return err
+		}
 	}
 	return nativeStartupRecover(ctx, r, p, session.StartupGuardHandle, session.StartupGuardPhase)
 }

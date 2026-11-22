@@ -137,6 +137,11 @@ ExecStopPost rechecks its committed nft receipt, preserves foreign
 owners/accepted inbound replies, verifies the Core-owned kernel footprint
 is gone, saves Direct durably **before** removing the barrier by exact
 generation-checked ownership, and retires the one-use receipt last.
+Before its final nft deletion, the exact verified operation durably records
+`releasing` with the original plan digest and table handle. After an
+interruption, a missing guard is acceptable only with that prior release
+intent and independently reverified owned network restoration; an absent
+`armed` guard or changed/foreign table remains an explicit refusal.
 Intermediate errors retain an uncertain/pending recovery rather than
 claiming Off. The guard cannot make arbitrary external/kernel failures
 atomic; the required assurance is bounded to actual selected, Direct,
