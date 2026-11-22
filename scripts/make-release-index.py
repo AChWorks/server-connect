@@ -54,9 +54,11 @@ def inspect_archive(archive, metadata):
         names = set()
         for member in stream:
             name = member.name.rstrip('/')
-            if name in names or not name.startswith('server-connect/') or any(
-                part in ('', '.', '..') for part in name.split('/')
-            ) or (not member.isfile() and not member.isdir()):
+            if (name in names or
+                (name == 'server-connect' and not member.isdir()) or
+                (name != 'server-connect' and not name.startswith('server-connect/')) or
+                any(part in ('', '.', '..') for part in name.split('/')) or
+                (not member.isfile() and not member.isdir())):
                 raise ValueError('unsafe archive member')
             names.add(name)
             if member.name == 'server-connect/checksums.sha256':
