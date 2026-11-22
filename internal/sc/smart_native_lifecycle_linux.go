@@ -1413,6 +1413,9 @@ func (m *Manager) NativeStatus() (NativeConnectionStatus, error) {
 				if e := m.nativeReadyKernelPolicy(session, health.ProbeScope); e != nil {
 					return e
 				}
+				// A persistent guard alone is not native policy proof. Report
+				// verification only after the independent live Core/kernel check.
+				result.NativePolicyVerified = true
 				result.SelectedVPNPathProof = nativeSelectedHTTPSProof(health, s.Desired, observed, now)
 				return nil
 			case "releasing":
