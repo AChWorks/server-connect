@@ -31,13 +31,20 @@ Owner-approved **proportional recovery** requires representative evidence for no
 | Optional foreign Direct-first probing | **Not a prerequisite** for initial static exception support. If shipped, Direct success is path-bound and failures affect only **new** flows, without replaying transactions or flapping | Separate opted-in functional and negative cases |
 | Optional Cloudflare website ingress | **Not a first outbound-only release gate.** If advertised later: approved hostname/origin, official cloudflared identity, reachable Cloudflare egress (Direct or verified VPN), fresh uncached **origin** request, independent connector failure/credentials/DNS/TLS checks | Actual external origin receipt plus separated cloudflared/outbound health |
 
-### Next physical acceptance gate — Draft PR #126 combined lifecycle
+### Native physical acceptance matrix (source-bound, including PR #127)
 
-After exact-new-HEAD source/CI success and a fresh Owner-authorized IRPT-101
-admission, rerun the following with independent SSH heartbeat, fresh SSH and
-hosted-HTTP client, packet capture and the five baseline IPv4/IPv6 RPDB,
-routes and nft inventories. Record `PASS`, `FAIL` or `NOT_RUN` for the
-**new installed HEAD** (prior field results are not transferable).
+Use the [Issue #5 field evidence](https://github.com/AChWorks/server-connect/issues/5)
+and the [PR #127 test record](https://github.com/AChWorks/server-connect/pull/127)
+to determine which of the following are actually proved for the packet-affecting
+candidate and which require further testing. Genuine installed IRPT-101
+manual-stop and SIGKILL/no-Direct-leak witnesses, independent foreign SSH/HTTP,
+and five exact inventories have been recorded for the lifetime guard; older
+reboot and Core-exhaustion witnesses retain their original source identities.
+Retest a material network-code change rather than silently transferring an
+older result. For each applicable remaining case, use independent console,
+SSH/HTTP clients, positive packet capture and a reversible host baseline;
+classify **PASS / FAIL / NOT_RUN / UNSUPPORTED** without treating prior
+authorization as approval for Production.
 
 1. Start Native Smart, reboot while active and verify native Core/timers are
    inactive, owned kernel policy is absent and the baseline is restored; the
@@ -62,9 +69,10 @@ routes and nft inventories. Record `PASS`, `FAIL` or `NOT_RUN` for the
    DNS/UDP/TCP and selected IPv4; positive selected global IPv6 and REALITY
    remain separate **NOT_RUN** until independently supported and tested.
 
-The new source regression tests do **not** replace this installed-host gate.
-No Merge/Release/Production until author-separated independent review and
-separate Owner approval.
+Source regressions alone do **not** replace installed-host or physical
+checks. Current test outcomes are recorded per source identity in Issue #5;
+not every release-matrix scenario is accepted. No Merge/Release/Production
+until author-separated independent review and applicable separate Owner approval.
 
 ### Exact-candidate hybrid-IP and dual-stack acceptance (current development)
 
@@ -135,11 +143,15 @@ These are **different evidence levels**, not interchangeable versions of a PASS:
 
 Current source and installed-host checks use [`test-installed-host.sh`](../scripts/qa/test-installed-host.sh) and the [actual installed Native lifecycle](../scripts/qa/host-installed-native-connect.sh). The installed Debian 12/13 systemd guests exercise official-Core VLESS/Direct traffic, independent Health/Recovery and exact five-inventory restoration. Earlier [installed-host CI](https://github.com/AChWorks/server-connect/actions/runs/44326932048) lacked the current Debian 12 Native-positive lane; the original Incus evidence is bound to its own revision. The Debian 12 nftables set/chain ordering and TCP-protocol-rendering differences are handled by strict, owner-checked parsers ([Architecture](ARCHITECTURE.md#native-smart-routing-candidate-lifecycle-not-general-host-admitted), [Safety](SAFETY-RECOVERY.md#native-inbound-reply-guard-issue-3-development-candidate)). Treat those as verified **guest-only** behavior only when the exact candidate's installed CI succeeds, never as public-provider or physical-host acceptance.
 
-**Two non-negotiable physical regressions:** An established foreign SSH session passed Direct/off positive controls but was reset during native Apply. Merely marking existing conntrack replies was insufficient when connections predated conntrack or appeared reversed; an **exact accepted TCP socket four-tuple** guard preserved application-level SSH replies without exempting all new outbound traffic to that foreign IP. Separately, Core `SIGKILL` left real orphan RPDB rules: safe cleanup must require its specific current-boot ownership/consumed operation claim and refuse foreign/aliased table references. Source and isolated regressions exist, but **retake physical old/new SSH, website replies and crash recovery on the exact candidate** before claiming field acceptance. See the [physical evidence and fixes in Issue #3](https://github.com/AChWorks/server-connect/issues/3#issuecomment-6987698584) and [original bound field proof in Issue #2](https://github.com/AChWorks/server-connect/issues/2#issuecomment-6807595141).
+**Two non-negotiable physical regressions:** An established foreign SSH session passed Direct/off positive controls but was reset during native Apply. Merely marking existing conntrack replies was insufficient when connections predated conntrack or appeared reversed; an **exact accepted TCP socket four-tuple** guard preserved application-level SSH replies without exempting all new outbound traffic to that foreign IP. Separately, Core `SIGKILL` left real orphan RPDB rules: safe cleanup must require its specific current-boot ownership/consumed operation claim and refuse foreign/aliased table references. Source and isolated regressions exist; physical old/new SSH, website replies
+and crash recovery must be bound to the actual installed packet-affecting candidate
+before claiming a field result. Issue #5 and PR #127 record the current bounded
+witnesses; a later packet-routing change invalidates their transferability.
+See the [physical evidence and fixes in Issue #3](https://github.com/AChWorks/server-connect/issues/3#issuecomment-6987698584) and [original bound field proof in Issue #2](https://github.com/AChWorks/server-connect/issues/2#issuecomment-6807595141).
 
 When a guard returns verified Direct/off, it is a **network restoration** success, not proof that a formerly blocked foreign route now works. Do not repair orphan policy by flushing another owner's tables; report `UNCERTAIN` if exact ownership cannot be proved. Capture the relevant native and provider-side packet paths independently; use passive captures (for example, `tcpdump -p`) so diagnostics do not change link flags.
 
-## Native nonproduction field acceptance (pending)
+## Native nonproduction field evidence and remaining release gates
 
 Before any separately authorized physical-host test, identify the exact
 installed bundle, disposable host and original SSH/aaPanel/website sessions;
@@ -189,7 +201,7 @@ Use this as a **navigation index for reproducible regressions**, not a record of
 - **Native dual-stack packet witnesses:** [current Native compiler](../internal/sc/smart_native_policy.go) and [IPv6 wire fixture](../scripts/qa/tun-ipv6-wire.py) test bounded IPv6 Direct/VPN/exception and fail-closed behavior on synthetic guests. Their observations cannot establish physical geolocation, broad fragmentation or PMTUD.
 - **Read-only native host inspection:** `host-preflight --with-nftables` with `host-drift` observes native route/rule/link plus validated versioned `nft -j` schema and private policy digests. Changed/malformed foreign policy is reported unverified; a read-only observation is **not atomic host reservation, trustworthy route ownership or Activation Guard**.
 - **Resource ownership primitives:** [native nftables CAS test](../internal/sc/smart_tun_native_nft_native_linux_test.go), [native recovery tests](../internal/sc/smart_native_recovery_linux_test.go), [Docker kernel crash/foreign-bridge test](../scripts/qa/host-native-docker-recovery.sh) and [installed native lifecycle](../scripts/qa/host-installed-native-connect.sh) validate real official-Core ownership and exact cleanup. The obsolete precreated addressless/gVisor TUN experiment was retired: its object lifecycle differs from the selected Native `auto_route`/`auto_redirect` path. Unreceipted effects and overlapping foreign changes remain `UNCERTAIN`, not grounds for broad resets.
-- **Installed official-Core native lifecycle:** [installed native connect-smoke and health-failure trial](../scripts/qa/host-installed-native-connect.sh) uses the actual systemd-installed `connect-smart` command in separate Debian 12 and 13 disconnected Docker guests. A real synthetic VLESS peer, explicit Direct rule, independent underlay packet counters, UDP/TCP/DNS and foreign hosted replies precede explicit Disconnect with five exact kernel inventory checks. A second run has **no authenticated selected HTTPS target**, so the real Health/Recovery roles must independently return to Direct/off. This is deliberately an unhealthy-selected-path recovery test, **not** evidence that selected HTTPS is healthy, the provider has failed, or the latest revision is physically accepted.
+- **Installed official-Core native lifecycle:** [installed native connect-smoke and health-failure trial](../scripts/qa/host-installed-native-connect.sh) uses the actual systemd-installed `connect-smart` command in separate Debian 12 and 13 disconnected Docker guests. A real synthetic VLESS peer, explicit Direct rule, independent underlay packet counters, UDP/TCP/DNS and foreign hosted replies precede explicit Disconnect with five exact kernel inventory checks. The disconnected fixture has **no authenticated public selected HTTPS target**: `native-status` must truthfully report guarded `starting` during the initial Health grace, then independent `degraded` after a real failed probe while retaining the lifetime traffic guards, followed by precisely verified Direct/off on explicit cleanup. This is not a positive provider-health test, a claim that the provider failed, or evidence of physical-host acceptance.
 - **Official-Core native DNS and IPv6 policy:** [native DNS-policy lab](../scripts/qa/host-native-dns-policy.sh) compares both `default` and `bypass_iran` with **positive-controlled UDP/TCP port-53** private/explicit Direct/VPN/country-estimate ordering, selected resolver path and provider-loss no-Direct-leak observations. It also checks bounded IPv6 UDP payloads (1352/1353/2400 bytes) under a reduced guest underlay MTU. A large virtual TUN MTU or healthy HTTPS alone does not prove general IPv6 fragmentation, PMTUD or real Iranian DNS reachability.
 - **Current Native Health and Guard:** [installed Native acceptance](../scripts/qa/host-installed-native-connect.sh), [Health policy tests](../internal/sc/smart_native_health_linux_test.go) and [lifecycle tests](../internal/sc/smart_native_lifecycle_linux_test.go) check actual recovery roles, selected HTTPS evidence, no-Direct-leak failure and precise Direct/off. Synthetic QA certificates and peers are not proof of a healthy external selected provider; fresh management SSH and physical recovery still require separate field evidence.
 - **Historical persisted records:** The source still strictly recognizes and safely abandons exact unarmed v1 or recovers owned v2/v3 records. A v4/unknown old operation is not migrated or reactivated: fresh Native admission and installation must refuse uncertain retained evidence. [Boot recovery](../scripts/qa/test-activation-boot-qa.sh) remains an independent guest test, not an old-binary physical upgrade proof.

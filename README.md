@@ -10,7 +10,7 @@ Server Connect is an offline-first Linux connectivity manager for servers, inclu
 | --- | --- | --- |
 | **Direct** | Original host networking, with no Server Connect-owned VPN routing or blocking rules | Implemented; source and installed-host QA |
 | **Proxy Only** | Opt-in local HTTP/SOCKS proxy for compatible applications | Implemented; real pinned-Core and installed-host QA |
-| **Smart Routing (TUN)** | Iranian, private and protected paths Direct; other public outbound traffic through the selected VPN, with validated operator exceptions | Official-Core `connect-smart` and independent Health/Recovery tested in Debian installed-host QA; a prior exact candidate additionally passed physical IRPT-101 selected-IPv4, foreign SSH/HTTP and reboot/cleanup cases. The **new** post-reboot reconciliation and Core-process restart candidate still requires a fresh exact-HEAD installed physical acceptance run; neither REALITY nor positive selected public IPv6 is proven. |
+| **Smart Routing (TUN)** | Iranian, private and protected paths Direct; other public outbound traffic through the selected VPN, with validated operator exceptions | Official-Core native installed-host QA on Debian 12/13; the current unreviewed lifetime-guard implementation also has installed-VM and nonproduction IRPT-101 real selected VLESS/IPv4, actual Core SIGKILL and manual-stop packet witnesses, independently observed foreign SSH/HTTP, and exact Direct/off restoration. Evidence is source-bound in [Issue #5](https://github.com/AChWorks/server-connect/issues/5) and [PR #127](https://github.com/AChWorks/server-connect/pull/127); REALITY and positive selected public IPv6 remain unproven. |
 
 For a real Smart Routing session, existing/new SSH administration, aaPanel and foreign-client website replies must remain reachable; VPN-required traffic must not escape Direct while routed or degraded. A verified Disconnect or guard-driven switch to Direct must remove precisely owned VPN-only rules while **preserving saved profiles and routing settings**. A healthy Core process, selected HTTPS probe or synthetic guest run alone does not prove all TCP/UDP/DNS/IPv4/IPv6 and provider paths.
 
@@ -25,9 +25,10 @@ per-incident deadline. Use `--core-restart-attempts`,
 an **authorized QA host** to tune the bounded behavior; `--core-restart-attempts 0`
 disables automatic process replacements. An unexpected unguarded Core
 exit still stops into verified owned Direct/off (or explicit uncertainty)
-rather than improvising a restart. The new source and local process
-tests do not prove installed systemd/TUN safety; see the next physical
-gate in [Acceptance](docs/ACCEPTANCE.md).
+rather than improvising a restart. Source tests alone cannot prove
+installed systemd/TUN safety; bounded installed-guest and authorized
+nonproduction field evidence is tracked in [Acceptance](docs/ACCEPTANCE.md)
+and Issue #5. Such evidence does not itself authorize production.
 
 The installed CLI offers an interactive menu and script-friendly `--json` commands. On a **development or separately authorized QA installation**, useful inspection commands include:
 
