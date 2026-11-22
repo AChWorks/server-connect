@@ -9,8 +9,10 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
 	"strconv"
 	"strings"
+	"syscall"
 
 	"github.com/AChWorks/server-connect/internal/sc"
 )
@@ -684,8 +686,42 @@ func menu(m *sc.Manager) int {
 func menuWithRunner(m *sc.Manager, dispatch func(*sc.Manager, ...string) int) int {
 	in := bufio.NewReader(os.Stdin)
 	ui := terminalPresenter(os.Stdout)
+	// Full-screen mode is presentation-only. Pipes and JSON retain the previous
+	// unadorned interface, and all privileged operations share the same runner.
+	screen := operatorFullScreen(os.Stdin, os.Stdout)
+	if screen {
+		fmt.Fprint(os.Stdout, "\x1b[?1049h")
+		defer fmt.Fprint(os.Stdout, "\x1b[?1049l")
+		// Default SIGINT/SIGTERM termination skips defers. Restore the
+		// operator's original terminal first, then re-raise the same signal.
+		signals := make(chan os.Signal, 1)
+		signal.Notify(signals, os.Interrupt, syscall.SIGTERM)
+		done := make(chan struct{})
+		defer signal.Stop(signals)
+		defer close(done)
+		go func() {
+			select {
+			case caught := <-signals:
+				fmt.Fprint(os.Stdout, "\x1b[?1049l")
+				signal.Reset(caught)
+				_ = syscall.Kill(syscall.Getpid(), caught.(syscall.Signal))
+			case <-done:
+			}
+		}()
+	}
+	pause := func() {
+		if !screen {
+			return
+		}
+		fmt.Print("\nPress Enter to return to the menu...")
+		_, _ = in.ReadString('\n')
+	}
 	advanced := false
 	for {
+		if screen {
+			ui.width = operatorTerminalColumns(os.Stdout, ui.width)
+			fmt.Fprint(os.Stdout, "\x1b[2J\x1b[H")
+		}
 		ui.menu(m, advanced)
 		raw, e := in.ReadString('\n')
 		if e != nil {
@@ -713,8 +749,10 @@ func menuWithRunner(m *sc.Manager, dispatch func(*sc.Manager, ...string) int) in
 			}
 			fmt.Println("This changes host-wide routing. Have a working management connection and a console recovery path.")
 			fmt.Println("Initial activation is provisional until confirmed from a freshly opened SSH session.")
-			underlay, ok := operatorPrompt(in, "Current underlay interface (from 'ip route', or cancel): ", false)
+			fmt.Println("Your underlay is the server's real outbound network interface; check 'ip -4 route show default' in another SSH session.")
+			underlay, ok := operatorPrompt(in, "Underlay interface name (e.g. eth0, or cancel): ", false)
 			if !ok {
+				pause()
 				continue
 			}
 			fmt.Println("Policy:")
@@ -725,6 +763,7 @@ func menuWithRunner(m *sc.Manager, dispatch func(*sc.Manager, ...string) int) in
 			policy, err := in.ReadString('\n')
 			if err != nil {
 				fmt.Println("Canceled: incomplete policy; no connection started")
+				pause()
 				continue
 			}
 			mode := ""
@@ -735,6 +774,7 @@ func menuWithRunner(m *sc.Manager, dispatch func(*sc.Manager, ...string) int) in
 				mode = "default"
 			default:
 				fmt.Println("Canceled: choose policy 1 or 2; no connection started")
+				pause()
 				continue
 			}
 			fmt.Println("A running Core alone does not prove VPN transit, routing safety, or release readiness.")
@@ -742,6 +782,7 @@ func menuWithRunner(m *sc.Manager, dispatch func(*sc.Manager, ...string) int) in
 			ack, err := in.ReadString('\n')
 			if err != nil || strings.TrimSpace(ack) != "CONNECT-SMART" {
 				fmt.Println("Canceled: no connection started")
+				pause()
 				continue
 			}
 			if dispatch(m, "connect-smart", "--underlay-if", underlay, "--mode", mode) == 0 {
@@ -761,6 +802,7 @@ func menuWithRunner(m *sc.Manager, dispatch func(*sc.Manager, ...string) int) in
 			case "2", "3", "5", "6":
 				value, ok := operatorPrompt(in, "Canonical CIDR or domain value (or cancel): ", false)
 				if !ok {
+					pause()
 					continue
 				}
 				name := strings.TrimSpace(operation)
@@ -774,10 +816,12 @@ func menuWithRunner(m *sc.Manager, dispatch func(*sc.Manager, ...string) int) in
 				} else {
 					mode, ok := operatorPrompt(in, "Suffix match (y/N, or cancel): ", true)
 					if !ok {
+						pause()
 						continue
 					}
 					if mode != "" && !strings.EqualFold(mode, "y") && !strings.EqualFold(mode, "n") {
 						fmt.Println("Canceled: choose y or n; no rule action started")
+						pause()
 						continue
 					}
 					command = append(command, "--domain", value)
@@ -790,10 +834,12 @@ func menuWithRunner(m *sc.Manager, dispatch func(*sc.Manager, ...string) int) in
 					if name == "2" {
 						answer, ok := operatorPrompt(in, "Route via direct or vpn (or cancel): ", false)
 						if !ok {
+							pause()
 							continue
 						}
 						if answer != "direct" && answer != "vpn" {
 							fmt.Println("Canceled: choose direct or vpn; no rule action started")
+							pause()
 							continue
 						}
 						via = answer
@@ -804,26 +850,32 @@ func menuWithRunner(m *sc.Manager, dispatch func(*sc.Manager, ...string) int) in
 			case "4":
 				file, ok := operatorPrompt(in, "Local list file path (use CLI for stdin, or cancel): ", false)
 				if !ok {
+					pause()
 					continue
 				}
 				if strings.TrimSpace(file) == "-" {
 					fmt.Println("Menu cannot import stdin; use server-connect smart-routing-rules import --file - instead")
+					pause()
 					continue
 				}
 				source, ok := operatorPrompt(in, "Source label (lowercase a-z, 0-9, -, _, or cancel): ", false)
 				if !ok {
+					pause()
 					continue
 				}
 				date, ok := operatorPrompt(in, "Source as-of date (YYYY-MM-DD, or cancel): ", false)
 				if !ok {
+					pause()
 					continue
 				}
 				digest, ok := operatorPrompt(in, "Independently supplied SHA-256 of raw list (or cancel): ", false)
 				if !ok {
+					pause()
 					continue
 				}
 				prior, ok := operatorPrompt(in, "Expected prior source SHA-256 for replacement (blank for new): ", true)
 				if !ok {
+					pause()
 					continue
 				}
 				args := []string{"smart-routing-rules", "import", "--file", strings.TrimSpace(file),
@@ -835,10 +887,12 @@ func menuWithRunner(m *sc.Manager, dispatch func(*sc.Manager, ...string) int) in
 			case "7":
 				source, ok := operatorPrompt(in, "Existing source label (or cancel): ", false)
 				if !ok {
+					pause()
 					continue
 				}
 				digest, ok := operatorPrompt(in, "Exact current source SHA-256 (or cancel): ", false)
 				if !ok {
+					pause()
 					continue
 				}
 				dispatch(m, []string{"smart-routing-rules", "remove-source", "--source", strings.TrimSpace(source), "--sha256", strings.TrimSpace(digest)}...)
@@ -848,14 +902,18 @@ func menuWithRunner(m *sc.Manager, dispatch func(*sc.Manager, ...string) int) in
 		case "2":
 			dispatch(m, []string{"profiles"}...)
 		case "3":
+			fmt.Println("Import a private local file containing one VLESS link or sing-box JSON config.")
+			fmt.Println("For pasting from stdin, use: sudo server-connect import --file -")
 			path, ok := operatorPrompt(in, "Private local config file path (or cancel): ", false)
 			if !ok {
+				pause()
 				continue
 			}
 			dispatch(m, "import", "--file", path)
 		case "4", "8":
 			id, ok := operatorPrompt(in, "Profile ID (or cancel): ", false)
 			if !ok {
+				pause()
 				continue
 			}
 			if choice == "4" {
@@ -864,6 +922,7 @@ func menuWithRunner(m *sc.Manager, dispatch func(*sc.Manager, ...string) int) in
 				ack, ok := operatorPrompt(in, "Remove this saved profile? Type REMOVE: ", false)
 				if !ok || ack != "REMOVE" {
 					fmt.Println("Canceled: saved profile unchanged")
+					pause()
 					continue
 				}
 				dispatch(m, "remove", id)
@@ -873,11 +932,13 @@ func menuWithRunner(m *sc.Manager, dispatch func(*sc.Manager, ...string) int) in
 		case "6":
 			url, ok := operatorPrompt(in, "Test URL (https://..., or cancel): ", false)
 			if !ok {
+				pause()
 				continue
 			}
 			path, ok := operatorPrompt(in, "Path 1=proxy, 2=direct: ", false)
 			if !ok || (path != "1" && path != "2") {
 				fmt.Println("Canceled: choose an explicit path; no network probe started")
+				pause()
 				continue
 			}
 			via := "proxy"
@@ -911,11 +972,13 @@ func menuWithRunner(m *sc.Manager, dispatch func(*sc.Manager, ...string) int) in
 			}
 			if canceled || len(targets) == 0 {
 				fmt.Println("Canceled: no network diagnostic started")
+				pause()
 				continue
 			}
 			selection, ok := operatorPrompt(in, "Path 1=proxy, 2=direct (or cancel): ", false)
 			if !ok || (selection != "1" && selection != "2") {
 				fmt.Println("Canceled: choose an explicit path; no network diagnostic started")
+				pause()
 				continue
 			}
 			via := "proxy"
@@ -931,14 +994,17 @@ func menuWithRunner(m *sc.Manager, dispatch func(*sc.Manager, ...string) int) in
 			advanced = true
 			address, ok := operatorPrompt(in, "Literal TCP endpoint IP (no DNS): ", false)
 			if !ok {
+				pause()
 				continue
 			}
 			rawPort, ok := operatorPrompt(in, "Endpoint TCP port: ", false)
 			if !ok {
+				pause()
 				continue
 			}
 			hostname, ok := operatorPrompt(in, "Optional DNS hostname to verify against pinned IP (blank to skip): ", true)
 			if !ok {
+				pause()
 				continue
 			}
 			command := []string{"underlay-tcp", "--endpoint", strings.TrimSpace(address), "--port", strings.TrimSpace(rawPort)}
@@ -950,14 +1016,17 @@ func menuWithRunner(m *sc.Manager, dispatch func(*sc.Manager, ...string) int) in
 			advanced = true
 			host, ok := operatorPrompt(in, "Endpoint DNS hostname: ", false)
 			if !ok {
+				pause()
 				continue
 			}
 			endpoint, ok := operatorPrompt(in, "Pinned endpoint IP: ", false)
 			if !ok {
+				pause()
 				continue
 			}
 			resolver, ok := operatorPrompt(in, "Explicit resolver IP (DNS queries are sent to this resolver): ", false)
 			if !ok {
+				pause()
 				continue
 			}
 			dispatch(m, []string{"underlay-dns", "--hostname", strings.TrimSpace(host),
@@ -969,6 +1038,7 @@ func menuWithRunner(m *sc.Manager, dispatch func(*sc.Manager, ...string) int) in
 			advanced = true
 			path, ok := operatorPrompt(in, "Private host-preflight JSON baseline path: ", false)
 			if !ok {
+				pause()
 				continue
 			}
 			dispatch(m, "host-drift", "--baseline", path)
@@ -977,6 +1047,7 @@ func menuWithRunner(m *sc.Manager, dispatch func(*sc.Manager, ...string) int) in
 			confirmation, err := in.ReadString('\n')
 			if err != nil || strings.TrimSpace(confirmation) != "UPDATE" {
 				fmt.Println("Canceled; no APT action taken")
+				pause()
 				continue
 			}
 			code, err := m.Apt([]string{"apt-get", "update"})
@@ -994,6 +1065,7 @@ func menuWithRunner(m *sc.Manager, dispatch func(*sc.Manager, ...string) int) in
 				fmt.Println("Enter a displayed menu number, 'a' for advanced tools, or '0' to exit; nothing changed.")
 			}
 		}
+		pause()
 	}
 }
 

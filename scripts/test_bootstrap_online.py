@@ -472,6 +472,12 @@ class BootstrapSecurityTest(unittest.TestCase):
         result = self.bootstrap()
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_no_menu_opt_out_preserves_verify_only(self):
+        result = self.bootstrap(extra=("--no-menu",))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Installation was not attempted", result.stdout)
+        self.assertNotIn("Opening Server Connect", result.stdout)
+
     def test_verify_only_does_not_admit_targets_or_execute_payloads(self):
         # Target admission belongs to the shared installer. These archives
         # prove only acquisition/layout verification, including when their
@@ -2055,7 +2061,7 @@ os.execv(sys.argv[1], sys.argv[1:])
         import re
         docs = (ROOT / "docs" / "OFFLINE-DISTRIBUTION.md").read_text()
         if channel == "mirror":
-            section = docs.split("**Operator-hosted HTTPS mirror", 1)[1].split("**Completely offline", 1)[0]
+            section = docs.split("**Operator-hosted HTTPS mirror", 1)[1].split("**Locally uploaded release archive", 1)[0]
             server = self.https_servers[1][0]
         else:
             section = docs.split("**Official GitHub release channel", 1)[1].split("**Operator-hosted HTTPS mirror", 1)[0]

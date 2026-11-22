@@ -220,6 +220,7 @@ target=''
 local_qa=no
 digest=''
 verify_only=no
+auto_menu=yes
 # Official pinned core 1.14.3 is 31,678,266 compressed / 93,255,156
 # expanded bytes. These conservative QA bundle caps allow manager/metadata
 # headroom without permitting multi-GiB disk consumption on hosting servers.
@@ -241,8 +242,9 @@ while [ "$#" -gt 0 ]; do
   --local-qa) [ "$local_qa" = no ] || exit 2; local_qa=yes;shift;;
   --sha256) [ "$#" -ge 2 ] && [ -z "$digest" ] || exit 2; digest=$2;shift 2;;
   --verify-only)verify_only=yes;shift;;
+  --no-menu)auto_menu=no;shift;;
   --max-download-bytes) [ "$#" -ge 2 ] || exit 2; max_download_bytes=$2;shift 2;;
-  *) echo 'Usage: bootstrap-online.sh (--official | --mirror-base HTTPS_BASE | --archive-url HTTPS_URL | --archive-file ABSOLUTE_FILE) [--verify-only]; optional legacy signed QA --publisher-key; digest-pinned local QA --local-qa --sha256 SHA256' >&2;exit 2;;
+  *) echo 'Usage: bootstrap-online.sh (--official | --mirror-base HTTPS_BASE | --archive-url HTTPS_URL | --archive-file ABSOLUTE_FILE) [--verify-only] [--no-menu]; optional legacy signed QA --publisher-key; digest-pinned local QA --local-qa --sha256 SHA256' >&2;exit 2;;
  esac
 done
 # Ordinary Official, operator Mirror and Offline use release metadata and
@@ -301,10 +303,11 @@ max_download_bytes=$(printf '%s' "$max_download_bytes" | sed 's/^0*//')
 [ -n "$max_download_bytes" ] || max_download_bytes=0
 [ "${#max_download_bytes}" -le 10 ] && [ "$max_download_bytes" -ge 1 ] &&
  [ "$max_download_bytes" -le 100663296 ] || { echo 'Download ceiling outside supported range' >&2;exit 2; }
-# A real connected installation may acquire *missing* native Debian 12/13
-# prerequisites via the host's existing signed APT policy. This is a separate
-# OS package transaction, not a second Server Connect installer. --verify-only
-# NEVER changes OS packages, even when invoked as root.
+# All installation channels may acquire *missing* OS prerequisites through
+# the host's existing trusted Debian APT sources. A locally uploaded archive
+# never downloads Server Connect/Core/rules assets, and APT may point to a
+# reachable domestic mirror even when international Internet is unavailable.
+# --verify-only never installs anything or changes host APT configuration.
 if [ -n "$url" ]; then
  case "$url" in
   https://?*) ;;
@@ -337,13 +340,27 @@ if [ -n "$url" ];then
  if ! bootstrap_preflight_source_url "$url";then
   echo 'Unsupported URL: unsafe acquisition authority (before APT)' >&2;exit 2
  fi
+elif [ "$verify_only" != yes ];then
+ # Reject absent/linked local inputs before a package transaction. Archive
+ # bytes, ownership and sidecar integrity are checked again after staging.
+ for input_file in "$archive_file" "$metadata_file" "$signature_file";do
+  [ -n "$input_file" ] || continue
+  [ -f "$input_file" ] && [ ! -L "$input_file" ] && [ -r "$input_file" ] || {
+   echo "Local release input unavailable or unsafe: $input_file; no APT attempted" >&2
+   exit 1
+  }
+ done
+fi
+if [ -n "$url" ] || [ "$verify_only" != yes ];then
  [ "$(/usr/bin/uname -m)" = x86_64 ] || {
   echo 'Only Debian 12/13 amd64 is supported; no APT attempted' >&2;exit 1;
  }
  host_os=$(bootstrap_read_os_version) || {
-  echo 'Verified Debian 12 or Debian 13 OS identity is required for automatic online prerequisites' >&2;exit 1;
+  echo 'Verified Debian 12 or Debian 13 OS identity is required before automatic prerequisites' >&2;exit 1;
  }
  host_target=debian-$host_os-amd64
+fi
+if [ -n "$url" ];then
  # If Python already exists, perform the complete URL parser before any
  # package changes. A minimal host without Python may acquire it only for
  # authorities the earlier portable shell preflight can fully classify.
@@ -361,12 +378,14 @@ if [ -n "$url" ]; then
  command -v curl >/dev/null 2>&1 || set -- "$@" curl
 fi
 command -v python3 >/dev/null 2>&1 || set -- "$@" python3
-# The offline installer must inspect the native reply-guard nftables table
-# *before* any product mutation, including a first install. On connected
-# installs acquire the real kernel inspector through signed Debian APT;
-# --verify-only never installs packages and offline remains fail-closed.
-if [ "$verify_only" != yes ] && [ -n "$url" ]; then
+# All real installs need the native nftables inspector and iproute2 for
+# guarded routing and recovery. Verify-only never needs kernel tools.
+# Inspect existing capability first; do not force specific package versions.
+if [ "$verify_only" != yes ]; then
  command -v nft >/dev/null 2>&1 || set -- "$@" nftables
+ # Native Smart Routing also uses iproute2. Accept any already working ip
+ # executable; acquire only a missing capability, never upgrade it by policy.
+ command -v ip >/dev/null 2>&1 || set -- "$@" iproute2
 fi
 if [ "$authenticated" = yes ]; then
  command -v openssl >/dev/null 2>&1 || set -- "$@" openssl
@@ -376,22 +395,18 @@ case "$url" in
   [ -r /etc/ssl/certs/ca-certificates.crt ] || set -- "$@" ca-certificates ;;
 esac
 if [ "$#" -gt 0 ]; then
- if [ -n "$archive_file" ]; then
-  echo 'Offline verification needs preinstalled Python 3 (and OpenSSL only for optional signed QA); no packages or downloads attempted' >&2
-  exit 1
- fi
  if [ "$verify_only" = yes ]; then
-  echo 'Online --verify-only needs existing curl, Python 3 and HTTPS CA certificates (OpenSSL only for signed QA); no packages installed' >&2
+  echo "Verification needs existing prerequisites: $*. Install them from your trusted Debian APT mirror, then retry; --verify-only never installs packages." >&2
   exit 1
  fi
  # Read only the fixed trusted host identity. No shell evaluation or caller
  # override may authorize a prerequisite package transaction.
  prerequisite_version=$(bootstrap_read_os_version) || {
-  echo 'Verified Debian 12 or Debian 13 OS identity is required for automatic online prerequisites' >&2
+  echo 'Verified Debian 12 or Debian 13 OS identity is required for automatic prerequisites' >&2
   exit 1
  }
  [ -x /usr/bin/apt-get ] || {
-  echo 'Automatic online prerequisites require native Debian APT' >&2
+  echo "Missing prerequisites: $*. Native Debian APT is unavailable; configure/install a trusted Debian APT mirror and install these packages manually, then retry." >&2
   exit 1
  }
  # Refuse an unsafe root staging parent BEFORE any OS package mutation.
@@ -405,7 +420,7 @@ if [ "$#" -gt 0 ]; then
   echo 'Root staging parent is group/other writable' >&2
   exit 1
  }
- echo "Installing missing Debian $prerequisite_version online-bootstrap prerequisites through native APT" >&2
+ echo "Installing only missing Debian $prerequisite_version prerequisites via existing APT sources: $*" >&2
  # Fixed package names only; no user-provided package, source, repository or
  # global APT policy changes. Failure leaves the Server Connect install alone.
  unset APT_CONFIG DPKG_ROOT
@@ -417,7 +432,7 @@ if [ "$#" -gt 0 ]; then
    -o Acquire::Retries=1 \
    -o Acquire::http::Timeout=15 \
    -o Acquire::https::Timeout=15 update; then
-  echo 'Debian prerequisite index update failed; no Server Connect installation attempted' >&2
+  echo "Cannot refresh existing Debian APT sources for missing packages: $*. Check that your trusted domestic Debian mirror is reachable (apt-get update), then retry. No Server Connect installation attempted." >&2
   exit 1
  fi
  if ! DEBIAN_FRONTEND=noninteractive /usr/bin/apt-get \
@@ -426,7 +441,7 @@ if [ "$#" -gt 0 ]; then
    -o Acquire::http::Timeout=15 \
    -o Acquire::https::Timeout=15 \
    install -y --no-remove --no-install-recommends "$@"; then
-  echo 'Debian prerequisites could not be installed; no Server Connect installation attempted' >&2
+  echo "APT could not install missing packages: $*. Check your configured Debian mirror or install them manually, then retry. No Server Connect installation attempted." >&2
   exit 1
  fi
 fi
@@ -436,7 +451,11 @@ fi
 command -v sha256sum >/dev/null 2>&1 || { echo 'sha256sum is required' >&2;exit 1; }
 command -v stat >/dev/null 2>&1 || { echo 'stat is required for trusted staging' >&2;exit 1; }
 command -v python3 >/dev/null 2>&1 || { echo 'Python 3 is required for bounded archive processing' >&2;exit 1; }
-command -v timeout >/dev/null 2>&1 || { echo 'timeout is required for bounded ONLINE archive processing' >&2;exit 1; }
+command -v timeout >/dev/null 2>&1 || { echo 'timeout is required for bounded archive processing' >&2;exit 1; }
+if [ "$verify_only" != yes ]; then
+ command -v nft >/dev/null 2>&1 || { echo 'Required nftables command still missing after APT; check the Debian nftables package and retry' >&2;exit 1; }
+ command -v ip >/dev/null 2>&1 || { echo 'Required ip command still missing after APT; check the Debian iproute2 package and retry' >&2;exit 1; }
+fi
 # Parse the effective authority, never textual localhost prefixes. Test-only
 # HTTP permits only explicit IPv4 loopback / localhost with a numeric port.
 # URL credentials, encoded authority, fragments and unsafe bytes are refused.
@@ -490,7 +509,8 @@ fi
 
 # Copy only bounded local regular files into private staging. A local input
 # may be uploaded by an unprivileged operator; authentication covers the copy,
-# never a later reread of the replaceable original. Offline has no curl/APT.
+# never a later reread of the replaceable original. Local archive acquisition
+# never calls curl and never fetches project or Core assets from the Internet.
 copy_input() {
  python3 -I -S - "$1" "$2" "$3" <<'PYCOPY'
 import os, stat, sys
@@ -920,4 +940,33 @@ elif [ "$authenticated" = integrity ];then
 else
  sh "$work/server-connect/install.sh" --offline --local-qa
 fi
+# The complete verified archive is no longer needed once the shared installer
+# finishes. Release task-owned staging before entering a potentially long
+# interactive session; retain the EXIT trap as a fallback on cleanup failure.
+if ! rm -rf -- "$work"; then
+ echo 'Installation complete, but temporary bootstrap staging cleanup failed; inspect root-owned staging.' >&2
+fi
+# When an actual operator has a usable controlling terminal, enter the
+# interactive manager after the completed install/update (and after the
+# installer releases its lifecycle locks). A piped bootstrap reads its script
+# from stdin; /dev/tty is a *separate* input stream for the operator. Never
+# consume stdin or prompt a noninteractive CI/cron/SSH pipeline. Failed menu
+# launch is reported but does not relabel a completed installation as failed.
+bootstrap_finish_with_menu() {
+ if [ "$auto_menu" = yes ] && [ -t 1 ] && [ "${TERM:-}" != '' ] && [ "${TERM:-}" != dumb ] &&
+    [ -x /opt/server-connect/current/bin/server-connect ]; then
+  # A TTY on stdout does NOT guarantee a controlling /dev/tty (e.g. an
+  # unattended process with stdout bound to a PTY slave). Open it ONCE for
+  # both the announcement and the manager, within a nonfatal condition.
+  # Neither an open failure nor a menu failure may undo a completed install.
+  if {
+   echo 'Installation completed. Opening Server Connect (press q to exit).'
+   /opt/server-connect/current/bin/server-connect menu
+  } < /dev/tty > /dev/tty 2>&1; then
+   return 0
+  fi
+ fi
+ echo 'Installation complete. Open the menu with: sudo server-connect' >&2
+}
+bootstrap_finish_with_menu
 # SERVER_CONNECT_BOOTSTRAP_END

@@ -22,7 +22,7 @@ func TestOperatorMenuIsReadOnlyOnFirstUseAndHidesLegacyUntilAdvanced(t *testing.
 	p := operatorPresenter{out: &out, width: 42}
 	p.menu(m, false)
 	basic := out.String()
-	for _, want := range []string{"Server Connect", "0.1.0-dev", "State: not inspected", "NOT RELEASE-READY", "18 Mode Overview", "19 Routing Rules", "21 Smart Routing (guarded QA)", "22 Native Guard / Recovery Status", "a Toggle advanced", "0 Exit", "Choice:"} {
+	for _, want := range []string{"Server Connect", "0.1.0-dev", "State: not inspected", "NOT RELEASE-READY", "18 Modes", "19 Routing Rules", "21 Smart Routing", "22 Guard Status", "a Advanced tools", "0 Exit", "Choice:"} {
 		if !strings.Contains(basic, want) {
 			t.Fatalf("missing operator guidance %q in %s", want, basic)
 		}
@@ -36,7 +36,7 @@ func TestOperatorMenuIsReadOnlyOnFirstUseAndHidesLegacyUntilAdvanced(t *testing.
 	out.Reset()
 	p.menu(m, true)
 	advanced := out.String()
-	for _, want := range []string{"Advanced diagnostics", "11 Path Diagnostics"} {
+	for _, want := range []string{"Advanced tools", "11 Path Diagnostics"} {
 		if !strings.Contains(advanced, want) {
 			t.Fatalf("advanced tool unavailable: %q", want)
 		}
@@ -59,9 +59,15 @@ func TestStableVersionMenuHasNoDevelopmentQADisclaimer(t *testing.T) {
 		p := operatorPresenter{out: &out, width: width}
 		p.menu(m, false)
 		text := out.String()
-		for _, expected := range []string{"Server Connect  0.1.0", "21 Smart Routing (guarded)",
-			"initial activation requires fresh SSH confirmation", "7 Disconnect / Return to Direct"} {
-			if !strings.Contains(text, expected) {
+		normalized := strings.Join(strings.Fields(text), " ")
+		expected := []string{"Server Connect 0.1.0", "Smart", "new SSH confirmation"}
+		if width < 50 {
+			expected = append(expected, "21 Smart Routing", "7 Disconnect", "22 Guard Status")
+		} else {
+			expected = append(expected, "21 Smart Routing (guarded)", "7 Disconnect / Return to Direct", "22 Native Guard / Recovery Status")
+		}
+		for _, expected := range expected {
+			if !strings.Contains(normalized, strings.Join(strings.Fields(expected), " ")) {
 				t.Fatalf("stable menu width %d missing %q: %s", width, expected, text)
 			}
 		}
@@ -610,8 +616,12 @@ func TestOperatorMenuNativeOptionsVisibleAtWideAndNarrowWidths(t *testing.T) {
 		var out bytes.Buffer
 		p := operatorPresenter{out: &out, width: width}
 		p.menu(m, false)
-		for _, want := range []string{"21 Smart Routing (guarded QA)", "22 Native Guard / Recovery Status", "7 Disconnect / Return to Direct"} {
-			if !strings.Contains(out.String(), want) {
+		wanted := []string{"21 Smart Routing", "22 Guard Status", "7 Disconnect"}
+		if width >= 50 {
+			wanted = []string{"21 Smart Routing (guarded QA)", "22 Native Guard / Recovery Status", "7 Disconnect / Return to Direct"}
+		}
+		for _, want := range wanted {
+			if !strings.Contains(strings.Join(strings.Fields(out.String()), " "), want) {
 				t.Fatalf("width %d missing %q: %s", width, want, out.String())
 			}
 		}

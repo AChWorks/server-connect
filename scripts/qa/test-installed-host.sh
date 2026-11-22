@@ -574,14 +574,15 @@ import sys
 from pathlib import Path
 message=Path(sys.argv[1]).read_text()
 assert "18 Mode Overview" in message
-assert '"observed_mode": "unknown"' in message
-assert '"host_direct_path_proof": "not_run"' in message
-assert '"availability": "candidate_not_field_verified"' in message
-assert '"general_host_activation": false' in message
+assert "Available modes" in message
+assert "Smart host-wide permission is NOT automatically established" in message
+assert "Selected VPN path proof: not_run" in message
+assert "Host Direct path proof: not_run" in message
+assert '"observed_mode":' not in message, "interactive page leaked machine JSON"
 PYMODEMENU
 assert_network_unchanged installed-mode-overview "$offline_before"
 verify_host_services installed-mode-overview
-echo 'INSTALLED_OPERATOR_MODE_OVERVIEW=PASS (inactive service, honest Direct unknown, non-admitted TUN, CLI/menu parity)'
+echo 'INSTALLED_OPERATOR_MODE_OVERVIEW=PASS (human-readable mode page, honest Direct unknown, guarded TUN, unchanged JSON CLI)'
 # Real installed terminal menu: the new native entry must not start anything
 # until the final explicit confirmation. With no selected profile, even an
 # intentionally confirmed request must be refused by the same guarded CLI.
