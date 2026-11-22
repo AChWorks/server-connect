@@ -189,12 +189,16 @@ def main():
             "stop_seconds": round(after_stop-before_stop, 3),
             "leaked_direct_sns_while_smart": leaks,
             "recovery": off, "pass": not leaks}
+        # Preserve the actual filtered tcpdump timestamps for subsequent
+        # independent packet/phase inspection, not merely the PASS counter.
+        (args.evidence_dir / "underlay-syn.log").write_text(
+            "\n".join(x["line"] for x in records) + "\n")
         (args.evidence_dir / "stop-boundary.json").write_text(json.dumps(result, indent=2))
         (args.evidence_dir / "phasewatch.jsonl").write_text(
             "\n".join(json.dumps(x) for x in snapshots) + "\n")
         if leaks:
             raise RuntimeError("selected Direct SYN was observed while Smart remained desired")
-        print("PASS_PHYSICAL_PACKET_BOUNDARY: positive Direct control, real selected VPN, "
+        print("PASS_INSTALLED_VM_STOP_BOUNDARY: positive Direct control, real selected VPN, "
               "zero Direct SYN while Smart, exact Direct restoration", flush=True)
         print(json.dumps({k: v for k, v in result.items() if k != "recovery"}), flush=True)
     finally:

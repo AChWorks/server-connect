@@ -1401,8 +1401,11 @@ func (m *Manager) NativeStatus() (NativeConnectionStatus, error) {
 				if e = requireNativeStartupGuardClaim(context.Background(), nativeSystemRunner{}, plan, session.StartupGuardHandle); e != nil {
 					return e
 				}
-				if health.Phase == "stopping" {
-					result.Observed = "stopping"
+				// During supervised replacement the Core can be active but
+				// interception is still withheld by the rearmed barrier.
+				// Preserve the observed recovery/stop phase, not "starting".
+				if health.Phase == "recovering" || health.Phase == "stopping" {
+					result.Observed = health.Phase
 				} else {
 					result.Observed = "starting"
 				}
