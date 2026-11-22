@@ -359,14 +359,14 @@ class BootstrapUXTests(unittest.TestCase):
                               .replace("/usr/bin/apt-get", "fixture_apt"))
             # Fixture root ownership can be modeled without root or writing
             # system metadata. Preserve actual mode and inode checks.
-            spoof_uid = "no" if unsafe_owner else "yes"
+            spoof_uid = "65534" if unsafe_owner else "0"
             entry = ("set -eu\n"
                      + "SC_TMP=" + shlex.quote(temp) + "\n"
                      + "SC_MARKER=" + shlex.quote(str(marker)) + "\n"
                      + "SC_SPOOF_UID=" + spoof_uid + "\n"
                      + "fixture_stat() {\n"
-                     + "  if [ \"$1\" = -c ] && [ \"$2\" = %u ] && [ \"${4#\"$SC_TMP\"}\" != \"$4\" ] && [ \"$SC_SPOOF_UID\" = yes ]; then\n"
-                     + "    printf '0\\n'; return 0\n"
+                     + "  if [ \"$1\" = -c ] && [ \"$2\" = %u ] && [ \"${4#\"$SC_TMP\"}\" != \"$4\" ]; then\n"
+                     + "    printf '%s\\n' \"$SC_SPOOF_UID\"; return 0\n"
                      + "  fi\n"
                      + "  /usr/bin/stat \"$@\"\n"
                      + "}\n"
