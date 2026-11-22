@@ -87,9 +87,13 @@ class TerminalUXTests(unittest.TestCase):
     def setUpClass(cls):
         cls.build = tempfile.TemporaryDirectory(prefix="sc-pty-ux-")
         cls.binary = str(Path(cls.build.name) / "server-connect")
-        subprocess.run(["go", "build", "-trimpath", "-ldflags=-s -w -X main.managerVersion=0.1.0",
-                        "-o", cls.binary, "./cmd/server-connect"], cwd=ROOT, check=True,
-                       stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=90)
+        build = subprocess.run(["go", "build", "-buildvcs=false", "-trimpath",
+                                "-ldflags=-s -w -X main.managerVersion=0.1.0",
+                                "-o", cls.binary, "./cmd/server-connect"], cwd=ROOT,
+                               stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                               text=True, timeout=90)
+        if build.returncode:
+            raise AssertionError("disposable PTY test CLI build failed: " + build.stderr.strip())
 
     @classmethod
     def tearDownClass(cls):
