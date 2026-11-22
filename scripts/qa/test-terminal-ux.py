@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import pty
 import re
+import shlex
 import select
 import signal
 import struct
@@ -249,6 +250,16 @@ class BootstrapUXTests(unittest.TestCase):
         a = BOOTSTRAP.index('\nif [ "$#" -gt 0 ]; then', b)
         b = BOOTSTRAP.index('\nif [ -n "$url" ]; then\n command -v curl', a)
         cls.apt_transaction = BOOTSTRAP[a:b]
+        docs = (ROOT / "docs/OFFLINE-DISTRIBUTION.md").read_text()
+        blocks = re.findall(r"```sh\n(.*?)\n```", docs, re.S)
+        cls.prefetch_blocks = []
+        for command in blocks[:2]:
+            start = command.index("  # Pre-bootstrap curl/CA acquisition:")
+            end = command.index("  bootstrap=$(mktemp ", start)
+            cls.prefetch_blocks.append(command[start:end])
+        assert len(cls.prefetch_blocks) == 2
+        assert cls.prefetch_blocks[0] == cls.prefetch_blocks[1], (
+            "Official and Mirror must have identical prefetch trust/APT handling")
 
     def test_only_missing_installed_capabilities_are_selected(self):
         cases = (
@@ -317,52 +328,165 @@ class BootstrapUXTests(unittest.TestCase):
                             self.assertIn('Native Debian APT is unavailable', result.stderr)
                         self.assertIn('python3 nftables iproute2', result.stderr)
 
+    def run_prefetch_fixture(self, block, *, missing_curl=False, missing_ca=False,
+                             symlink=False, relative_link=False, unsafe_link=False, unsafe_mode=False,
+                             unsafe_owner=False, invalid_os=False, unsupported_arch=False,
+                             apt_stage="success", apt_available=True):
+        with tempfile.TemporaryDirectory(prefix="sc-outer-fetch-") as temp:
+            root = Path(temp)
+            (root / "etc").mkdir()
+            (root / "usr" / "lib").mkdir(parents=True)
+            etc_os, usr_os = root / "etc" / "os-release", root / "usr" / "lib" / "os-release"
+            os_text = ("ID=ubuntu\nVERSION_ID=13\n" if invalid_os
+                       else "ID=debian\nVERSION_ID=\"13\"\n")
+            usr_os.write_text(os_text)
+            if symlink:
+                if unsafe_link:
+                    alien = root / "foreign-os-release"
+                    alien.write_text(os_text)
+                    etc_os.symlink_to(alien)
+                else:
+                    etc_os.symlink_to("../usr/lib/os-release" if relative_link else usr_os)
+            else:
+                etc_os.write_text(os_text)
+            if unsafe_mode:
+                (usr_os if symlink else etc_os).chmod(0o666)
+            marker = root / "apt.log"
+            fragment = (block.replace("/etc/os-release", str(etc_os))
+                              .replace("/usr/lib/os-release", str(usr_os))
+                              .replace(".." + str(usr_os), "../usr/lib/os-release")
+                              .replace("/usr/bin/stat", "fixture_stat")
+                              .replace("/usr/bin/apt-get", "fixture_apt"))
+            # Fixture root ownership can be modeled without root or writing
+            # system metadata. Preserve actual mode and inode checks.
+            spoof_uid = "no" if unsafe_owner else "yes"
+            entry = ("set -eu\n"
+                     + "SC_TMP=" + shlex.quote(temp) + "\n"
+                     + "SC_MARKER=" + shlex.quote(str(marker)) + "\n"
+                     + "SC_SPOOF_UID=" + spoof_uid + "\n"
+                     + "fixture_stat() {\n"
+                     + "  if [ \"$1\" = -c ] && [ \"$2\" = %u ] && [ \"${4#\"$SC_TMP\"}\" != \"$4\" ] && [ \"$SC_SPOOF_UID\" = yes ]; then\n"
+                     + "    printf '0\\n'; return 0\n"
+                     + "  fi\n"
+                     + "  /usr/bin/stat \"$@\"\n"
+                     + "}\n"
+                     + "fixture_apt() {\n"
+                     + "  printf '%s\\n' \"$*\" >> \"$SC_MARKER\"\n"
+                     + "  case \"$*\" in\n"
+                     + "    *' update') [ \"$SC_APT_STAGE\" = update ] && { echo 'SIMULATED APT UPDATE ERROR' >&2; return 91; };;\n"
+                     + "    *' install -y --no-remove --no-install-recommends '*) [ \"$SC_APT_STAGE\" = install ] && { echo 'SIMULATED APT INSTALL ERROR' >&2; return 92; };;\n"
+                     + "  esac\n"
+                     + "  return 0\n"
+                     + "}\n"
+                     + "SC_APT_STAGE=" + apt_stage + "\n")
+            if missing_curl:
+                entry += ("command() { [ \"$1\" = -v ] || return 1; "
+                          "[ \"$2\" != curl ] && type \"$2\" >/dev/null 2>&1; }\n")
+            if missing_ca:
+                fragment = fragment.replace("/etc/ssl/certs/ca-certificates.crt", str(root / "absent-ca"))
+            if unsupported_arch:
+                fragment = fragment.replace("$(/usr/bin/uname -m)", "$(printf aarch64)")
+            if not apt_available:
+                fragment = fragment.replace("[ -x fixture_apt ]", "false")
+            else:
+                fragment = fragment.replace("[ -x fixture_apt ]", "true")
+            result = subprocess.run(["/bin/sh", "-c", entry + fragment],
+                                    text=True, capture_output=True, timeout=5)
+            return result, marker.read_text().splitlines() if marker.exists() else []
+
     def test_documented_outer_https_fetch_installs_only_missing_tools(self):
-        docs = (ROOT / "docs/OFFLINE-DISTRIBUTION.md").read_text()
-        first = docs.index('  fetch_missing=""\n')
-        last = docs.index('  bootstrap=$(mktemp ', first)
-        fragment = docs[first:last]
-        self.assertIn('/usr/bin/apt-get', fragment)
-        # Replace only the package-manager invocation with a recording fake.
-        # This checks the exact documented pre-fetch branch without any APT or
-        # network effect on the runner or user's host.
-        fragment = fragment.replace('/usr/bin/apt-get -o', 'mock_apt -o')
-        for absent_curl, absent_ca, bad_cpu, packages in (
-            (False, False, False, []),
-            (True, False, False, ['curl']),
-            (False, True, False, ['ca-certificates']),
-            (True, True, False, ['curl', 'ca-certificates']),
-            (True, False, True, []),
-        ):
-            with self.subTest(absent_curl=absent_curl, absent_ca=absent_ca, bad_cpu=bad_cpu):
-                with tempfile.TemporaryDirectory(prefix='sc-outer-deps-') as temp:
-                    marker = Path(temp) / 'apt-operations'
-                    fixture = fragment
-                    if absent_ca:
-                        fixture = fixture.replace('/etc/ssl/certs/ca-certificates.crt',
-                                                  str(Path(temp) / 'missing-ca'))
-                    if bad_cpu:
-                        fixture = fixture.replace('$(/usr/bin/uname -m)', '$(printf aarch64)')
-                    entry = 'set -eu\n'
-                    if absent_curl:
-                        entry += 'command() { if [ "$1" = -v ] && [ "$2" = curl ]; then return 1; fi; type "$2" >/dev/null 2>&1; }\n'
-                    entry += ('mock_apt() { printf "%s\n" "$*" >> "' + str(marker) + '"; }\n'
-                              + fixture + '\n')
-                    result = subprocess.run(['/bin/sh', '-c', entry], text=True,
-                                            capture_output=True, timeout=5)
-                    if bad_cpu:
-                        self.assertNotEqual(result.returncode, 0)
-                        self.assertFalse(marker.exists(), 'unsupported CPU ran host APT')
-                        continue
+        for channel, fragment in enumerate(self.prefetch_blocks):
+            for miss_curl, miss_ca, packages in (
+                (False, False, []), (True, False, ["curl"]),
+                (False, True, ["ca-certificates"]),
+                (True, True, ["curl", "ca-certificates"]),
+            ):
+                with self.subTest(channel=channel, miss_curl=miss_curl, miss_ca=miss_ca):
+                    result, calls = self.run_prefetch_fixture(fragment, missing_curl=miss_curl,
+                                                              missing_ca=miss_ca)
                     self.assertEqual(result.returncode, 0, result.stderr)
-                    if not packages:
-                        self.assertFalse(marker.exists(), 'existing packages caused APT update')
-                        continue
-                    lines = marker.read_text().splitlines()
-                    self.assertEqual(len(lines), 2)
-                    self.assertTrue(lines[0].endswith('update'))
-                    self.assertIn('install -y --no-remove --no-install-recommends ', lines[1])
-                    self.assertEqual(lines[1].split('--no-install-recommends ', 1)[1].split(), packages)
+                    self.assertEqual(len(calls), 2 if packages else 0)
+                    if packages:
+                        self.assertTrue(calls[0].endswith("update"))
+                        self.assertEqual(calls[1].split("--no-install-recommends ", 1)[1].split(), packages)
+
+    def test_documented_prefetch_valid_os_paths_and_negative_trust_before_apt(self):
+        for channel, fragment in enumerate(self.prefetch_blocks):
+            for setup in ({}, {"symlink": True}, {"symlink": True, "relative_link": True},
+                          {"unsafe_link": True, "symlink": True},
+                          {"unsafe_mode": True}, {"unsafe_mode": True, "symlink": True},
+                          {"unsafe_owner": True}, {"invalid_os": True},
+                          {"unsupported_arch": True}):
+                with self.subTest(channel=channel, setup=setup):
+                    result, calls = self.run_prefetch_fixture(fragment, missing_curl=True, **setup)
+                    should_pass = setup in ({}, {"symlink": True},
+                                            {"symlink": True, "relative_link": True})
+                    self.assertEqual(result.returncode == 0, should_pass, result.stderr)
+                    self.assertEqual(len(calls), 2 if should_pass else 0)
+                    if not should_pass:
+                        self.assertIn("No APT or Server Connect bootstrap executed", result.stderr)
+
+    def test_documented_prefetch_apt_failures_are_actionable(self):
+        for channel, fragment in enumerate(self.prefetch_blocks):
+            for stage, expected_calls, expected_error in (
+                ("success", 2, ""), ("update", 1, "APT index update failed"),
+                ("install", 2, "APT installation failed"),
+                ("missing", 0, "Native APT is unavailable"),
+            ):
+                with self.subTest(channel=channel, stage=stage):
+                    result, calls = self.run_prefetch_fixture(fragment, missing_curl=True,
+                                                              missing_ca=True, apt_stage=stage,
+                                                              apt_available=stage != "missing")
+                    self.assertEqual(len(calls), expected_calls, result.stderr)
+                    if stage != "success":
+                        self.assertNotEqual(result.returncode, 0)
+                        self.assertIn(expected_error, result.stderr)
+                        self.assertIn("curl ca-certificates", result.stderr)
+                        self.assertIn("Server Connect bootstrap was not executed", result.stderr)
+                        self.assertIn("trusted Debian mirror", result.stderr)
+                        if stage in ("update", "install"):
+                            self.assertIn("SIMULATED APT", result.stderr)
+                    else:
+                        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_menu_failure_after_install_does_not_fail_bootstrap(self):
+        with tempfile.TemporaryDirectory(prefix="sc-menu-failure-") as base:
+            fake = Path(base) / "server-connect"
+            fake.write_text("#!/bin/sh\nexit 19\n")
+            fake.chmod(0o700)
+            helper = self.finalizer.replace("/opt/server-connect/current/bin/server-connect", str(fake))
+            raw, code = run_pty(["/bin/sh", "-c", "set -eu\nauto_menu=yes\n" +
+                                 helper + "\nbootstrap_finish_with_menu\n"], "", term="xterm")
+            self.assertEqual(code, 0)
+            self.assertIn("Installation completed. Opening Server Connect", raw)
+            self.assertIn("Open the menu with: sudo server-connect", raw)
+
+    def test_tty_stdout_without_controlling_tty_preserves_success(self):
+        # A PTY slave bound to stdout is not necessarily a controlling TTY.
+        # Under set -e an unguarded /dev/tty redirect used to report a
+        # *completed* install as failed. Test the actual documented shape.
+        with tempfile.TemporaryDirectory(prefix="sc-no-controlling-tty-") as base:
+            marker = Path(base) / "menu-ran"
+            fake = Path(base) / "server-connect"
+            fake.write_text("#!/bin/sh\nprintf triggered > " + repr(str(marker)) + "\n")
+            fake.chmod(0o700)
+            helper = self.finalizer.replace("/opt/server-connect/current/bin/server-connect", str(fake))
+            shell = "set -eu\nauto_menu=yes\n" + helper + "\nbootstrap_finish_with_menu\n"
+            master, slave = pty.openpty()
+            try:
+                # start_new_session detaches the child from our controlling
+                # terminal, but preserves a TTY on its stdout fd.
+                result = subprocess.run(["/bin/sh", "-c", shell], stdin=subprocess.DEVNULL,
+                                        stdout=slave, stderr=subprocess.PIPE,
+                                        start_new_session=True,
+                                        text=True, timeout=5,
+                                        env={**os.environ, "TERM": "xterm-256color"})
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn("Open the menu with: sudo server-connect", result.stderr)
+                self.assertFalse(marker.exists(), "menu started with no controlling TTY")
+            finally:
+                os.close(slave)
+                os.close(master)
 
     def test_post_install_opens_only_in_pty_and_can_be_disabled(self):
         with tempfile.TemporaryDirectory(prefix="sc-ux-post-install-") as base:

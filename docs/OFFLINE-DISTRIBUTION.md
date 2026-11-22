@@ -23,25 +23,67 @@ every exit):
 ```sh
 sudo /usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin TERM="${TERM:-dumb}" /bin/sh -eu -c '
   umask 077
-  # Native signed Debian APT bootstraps the HTTPS downloader only when absent.
-  # The full Server Connect bootstrap then checks its remaining prerequisites.
+  # Pre-bootstrap curl/CA acquisition: same trusted Debian 12/13 OS
+  # admission as the shared installer, before ANY host APT transaction.
+  fetch_trusted_path() {
+    [ -e "$1" ] && [ ! -L "$1" ] &&
+      [ "$(/usr/bin/stat -c %u -- "$1")" = 0 ] || return 1
+    fetch_mode=$(/usr/bin/stat -c %a -- "$1") || return 1
+    case "$fetch_mode" in ""|*[!0-7]*) return 1;; esac
+    [ "$((0$fetch_mode & 022))" -eq 0 ]
+  }
+  fetch_trusted_debian() {
+    [ "$(/usr/bin/uname -m)" = x86_64 ] || return 1
+    for fetch_dir in / /etc; do fetch_trusted_path "$fetch_dir" || return 1; done
+    [ "$(/usr/bin/stat -c %u -- /etc/os-release)" = 0 ] || return 1
+    fetch_os=/etc/os-release
+    if [ -L /etc/os-release ]; then
+      case "$(/usr/bin/readlink -n -- /etc/os-release)" in
+        ../usr/lib/os-release|/usr/lib/os-release) ;;
+        *) return 1;;
+      esac
+      for fetch_dir in /usr /usr/lib; do fetch_trusted_path "$fetch_dir" || return 1; done
+      fetch_os=/usr/lib/os-release
+    fi
+    fetch_trusted_path "$fetch_os" && [ -f "$fetch_os" ] || return 1
+    fetch_size=$(/usr/bin/stat -c %s -- "$fetch_os") || return 1
+    case "$fetch_size" in ""|*[!0-9]*) return 1;; esac
+    [ "$fetch_size" -gt 0 ] && [ "$fetch_size" -le 16384 ] || return 1
+    fetch_before=$(/usr/bin/stat -c "%d:%i:%f:%u:%g:%s:%y:%z" -- "$fetch_os") || return 1
+    fetch_link_before=$(/usr/bin/stat -c "%d:%i:%f:%u:%g:%s:%y:%z" -- /etc/os-release) || return 1
+    fetch_id=$(/usr/bin/sed -n "s/^ID=//p" "$fetch_os") || return 1
+    fetch_version=$(/usr/bin/sed -n "s/^VERSION_ID=//p" "$fetch_os") || return 1
+    case "$fetch_id" in debian|\"debian\") ;; *) return 1;; esac
+    case "$fetch_version" in 12|13|\"12\"|\"13\") ;; *) return 1;; esac
+    [ "$(/usr/bin/stat -c "%d:%i:%f:%u:%g:%s:%y:%z" -- "$fetch_os")" = "$fetch_before" ] &&
+      [ "$(/usr/bin/stat -c "%d:%i:%f:%u:%g:%s:%y:%z" -- /etc/os-release)" = "$fetch_link_before" ] || return 1
+    fetch_trusted_path "$fetch_os"
+  }
   fetch_missing=""
   command -v curl >/dev/null 2>&1 || fetch_missing="curl"
   [ -r /etc/ssl/certs/ca-certificates.crt ] || fetch_missing="$fetch_missing ca-certificates"
   if [ -n "$fetch_missing" ]; then
-    [ -x /usr/bin/apt-get ] && [ "$(/usr/bin/uname -m)" = x86_64 ] &&
-      [ -r /etc/os-release ] && [ "$(/usr/bin/stat -c %u /etc/os-release)" = 0 ] || {
-      echo "Trusted Debian 12/13 APT is required for missing HTTPS fetch tools" >&2; exit 1;
+    fetch_trusted_debian || {
+      echo "Untrusted/unsupported Debian 12/13 amd64 host. Missing HTTPS tools:$fetch_missing. No APT or Server Connect bootstrap executed." >&2
+      exit 1
     }
-    os_id=$(/usr/bin/sed -n "s/^ID=//p" /etc/os-release)
-    os_ver=$(/usr/bin/sed -n "s/^VERSION_ID=//p" /etc/os-release)
-    case "$os_id" in debian|\"debian\") ;; *) echo "Unsupported OS; no APT attempted" >&2; exit 1;; esac
-    case "$os_ver" in 12|13|\"12\"|\"13\") ;; *) echo "Unsupported Debian version; no APT attempted" >&2; exit 1;; esac
-    DEBIAN_FRONTEND=noninteractive /usr/bin/apt-get -o APT::Get::AllowUnauthenticated=false \
-      -o APT::Update::Error-Mode=any update
-    # Only fixed missing names enter this list; never a user-supplied package.
-    DEBIAN_FRONTEND=noninteractive /usr/bin/apt-get -o APT::Get::AllowUnauthenticated=false \
-      install -y --no-remove --no-install-recommends $fetch_missing
+    [ -x /usr/bin/apt-get ] || {
+      echo "Missing HTTPS packages:$fetch_missing. Native APT is unavailable; configure a reachable trusted Debian mirror or install these packages manually, then retry. Server Connect bootstrap was not executed." >&2
+      exit 1
+    }
+    if ! DEBIAN_FRONTEND=noninteractive /usr/bin/apt-get \
+      -o Acquire::AllowInsecureRepositories=false \
+      -o APT::Get::AllowUnauthenticated=false \
+      -o APT::Update::Error-Mode=any update; then
+      echo "APT index update failed for missing packages:$fetch_missing. Check your trusted Debian mirror (apt-get update) or install them manually, then retry. Server Connect bootstrap was not executed." >&2
+      exit 1
+    fi
+    if ! DEBIAN_FRONTEND=noninteractive /usr/bin/apt-get \
+      -o APT::Get::AllowUnauthenticated=false \
+      install -y --no-remove --no-install-recommends $fetch_missing; then
+      echo "APT installation failed for missing packages:$fetch_missing. Check your configured trusted Debian mirror or install these packages manually, then retry. Server Connect bootstrap was not executed." >&2
+      exit 1
+    fi
   fi
   bootstrap=$(mktemp /root/.server-connect-entry.XXXXXXXX)
   trap "rm -f -- $bootstrap" 0
@@ -68,25 +110,67 @@ sudo /usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin TERM="${TERM:-dumb}" /bi
   umask 077
   case "$1" in https://?*) ;; *) echo "HTTPS mirror base is required" >&2; exit 2;; esac
   case "$1" in *[![:print:]]*|*\@*|*\%*|*\?*|*\#*|*\\*|*\ * ) echo "Unsafe Mirror URL" >&2; exit 2;; esac
-  # Native signed Debian APT bootstraps the HTTPS downloader only when absent.
-  # The full Server Connect bootstrap then checks its remaining prerequisites.
+  # Pre-bootstrap curl/CA acquisition: same trusted Debian 12/13 OS
+  # admission as the shared installer, before ANY host APT transaction.
+  fetch_trusted_path() {
+    [ -e "$1" ] && [ ! -L "$1" ] &&
+      [ "$(/usr/bin/stat -c %u -- "$1")" = 0 ] || return 1
+    fetch_mode=$(/usr/bin/stat -c %a -- "$1") || return 1
+    case "$fetch_mode" in ""|*[!0-7]*) return 1;; esac
+    [ "$((0$fetch_mode & 022))" -eq 0 ]
+  }
+  fetch_trusted_debian() {
+    [ "$(/usr/bin/uname -m)" = x86_64 ] || return 1
+    for fetch_dir in / /etc; do fetch_trusted_path "$fetch_dir" || return 1; done
+    [ "$(/usr/bin/stat -c %u -- /etc/os-release)" = 0 ] || return 1
+    fetch_os=/etc/os-release
+    if [ -L /etc/os-release ]; then
+      case "$(/usr/bin/readlink -n -- /etc/os-release)" in
+        ../usr/lib/os-release|/usr/lib/os-release) ;;
+        *) return 1;;
+      esac
+      for fetch_dir in /usr /usr/lib; do fetch_trusted_path "$fetch_dir" || return 1; done
+      fetch_os=/usr/lib/os-release
+    fi
+    fetch_trusted_path "$fetch_os" && [ -f "$fetch_os" ] || return 1
+    fetch_size=$(/usr/bin/stat -c %s -- "$fetch_os") || return 1
+    case "$fetch_size" in ""|*[!0-9]*) return 1;; esac
+    [ "$fetch_size" -gt 0 ] && [ "$fetch_size" -le 16384 ] || return 1
+    fetch_before=$(/usr/bin/stat -c "%d:%i:%f:%u:%g:%s:%y:%z" -- "$fetch_os") || return 1
+    fetch_link_before=$(/usr/bin/stat -c "%d:%i:%f:%u:%g:%s:%y:%z" -- /etc/os-release) || return 1
+    fetch_id=$(/usr/bin/sed -n "s/^ID=//p" "$fetch_os") || return 1
+    fetch_version=$(/usr/bin/sed -n "s/^VERSION_ID=//p" "$fetch_os") || return 1
+    case "$fetch_id" in debian|\"debian\") ;; *) return 1;; esac
+    case "$fetch_version" in 12|13|\"12\"|\"13\") ;; *) return 1;; esac
+    [ "$(/usr/bin/stat -c "%d:%i:%f:%u:%g:%s:%y:%z" -- "$fetch_os")" = "$fetch_before" ] &&
+      [ "$(/usr/bin/stat -c "%d:%i:%f:%u:%g:%s:%y:%z" -- /etc/os-release)" = "$fetch_link_before" ] || return 1
+    fetch_trusted_path "$fetch_os"
+  }
   fetch_missing=""
   command -v curl >/dev/null 2>&1 || fetch_missing="curl"
   [ -r /etc/ssl/certs/ca-certificates.crt ] || fetch_missing="$fetch_missing ca-certificates"
   if [ -n "$fetch_missing" ]; then
-    [ -x /usr/bin/apt-get ] && [ "$(/usr/bin/uname -m)" = x86_64 ] &&
-      [ -r /etc/os-release ] && [ "$(/usr/bin/stat -c %u /etc/os-release)" = 0 ] || {
-      echo "Trusted Debian 12/13 APT is required for missing HTTPS fetch tools" >&2; exit 1;
+    fetch_trusted_debian || {
+      echo "Untrusted/unsupported Debian 12/13 amd64 host. Missing HTTPS tools:$fetch_missing. No APT or Server Connect bootstrap executed." >&2
+      exit 1
     }
-    os_id=$(/usr/bin/sed -n "s/^ID=//p" /etc/os-release)
-    os_ver=$(/usr/bin/sed -n "s/^VERSION_ID=//p" /etc/os-release)
-    case "$os_id" in debian|\"debian\") ;; *) echo "Unsupported OS; no APT attempted" >&2; exit 1;; esac
-    case "$os_ver" in 12|13|\"12\"|\"13\") ;; *) echo "Unsupported Debian version; no APT attempted" >&2; exit 1;; esac
-    DEBIAN_FRONTEND=noninteractive /usr/bin/apt-get -o APT::Get::AllowUnauthenticated=false \
-      -o APT::Update::Error-Mode=any update
-    # Only fixed missing names enter this list; never a user-supplied package.
-    DEBIAN_FRONTEND=noninteractive /usr/bin/apt-get -o APT::Get::AllowUnauthenticated=false \
-      install -y --no-remove --no-install-recommends $fetch_missing
+    [ -x /usr/bin/apt-get ] || {
+      echo "Missing HTTPS packages:$fetch_missing. Native APT is unavailable; configure a reachable trusted Debian mirror or install these packages manually, then retry. Server Connect bootstrap was not executed." >&2
+      exit 1
+    }
+    if ! DEBIAN_FRONTEND=noninteractive /usr/bin/apt-get \
+      -o Acquire::AllowInsecureRepositories=false \
+      -o APT::Get::AllowUnauthenticated=false \
+      -o APT::Update::Error-Mode=any update; then
+      echo "APT index update failed for missing packages:$fetch_missing. Check your trusted Debian mirror (apt-get update) or install them manually, then retry. Server Connect bootstrap was not executed." >&2
+      exit 1
+    fi
+    if ! DEBIAN_FRONTEND=noninteractive /usr/bin/apt-get \
+      -o APT::Get::AllowUnauthenticated=false \
+      install -y --no-remove --no-install-recommends $fetch_missing; then
+      echo "APT installation failed for missing packages:$fetch_missing. Check your configured trusted Debian mirror or install these packages manually, then retry. Server Connect bootstrap was not executed." >&2
+      exit 1
+    fi
   fi
   bootstrap=$(mktemp /root/.server-connect-entry.XXXXXXXX)
   trap "rm -f -- $bootstrap" 0
@@ -116,7 +200,9 @@ The locally uploaded archive's identity sidecar must exist at `<archive>.release
 
 Official/Mirror online acquisition additionally needs `curl` and a local HTTPS CA bundle; their documented launch commands acquire only missing initial fetch tools through host APT when available. Neither online nor local-archive installation forces a particular APT package version or deliberately upgrades an already usable tool; APT may resolve dependencies for newly needed packages. The official bundled sing-box Core remains a pinned **product binary contract**, not an APT prerequisite version pin. Essential native Debian bootstrap utilities and actual systemd must be functional; an unsupported/stripped host fails with diagnostic context rather than an unsafe partial repair. `--verify-only` performs full acquisition/layout checks but **never installs packages**, even when missing (it reports the missing prerequisite). Advanced explicit `--archive-url` and `--archive-file` remain available for controlled verification/QA; Mirror mode never falls back to GitHub.
 
-**Interactive completion:** The Official and Mirror launch commands preserve **only the terminal type** (`TERM`) alongside a fixed clean `PATH` across the privileged `env -i` boundary; all other ambient shell/loader variables remain excluded. Without this explicit `TERM` transfer a trusted `env -i` installation would never start the full-screen UI. After a successful shared-bootstrap **install or update**, a real TTY (including a normal SSH terminal) opens the Server Connect full-screen menu automatically *after* the installer returns and releases its lifecycle lock. Menu exit restores the operator's terminal. Noninteractive/redirected/`TERM=dumb` execution never waits for menu input and prints `sudo server-connect` as the next action. Use `--no-menu` on any Official, Mirror or Offline bootstrap command to suppress the automatic menu for automation. Direct developer-only `bundle/install.sh` invocation remains a noninteractive low-level installer; launch `sudo server-connect` manually in that case. `--verify-only` never opens a menu or installs packages. The menu text is English, while data/terminal colors are always optional.
+**Early HTTPS fetch prerequisites:** The two pasteable Official/Mirror launchers keep the same pre-bootstrap check: accept only root-owned, non-group/other-writable Debian 12/13 OS metadata, including the canonical `/etc/os-release` to `/usr/lib/os-release` symlink with trusted directory ancestry, before any APT operation. They acquire only missing `curl`/CA tools from the host's existing trusted APT sources. Any APT absence, update failure or install failure preserves native APT diagnostics and names the missing packages plus a trusted-mirror/manual-install recovery action; **the project bootstrap has not yet executed**. The automated tests assert both launchers retain identical prefetch logic.
+
+**Interactive completion:** The Official and Mirror launch commands preserve **only the terminal type** (`TERM`) alongside a fixed clean `PATH` across the privileged `env -i` boundary; all other ambient shell/loader variables remain excluded. Without this explicit `TERM` transfer a trusted `env -i` installation would never start the full-screen UI. After a successful shared-bootstrap **install or update**, a real TTY (including a normal SSH terminal) opens the Server Connect full-screen menu automatically *after* the installer returns and releases its lifecycle lock. Menu exit restores the operator's terminal. Noninteractive/redirected/`TERM=dumb` execution never waits for menu input and prints `sudo server-connect` as the next action. A TTY-looking stdout without an actually openable controlling `/dev/tty`, or failure of the optional menu, also falls back to this manual instruction **without changing the successful installer exit status**. Use `--no-menu` on any Official, Mirror or Offline bootstrap command to suppress the automatic menu for automation. Direct developer-only `bundle/install.sh` invocation remains a noninteractive low-level installer; launch `sudo server-connect` manually in that case. `--verify-only` never opens a menu or installs packages. The menu text is English, while data/terminal colors are always optional.
 
 **Trust before execution:** Both online launchers stage complete root-owned bootstrap bytes, check a terminal completeness marker and execute only after a successful HTTPS download; no executable script is piped directly from curl. This protects against incomplete transfers, but the marker is **not** a publisher signature: the operator still trusts the selected HTTPS source. HTTPS validates the server's certificate. The bounded downloader permits HTTPS redirects for GitHub, refuses redirects for an operator Mirror (to keep all project assets on the selected mirror), and refuses plaintext except explicit loopback-only QA. The bootstrap validates the restricted release index, source/target/version, exact archive SHA256 and gzip/tar member layout **before executing any extracted script**; a second check binds metadata to the extracted package manifest and all checksummed members. The shared local installer repeats checksum, manager/Core, OS target, ownership and active guard preflights before changing units or releases. Symlinks/traversal/duplicate members, malformed JSON, unlisted files, decompression bombs, wrong target, modified data and partial downloads fail closed. Update and failed installation use narrowly owned state and rollback. On a first install the complete owner marker is staged before atomic no-replace publication of `/opt/server-connect`; root-private inode-bound intents under `/var/lib/server-connect/` identify the exact first prefix and release stage, including a partially copied release, its atomically reparented `.stage.*` path inside the original managed signed-receipt namespace, and the finally published release. On a retry, while holding the lifecycle lock, the installer verifies its full original file/service footprint and recovers exactly owned partial resources before a fresh install. Unexpected files, changed ownership/inodes, foreign services or active units are preserved and refused, never silently adopted or deleted. After successful initial installation, the release is verified against its inode-bound first-install receipts, current-link identity and effective managed systemd units before those receipts are retired. If interrupted between receipt removals, the remaining private receipt is revalidated and retired under the same lifecycle lock before a subsequent verify, update or uninstall; neither an uncommitted install nor a foreign/malformed receipt is silently adopted. The optional Signed receipt is prepared as an anonymous, fsynced inode and atomically linked once under its final filename, avoiding named temporary files or two-hardlink interruption windows. An interrupted Signed first install can be reconciled only after verification against the original signed publisher inputs, never by silently falling back to integrity-only trust. Uncertain foreign network/kernel resources are preserved for operator recovery.
 

@@ -954,14 +954,19 @@ fi
 # launch is reported but does not relabel a completed installation as failed.
 bootstrap_finish_with_menu() {
  if [ "$auto_menu" = yes ] && [ -t 1 ] && [ "${TERM:-}" != '' ] && [ "${TERM:-}" != dumb ] &&
-    [ -r /dev/tty ] && [ -w /dev/tty ] && [ -x /opt/server-connect/current/bin/server-connect ]; then
-  echo 'Installation completed. Opening Server Connect (press q to exit).' > /dev/tty
-  if ! /opt/server-connect/current/bin/server-connect menu < /dev/tty > /dev/tty 2>&1; then
-   echo 'Installation succeeded but the interactive menu could not start; run sudo server-connect manually.' >&2
+    [ -x /opt/server-connect/current/bin/server-connect ]; then
+  # A TTY on stdout does NOT guarantee a controlling /dev/tty (e.g. an
+  # unattended process with stdout bound to a PTY slave). Open it ONCE for
+  # both the announcement and the manager, within a nonfatal condition.
+  # Neither an open failure nor a menu failure may undo a completed install.
+  if {
+   echo 'Installation completed. Opening Server Connect (press q to exit).'
+   /opt/server-connect/current/bin/server-connect menu
+  } < /dev/tty > /dev/tty 2>&1; then
+   return 0
   fi
- else
-  echo 'Installation complete. Open the menu with: sudo server-connect' >&2
  fi
+ echo 'Installation complete. Open the menu with: sudo server-connect' >&2
 }
 bootstrap_finish_with_menu
 # SERVER_CONNECT_BOOTSTRAP_END
