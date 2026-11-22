@@ -820,6 +820,38 @@ class FirstInstallIntentTests(unittest.TestCase):
         self.assertTrue(displaced.is_dir())
         self.assertTrue(target.is_file())
 
+    def test_sigkill_after_signed_namespace_reparent_before_receipt(self):
+        self.first_stage_crash()
+        original=Path((self.state/".first-release-intent").read_text().splitlines()[0])
+        nested=self.prefix/"releases"/(".stage."+original.name.rsplit(".",1)[-1])
+        (self.prefix/"releases").mkdir()
+        original.rename(nested)
+        self.assertEqual(nested.stat().st_ino, int(
+            (self.state/".first-release-intent").read_text().splitlines()[1].split(":")[1]
+        ))
+        self.run_first("first_install_reconcile_transaction inspect\n")
+        self.run_first("first_install_reconcile_transaction recover\n")
+        self.assertFalse(self.prefix.exists())
+        self.assertFalse(original.exists())
+        self.assertFalse(nested.exists())
+        self.assertFalse((self.state/".first-release-intent").exists())
+
+    def test_swapped_signed_namespace_stage_refused_without_deletion(self):
+        self.first_stage_crash()
+        original=Path((self.state/".first-release-intent").read_text().splitlines()[0])
+        nested=self.prefix/"releases"/(".stage."+original.name.rsplit(".",1)[-1])
+        (self.prefix/"releases").mkdir()
+        original.rename(nested)
+        moved=self.opt/"original-release-stage"
+        nested.rename(moved)
+        nested.mkdir()
+        (nested/"foreign").write_text("do not adopt\n")
+        self.run_first("first_install_reconcile_transaction inspect\n",exit_expected=1)
+        self.run_first("first_install_reconcile_transaction recover\n",exit_expected=1)
+        self.assertEqual((nested/"foreign").read_text(),"do not adopt\n")
+        self.assertTrue(moved.exists())
+        self.assertTrue(self.prefix.exists())
+
     def test_foreign_file_in_partial_release_never_deleted(self):
         self.first_stage_crash()
         receipt=(self.state/".first-release-intent").read_text().splitlines()

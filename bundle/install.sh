@@ -568,6 +568,7 @@ def scan_release(root):
     return observed
 
 outside=None
+owned_inner=None
 published=None
 if stage_intent.exists() or stage_intent.is_symlink():
     stage_receipt=receipt(stage_intent,3)
@@ -577,7 +578,11 @@ if stage_intent.exists() or stage_intent.is_symlink():
         refuse("unexpected release-stage location")
     if not re.fullmatch(r"[0-9]+:[0-9]+",stage_receipt[1]) or stage_receipt[2] != release_name:
         refuse("different source release or stage inode")
-    for candidate in (outside,release):
+    # The same inode is first copied in an external private stage, then moved
+    # into the exact managed release-auth namespace for signed receipts, and
+    # finally published under its immutable release name.
+    owned_inner = prefix / "releases" / (".stage." + outside.name.rsplit(".",1)[-1])
+    for candidate in (outside,owned_inner,release):
         info=node(candidate,"dir")
         if info is not None:
             if identity(info) != stage_receipt[1]:
@@ -598,7 +603,7 @@ if root_info is not None:
         elif item.name=="releases":
             node(item,"dir")
             for child in entries(item):
-                if child != release or published != child:
+                if published != child or child not in (release, owned_inner):
                     refuse("unexpected release path: "+str(child))
         elif item.name=="current":
             node(item,"link")
@@ -664,7 +669,7 @@ if root_info is not None:
             item.unlink()
         if item.name.startswith(".guard-backup."):
             item.rmdir()
-for candidate in (release,outside):
+for candidate in (release,owned_inner,outside):
     if candidate is None or node(candidate,"dir") is None:
         continue
     observed=scan_release(candidate)
@@ -1304,6 +1309,19 @@ else
  chmod 0644 "$stage/.owner"
  chmod 0755 "$stage"
  verify_release_payload "$stage" || die 'staged release integrity failed'
+ if [ "$prefix_created" = yes ];then
+  # The copy/crash phase is kept outside PREFIX. Reparent only the complete
+  # verified stage into the original release-auth.py managed namespace before
+  # recording an authenticated receipt. This must not relax signed path trust.
+  stage_inner="$PREFIX/releases/.stage.${stage##*.}"
+  [ ! -e "$stage_inner" ] && [ ! -L "$stage_inner" ] ||
+   die 'foreign first-release staging name exists'
+  first_install_noreplace "$stage" "$stage_inner" ||
+   die 'cannot atomically reparent initial release into signed namespace'
+  [ "$(stat -c '%d:%i' "$stage_inner")" = "$first_release_inode" ] ||
+   die 'first-release inode changed during namespace transition'
+  stage=$stage_inner
+ fi
  write_release_trust "$stage"
  verify_release_trust "$stage" || die 'staged release trust failed'
  # Mark the intended new release for rollback BEFORE publishing the final
