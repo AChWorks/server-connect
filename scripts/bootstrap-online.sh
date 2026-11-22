@@ -335,7 +335,7 @@ if [ -n "$url" ];then
   echo 'Only Debian 12/13 amd64 is supported; no APT attempted' >&2;exit 1;
  }
  host_os=$(bootstrap_read_os_version) || {
-  echo 'Verified Debian 12/13 host identity required before APT' >&2;exit 1;
+  echo 'Verified Debian 12 or Debian 13 OS identity is required for automatic online prerequisites' >&2;exit 1;
  }
  host_target=debian-$host_os-amd64
  # If Python already exists, perform the complete URL parser before any

@@ -380,6 +380,23 @@ first_install_reconcile_abandoned_stage() {
  fi
  rm -f -- "$FIRST_INSTALL_INTENT" || die 'cannot retire abandoned initial claim'
 }
+# Atomic no-replace publication avoids the two-hardlink gap: a SIGKILL
+# between ln(temp, intent) and unlink(temp) previously left nlink=2 and an
+# otherwise valid recovery receipt unreadable on the next installation.
+first_install_noreplace() {
+ python3 -I -S - "$1" "$2" <<'SC_FIRST_INSTALL_NOREPLACE'
+import ctypes, errno, os, sys
+source, target = sys.argv[1:]
+libc = ctypes.CDLL(None, use_errno=True)
+renameat2 = getattr(libc, 'renameat2', None)
+if renameat2 is None:
+    raise OSError(errno.ENOSYS, 'atomic no-replace rename unavailable')
+renameat2.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
+if renameat2(-100, os.fsencode(source), -100, os.fsencode(target), 1) != 0:
+    code = ctypes.get_errno()
+    raise OSError(code, os.strerror(code), target)
+SC_FIRST_INSTALL_NOREPLACE
+}
 first_install_publish() {
  check_root_dir /opt
  [ ! -e "$PREFIX" ] && [ ! -L "$PREFIX" ] ||
@@ -397,9 +414,8 @@ first_install_publish() {
  printf '%s\n%s\n' "$first_stage" "$first_inode" > "$first_temp" ||
   die 'cannot write first-install intent'
  chmod 0600 "$first_temp" || die 'cannot protect first-install intent'
- ln "$first_temp" "$FIRST_INSTALL_INTENT" ||
-  die 'another first-install intent exists; refusing overwrite'
- rm -f -- "$first_temp" || die 'cannot finalize initial intent'
+ first_install_noreplace "$first_temp" "$FIRST_INSTALL_INTENT" ||
+  die 'cannot atomically publish first-install intent without overwrite'
  # Flush the owner marker, intent and their parents before atomic publication.
  # Linux renameat2(NO_REPLACE) avoids replacing an independently created
  # foreign prefix, even during the last pre-rename scheduling window.

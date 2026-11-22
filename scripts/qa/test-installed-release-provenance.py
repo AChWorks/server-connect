@@ -633,6 +633,8 @@ class FirstInstallIntentTests(unittest.TestCase):
                          "AChWorks/server-connect\n")
         receipt = self.state / ".first-install-intent"
         self.assertTrue(receipt.is_file())
+        self.assertEqual(receipt.stat().st_nlink, 1)
+        self.assertFalse(list(self.state.glob('.first-install-intent.*')))
         original_inode = self.prefix.stat().st_ino
         self.run_first("first_install_claimed_prefix\n")
         # Emulates SIGKILL immediately after owner publication and a second
@@ -679,6 +681,55 @@ class FirstInstallIntentTests(unittest.TestCase):
         self.assertEqual(foreign.read_text(), "never delete\n")
         foreign.unlink()
         self.run_first("first_install_claimed_prefix\n")
+
+    def test_failure_after_published_owner_rolls_back_exact_empty_prefix(self):
+        rollback = extract("rollback_candidate() {\n", "\n}\n")
+        command = (
+            "first_install_publish\n"
+            "prefix_created=yes\n"
+            "rollback_needed=no\n"
+            "release_created=no\n"
+            "command_created=no\n"
+            "stage=''\n"
+            "unit_backup=''\n"
+            "guard_backup=''\n"
+            "previous=''\n"
+            "remove_backup() { :; }\n"
+            "unit_identity=absent\n"
+            + rollback + "\n"
+            "rollback_candidate\n"
+            '[ "$failed" = no ]\n'
+            '[ ! -e "$PREFIX" ]\n'
+            '[ ! -e "$FIRST_INSTALL_INTENT" ]\n'
+        )
+        self.run_first(command)
+        self.assertFalse(self.prefix.exists())
+        self.assertFalse((self.state / ".first-install-intent").exists())
+
+    def test_failure_with_foreign_file_keeps_partial_prefix_for_inspection(self):
+        rollback = extract("rollback_candidate() {\n", "\n}\n")
+        command = (
+            "first_install_publish\n"
+            'printf "untouched\\n" > "$PREFIX/foreign-data"\n'
+            "prefix_created=yes\n"
+            "rollback_needed=no\n"
+            "release_created=no\n"
+            "command_created=no\n"
+            "stage=''\n"
+            "unit_backup=''\n"
+            "guard_backup=''\n"
+            "previous=''\n"
+            "remove_backup() { :; }\n"
+            "unit_identity=absent\n"
+            + rollback + "\n"
+            "rollback_candidate\n"
+            '[ "$failed" = yes ]\n'
+            '[ -f "$PREFIX/foreign-data" ]\n'
+            '[ -f "$FIRST_INSTALL_INTENT" ]\n'
+        )
+        self.run_first(command)
+        self.assertEqual((self.prefix / "foreign-data").read_text(), "untouched\n")
+        self.assertTrue((self.state / ".first-install-intent").exists())
 
     def test_preexisting_prefix_never_replaced(self):
         self.prefix.mkdir()
