@@ -561,6 +561,16 @@ func TestNativeRecoveryFinalizesOnlyValidatedDirectSession(t *testing.T) {
 			if err := put(filepath.Join(m.Dir, nativeConfigFile), []byte("private-config")); err != nil {
 				t.Fatal(err)
 			}
+			// A direct-only helper cannot retire the receipt before the
+			// separately verified kernel/OUTPUT barrier transition.
+			if initial == "smart" {
+				if err := m.finalizeNativeRecoveryLocked(); ErrorCode(err) != "guard_pending" {
+					t.Fatalf("retired Smart claim before Direct and barrier cleanup: %v", err)
+				}
+			}
+			if err := m.commitNativeDirectAfterKernelRestoreLocked(); err != nil {
+				t.Fatal(err)
+			}
 			if err := m.finalizeNativeRecoveryLocked(); err != nil {
 				t.Fatal(err)
 			}

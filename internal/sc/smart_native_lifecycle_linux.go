@@ -769,8 +769,26 @@ func (m *Manager) NativeRecoverInstalled() error {
 		if err := m.nativeCoreRecoveryQuiescent(); err != nil {
 			return err
 		}
+		// ExecStopPost may run after an unexpected Core exit, without an
+		// operator/Health stop prearm. Restore the exact outbound barrier
+		// before any remaining kernel teardown, including SIGKILL recovery.
+		if err := m.ensureNativeStopBarrierLocked(); err != nil {
+			return err
+		}
+		// A repaired preparing/releasing receipt must be reread: kernel CAS
+		// cleanup may only use its *current* committed table handle.
+		session, err = m.readNativeSession()
+		if err != nil {
+			return err
+		}
 		if err := recoverNativeNetworkWithReceipt(context.Background(),
 			nativeSystemRunner{}, nativeSystemRunner{}, session, health, boot); err != nil {
+			return err
+		}
+		// Only the exact network restoration can authorize desired=direct.
+		// Publish that state while the output barrier is STILL effective;
+		// releasing it first leaks public SYNs through the recovered routes.
+		if err := m.commitNativeDirectAfterKernelRestoreLocked(); err != nil {
 			return err
 		}
 		if err := m.recoverNativeStartupWithSession(context.Background(), nativeSystemRunner{}, session); err != nil {
@@ -795,24 +813,36 @@ func (m *Manager) NativeRecoverInstalled() error {
 	})
 }
 
-// Called under the native lifecycle lock only AFTER recoverNativeRedirect has
-// proved the exact owned RPDB, route and nftables objects are absent. Save
-// Direct before retiring the one-use receipt: a crash between these writes
-// leaves either a retryable receipt or a verified Direct session, never an
-// unproven Smart session with no recovery identity.
-func (m *Manager) finalizeNativeRecoveryLocked() error {
+// Called ONLY after the exact owned TUN/rules and reply hook were verified
+// absent. This state write must precede releasing the rearmed OUTPUT barrier,
+// otherwise the recovered Direct route leaks public traffic while desired=smart.
+// A failure retains the one-use receipt and barrier for an explicit retry.
+func (m *Manager) commitNativeDirectAfterKernelRestoreLocked() error {
 	state, err := m.load()
 	if err != nil {
 		return err
 	}
 	if state.Desired != "smart" && state.Desired != "direct" {
-		return Fault("guard_pending", "native cleanup cannot finalize an unrelated desired mode")
+		return Fault("guard_pending", "native cleanup cannot commit an unrelated mode")
 	}
 	if state.Desired == "smart" {
 		state.Desired = "direct"
-		if err := m.save(state); err != nil {
-			return err
-		}
+		return m.save(state)
+	}
+	return nil
+}
+
+// Finalize the receipt only after Direct was durably committed AND the exact
+// operation-bound OUTPUT barrier has been independently removed. A failed
+// release leaves the claim for retry; ordinary Direct/off is never announced
+// as fully restored solely because the network route table is empty.
+func (m *Manager) finalizeNativeRecoveryLocked() error {
+	state, err := m.load()
+	if err != nil {
+		return err
+	}
+	if state.Desired != "direct" {
+		return Fault("guard_pending", "native recovery cannot retire its claim before Direct commitment and barrier release")
 	}
 	if health, e := m.readNativeHealth(); e == nil {
 		session, sessionErr := m.readNativeSession()
@@ -1163,6 +1193,18 @@ func (m *Manager) disconnectNativeSmartRoutingUnlocked() error {
 	if err := m.nativeUnitOwnership(); err != nil {
 		return err
 	}
+	// Stop-time OUTPUT containment is committed BEFORE systemctl stop may
+	// remove the TUN. The same path is used for manual Disconnect, Health
+	// exhaustion, and a failed initial Connect, with no new resource owner.
+	// A foreign or changed nft table blocks the stop rather than leaking.
+	if err := m.withLock(func() error {
+		if err := m.ensureNativeStopBarrierLocked(); err != nil {
+			return err
+		}
+		return m.markNativeOperatorStoppingLocked()
+	}); err != nil {
+		return err
+	}
 	// A matching active service can always be stopped independently of stale
 	// local state. ExecStopPost owns kernel cleanup, not the stopped Core.
 	if err := m.nativeControl("stop"); err != nil {
@@ -1359,7 +1401,11 @@ func (m *Manager) NativeStatus() (NativeConnectionStatus, error) {
 				if e = requireNativeStartupGuardClaim(context.Background(), nativeSystemRunner{}, plan, session.StartupGuardHandle); e != nil {
 					return e
 				}
-				result.Observed = "starting"
+				if health.Phase == "stopping" {
+					result.Observed = "stopping"
+				} else {
+					result.Observed = "starting"
+				}
 				result.ReplyGuardVerified = true
 				result.GuardVerified = true
 				return nil

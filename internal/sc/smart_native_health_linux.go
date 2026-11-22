@@ -632,6 +632,39 @@ func (m *Manager) withNativeTransition(fn func() error) error {
 	defer syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
 	return fn()
 }
+
+// Operator Disconnect must publish a truthful stopping phase while the
+// owned Core/TUN still exists. It must never overwrite an already persisted
+// Health-driven stop cause, and never mutate a missing/foreign health receipt.
+// Caller holds .lock; the outbound shutdown barrier has already been armed.
+func (m *Manager) markNativeOperatorStoppingLocked() error {
+	state, err := m.load()
+	if err != nil || state.Desired != "smart" {
+		return err
+	}
+	claim, err := m.readNativeSession()
+	if err != nil {
+		return err
+	}
+	health, err := m.readNativeHealth()
+	if errors.Is(err, os.ErrNotExist) {
+		return nil // partial initial connection before Health is staged
+	}
+	if err != nil {
+		return err
+	}
+	if health.OperationID != claim.HealthOperationID || health.ConfigSHA256 != claim.ConfigSHA256 {
+		return Fault("guard_pending", "native shutdown health identity mismatch")
+	}
+	if health.Phase == "stopping" {
+		return nil
+	}
+	health.Phase, health.Reason = "stopping", "operator_disconnect"
+	health.RestartInFlight = false
+	health.RestartOriginalPID = 0
+	return m.saveNativeHealth(health)
+}
+
 func (m *Manager) stopNativeHealthOperation(id, reason string) (bool, error) {
 	return m.stopNativeHealthOperationExpected(id, reason, nil)
 }

@@ -395,3 +395,87 @@ func TestNativeHealthArbitraryPositiveThresholdAndPersistence(t *testing.T) {
 		}
 	}
 }
+
+// A manual shutdown records the transition before Core/TUN are stopped.
+// Automatic exhaustion already wrote its concrete reason; that reason must
+// survive the same shared Disconnect path. No privileged kernel change here.
+func TestNativeManualStoppingPhaseAndRecoveryReasonPreservation(t *testing.T) {
+	for _, tc := range []struct {
+		name, phase, reason, wantReason string
+	}{
+		{"healthy-operator", "healthy", "selected_https_verified", "operator_disconnect"},
+		{"degraded-operator", "degraded", "selected_tcp_unreachable", "operator_disconnect"},
+		{"recovering-operator", "recovering", "core_restart_in_progress", "operator_disconnect"},
+		{"automatic-exhaustion", "stopping", "core_restart_attempts_exhausted", "core_restart_attempts_exhausted"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := New(filepath.Join(t.TempDir(), "state"), "", 0)
+			if err := m.prepare(); err != nil {
+				t.Fatal(err)
+			}
+			if err := m.save(State{Version: 1, Desired: "smart", Selected: "0123456789abcdef", Port: m.Port}); err != nil {
+				t.Fatal(err)
+			}
+			h := nativeHealthTestState()
+			h.Phase, h.Reason = tc.phase, tc.reason
+			if tc.phase == "recovering" {
+				h.RestartLimit, h.RestartAttempts, h.RestartIncidentMS = 3, 1, 1000
+				h.RestartBackoffMS, h.RestartDeadlineMS = 1000, 60000
+				h.RestartInFlight, h.RestartOriginalPID = true, 112
+			}
+			claim := NativeSession{Version: 1, Selected: "0123456789abcdef", InterfaceName: "sctun0", UnderlayIF: "eth0", ConfigSHA256: h.ConfigSHA256, HealthOperationID: h.OperationID}
+			raw, err := json.Marshal(claim)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := put(filepath.Join(m.Dir, nativeSessionFile), raw); err != nil {
+				t.Fatal(err)
+			}
+			if err := m.saveNativeHealth(h); err != nil {
+				t.Fatal(err)
+			}
+			if err := m.markNativeOperatorStoppingLocked(); err != nil {
+				t.Fatal(err)
+			}
+			got, err := m.readNativeHealth()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.Phase != "stopping" || got.Reason != tc.wantReason {
+				t.Fatalf("wrong stopping status: %+v", got)
+			}
+			if got.RestartInFlight || got.RestartOriginalPID != 0 {
+				t.Fatalf("stopping retained inflight Core receipt: %+v", got)
+			}
+		})
+	}
+}
+
+func TestNativeManualStopCannotRewriteUnrelatedHealth(t *testing.T) {
+	m := New(filepath.Join(t.TempDir(), "state"), "", 0)
+	if err := m.prepare(); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.save(State{Version: 1, Desired: "smart", Selected: "0123456789abcdef", Port: m.Port}); err != nil {
+		t.Fatal(err)
+	}
+	h := nativeHealthTestState()
+	claim := NativeSession{Version: 1, Selected: "0123456789abcdef", InterfaceName: "sctun0", UnderlayIF: "eth0", ConfigSHA256: h.ConfigSHA256, HealthOperationID: strings.Repeat("c", 32)}
+	raw, err := json.Marshal(claim)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := put(filepath.Join(m.Dir, nativeSessionFile), raw); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.saveNativeHealth(h); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.markNativeOperatorStoppingLocked(); ErrorCode(err) != "guard_pending" {
+		t.Fatalf("foreign health identity changed: %v", err)
+	}
+	got, err := m.readNativeHealth()
+	if err != nil || got != h {
+		t.Fatalf("unexpected mutation: %+v %v", got, err)
+	}
+}

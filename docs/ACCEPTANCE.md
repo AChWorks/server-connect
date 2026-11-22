@@ -72,6 +72,25 @@ For a candidate that incorporates the two-source Iran country policy, independen
 
 For a candidate that suppresses AAAA by default when selected IPv6 egress is unverified, prove **ordinary unforced dual-stack HTTPS** on actual WordPress API/download, aaPanel-equivalent and a large download on the exact real selected foreign VPN path, *not* merely `curl -4`. Verify normal A responses and a properly scoped empty AAAA response through the **actual installed TUN**; test literal IPv6 failure and independent underlay no-leak packet counters, before/after selected exit failures; verify protected public SSH and established HTTP replies. On an environment with genuinely working selected exit IPv6, test explicit opt-in positive IPv6 DNS/literal TCP/TLS and failure/no-leak. Mark unavailable global/provider IPv6 **UNSUPPORTED/NOT_RUN**, never a PASS. Retest Core SIGKILL, short provider outage, real reboot and original kernel restoration on the exact candidate before stable release.
 
+### Concurrent Native terminal-stop packet-leak regression
+
+The [real-VM shutdown witness](../scripts/qa/native-stop-concurrent-syn.py)
+requires an authorized disposable installed host with independent console,
+snapshot, SSH and five original IPv4/IPv6 route/rule/nft inventories.
+Prearm its independent failback; make a real selected HTTPS request using
+unproxied curl while the official VLESS Core/TUN is active; continually
+issue **new unmarked foreign TCP SYNs** throughout healthy, stopping and
+TUN removal. A passive Underlay tcpdump must first capture a positive
+Direct-mode SYN for the pinned foreign destination, then **zero** Direct
+SYNs while desired Smart remains persisted, including after TUN vanishes.
+Require actual Core stop and Direct commit, no lingering OUTPUT barrier,
+working SSH, and exact restored inventories. Report the phase-timestamped
+packet and mode witness, not only a final status response. Also verify
+automatic Health-exhaustion shutdown and manually requested Disconnect
+during degraded recovery on the same exact candidate. Preserve the
+distinct Real-VM/foreign-provider/physical-host evidence grades and never
+call unsupported combinations PASS.
+
 ### Concurrent Native startup packet-leak regression
 
 Use the [rooted disposable-VM packet witness](../scripts/qa/native-startup-concurrent-syn.py)

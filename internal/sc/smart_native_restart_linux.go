@@ -26,12 +26,12 @@ func nativeRestartDelay(s NativeHealthState) int64 {
 	return delay
 }
 
-// Reuse the *same* operation-bound startup plan to install a fresh exact
-// nft barrier before deliberately terminating a working Core child. The
-// original post-startup barrier was fully removed; that old handle is never
-// authority to adopt a new table. Retain crash-consistent preparing/armed
-// receipts so ExecStopPost can still recover either interrupted transition.
-func (m *Manager) rearmNativeRestartBarrierLocked(session NativeSession) error {
+// Reuse the operation-bound startup plan for both a supervised Core
+// replacement and terminal shutdown. The old nft table was removed after
+// readiness; its old handle is never authority to adopt a new one. Persist
+// preparing before nft creation so ExecStopPost can recover an interrupted
+// rearm by verifying the original plan and exact kernel object.
+func (m *Manager) rearmNativeOperationBarrierLocked(session NativeSession) error {
 	if session.StartupGuardName == "" || session.StartupGuardPhase != "released" {
 		return Fault("guard_pending", "Core restart requires a fully released initial startup barrier")
 	}
@@ -122,7 +122,7 @@ func (m *Manager) requestNativeCoreReplacement(id string) error {
 			if err != nil {
 				return err
 			}
-			if err := m.rearmNativeRestartBarrierLocked(claim); err != nil {
+			if err := m.rearmNativeOperationBarrierLocked(claim); err != nil {
 				return err
 			}
 			s.RestartAttempts++

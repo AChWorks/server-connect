@@ -129,6 +129,23 @@ the disposable VM packet-capture regression is
 No physical-server/no-leak or public release conclusion follows from VM
 observations alone.
 
+**Native shutdown boundary:** packet captures on both an installed VM
+and nonproduction IRPT-101 reproduced new, unmarked selected-foreign Direct
+SYNs during TUN teardown while the saved desired state was still Smart.
+The normal stop path, as well as finite Health exhaustion, therefore must
+rearm the *same existing operation-bound* OUTPUT barrier before stopping
+Core, not invent a separate long-lived kill switch. ExecStopPost must
+recheck its committed nft receipt before kernel removal, preserve foreign
+owners/accepted inbound replies, verify the Core-owned kernel footprint is
+gone, save Direct durably **before** deleting that barrier, and retire the
+one-use receipt only after verified removal. Intermediate errors report an
+uncertain/pending recovery rather than a successfully completed Off.
+A terminated Core cannot make all arbitrary OS crashes atomic; the
+required guarantee is bounded to observed deliberate and managed teardown
+windows, with real packet-positive evidence on the exact candidate.
+The disposable-VM [shutdown packet regression](../scripts/qa/native-stop-concurrent-syn.py)
+exercises this interval; independently observed field tests remain distinct.
+
 The Debian 12 (`nftables` 1.0.6) installed-Core candidate exposed a
 real version-specific enumeration difference: it lists `table,set,set,chain,rule,rule,rule`,
 where Debian 13 lists `table,chain,set,set,rule,rule,rule`. The initial

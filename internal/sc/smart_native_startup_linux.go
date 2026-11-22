@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
+	"os"
 	"path/filepath"
 	"reflect"
 	"regexp"
@@ -364,6 +365,95 @@ func nativeStartupRecover(ctx context.Context, r nativeReplyGuardCASRunner,
 		return Fault("guard_pending", "native startup containment removal unverified")
 	}
 	return nil
+}
+
+// Every deliberate terminal stop must restore the *existing* operation-bound
+// packet barrier before Core or its TUN can disappear. The same guard is used
+// for supervised child replacement. During a partial startup/rearm, a
+// preparing receipt can be recovered only against its exact precommitted plan;
+// an unknown or replaced nft object is never adopted or deleted here.
+// Caller holds Manager .lock and the outer native transition, or is the
+// quiescent ExecStopPost owner.
+func (m *Manager) ensureNativeStopBarrierLocked() error {
+	state, err := m.load()
+	if err != nil {
+		return err
+	}
+	session, err := m.readNativeSession()
+	if os.IsNotExist(err) {
+		if state.Desired == "smart" {
+			return Fault("guard_pending", "Smart shutdown has no native containment receipt")
+		}
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	// Pre-commit rollback already has Direct desired, and must not install
+	// a new filter merely to retire a never-activated startup receipt.
+	if state.Desired != "smart" {
+		return nil
+	}
+	if err := m.validateNativeSessionConfig(session); err != nil {
+		return err
+	}
+	if session.StartupGuardName == "" {
+		return Fault("guard_pending", "Smart shutdown has no operation-bound output barrier")
+	}
+	plan, err := m.readNativeStartupPlan(session)
+	if err != nil {
+		return err
+	}
+	switch session.StartupGuardPhase {
+	case "armed":
+		return requireNativeStartupGuardClaim(context.Background(), nativeSystemRunner{}, plan, session.StartupGuardHandle)
+	case "released":
+		return m.rearmNativeOperationBarrierLocked(session)
+	case "releasing":
+		present, err := nativeStartupPresent(context.Background(), nativeSystemRunner{}, plan.Name)
+		if err != nil {
+			return err
+		}
+		if present {
+			return requireNativeStartupGuardClaim(context.Background(), nativeSystemRunner{}, plan, session.StartupGuardHandle)
+		}
+		// Interrupted release: the old table has independently disappeared.
+		// Retire its stale handle before preparing the new guard.
+		session.StartupGuardPhase = "released"
+		raw, err := json.Marshal(session)
+		if err != nil {
+			return err
+		}
+		if err := put(filepath.Join(m.Dir, nativeSessionFile), raw); err != nil {
+			return err
+		}
+		return m.rearmNativeOperationBarrierLocked(session)
+	case "preparing":
+		present, err := nativeStartupPresent(context.Background(), nativeSystemRunner{}, plan.Name)
+		if err != nil {
+			return err
+		}
+		handle := uint64(0)
+		if present {
+			handle, err = nativeStartupReceipt(context.Background(), nativeSystemRunner{}, plan)
+		} else {
+			handle, err = nativeStartupInstall(context.Background(), nativeSystemRunner{}, plan)
+		}
+		if err != nil {
+			return err
+		}
+		session.StartupGuardPhase, session.StartupGuardHandle = "armed", handle
+		raw, err := json.Marshal(session)
+		if err != nil {
+			return err
+		}
+		if err := put(filepath.Join(m.Dir, nativeSessionFile), raw); err != nil {
+			return err
+		}
+		return requireNativeStartupGuardClaim(context.Background(), nativeSystemRunner{}, plan, handle)
+	default:
+		return Fault("guard_pending", "native shutdown containment phase invalid")
+	}
 }
 
 // A manager may only release containment after the exact independent Core

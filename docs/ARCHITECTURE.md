@@ -79,9 +79,22 @@ start or unexpected Core termination. The fixed native table/rule indices are
 not enough for SIGKILL recovery: official sing-tun's auto_redirect separately
 creates a random route table and priority-1 lookup. Recovery validates native
 resources before removing them. Unknown foreign objects are retained and
-reported uncertain for operator repair/retry. Only after exact kernel
-restoration is verified does the native stop hook persist Direct and retire
-its recovery receipt. A mismatched or unverified receipt remains intact for
+reported uncertain for operator repair/retry. For deliberate Disconnect and exhausted Health recovery, the Manager
+rearms the same one-operation OUTPUT nft containment *before* it stops
+the supervisor or removes the TUN; the independent ExecStopPost rechecks
+that exact barrier before any kernel restoration (also covering unplanned
+Core exit). The stop hook first verifies restoration of its Core/route/reply
+resources, **durably commits desired=direct while the OUTPUT barrier still
+blocks VPN-required egress**, and only then removes its exact barrier by
+generation-checked ownership. The operation receipt is retired last.
+A failure to verify the kernel, persist Direct, or remove its owned filter
+returns pending/uncertain rather than declaring clean Off. The temporary
+filter has no permanent Direct-mode role and protects established inbound
+SSH/HTTP replies and Core bootstrap by the same narrowly verified rules as
+at startup. Tests must prove both no Direct leak *before* this commit and
+no leftover VPN-only block *after* it.
+
+A mismatched or unverified receipt remains intact for
 operator investigation; a private inactive Core config may remain until the
 next explicit Disconnect. Connect starts the owned native unit without
 enabling it for future boots: a reboot never blindly reapplies unconfirmed
