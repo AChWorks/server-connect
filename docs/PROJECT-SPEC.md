@@ -35,7 +35,7 @@ Operators can manage rules manually and use trusted local or updated lists. A fo
 
 ## Installation and operation
 
-One independently authenticated, complete, versioned bundle and **one shared installer** must support:
+One complete, versioned, integrity-verified bundle and **one shared installer** must support:
 
 - **Official online** installation and update.
 - **Operator-hosted online mirror**, including a static Iranian web host holding the same verified release bytes.
@@ -57,7 +57,7 @@ Operators should manage compatible profiles, routing rules, connection state, di
 1. Preserve the already established Direct/Proxy Only and shared installation foundation; do not expand obsolete application/job diagnostics.
 2. Make **real Smart Routing TUN** work end-to-end on disposable Linux, proving independent Direct/VPN packet paths and safe coexistence.
 3. Complete independent activation/runtime protection, recovery and practical operator controls.
-4. Validate official, mirror and offline installation/update, real supported traffic paths, compatibility, resource footprint and release authenticity before the first stable outbound-capable release.
+4. Validate official, mirror and offline installation/update, real supported traffic paths, compatibility, resource footprint and release-source integrity and licensing before the first stable outbound-capable release.
 5. Add the optional Cloudflare website connector and any other future features **only as separate, justified work**. Concurrent active VPN profiles are deferred, not a dependency.
 
 A release is complete only for the features **actually implemented, independently validated, documented and safely distributed**. Source tests, isolated simulations or a successful Windows VPN profile alone do not establish production-ready Linux TUN or Iran-datacenter connectivity.
@@ -66,7 +66,7 @@ A release is complete only for the features **actually implemented, independentl
 
 - [Architecture](ARCHITECTURE.md) — components, traffic-policy mechanics, routing and resource ownership.
 - [Safety and recovery](SAFETY-RECOVERY.md) — activation, independent health protection, failure policy and rollback.
-- [Distribution](OFFLINE-DISTRIBUTION.md) — authenticated official/mirror/offline package and installation lifecycle.
+- [Distribution](OFFLINE-DISTRIBUTION.md) — source-trusted official/mirror/offline package and installation lifecycle.
 - [Acceptance](ACCEPTANCE.md) — reproducible test matrix, evidence thresholds and historical lessons worth retaining.
 
 **Work and history live in their natural systems:** GitHub Issues track remaining tasks; PRs, CI and Releases track implementation and evidence. They do not redefine this specification.

@@ -361,7 +361,7 @@ production route ownership or safe hosted ingress/SSH behavior.
 
 ## Activation Guard
 
-Default confirmation window: **600 seconds**, operator configurable. High-risk route changes require:
+Current initial Native confirmation window: **600 seconds**, fixed for first Stable. High-risk route changes require:
 
 1. Inspect actual IPv4/IPv6 addresses, routes/rules, relevant packet filtering, conntrack/return paths, local resolver, VPN underlay, management access and foreign owners. Collect a deterministic minimum proposed delta and verified safe baseline, including expected **absence**.
 2. Serialize the operation and durably journal its exact ID, resource identities, before/after intent, phase, boot identity and rollback deadline. Reject stale or conflicting operations; use crash-safe fsync/atomic storage. Judge deadlines with a **monotonic clock within the same boot**; reboot, clock changes or unverifiable deadline state must conservatively trigger reconciliation, not extend an unconfirmed Apply.
@@ -373,26 +373,38 @@ Default confirmation window: **600 seconds**, operator configurable. High-risk r
 
 If an existing resource was replaced or altered by another owner, classify `UNCERTAIN`, preserve it and require controlled operator recovery instead of deleting/overwriting it. Reobserve native kernel identity and all relevant foreign dependencies before cleanup: an `ip route`/RPDB protocol tag or a matching rule number alone is **not authenticated proof of Server Connect ownership**, and a Manager lock cannot exclude independent privileged writers.
 
-### Fresh management confirmation — pending production acceptance
+### One-use Native confirmation from a new SSH login
 
-The former **v4 disposable supervised trial** implemented an experimental
-fresh-root-OpenSSH challenge using process ancestry, socket identity and
-monotonic session timing. That implementation and its confirmation CLI have
-been retired. **Current Native `connect-smart` does not issue or validate
-a fresh SSH challenge or provider-console confirmation.** Historical v4
-observations are not current Native authentication or field evidence.
+After the actual `connect-smart` path has started the guarded Core and verified
+its live TUN/kernel policy, the CLI displays one short ready-to-copy command:
+`sudo /usr/local/bin/server-connect confirm <one-use-token>`. It must be run in a **new**
+OpenSSH connection established **after** this activation. The implementation
+checks Linux kernel process ancestry/start timestamps for a real server-side
+`sshd` process, rather than trusting a caller-provided environment variable,
+terminal name or a nested shell in an old login. The token is random per
+operation; only its SHA256 digest is persisted with the same boot and Health
+operation ID. The receipt uses kernel uptime, starts a fixed 600-second
+monotonic deadline after initial Core readiness, and can be durably consumed
+only once. Replay, wrong ID, stale boot, expired deadline, old SSH, detached
+local command and a changed/unverified Core/guard refuse confirmation.
 
-The current Native candidate instead uses a durable, configuration-bound,
-current-boot one-use Core-start claim, independently armed Health/Recovery
-roles and a narrowly owned inbound-reply guard. These safeguards protect
-startup and existing accepted connections but do **not** prove that a
-new management connection can reach the host after activation.
+Before confirmation, the session remains **provisional**, guarded against
+unmarked VPN-required public Direct egress. The existing independent Health
+and Recovery executors check the operation-bound deadline; on expiry,
+restart/reboot or lost guard they invoke the same exact owned-resource
+restoration to Direct/off. No new daemon, second tunnel, custom public key or
+recurring operator confirmation is added. Once confirmed, the normal
+independent Runtime Health Guard, bounded Core recovery and emergency
+`disconnect` continue without re-confirmation. A prior full signed/trial
+journal is not an authorization for a new session.
 
-For future production acceptance, an independently verified, fresh
-operation-bound SSH session or explicitly approved provider-console
-confirmation remains required under the Activation Guard contract above.
-Neither source tests nor disconnected installed-guest QA satisfy this
-physical management-access requirement.
+**Evidence boundary:** These source and local tests verify receipt and
+process-ancestry logic only. A working SSH connection after real activation,
+expiry with a physical server disconnected, actual pre/post host network
+inventories and selected VPN-path delivery still require exact-candidate
+installed/physical proof before first Stable. A new SSH command alone does
+not prove preserved website traffic, upstream VPN health or arbitrary host
+safety. Provider-console recovery remains independent of the SSH gate.
 
 ## Runtime Health Guard
 
@@ -411,7 +423,7 @@ On confirmed failure, prevent **unobserved** Direct bypass while the Smart Routi
 
 **Initial reconnect candidate, subject to field calibration:** at most **3 automatic attempts per confirmed outage incident**, with short increasing delays and an overall recovery deadline; allow operator adjustment of the bounded attempt/time budget. Flapping must not reset the incident budget into an endless loop; reconnect only the selected VPN transport, **never replay interrupted application requests or arbitrary host operations**. Exhaustion triggers verified `restore_direct` and **no further automatic retries until an explicit new enable action**. Critical guard, ownership or protected-host-access failures bypass the retry delay and restore the safest available host baseline immediately. Report the failure cause, attempt count, last result and true current mode in status and credential-safe local logs. **Optional outage/recovery notifications are Owner-deferred**; no mandatory external alerting service, delivery dependency or separate notification worker in the first release. **Cloudflare Tunnel**, if separately enabled, has its own connector health: an unselected/failed website-origin check must not tear down healthy outbound Smart Routing.
 
-### Current Native guarded Core-process candidate (Draft PR #126)
+### Native guarded Core-process lifecycle and bounded recovery
 
 The original sing-box Core now executes as a directly supervised child inside
 its existing managed systemd unit. The supervisor is **not** an unguarded

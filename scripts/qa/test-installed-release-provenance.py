@@ -39,7 +39,7 @@ FUNCTIONS = (
     + extract("rollback_candidate() {\n", "\n}\n")
 )
 STAGING = extract(
-    " stage=$(mktemp -d \"$PREFIX/releases/.stage.XXXXXXXX\") || die 'cannot stage release'\n",
+    ' if [ "$prefix_created" = yes ];then\n  # Interrupted copies stay outside the already published prefix, but are\n',
     " stage=''\n",
 )
 assert 'verify_release_payload "$stage"' in STAGING
@@ -318,7 +318,7 @@ class ReleasePayloadTests(unittest.TestCase):
         result = self.shell(
             RELEASE_ASSIGNMENT[0] + '\n'
             + 'release="$PREFIX/releases/$release_name"\n'
-            'stage=""\nrelease_created=no\n'
+            'stage=""\nrelease_created=no\nprefix_created=no\n'
             + STAGING + '\nprintf "%s\\n" "$release"\n')
         self.assertEqual(result.stdout.strip(), str(self.prefix / "releases" / name))
         return self.prefix / "releases" / name
@@ -581,6 +581,420 @@ class ReleasePayloadTests(unittest.TestCase):
             b"changed managed service template\n")
         self.owned_current(release, expected=21)
         self.audit(release, expected=21)
+
+
+
+class FirstInstallIntentTests(unittest.TestCase):
+    """Exercise the actual atomic first-prefix helpers in an isolated fake /opt.
+
+    This is intentionally not a stand-in for the privileged installed-host
+    matrix. It distinguishes after-directory-publish SIGKILL from foreign
+    owner-marker lookalikes and verifies safe retry/refusal without root.
+    """
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix="sc-first-intent-")
+        self.addCleanup(self.temp.cleanup)
+        self.home = Path(self.temp.name)
+        self.opt = self.home / "opt"
+        self.state = self.home / "state"
+        self.prefix = self.opt / "server-connect"
+        self.opt.mkdir()
+        self.state.mkdir(mode=0o700)
+        self.functions = extract(
+            "FIRST_INSTALL_INTENT=$STATE/.first-install-intent\n",
+            "\n# Inspect the *effective* systemd identity before ANY stop/disable/enable or",
+        )
+        # Substitute the real root-owned /opt path only inside this private
+        # hermetic source copy; do not change the shipped installer.
+        self.functions = self.functions.replace("/opt", str(self.opt))
+        self.units = self.home / "units"
+        self.units.mkdir()
+        self.source = self.home / "source"
+        self.source.mkdir()
+        (self.source / "checksums.sha256").write_text("")
+        self.functions = self.functions.replace(
+            '/etc/systemd/system "$COMMAND" "$release_name"',
+            str(self.units) + ' "$COMMAND" "$release_name"',
+        )
+        self.functions = self.functions.replace('node(Path("/etc/systemd/system")/name,"file")',
+                                                'node(Path(' + repr(str(self.units)) + ')/name,"file")')
+        self.prelude = (
+            "set -eu\n"
+            f'PREFIX="{self.prefix}"\n'
+            f'STATE="{self.state}"\n'
+            f'SOURCE_DIR="{self.source}"\n'
+            f'COMMAND="{self.home / "bin"}"\n'
+            'release_name="0.1.0-dev-0123456789abcdef"\n'
+            'trust_kind=unsigned\nmetadata_file=""\nsignature_file=""\npublisher_key=""\n'
+            'say() { printf "%s\\n" "$*"; }\n'
+            'die() { printf "REFUSED:%s\\n" "$*" >&2; exit 21; }\n'
+            'check_root_file() { [ -f "$1" ] && [ ! -L "$1" ]; }\n'
+            'check_root_dir() { [ -d "$1" ] && [ ! -L "$1" ]; }\n'
+        )
+
+    def run_first(self, command, exit_expected=0):
+        result = subprocess.run(
+            ["/bin/sh", "-c", self.prelude + self.functions + "\n" + command],
+            capture_output=True, text=True, timeout=15,
+        )
+        self.assertEqual(result.returncode, exit_expected,
+                         f"stdout={result.stdout} stderr={result.stderr}")
+        return result
+
+    def test_atomic_initial_publish_then_safe_resume_after_interrupt(self):
+        self.run_first("first_install_publish\n")
+        self.assertEqual((self.prefix / ".owner").read_text(),
+                         "AChWorks/server-connect\n")
+        receipt = self.state / ".first-install-intent"
+        self.assertTrue(receipt.is_file())
+        self.assertEqual(receipt.stat().st_nlink, 1)
+        self.assertFalse(list(self.state.glob('.first-install-intent.*')))
+        original_inode = self.prefix.stat().st_ino
+        self.run_first("first_install_claimed_prefix\n")
+        # Emulates SIGKILL immediately after owner publication and a second
+        # SIGKILL after making just the empty releases directory.
+        (self.prefix / "releases").mkdir()
+        self.run_first("first_install_claimed_prefix\n")
+        self.assertEqual(original_inode, self.prefix.stat().st_ino)
+        self.assertTrue(receipt.exists())
+
+    def test_crash_before_rename_reconciles_only_exact_staging(self):
+        stage = self.opt / ".server-connect-initial.QA123456"
+        stage.mkdir()
+        (stage / ".owner").write_text("AChWorks/server-connect\n")
+        receipt = self.state / ".first-install-intent"
+        receipt.write_text(
+            f"{stage}\n{stage.stat().st_dev}:{stage.stat().st_ino}\nunsigned\n"
+        )
+        receipt.chmod(0o600)
+        self.run_first("first_install_reconcile_abandoned_stage\n")
+        self.assertFalse(stage.exists())
+        self.assertFalse(receipt.exists())
+        self.run_first("first_install_publish\n")
+        self.assertTrue(self.prefix.is_dir())
+        self.run_first("first_install_claimed_prefix\n")
+
+    def test_foreign_prefix_and_changed_inode_never_adopted(self):
+        self.run_first("first_install_publish\n")
+        quarantined = self.opt / "old-staging-identity"
+        self.prefix.rename(quarantined)
+        self.prefix.mkdir()
+        (self.prefix / ".owner").write_text("AChWorks/server-connect\n")
+        self.run_first("first_install_claimed_prefix\n", exit_expected=1)
+        self.assertTrue((self.prefix / ".owner").is_file())
+        self.assertTrue(quarantined.is_dir())
+        self.run_first("first_install_reconcile_abandoned_stage\n",
+                       exit_expected=21)
+        self.assertTrue(self.prefix.is_dir())
+
+    def test_unrecognized_foreign_file_blocks_recovery(self):
+        self.run_first("first_install_publish\n")
+        foreign = self.prefix / "unknown-client-data"
+        foreign.write_text("never delete\n")
+        self.run_first("first_install_claimed_prefix\n", exit_expected=1)
+        self.assertEqual(foreign.read_text(), "never delete\n")
+        foreign.unlink()
+        self.run_first("first_install_claimed_prefix\n")
+
+    def test_failure_after_published_owner_rolls_back_exact_empty_prefix(self):
+        rollback = extract("rollback_candidate() {\n", "\n}\n")
+        command = (
+            "first_install_publish\n"
+            "prefix_created=yes\n"
+            "rollback_needed=no\n"
+            "release_created=no\n"
+            "command_created=no\n"
+            "stage=''\n"
+            "unit_backup=''\n"
+            "guard_backup=''\n"
+            "previous=''\n"
+            "remove_backup() { :; }\n"
+            "unit_identity=absent\n"
+            + rollback + "\n"
+            "rollback_candidate\n"
+            '[ "$failed" = no ]\n'
+            '[ ! -e "$PREFIX" ]\n'
+            '[ ! -e "$FIRST_INSTALL_INTENT" ]\n'
+        )
+        self.run_first(command)
+        self.assertFalse(self.prefix.exists())
+        self.assertFalse((self.state / ".first-install-intent").exists())
+
+    def test_failure_with_foreign_file_keeps_partial_prefix_for_inspection(self):
+        rollback = extract("rollback_candidate() {\n", "\n}\n")
+        command = (
+            "first_install_publish\n"
+            'printf "untouched\\n" > "$PREFIX/foreign-data"\n'
+            "prefix_created=yes\n"
+            "rollback_needed=no\n"
+            "release_created=no\n"
+            "command_created=no\n"
+            "stage=''\n"
+            "unit_backup=''\n"
+            "guard_backup=''\n"
+            "previous=''\n"
+            "remove_backup() { :; }\n"
+            "unit_identity=absent\n"
+            + rollback + "\n"
+            "rollback_candidate\n"
+            '[ "$failed" = yes ]\n'
+            '[ -f "$PREFIX/foreign-data" ]\n'
+            '[ -f "$FIRST_INSTALL_INTENT" ]\n'
+        )
+        self.run_first(command)
+        self.assertEqual((self.prefix / "foreign-data").read_text(), "untouched\n")
+        self.assertTrue((self.state / ".first-install-intent").exists())
+
+    def first_stage_crash(self, after_publish=False):
+        # The test harness uses the installer's *actual* first-install
+        # helpers. SIGKILL bypasses every shell cleanup trap.
+        self.run_first("first_install_publish\n")
+        content=b"local verified candidate payload"
+        (self.source / "bin").mkdir(exist_ok=True)
+        (self.source / "bin" / "server-connect").write_bytes(content)
+        (self.source / "checksums.sha256").write_text(
+            hashlib.sha256(content).hexdigest()+"  bin/server-connect\n"
+        )
+        service=self.source/"server-connect.service"
+        service.write_text("[Service]\nExecStart=/opt/server-connect/current/bin/server-connect\n")
+        stage_script=(
+            f'stage=$(mktemp -d "{self.opt}/.server-connect-release.XXXXXXXX")\n'
+            "first_install_stage_receipt\n"
+            'mkdir -m 0755 "$stage/bin"\n'
+            'install -m 0755 "$SOURCE_DIR/bin/server-connect" "$stage/bin/server-connect"\n'
+        )
+        if after_publish:
+            stage_script+=(
+                'mkdir -m 0755 "$PREFIX/releases"\n'
+                'printf "AChWorks/server-connect\\n" > "$stage/.owner"\n'
+                'mv -Tn "$stage" "$PREFIX/releases/$release_name"\n'
+                'ln -s "releases/$release_name" "$PREFIX/current"\n'
+                f'first_install_atomic_unit "$SOURCE_DIR/server-connect.service" "{self.units}/server-connect.service"\n'
+            )
+        else:
+            stage_script+='printf "partial-copy" > "$stage/bin/server-connect"\n'
+        stage_script+="kill -KILL $$\n"
+        self.run_first(stage_script, exit_expected=-9)
+        self.assertTrue((self.state/".first-install-intent").is_file())
+        self.assertTrue((self.state/".first-release-intent").is_file())
+
+    def test_sigkill_during_first_release_copy_resumes_without_foreign_cleanup(self):
+        self.first_stage_crash()
+        sentinel=self.home/"foreign-preserved"
+        sentinel.write_text("outside")
+        self.run_first("first_install_reconcile_transaction inspect\n")
+        self.run_first("first_install_reconcile_transaction recover\n")
+        self.assertEqual(sentinel.read_text(),"outside")
+        self.assertFalse(self.prefix.exists())
+        self.assertFalse((self.state/".first-release-intent").exists())
+        self.assertFalse((self.state/".first-install-intent").exists())
+        self.assertFalse(list(self.opt.glob(".server-connect-release.*")))
+        self.run_first("first_install_publish\n")
+        self.assertTrue(self.prefix.is_dir())
+
+    def test_sigkill_after_release_and_first_service_published_recovers(self):
+        self.first_stage_crash(after_publish=True)
+        self.assertTrue((self.units/"server-connect.service").is_file())
+        self.assertTrue((self.prefix/"current").is_symlink())
+        self.run_first("first_install_reconcile_transaction inspect\n")
+        self.run_first("first_install_reconcile_transaction recover\n")
+        self.assertFalse(self.prefix.exists())
+        self.assertFalse((self.units/"server-connect.service").exists())
+        self.assertFalse((self.state/".first-release-intent").exists())
+
+    def test_foreign_unit_or_inode_during_interrupted_install_refused(self):
+        self.first_stage_crash(after_publish=True)
+        target=self.units/"server-connect.service"
+        original=target.read_bytes()
+        target.write_bytes(b"foreign service")
+        self.run_first("first_install_reconcile_transaction inspect\n",exit_expected=1)
+        self.run_first("first_install_reconcile_transaction recover\n",exit_expected=1)
+        self.assertEqual(target.read_bytes(),b"foreign service")
+        self.assertTrue(self.prefix.exists())
+        target.write_bytes(original)
+        release=self.prefix/"releases"/"0.1.0-dev-0123456789abcdef"
+        displaced=self.opt/"removed-original-release"
+        release.rename(displaced)
+        release.mkdir()
+        self.run_first("first_install_reconcile_transaction inspect\n",exit_expected=1)
+        self.run_first("first_install_reconcile_transaction recover\n",exit_expected=1)
+        self.assertTrue(release.is_dir())
+        self.assertTrue(displaced.is_dir())
+        self.assertTrue(target.is_file())
+
+    def test_sigkill_after_signed_namespace_reparent_before_receipt(self):
+        self.first_stage_crash()
+        original=Path((self.state/".first-release-intent").read_text().splitlines()[0])
+        nested=self.prefix/"releases"/(".stage."+original.name.rsplit(".",1)[-1])
+        (self.prefix/"releases").mkdir()
+        original.rename(nested)
+        self.assertEqual(nested.stat().st_ino, int(
+            (self.state/".first-release-intent").read_text().splitlines()[1].split(":")[1]
+        ))
+        self.run_first("first_install_reconcile_transaction inspect\n")
+        self.run_first("first_install_reconcile_transaction recover\n")
+        self.assertFalse(self.prefix.exists())
+        self.assertFalse(original.exists())
+        self.assertFalse(nested.exists())
+        self.assertFalse((self.state/".first-release-intent").exists())
+
+    def test_swapped_signed_namespace_stage_refused_without_deletion(self):
+        self.first_stage_crash()
+        original=Path((self.state/".first-release-intent").read_text().splitlines()[0])
+        nested=self.prefix/"releases"/(".stage."+original.name.rsplit(".",1)[-1])
+        (self.prefix/"releases").mkdir()
+        original.rename(nested)
+        moved=self.opt/"original-release-stage"
+        nested.rename(moved)
+        nested.mkdir()
+        (nested/"foreign").write_text("do not adopt\n")
+        self.run_first("first_install_reconcile_transaction inspect\n",exit_expected=1)
+        self.run_first("first_install_reconcile_transaction recover\n",exit_expected=1)
+        self.assertEqual((nested/"foreign").read_text(),"do not adopt\n")
+        self.assertTrue(moved.exists())
+        self.assertTrue(self.prefix.exists())
+
+    def test_foreign_file_in_partial_release_never_deleted(self):
+        self.first_stage_crash()
+        receipt=(self.state/".first-release-intent").read_text().splitlines()
+        stage=Path(receipt[0])
+        foreign=stage/"other-process-data"
+        foreign.write_text("important")
+        self.run_first("first_install_reconcile_transaction inspect\n",exit_expected=1)
+        self.run_first("first_install_reconcile_transaction recover\n",exit_expected=1)
+        self.assertEqual(foreign.read_text(),"important")
+
+    def completed_first_fixture(self):
+        # Prepare an exact inode/receipt claim plus a complete fake installed
+        # unit inventory. The real systemd + manager checks are separately
+        # exercised against root Debian12/13 in installed-host QA.
+        self.first_stage_crash(after_publish=True)
+        script=b"#!/bin/sh\n[ \"$1\" = installer-check-service ]\n"
+        for manager in (self.source/"bin/server-connect",
+                        self.prefix/"releases/0.1.0-dev-0123456789abcdef/bin/server-connect"):
+            manager.write_bytes(script)
+            manager.chmod(0o755)
+        checksum=hashlib.sha256(script).hexdigest()
+        (self.source/"checksums.sha256").write_text(
+            checksum + "  bin/server-connect\n")
+        release=self.prefix/"releases/0.1.0-dev-0123456789abcdef"
+        (release/"checksums.sha256").write_bytes(
+            (self.source/"checksums.sha256").read_bytes())
+        unit_names=("server-connect-activation-recover.service",
+                    "server-connect-activation-recover.timer",
+                    "server-connect-native-tun.service",
+                    "server-connect-smart-health.service",
+                    "server-connect-smart-health.timer")
+        for name in unit_names:
+            body=("Unit fixture "+name+"\n").encode()
+            (self.units/name).write_bytes(body)
+            (self.prefix/(name+".sha256")).write_text(hashlib.sha256(body).hexdigest()+"\n")
+        main=self.units/"server-connect.service"
+        (self.prefix/"unit.sha256").write_text(hashlib.sha256(main.read_bytes()).hexdigest()+"\n")
+        (self.home/"bin").symlink_to(self.prefix/"current/bin/server-connect")
+        # Subprocesses run actual production receipt and inode helpers. Only
+        # the external systemctl/manager-admission adapters are replaced.
+        self.committed_checks=(
+            'check_owned() { [ -f "$PREFIX/.owner" ] && '
+            '[ -L "$PREFIX/current" ] && [ -L "$COMMAND" ]; }\n'
+            'check_service_owner() { [ -f "$UNIT" ] || return 1; unit_identity=owned; }\n'
+            'check_guard_units() {\n'
+            ' for name in server-connect-activation-recover.service '
+            'server-connect-activation-recover.timer server-connect-native-tun.service '
+            'server-connect-smart-health.service server-connect-smart-health.timer;do\n'
+            '  [ -f "'+str(self.units)+'/$name" ] || return 1\n'
+            '  test "$(sha256sum "'+str(self.units)+'/$name" | cut -d" " -f1)" '
+            '= "$(cat "$PREFIX/$name.sha256")" || return 1\n'
+            ' done\n'
+            '}\n'
+        )
+        self.prelude+=f'UNIT="{main}"\n'
+        return release
+
+    def run_committed(self, command, exit_expected=0):
+        return self.run_first(self.committed_checks+command,exit_expected)
+
+    def test_interrupted_two_receipt_retirement_preserves_committed_service(self):
+        release=self.completed_first_fixture()
+        self.run_committed("first_install_is_committed\n")
+        # One real process is killed after unlinking the first claim but
+        # before the second unlink. No signal trap can complete retirement.
+        self.run_committed('rm "$FIRST_INSTALL_INTENT"\nkill -KILL $$\n',-9)
+        self.assertTrue(release.is_dir())
+        self.assertTrue((self.units/"server-connect.service").exists())
+        self.assertFalse((self.state/".first-install-intent").exists())
+        self.assertTrue((self.state/".first-release-intent").exists())
+        self.run_committed("first_install_is_committed\n")
+        self.run_committed("first_install_retire_committed_claims\n")
+        self.assertFalse((self.state/".first-release-intent").exists())
+        self.assertTrue(release.is_dir(), "valid installed release discarded")
+        self.assertTrue((self.units/"server-connect.service").is_file())
+        # The subsequent real uninstall is covered by installed-host CI.
+        # This isolated cleanup verifies a different initial release can now
+        # be claimed without stale stage receipts.
+        (self.home/"bin").unlink()
+        shutil.rmtree(self.prefix)
+        for file in self.units.iterdir():file.unlink()
+        self.run_first('release_name="0.1.0-dev-ffffffffffffffff"\n'
+                       'first_install_publish\n'
+                       'stage=$(mktemp -d "'+str(self.opt)+'/ .unused" )\n',
+                       exit_expected=1) if False else None
+        self.run_first('first_install_publish\n'
+                       'stage=$(mktemp -d "'+str(self.opt)+'/.server-connect-release.XXXXXXXX")\n'
+                       'release_name="0.1.0-dev-ffffffffffffffff"\n'
+                       'first_install_stage_receipt\n')
+        self.assertTrue((self.state/".first-release-intent").is_file())
+        self.assertTrue((self.prefix/".owner").is_file())
+
+    def test_retirement_commit_is_idempotent_and_rejects_foreign_receipts(self):
+        release=self.completed_first_fixture()
+        self.run_committed("first_install_retire_committed_claims\n")
+        self.assertTrue(release.exists())
+        self.assertFalse((self.state/".first-install-intent").exists())
+        self.assertFalse((self.state/".first-release-intent").exists())
+        # An unrelated orphan with the same basename is never deleted.
+        staged=self.state/".first-release-intent"
+        staged.write_text("/opt/.server-connect-release.FOREIGN1\n1:2\n0.1.0-dev-ffffffffffffffff\n")
+        staged.chmod(0o600)
+        self.run_committed("first_install_is_committed\n",exit_expected=1)
+        self.run_committed("first_install_retire_committed_claims\n",exit_expected=21)
+        self.assertTrue(staged.exists())
+        # Even a syntactically authentic receipt cannot adopt a replaced
+        # inode or modified current target/unit digest.
+        original=(staged).read_bytes()
+        staged.write_bytes(("/opt/.server-connect-release.ABCDE123\n"
+                            +str(release.stat().st_dev)+":"+str(release.stat().st_ino+1)
+                            +"\n"+release.name+"\n").encode())
+        self.run_committed("first_install_is_committed\n",exit_expected=1)
+        self.assertTrue(staged.is_file(), "malformed orphan was deleted")
+        self.assertTrue(release.is_dir(), "valid installed release was disturbed")
+        staged.write_bytes(original)
+
+    def test_retirement_unlink_error_is_recoverable_without_uninstall(self):
+        release=self.completed_first_fixture()
+        refuse_stage_remove=(
+            'rm() {\n'
+            ' case "$*" in *".first-release-intent"*) return 1;; esac\n'
+            ' command rm "$@"\n'
+            '}\n'
+        )
+        self.run_committed(refuse_stage_remove+
+                           "first_install_retire_committed_claims\n",exit_expected=21)
+        self.assertFalse((self.state/".first-install-intent").exists())
+        self.assertTrue((self.state/".first-release-intent").is_file())
+        self.assertTrue(release.is_dir())
+        self.assertTrue((self.units/"server-connect.service").is_file())
+        self.run_committed("first_install_retire_committed_claims\n")
+        self.assertFalse((self.state/".first-release-intent").exists())
+        self.assertTrue(release.is_dir())
+
+    def test_preexisting_prefix_never_replaced(self):
+        self.prefix.mkdir()
+        (self.prefix / "foreign").write_text("untouched\n")
+        self.run_first("first_install_publish\n", exit_expected=21)
+        self.assertEqual((self.prefix / "foreign").read_text(), "untouched\n")
+        self.assertFalse((self.state / ".first-install-intent").exists())
 
 
 if __name__ == "__main__":

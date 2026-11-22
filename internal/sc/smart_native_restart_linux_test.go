@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -168,6 +169,127 @@ func TestNativeCompletedCoreReplacementDefersUntilFreshReleasedClaim(t *testing.
 		if got, err := nativeFinishCoreReplacementRound(state, fail); err != nil || got != state || failCalls != before {
 			t.Fatalf("live or healthy replacement result incorrectly terminated: %+v err=%v", got, err)
 		}
+	}
+}
+
+func TestNativeCoreRecoveryPublishesThroughSSHConfirmationWithoutFalseOff(t *testing.T) {
+	m := New(filepath.Join(t.TempDir(), "state"), "", 0)
+	before := nativeHealthTestState()
+	before.Phase = "recovering"
+	before.RestartLimit = 3
+	before.RestartBackoffMS = 1000
+	before.RestartDeadlineMS = 60000
+	before.RestartIncidentMS = 1000
+	before.RestartNextMS = 8000
+	pending := NativeSession{
+		Version: 1, Selected: "0123456789abcdef", InterfaceName: "sctun0", UnderlayIF: "eth0",
+		HealthOperationID: before.OperationID, ConfigSHA256: before.ConfigSHA256,
+		StartupGuardName:   "sc_pre_" + before.OperationID,
+		StartupGuardSHA256: strings.Repeat("c", 64), StartupGuardPhase: "armed", StartupGuardHandle: 42,
+		ConfirmationBootID: before.BootID, ConfirmationIssuedMS: 1100,
+		ConfirmationDeadlineMS:  1100 + nativeConfirmationTTLMS,
+		ConfirmationTokenSHA256: strings.Repeat("d", 64),
+	}
+	persist := func(session NativeSession, health NativeHealthState) {
+		t.Helper()
+		if err := m.withLock(func() error {
+			b, e := json.Marshal(session)
+			if e != nil {
+				return e
+			}
+			if e = put(filepath.Join(m.Dir, nativeSessionFile), b); e != nil {
+				return e
+			}
+			return m.saveNativeHealth(health)
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	confirmed := pending
+	confirmed.ConfirmationTokenSHA256 = ""
+	confirmed.ConfirmationAccepted = true
+	for _, label := range []string{"waiting_for_fresh_core", "waiting_for_kernel_policy", "recovery_backoff"} {
+		t.Run(label, func(t *testing.T) {
+			persist(pending, before)
+			next := before
+			next.HeartbeatMS++
+			next.Rounds++
+			next.RestartResult = label
+			// The recovery executor has already captured the pending
+			// generation. Commit the independent successful SSH confirmation
+			// before it acquires its own publication lock.
+			ready, resume := make(chan struct{}), make(chan struct{})
+			result := make(chan error, 1)
+			go func() { close(ready); <-resume; result <- m.publishNativeRecoveryWait(before, next, pending) }()
+			<-ready
+			if err := m.withLock(func() error {
+				b, e := json.Marshal(confirmed)
+				if e != nil {
+					return e
+				}
+				return put(filepath.Join(m.Dir, nativeSessionFile), b)
+			}); err != nil {
+				t.Fatal(err)
+			}
+			close(resume)
+			if err := <-result; err != nil {
+				t.Fatalf("valid confirmation invalidated %s: %v", label, err)
+			}
+			health, err := m.readNativeHealth()
+			if err != nil || health != next || health.Phase == "off" {
+				t.Fatalf("spurious Direct/off: %+v %v", health, err)
+			}
+			session, err := m.readNativeSession()
+			if err != nil || !session.ConfirmationAccepted {
+				t.Fatalf("accepted receipt lost: %+v %v", session, err)
+			}
+		})
+	}
+	for _, kind := range []string{"different_operation", "changed_core", "different_boot", "different_guard", "changed_health"} {
+		t.Run(kind, func(t *testing.T) {
+			persist(pending, before)
+			next := before
+			next.Rounds++
+			altered := confirmed
+			if kind == "changed_health" {
+				moved := before
+				moved.Rounds += 2
+				persist(pending, moved)
+			} else {
+				switch kind {
+				case "different_operation":
+					altered.HealthOperationID = strings.Repeat("e", 32)
+					altered.StartupGuardName = "sc_pre_" + altered.HealthOperationID
+				case "changed_core":
+					altered.ConfigSHA256 = strings.Repeat("f", 64)
+				case "different_boot":
+					altered.ConfirmationBootID = "22222222-2222-4222-8222-222222222222"
+				case "different_guard":
+					altered.StartupGuardHandle++
+				}
+				persist(altered, before)
+			}
+			err := m.publishNativeRecoveryWait(before, next, pending)
+			expected := "guard_pending"
+			if kind == "changed_health" {
+				expected = "recovery_superseded"
+			}
+			if ErrorCode(err) != expected {
+				t.Fatalf("foreign generation accepted: %v (want %s)", err, expected)
+			}
+			h, e := m.readNativeHealth()
+			if e != nil || h == next || h.Phase == "off" {
+				t.Fatalf("foreign generation overwritten/stopped: %+v %v", h, e)
+			}
+		})
+	}
+	if !nativeRecoveryClaimCompatible(pending, confirmed) {
+		t.Fatal("in-flight selected reproof would reject accepted SSH confirmation")
+	}
+	other := confirmed
+	other.HealthOperationID = strings.Repeat("f", 32)
+	if nativeRecoveryClaimCompatible(pending, other) {
+		t.Fatal("selected reproof adopted foreign operation")
 	}
 }
 

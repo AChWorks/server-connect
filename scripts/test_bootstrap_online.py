@@ -7,6 +7,8 @@ binaries are inert and every HTTP invocation passes --verify-only.
 from __future__ import annotations
 
 import base64
+import errno
+import signal
 import contextlib
 import gzip
 import importlib.util
@@ -201,6 +203,119 @@ class LocalHTTPHandler(SimpleHTTPRequestHandler):
                 pass
             return
         return super().do_GET()
+
+
+
+class BootstrapBeforeAPTTests(unittest.TestCase):
+    """The actual no-Python POSIX acquisition preflight gates any APT call."""
+
+    @classmethod
+    def setUpClass(cls):
+        source = BOOTSTRAP.read_text()
+        a = source.index("bootstrap_preflight_source_url() {\n")
+        b = source.index("\n}\n", a) + len("\n}\n")
+        cls.preflight = source[a:b]
+        a = source.index("bootstrap_parse_acquisition_mode() {\n")
+        b = source.index("\n}\n", a) + len("\n}\n")
+        cls.preflight += "\n" + source[a:b]
+        a = source.index("# Admission BEFORE any package transaction.")
+        b = source.index("\nset --\n", a)
+        cls.admission = source[a:b].replace(
+            '$(/usr/bin/uname -m)', '"$SC_QA_ARCH"'
+        )
+
+    def attempt(self, source_url, *, arch="x86_64", os_version="13",
+                local_qa="no", source_kind="", target="", python_absent=False):
+        with tempfile.TemporaryDirectory(prefix="sc-early-apt-") as tmp:
+            marker = Path(tmp) / "APT_WOULD_HAVE_RUN"
+            # The native tools were verified immediately before this block.
+            # Mock only CPU and OS identity to exercise unsupported-host paths
+            # on the same runner as positive Debian12/13 tests.
+            program = (
+                "set -eu\n"
+                f"SC_QA_ARCH={shlex.quote(arch)}\n"
+                f"SC_QA_OS={shlex.quote(os_version)}\n"
+                f"url={shlex.quote(source_url)}\n"
+                f'local_qa={shlex.quote(local_qa)}\n'
+                f'source_kind={shlex.quote(source_kind)}\n'
+                f'target={shlex.quote(target)}\n'
+                + ('command() { if [ "$1" = -v ] && [ "$2" = python3 ]; then return 1; fi; type "$2" >/dev/null 2>&1; }\n'
+                   if python_absent else '')
+                + 'bootstrap_read_os_version() { case "$SC_QA_OS" in 12|13) echo "$SC_QA_OS" ;; *) return 1 ;; esac; }\n'
+                + self.preflight + "\n"
+                + self.admission + "\n"
+                + f'printf APT_WOULD_RUN > {shlex.quote(str(marker))}\n'
+            )
+            completed = subprocess.run(
+                ["/bin/sh", "-c", program],
+                capture_output=True, text=True, timeout=6,
+            )
+            return completed, marker.exists()
+
+    def test_unsupported_os_arch_and_url_reject_before_apt(self):
+        scenarios = [
+            ("https://mirror.example/server-connect/release-index.json", "aarch64", "13", "no", ""),
+            ("https://mirror.example/server-connect/release-index.json", "x86_64", "11", "no", ""),
+            ("https://mirror.example@foreign.example/index", "x86_64", "13", "no", ""),
+            ("https://mirror.example:bad/index", "x86_64", "13", "no", ""),
+            ("https://mirror.example:0/index", "x86_64", "13", "no", ""),
+            ("https://mirror.example/#fragment", "x86_64", "13", "no", ""),
+            ("http://outside.invalid/index", "x86_64", "13", "yes", ""),
+            ("https://[bad-addr]/index", "x86_64", "13", "no", ""),
+            ("https://[0:0:0:0:0:0:0]/index", "x86_64", "13", "no", ""),
+        ]
+        for url, arch, os_version, local, kind in scenarios:
+            with self.subTest(url=url, arch=arch, os_version=os_version):
+                result, apt = self.attempt(url, arch=arch, os_version=os_version,
+                                           local_qa=local, source_kind=kind)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertFalse(apt, "invalid host/source crossed APT boundary")
+
+    def test_supported_debian12_debian13_and_qa_loopback_admit(self):
+        for version in ("12", "13"):
+            for url, local, kind in [
+                ("https://mirror.example/server-connect/release-index.json", "no", "mirror"),
+                ("http://127.0.0.1:19179/bundle.tar.gz", "yes", ""),
+            ]:
+                with self.subTest(version=version, url=url):
+                    result, apt = self.attempt(url, os_version=version, local_qa=local,
+                                               source_kind=kind)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertTrue(apt, "valid supported host blocked before optional APT")
+
+    def test_python_absent_oversize_urls_rejected_before_any_apt(self):
+        # Distinguish URL and hostname limits from downstream DNS/curl errors:
+        # the same valid short authority must still be admitted for both OSes.
+        for version in ("12", "13"):
+            valid = "https://mirror.example/server-connect/release-index.json"
+            allowed, apt = self.attempt(valid, os_version=version, source_kind="mirror", python_absent=True)
+            self.assertEqual(allowed.returncode, 0, allowed.stderr)
+            self.assertTrue(apt)
+            for invalid in (
+                "https://mirror.example/" + "a" * 4075,
+                "https://" + "a" * 254 + ".example/bundle",
+                "https://mirror.example/" + "a" * 4096 + "#ignored",
+            ):
+                with self.subTest(version=version, size=len(invalid)):
+                    result, apt = self.attempt(invalid, os_version=version,
+                                               source_kind="mirror", python_absent=True)
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertFalse(apt, "rejected URL reached APT without Python")
+        # UTF-8 in the pathname also violates the Python parser's ASCII-only
+        # contract and must be refused before installing missing prerequisites.
+        result, apt = self.attempt("https://mirror.example/" + chr(233),
+                                   source_kind="mirror", python_absent=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(apt)
+
+    def test_target_selection_must_match_host_before_apt(self):
+        result, apt = self.attempt(
+            "https://mirror.example/release-index.json",
+            os_version="13", source_kind="mirror", target="debian-12-amd64",
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(apt)
+
 
 
 class BootstrapIdentityParserTest(unittest.TestCase):
@@ -761,6 +876,30 @@ class SignedReleaseTest(unittest.TestCase):
             def do_GET(self):
                 self.http_started = True
                 self.server.requests.append((self.path, self.connection.version()))
+                if self.path.endswith("/bootstrap-online.sh"):
+                    response = getattr(self.server, "bootstrap_response", "")
+                    if response == "redirect":
+                        self.send_response(302)
+                        self.send_header("Location", "https://outside.invalid/foreign-bootstrap")
+                        self.end_headers()
+                        return
+                    if response.startswith("redirect-complete-"):
+                        status = int(response.rsplit("-", 1)[-1])
+                        body = self.server.bootstrap_response_body
+                        self.send_response(status)
+                        self.send_header("Location", "https://outside.invalid/foreign-bootstrap")
+                        self.send_header("Content-Length", str(len(body)))
+                        self.end_headers()
+                        self.wfile.write(body)
+                        return
+                    if response == "truncated":
+                        self.send_response(200)
+                        self.send_header("Content-Length", "1000000")
+                        self.end_headers()
+                        self.wfile.write(b"#!/bin/sh\necho partial\n")
+                        self.wfile.flush()
+                        self.close_connection = True
+                        return
                 if self.path == "/https-downgrade":
                     self.send_response(302)
                     self.send_header("Location", f"http://127.0.0.1:{cls.server.server_port}/redirect-sentinel")
@@ -951,7 +1090,7 @@ class SignedReleaseTest(unittest.TestCase):
                  "--verify-only"], capture_output=True, text=True, timeout=5,
             )
             self.assertNotEqual(result.returncode, 0)
-            self.assertIn("Publisher key, version and target pins are required", result.stderr)
+            self.assertIn("Normal installation does not take detached signatures or independent digests", result.stderr)
         argv = self.arguments(online=True)
         argv.remove("--local-qa")
         result = subprocess.run(argv, capture_output=True, text=True, timeout=5)
@@ -1374,7 +1513,7 @@ class SignedReleaseTest(unittest.TestCase):
         runtime = self.receipt_runtime()
         stage = self.receipt_stage()
         receipt = stage / "authentication.json"
-        with mock.patch.object(runtime.os, "link", side_effect=OSError("injected publish failure")):
+        with mock.patch.object(runtime, "link_anonymous_receipt", side_effect=OSError("injected publish failure")):
             with self.assertRaises(OSError):
                 self.receipt_action("install-receipt", stage)
         self.assertFalse(receipt.exists())
@@ -1401,6 +1540,285 @@ class SignedReleaseTest(unittest.TestCase):
                 self.receipt_action("install-receipt", stage)
         self.receipt_action("install-receipt", stage)
         self.receipt_action("verify-installed", stage)
+
+    def test_real_sigkill_inside_anonymous_signed_receipt_publication(self):
+        # Test the actual Signed receipt helper in a separate OS process;
+        # SIGKILL bypasses Python finally and can never be mistaken for a
+        # caught exception or a successful write. No signed auth bytes may be
+        # published before linkat; after linkat only one inode/name exists.
+        script = """
+import importlib.util, os, signal, sys
+helper, when, bundle, metadata, signature, key = sys.argv[1:]
+spec = importlib.util.spec_from_file_location("real_signed_receipt_sigkill", helper)
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+module.INSTALLED_RELEASES = __import__("pathlib").Path(bundle).parent
+original = module.link_anonymous_receipt
+def interrupt(fd, directory):
+    if when == "before":
+        os.kill(os.getpid(), signal.SIGKILL)
+    original(fd, directory)
+    os.kill(os.getpid(), signal.SIGKILL)
+module.link_anonymous_receipt = interrupt
+sys.argv = [helper, "install-receipt", "--bundle", bundle, "--metadata", metadata,
+            "--signature", signature, "--publisher-key", key,
+            "--version", "0.1.0-dev", "--target", "debian-13-amd64"]
+module.main()
+"""
+        for when in ("before", "after"):
+            with self.subTest(interruption=when):
+                stage = self.receipt_stage("sigbefor" if when=="before" else "sigafter")
+                child = subprocess.run(
+                    [sys.executable, "-I", "-S", "-c", script, str(self.auth),
+                     when, str(stage), str(self.metadata),
+                     str(self.signature), str(self.public)],
+                    capture_output=True, text=True, timeout=25)
+                self.assertEqual(child.returncode, -signal.SIGKILL,
+                                 child.stdout + child.stderr)
+                receipt = stage / "authentication.json"
+                self.assertEqual(list(stage.glob(".authentication.*")), [])
+                if when == "before":
+                    self.assertFalse(receipt.exists(), "anonymous prep became visible")
+                    self.receipt_action("install-receipt", stage)
+                else:
+                    self.assertTrue(receipt.is_file(), "atomic link was not published")
+                    self.assertEqual(receipt.stat().st_nlink, 1)
+                    self.assertEqual(receipt.stat().st_mode & 0o777, 0o600)
+                self.receipt_action("verify-installed", stage)
+                self.receipt_action("install-receipt", stage)
+                self.assertEqual(receipt.stat().st_nlink, 1)
+                self.assertEqual(list(stage.glob(".authentication.*")), [])
+
+    def test_anonymous_signed_receipt_rejects_filesystem_without_support(self):
+        runtime = self.receipt_runtime()
+        stage = self.receipt_stage("notsuprt")
+        original_open = runtime.os.open
+
+        def reject_anonymous(path, flags, *args, **kwargs):
+            if flags & os.O_TMPFILE == os.O_TMPFILE:
+                raise OSError(errno.EOPNOTSUPP, "anonymous temp unsupported")
+            return original_open(path, flags, *args, **kwargs)
+
+        with mock.patch.object(runtime.os, "open", side_effect=reject_anonymous):
+            with self.assertRaisesRegex(ValueError, "anonymous installed authentication staging unavailable"):
+                self.receipt_action("install-receipt", stage)
+        self.assertFalse((stage / "authentication.json").exists())
+        self.assertEqual(list(stage.glob(".authentication.*")), [])
+
+    def signed_first_recovery_fixture(self, *, published=True):
+        # Execute the actual installer first-transaction scanner using the
+        # original real Signed crypto and inode-bound rootless directory
+        # layout. Only the hardcoded /opt and systemd path are substituted
+        # inside this disposable fixture; no installed host is modified.
+        runtime = self.receipt_runtime()
+        stage = self.receipt_stage("authsign")
+        if published:
+            self.receipt_action("install-receipt", stage)
+        release_name="0.1.0-dev-"+self.identity["checksums_sha256"][:16]
+        release=stage.parent/release_name
+        stage.rename(release)
+        prefix=runtime.INSTALLED_RELEASES.parent
+        (prefix/".owner").write_text("AChWorks/server-connect\n")
+        (prefix/"current").symlink_to("releases/"+release_name)
+        private=self.case/"first-private"
+        private.mkdir(mode=0o700)
+        outer=self.case/".server-connect-release.authsign"
+        first=self.case/".server-connect-initial.ABCDE123"
+        canonical=subprocess.run(["/usr/bin/openssl","pkey","-pubin",
+                                  "-in",str(self.public),"-pubout"],
+                                  check=True,capture_output=True,timeout=15).stdout
+        binding="signed:"+":".join(hashlib.sha256(v).hexdigest()
+               for v in (self.metadata.read_bytes(),self.signature.read_bytes(),canonical))
+        (private/".first-install-intent").write_text(
+            f"{first}\n{prefix.stat().st_dev}:{prefix.stat().st_ino}\n{binding}\n")
+        (private/".first-release-intent").write_text(
+            f"{outer}\n{release.stat().st_dev}:{release.stat().st_ino}\n{release_name}\n{binding}\n")
+        for intent in private.iterdir():intent.chmod(0o600)
+        source=self.case/"signed-source"
+        source.mkdir()
+        for name,raw in self.payload.items():
+            path=source/name.removeprefix("server-connect/")
+            path.parent.mkdir(parents=True,exist_ok=True)
+            path.write_bytes(raw)
+        helper=source/"release-auth.py"
+        written=helper.read_text()
+        assert 'INSTALLED_RELEASES = Path("/opt/server-connect/releases")' in written
+        helper.write_text(written.replace(
+            'INSTALLED_RELEASES = Path("/opt/server-connect/releases")',
+            f'INSTALLED_RELEASES = Path({str(runtime.INSTALLED_RELEASES)!r})'))
+        unitdir=self.case/"units";unitdir.mkdir()
+        source_code=INSTALLER.read_text()
+        begin=source_code.index("FIRST_INSTALL_INTENT=$STATE/.first-install-intent\n")
+        end=source_code.index(
+            "# Inspect the *effective* systemd identity before ANY stop/disable/enable or",
+            begin)
+        functions=source_code[begin:end]
+        functions=functions.replace("/opt",str(self.case))
+        functions=functions.replace(
+            '/etc/systemd/system "$COMMAND" "$release_name"',
+            f'{unitdir} "$COMMAND" "$release_name"')
+        prolog=(
+            "set -eu\n"
+            f'PREFIX={shlex.quote(str(prefix))}\n'
+            f'STATE={shlex.quote(str(private))}\n'
+            f'SOURCE_DIR={shlex.quote(str(source))}\n'
+            f'COMMAND={shlex.quote(str(self.case/"absent-bin"))}\n'
+            f'release_name={shlex.quote(release_name)}\n'
+            f'metadata_file={shlex.quote(str(self.metadata))}\n'
+            f'signature_file={shlex.quote(str(self.signature))}\n'
+            f'publisher_key={shlex.quote(str(self.public))}\n'
+            'trust_kind=signed\n'
+            'say() { printf "%s\n" "$*"; }\n'
+            'die() { printf "REFUSED:%s\n" "$*" >&2; exit 21; }\n'
+            +functions+"\n"
+        )
+        def reconcile(action,trust="signed",public=None,signature=None):
+            args=prolog.replace('trust_kind=signed\n','trust_kind='+trust+'\n')
+            if public is not None:
+                args=args.replace('publisher_key='+shlex.quote(str(self.public))+'\n',
+                                  'publisher_key='+shlex.quote(str(public))+'\n')
+            if signature is not None:
+                args=args.replace('signature_file='+shlex.quote(str(self.signature))+'\n',
+                                  'signature_file='+shlex.quote(str(signature))+'\n')
+            return subprocess.run(["/bin/sh","-c",args+
+                "first_install_reconcile_transaction "+action+"\n"],
+                capture_output=True,text=True,timeout=40)
+        return reconcile,release,private
+
+    def test_signed_first_recovery_requires_exact_receipt_and_selected_authority(self):
+        reconcile,release,private=self.signed_first_recovery_fixture()
+        valid=reconcile("inspect")
+        self.assertEqual(valid.returncode,0,valid.stderr)
+        with self.subTest("downgrade"):
+            refused=reconcile("inspect",trust="unsigned")
+            self.assertNotEqual(refused.returncode,0)
+            self.assertTrue(release.exists())
+        with self.subTest("wrong publisher"):
+            refused=reconcile("inspect",public=self.wrong_public)
+            self.assertNotEqual(refused.returncode,0)
+            self.assertTrue(release.exists())
+        original=self.signature.read_bytes()
+        self.signature.write_bytes(original+b"foreign")
+        with self.subTest("changed signer input"):
+            refused=reconcile("recover")
+            self.assertNotEqual(refused.returncode,0)
+            self.assertTrue(release.exists())
+        self.signature.write_bytes(original)
+        auth=release/"authentication.json"
+        real=auth.read_bytes()
+        auth.write_bytes(real.replace(b'"owner":"AChWorks/server-connect"',
+                                          b'"owner":"foreign-project"'))
+        with self.subTest("conflicting final receipt"):
+            refused=reconcile("recover")
+            self.assertNotEqual(refused.returncode,0)
+            self.assertTrue(auth.exists())
+        auth.write_bytes(real)
+        shadow=release/".authentication.foreign"
+        os.link(auth,shadow)
+        with self.subTest("foreign hardlink"):
+            refused=reconcile("recover")
+            self.assertNotEqual(refused.returncode,0)
+            self.assertTrue(shadow.exists())
+            self.assertEqual(auth.stat().st_nlink,2)
+        shadow.unlink()
+        self.assertEqual(reconcile("inspect").returncode,0)
+        completed=reconcile("recover")
+        self.assertEqual(completed.returncode,0,completed.stderr)
+        self.assertFalse(release.exists())
+        self.assertFalse((private/".first-release-intent").exists())
+        self.assertFalse((private/".first-install-intent").exists())
+
+    def test_signed_prelink_first_install_never_downgrades_implicitly(self):
+        reconcile, release, private = self.signed_first_recovery_fixture(published=False)
+        receipt = private / ".first-release-intent"
+        source_identity = receipt.read_bytes()
+        self.assertFalse((release / "authentication.json").exists())
+        self.assertEqual(reconcile("inspect").returncode, 0)
+        for kind in ("unsigned", "local-qa"):
+            with self.subTest(trust=kind):
+                rejected = reconcile("inspect", trust=kind)
+                self.assertNotEqual(rejected.returncode, 0)
+                self.assertIn("original", rejected.stderr)
+                self.assertEqual(receipt.read_bytes(), source_identity)
+                self.assertTrue(release.exists(), "partial Signed release was adopted")
+                self.assertFalse((release / "integrity.sha256").exists())
+        # A second, cryptographically valid independent publisher cannot
+        # silently replace the original operator-selected signer even when
+        # payload bytes and signed release metadata are identical.
+        new_private = self.case / "alternate-signing-private.pem"
+        new_public = self.case / "alternate-signing-public.pem"
+        new_signature = self.case / "alternate-release.sig"
+        subprocess.run(["/usr/bin/openssl", "genpkey", "-algorithm", "RSA",
+                        "-pkeyopt", "rsa_keygen_bits:2048", "-out", str(new_private)],
+                       check=True, capture_output=True, timeout=30)
+        subprocess.run(["/usr/bin/openssl", "pkey", "-in", str(new_private),
+                        "-pubout", "-out", str(new_public)],
+                       check=True, capture_output=True, timeout=15)
+        subprocess.run(["/usr/bin/openssl", "dgst", "-sha256", "-sign",
+                        str(new_private), "-out", str(new_signature),
+                        str(self.metadata)],
+                       check=True, capture_output=True, timeout=15)
+        valid = subprocess.run(["/usr/bin/openssl", "dgst", "-sha256",
+                                "-verify", str(new_public), "-signature",
+                                str(new_signature), str(self.metadata)],
+                               capture_output=True, text=True, timeout=15)
+        self.assertEqual(valid.returncode, 0, valid.stderr)
+        other = reconcile("inspect", public=new_public, signature=new_signature)
+        self.assertNotEqual(other.returncode, 0)
+        self.assertIn("original", other.stderr)
+        self.assertEqual(receipt.read_bytes(), source_identity)
+        # One explicit, owned, *cleanup-only* action may abandon the
+        # incomplete Signed operation when the operator no longer has its key.
+        self.assertEqual(reconcile("inspect-abandon", trust="unsigned").returncode, 0)
+        self.assertTrue(release.exists(), "inspection must not mutate")
+        self.assertEqual(reconcile("abandon", trust="unsigned").returncode, 0)
+        self.assertFalse(release.exists())
+        self.assertFalse(private.joinpath(".first-install-intent").exists())
+        self.assertFalse(receipt.exists())
+
+    def test_signed_prelink_abandon_preserves_foreign_and_swapped_inodes(self):
+        reconcile, release, private = self.signed_first_recovery_fixture(published=False)
+        foreign = release / "unowned-resource"
+        foreign.write_bytes(b"preserve foreign")
+        denied = reconcile("abandon", trust="unsigned")
+        self.assertNotEqual(denied.returncode, 0)
+        self.assertEqual(foreign.read_bytes(), b"preserve foreign")
+        self.assertTrue(private.joinpath(".first-release-intent").exists())
+        foreign.unlink()
+        displaced = self.case / "original-signed-release"
+        release.rename(displaced)
+        release.mkdir()
+        denied = reconcile("abandon", trust="unsigned")
+        self.assertNotEqual(denied.returncode, 0)
+        self.assertTrue(release.exists())
+        self.assertTrue(displaced.exists())
+        self.assertTrue(private.joinpath(".first-release-intent").exists())
+
+    def test_signed_published_explicit_abandon_checks_original_receipt_digest(self):
+        reconcile, release, private = self.signed_first_recovery_fixture(published=True)
+        claim = private / ".first-release-intent"
+        raw = claim.read_bytes()
+        # Embedded Signed material cannot be replaced even if the operator
+        # explicitly chooses only to abandon an interrupted stage.
+        claim.write_bytes(raw.replace(b"signed:", b"signed:0", 1))
+        self.assertNotEqual(reconcile("abandon", trust="unsigned").returncode, 0)
+        self.assertTrue(release.exists())
+        claim.write_bytes(raw)
+        self.assertEqual(reconcile("inspect-abandon", trust="unsigned").returncode, 0)
+        self.assertEqual(reconcile("abandon", trust="unsigned").returncode, 0)
+        self.assertFalse(release.exists())
+
+    def test_signed_prefix_claim_alone_preserves_original_trust(self):
+        reconcile, release, private = self.signed_first_recovery_fixture(published=False)
+        current=release.parent.parent / "current"
+        current.unlink()
+        shutil.rmtree(release)
+        stage=private / ".first-release-intent"
+        stage.unlink()
+        self.assertEqual(reconcile("inspect", trust="signed").returncode, 0)
+        self.assertNotEqual(reconcile("inspect", trust="unsigned").returncode, 0)
+        self.assertEqual(reconcile("abandon", trust="unsigned").returncode, 0)
+        self.assertFalse(private.joinpath(".first-install-intent").exists())
 
     def installer_receipt_harness(self, command, *, source=None):
         body = INSTALLER.read_text()
@@ -1592,6 +2010,198 @@ os.execv(sys.argv[1], sys.argv[1:])
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("Publisher signature and pinned release identity verified", result.stdout)
+
+    def unsigned_bootstrap(self, *extra, url=None, mirror_base=None, ca=True):
+        if mirror_base is not None:
+            source = ['--mirror-base', mirror_base]
+        elif url is not None:
+            source = ['--archive-url', url]
+        else:
+            source = ['--archive-file', str(self.bundle)]
+        env = os.environ.copy()
+        if ca:
+            env['CURL_CA_BUNDLE'] = str(self.ca)
+        else:
+            env.pop('CURL_CA_BUNDLE', None)
+        return subprocess.run(['/bin/sh', str(self.bootstrap), *source, '--verify-only', *extra],
+                              capture_output=True, text=True, timeout=30, env=env)
+
+    def test_keyless_offline_archive_and_metadata_integrity(self):
+        result = self.unsigned_bootstrap()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('Installation was not attempted', result.stdout)
+        self.assertIn('not publisher authentication', result.stderr)
+        before = self.bundle.read_bytes()
+        self.bundle.write_bytes(before + b'tampered')
+        rejected = self.unsigned_bootstrap()
+        self.assertNotEqual(rejected.returncode, 0)
+        self.assertIn('archive integrity mismatch', rejected.stderr)
+        self.bundle.write_bytes(before)
+        before_meta = self.metadata.read_bytes()
+        self.metadata.write_bytes(before_meta.replace(b'"source_state":"clean"', b'"source_state":"dirty"'))
+        rejected = self.unsigned_bootstrap()
+        self.assertNotEqual(rejected.returncode, 0)
+        self.assertIn('nothing installed', rejected.stderr)
+        self.metadata.write_bytes(before_meta)
+        self.metadata.unlink()
+        rejected = self.unsigned_bootstrap()
+        self.assertNotEqual(rejected.returncode, 0)
+        self.assertIn('Local release identity unavailable', rejected.stderr)
+
+
+    def documented_entrypoint(self, channel, *, trusted=True):
+        import re
+        docs = (ROOT / "docs" / "OFFLINE-DISTRIBUTION.md").read_text()
+        if channel == "mirror":
+            section = docs.split("**Operator-hosted HTTPS mirror", 1)[1].split("**Completely offline", 1)[0]
+            server = self.https_servers[1][0]
+        else:
+            section = docs.split("**Official GitHub release channel", 1)[1].split("**Operator-hosted HTTPS mirror", 1)[0]
+            server = self.https_servers[0][0]
+        command = re.search(r"```sh\n(.*?)\n```", section, re.S).group(1)
+        command = command.replace("sudo /usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin ", "")
+        command = command.replace(
+            "/root/.server-connect-entry.XXXXXXXX",
+            str(self.case / ".server-connect-entry.XXXXXXXX"),
+        )
+        base = f"https://localhost:{server.server_port}/{self.case.name}/"
+        if channel == "mirror":
+            command = command.replace("https://mirror.example/server-connect/", base)
+        else:
+            command = command.replace(
+                "https://github.com/AChWorks/server-connect/releases/latest/download/bootstrap-online.sh",
+                base + "bootstrap-online.sh",
+            )
+        env = os.environ.copy()
+        if trusted:
+            env["CURL_CA_BUNDLE"] = str(self.ca)
+        else:
+            env.pop("CURL_CA_BUNDLE", None)
+        return subprocess.run(["/bin/sh", "-eu", "-c", command],
+                              capture_output=True, text=True, timeout=17, env=env)
+
+    def test_documented_bootstrap_download_stages_full_bytes_before_execution(self):
+        for channel, index in (("official", 0), ("mirror", 1)):
+            with self.subTest(channel=channel):
+                server = self.https_servers[index][0]
+                source = self.case / "bootstrap-online.sh"
+                executed = self.case / "BOOTSTRAP_ENTRY_RAN"
+                source.write_text("#!/bin/sh\nprintf 'ok' > "+shlex.quote(str(executed))+"\n# SERVER_CONNECT_BOOTSTRAP_END\n")
+                try:
+                    server.bootstrap_response = ""
+                    server.requests.clear()
+                    good = self.documented_entrypoint(channel)
+                    self.assertEqual(good.returncode, 0, good.stderr)
+                    self.assertEqual(executed.read_text(), "ok")
+                    self.assertEqual([path for path, _ in server.requests],
+                                     [f"/{self.case.name}/bootstrap-online.sh"])
+                    self.assertFalse(list(self.case.glob(".server-connect-entry.*")))
+                    executed.unlink()
+                    # TLS failure, redirect, truncated transfer, complete-but-
+                    # unfinished source: none may execute the fetched script.
+                    server.requests.clear()
+                    rejected = self.documented_entrypoint(channel, trusted=False)
+                    self.assertNotEqual(rejected.returncode, 0)
+                    self.assertFalse(executed.exists())
+                    self.assertEqual(server.requests, [])
+                    # A redirect with an executable and *complete* shell
+                    # body must be refused even if curl exits successfully.
+                    if channel == "mirror":
+                        server.bootstrap_response_body = source.read_bytes()
+                        for code in (302, 307, 308):
+                            server.requests.clear()
+                            server.bootstrap_response = f"redirect-complete-{code}"
+                            rejected = self.documented_entrypoint(channel)
+                            self.assertNotEqual(rejected.returncode, 0)
+                            self.assertIn(f"HTTP status {code} refused", rejected.stderr)
+                            self.assertFalse(executed.exists(), "3xx body executed")
+                            self.assertEqual([p for p, _ in server.requests],
+                                             [f"/{self.case.name}/bootstrap-online.sh"])
+                            self.assertFalse(list(self.case.glob(".server-connect-entry.*")))
+                    server.bootstrap_response = "truncated"
+                    rejected = self.documented_entrypoint(channel)
+                    self.assertNotEqual(rejected.returncode, 0)
+                    self.assertFalse(executed.exists())
+                    self.assertFalse(list(self.case.glob(".server-connect-entry.*")))
+                    server.bootstrap_response = "redirect"
+                    rejected = self.documented_entrypoint(channel)
+                    if channel == "mirror":
+                        self.assertNotEqual(rejected.returncode, 0)
+                        self.assertNotIn("foreign-bootstrap", rejected.stdout)
+                    # Official supports redirects; the untrusted foreign host
+                    # is deliberately unreachable, so this fixture also fails.
+                    self.assertNotEqual(rejected.returncode, 0)
+                    self.assertFalse(executed.exists())
+                    server.bootstrap_response = ""
+                    source.write_text("#!/bin/sh\nprintf bad > "+shlex.quote(str(executed))+"\n")
+                    rejected = self.documented_entrypoint(channel)
+                    self.assertNotEqual(rejected.returncode, 0)
+                    self.assertIn("Incomplete bootstrap", rejected.stderr)
+                    self.assertFalse(executed.exists())
+                finally:
+                    server.bootstrap_response = ""
+                    source.unlink(missing_ok=True)
+                    executed.unlink(missing_ok=True)
+
+    def test_keyless_https_requires_real_tls_and_no_signature(self):
+        server = self.https_servers[0][0]
+        server.requests.clear()
+        url = f'https://localhost:{server.server_port}/{self.case.name}/bundle.tar.gz'
+        success = self.unsigned_bootstrap(url=url)
+        self.assertEqual(success.returncode, 0, success.stderr)
+        self.assertEqual([p for p, _ in server.requests], [
+            f'/{self.case.name}/bundle.tar.gz', f'/{self.case.name}/bundle.tar.gz.release.json',
+        ])
+        server.requests.clear()
+        untrusted = self.unsigned_bootstrap(url=url, ca=False)
+        self.assertNotEqual(untrusted.returncode, 0)
+        self.assertEqual(server.requests, [])
+        self.assertNotIn('Installation was not attempted', untrusted.stdout)
+
+    def test_keyless_mirror_index_resolves_debian_and_rejects_tamper(self):
+        if not Path('/etc/os-release').read_text().count('VERSION_ID="13"'):
+            self.skipTest('fixture has Debian 13 target; Debian 12 is exercised in installed-host CI')
+        server = self.https_servers[1][0]
+        base = f'https://localhost:{server.server_port}/{self.case.name}/'
+        index = self.case / 'release-index.json'
+        index_data = {'schema': 1, 'version': '0.1.0-dev', 'artifacts': {
+            target: {'archive': 'bundle.tar.gz', 'sha256': self.identity['archive_sha256']}
+            for target in ('debian-12-amd64', 'debian-13-amd64')
+        }}
+        index.write_text(json.dumps(index_data) + '\n')
+        server.requests.clear()
+        success = self.unsigned_bootstrap(mirror_base=base)
+        self.assertEqual(success.returncode, 0, success.stderr)
+        self.assertEqual([p for p, _ in server.requests], [
+            f'/{self.case.name}/release-index.json', f'/{self.case.name}/bundle.tar.gz',
+            f'/{self.case.name}/bundle.tar.gz.release.json',
+        ])
+        server.requests.clear()
+        index_data['artifacts']['debian-13-amd64']['sha256'] = '0' * 64
+        index.write_text(json.dumps(index_data) + '\n')
+        refused = self.unsigned_bootstrap(mirror_base=base)
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertIn('index and release identity disagree', refused.stderr)
+        self.assertFalse(self.marker.exists())
+        for value in ('../foreign.tar.gz', 'https://github.com/other.tar.gz', '/absolute.tar.gz'):
+            with self.subTest(unsafe_archive=value):
+                index_data['artifacts']['debian-13-amd64']['archive'] = value
+                index.write_text(json.dumps(index_data) + '\n')
+                server.requests.clear()
+                refused = self.unsigned_bootstrap(mirror_base=base)
+                self.assertNotEqual(refused.returncode, 0)
+                self.assertEqual([p for p, _ in server.requests], [f'/{self.case.name}/release-index.json'])
+        index.write_text('{"schema":1,"schema":1}')
+        refused = self.unsigned_bootstrap(mirror_base=base)
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertIn('Release index validation failed', refused.stderr)
+
+    def test_keyless_negative_archive_layout_even_if_index_and_digest_match(self):
+        self.fixture(abnormal='traversal')
+        rejected = self.unsigned_bootstrap()
+        self.assertNotEqual(rejected.returncode, 0)
+        self.assertIn('Archive preflight failed', rejected.stderr)
+
 
 
 if __name__ == "__main__":

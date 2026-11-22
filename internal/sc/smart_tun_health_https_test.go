@@ -496,3 +496,38 @@ func TestSmartTUNHTTPSReadCompletionCancellation(t *testing.T) {
 		})
 	}
 }
+
+// The Health executor may cancel its context between the owned connection
+// becoming readable and SetDeadline. A closed socket in that interval must be
+// classified as cancellation, not as a network/guard degradation.
+type healthRejectDeadlineConn struct{ net.Conn }
+
+func (c healthRejectDeadlineConn) SetDeadline(time.Time) error {
+	return net.ErrClosed
+}
+
+func TestSmartTUNHTTPSCanceledBeforeDeadlineSetupIsNotNetworkFailure(t *testing.T) {
+	for _, canceled := range []bool{false, true} {
+		t.Run(fmt.Sprintf("canceled_%t", canceled), func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+			if canceled {
+				cancel()
+			}
+			client, server := net.Pipe()
+			defer server.Close()
+			got := smartTUNHealthExchangeWithDeadline(
+				ctx, healthRejectDeadlineConn{client},
+				smartTUNHealthProbe{expectedSource: "127.0.0.1"},
+				bytes.Repeat([]byte{2}, 16),
+			)
+			want := "deadline_unavailable"
+			if canceled {
+				want = "canceled"
+			}
+			if got.Result != want || got.StatusCode != 0 {
+				t.Fatalf("deadline/cancellation race misclassified: got=%+v want=%s", got, want)
+			}
+		})
+	}
+}

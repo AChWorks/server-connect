@@ -694,6 +694,24 @@ func (m *Manager) stopNativeHealthOperationExpected(id, reason string, expected 
 			if expected != nil && s != *expected {
 				return nil
 			}
+			// A timeout observed outside the lock is only a proposal. The
+			// new SSH login may have confirmed within its deadline while
+			// this guard waited to acquire the transition/Manager locks.
+			// Recheck the live receipt against the same operation and clock
+			// before publishing the irreversible stopping intent.
+			if strings.HasPrefix(reason, "activation_confirmation_") {
+				boot, e := trialBootIdentity()
+				if e != nil {
+					return e
+				}
+				now, e := nativeUptimeMillis()
+				if e != nil {
+					return e
+				}
+				if nativeConfirmationTimeoutReason(claim, s, boot, now) != reason {
+					return nil
+				}
+			}
 			wasRecovering := s.Phase == "recovering"
 			s.Phase = "stopping"
 			if wasRecovering || s.RestartAttempts > 0 {
@@ -804,6 +822,26 @@ func (m *Manager) RunNativeHealthRound() (NativeHealthState, error) {
 	if err != nil {
 		return s, err
 	}
+	// Either independently scheduled executor may enforce the initial
+	// confirmation deadline, including when the Core is in recovery.
+	if boot, be := trialBootIdentity(); be == nil {
+		if now, te := nativeUptimeMillis(); te == nil {
+			if reason := nativeConfirmationTimeoutReason(claim, s, boot, now); reason != "" {
+				stopped, e := m.stopNativeHealthOperation(s.OperationID, reason)
+				if e != nil {
+					return s, e
+				}
+				if !stopped {
+					// A newly confirmed receipt or superseding Health
+					// generation won the race; this must not be reported
+					// as a failed guard executor.
+					return m.readNativeHealth()
+				}
+				s.Phase, s.Reason = "off", reason
+				return s, nil
+			}
+		}
+	}
 	if s.Phase == "recovering" {
 		return m.advanceNativeCoreRecovery(s, claim, targets)
 	}
@@ -911,10 +949,11 @@ func (m *Manager) RunNativeHealthRound() (NativeHealthState, error) {
 		// A second manual executor may have completed while our bounded
 		// probe was outside the lock. Never overwrite its newer verdict,
 		// renew a stale lease or replenish its outage/failure budget.
-		if current != claim || latest != s || state.Desired != "smart" || latest.Phase == "stopping" || latest.Phase == "off" {
+		if (current != claim && !nativeConfirmationOnlyUpgrade(claim, current)) ||
+			latest != s || state.Desired != "smart" || latest.Phase == "stopping" || latest.Phase == "off" {
 			return Fault("guard_pending", "native health result belongs to an old session")
 		}
-		if e = m.validateNativeSessionConfig(claim); e != nil {
+		if e = m.validateNativeSessionConfig(current); e != nil {
 			return e
 		}
 		if activity, e := m.nativeActivity(); e != nil || activity != "active" {
@@ -1012,6 +1051,8 @@ func (m *Manager) SuperviseNativeHealth() (NativeHealthState, error) {
 	reason := ""
 	if be != nil || te != nil || boot != s.BootID || now < s.StartedMS {
 		reason = "native_boot_identity_changed"
+	} else if confirmationReason := nativeConfirmationTimeoutReason(claim, s, boot, now); confirmationReason != "" {
+		reason = confirmationReason
 	} else if now-s.HeartbeatMS > nativeHealthLeaseMS {
 		reason = "native_health_executor_stale"
 	} else if s.Phase == "recovering" {

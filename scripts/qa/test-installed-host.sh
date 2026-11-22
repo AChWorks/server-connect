@@ -311,11 +311,19 @@ run_offline() {
   local label=$1 action=$2 source_dir=/root/server-connect
   if [[ $# -ge 3 ]]; then source_dir=$3; fi
   echo "=== Disconnected offline $label ==="
+  # First install exercises the no-key Offline contract. Retained explicit
+  # LOCAL QA updates preserve the historical receipt regression path.
+  # This script is Bash-executed, but the trusted workflow also runs sh -n.
+  if [[ $label == first-install || $label == first-retry-* ]]; then
+    set --
+  else
+    set -- --local-qa
+  fi
   docker exec "$container" /usr/bin/strace -ff -qq -yy -s 128 \
     -e trace=%network,%process \
     -o "/root/qa-strace/$label" /usr/bin/env -i \
     HOME=/root PATH=/usr/sbin:/usr/bin:/sbin:/bin LC_ALL=C \
-    /bin/sh "$source_dir/install.sh" "$action" --local-qa
+    /bin/sh "$source_dir/install.sh" "$action" "$@"
   assert_no_offline_fetch "$label"
 }
 # An active proxy is intentionally permitted to open its existing loopback
@@ -417,22 +425,23 @@ verify_clean_uninstall() {
   '
 }
 
-# The field driver explicitly selects --local-qa for unsigned, digest-pinned
-# candidates. A fresh extracted archive without that choice must still fail.
+# New normal mode does not require a publisher key, while --verify-only
+# must remain mutation-free and offline even on a complete Debian 12 bundle.
 if [[ $qa_version == 12 ]]; then
-  if docker exec "$container" /usr/bin/env -i \
-    HOME=/root PATH=/usr/sbin:/usr/bin:/sbin:/bin LC_ALL=C \
+  docker exec "$container" /usr/bin/strace -ff -qq -yy -s 128 \
+    -e trace=%network,%process -o /root/qa-strace/keyless-verify \
+    /usr/bin/env -i HOME=/root PATH=/usr/sbin:/usr/bin:/sbin:/bin LC_ALL=C \
     /bin/sh /root/server-connect/install.sh --verify-only \
-    >"$scratch/debian12-implicit-auth.log" 2>&1; then
-    echo 'Unexpected implicit authentication of a fresh LOCAL QA archive' >&2
-    exit 1
-  fi
-  grep -F 'incoming bundles require an independently supplied publisher key' \
-    "$scratch/debian12-implicit-auth.log" >/dev/null
+    >"$scratch/debian12-keyless-verify.log" 2>&1 || {
+      echo 'Debian 12 checksum-verified no-key install preflight failed' >&2
+      cat "$scratch/debian12-keyless-verify.log" >&2
+      exit 1
+    }
+  assert_no_offline_fetch keyless-verify
   docker exec "$container" /bin/sh -c 'test ! -e /opt/server-connect && test ! -e /var/lib/server-connect'
-  assert_network_unchanged implicit-auth-refusal "$offline_before"
-  verify_host_services implicit-auth-refusal
-  echo 'DEBIAN12_FRESH_ARCHIVE_IMPLICIT_AUTH_REFUSED=PASS'
+  assert_network_unchanged keyless-verify "$offline_before"
+  verify_host_services keyless-verify
+  echo 'DEBIAN12_KEYLESS_OFFLINE_VERIFY_NO_MUTATION=PASS'
 fi
 run_offline verify-only --verify-only
 assert_network_unchanged verify-only "$offline_before"
@@ -481,7 +490,50 @@ verify_host_services missing-core
 
 assert_no_offline_fetch missing-core
 echo 'OFFLINE_MISSING_CORE_FAIL_CLOSED=PASS (installer NOT applied)'
+# Exercise a genuine root-owned interrupted first installation on the
+# disposable Debian guest: the exact bundle's source helpers publish the
+# initial directory and .owner atomically, then this shell exits without
+# installing a service or cleaning up. The normal next installer call must
+# prove the private inode-bound receipt, safely resume and complete.
+docker exec -i "$container" /bin/sh -s <<'QA_FIRST_PREFIX_INTERRUPT'
+set -eu
+umask 077
+PREFIX=/opt/server-connect
+STATE=/var/lib/server-connect
+# This disposable first-prefix-only fixture intentionally models the
+# original keyless trust choice before the regular installer entrypoint.
+# The real entrypoint sets trust_kind after payload preflight; the isolated
+# function harness must supply that already-established precondition.
+trust_kind=unsigned
+[ ! -e "$PREFIX" ] && [ ! -L "$PREFIX" ]
+[ ! -e "$STATE" ] && [ ! -L "$STATE" ]
+install -d -m 0700 "$STATE"
+say() { printf 'Server Connect: %s\n' "$*"; }
+die() { say "ERROR: $*" >&2; exit 1; }
+check_root_file() {
+ [ -f "$1" ] && [ ! -L "$1" ] && [ "$(stat -c %u "$1")" = 0 ]
+}
+check_root_dir() {
+ [ -d "$1" ] && [ ! -L "$1" ] && [ "$(stat -c %u "$1")" = 0 ]
+}
+sed -n '/^FIRST_INSTALL_INTENT=/,/^# Inspect the \*effective\*/p'  /root/server-connect/install.sh > /root/qa-prefix-helpers.sh
+. /root/qa-prefix-helpers.sh
+first_install_publish
+first_install_claimed_prefix
+[ -f "$PREFIX/.owner" ] && [ ! -e "$PREFIX/releases" ]
+[ ! -e /etc/systemd/system/server-connect.service ]
+[ -f "$FIRST_INSTALL_INTENT" ]
+[ "$(sed -n '3p' "$FIRST_INSTALL_INTENT")" = unsigned ]
+rm -f -- /root/qa-prefix-helpers.sh
+echo 'REAL_FIRST_INSTALL_INTERRUPTED_AFTER_ATOMIC_OWNER=PASS'
+QA_FIRST_PREFIX_INTERRUPT
 run_offline first-install --offline
+docker exec "$container" /bin/sh -c '
+ set -eu
+ test ! -e /var/lib/server-connect/.first-install-intent
+ test -f /opt/server-connect/current/integrity.sha256
+ test ! -e /opt/server-connect/current/authentication.json
+'
 verify_direct_install
 # Run the newly installed operator overview on BOTH target OS lanes. The
 # installed service is verified inactive above; no host-route or VPN proof
@@ -1666,6 +1718,204 @@ verify_clean_uninstall
 assert_network_unchanged uninstall "$offline_before"
 verify_host_services uninstall
 
+# R3-02: a genuine completed installed systemd footprint plus original
+# inode-bound private receipts. Reconcile before touching any owned service,
+# including a SIGKILL between the first and second retirement unlink. Do not
+# invent an adoption rule for malformed/foreign residues.
+echo '=== Real installed first-install receipt retirement and different-release reinstall ==='
+run_offline first-retirement-install --offline
+verify_direct_install
+docker exec -i "$container" /usr/bin/python3 -I -S - <<'PY_COMMITTED_FIXTURE'
+import os,pathlib
+state=pathlib.Path('/var/lib/server-connect')
+prefix=pathlib.Path('/opt/server-connect')
+assert prefix.is_dir() and state.is_dir()
+assert (state.stat().st_mode & 0o777)==0o700
+assert not (state/'.first-install-intent').exists()
+assert not (state/'.first-release-intent').exists()
+target=(prefix/'current').readlink()
+release=prefix/target
+assert release.is_dir() and (prefix/'unit.sha256').is_file()
+assert not list(pathlib.Path('/opt').glob('.server-connect-release.*'))
+def claim(path, lines):
+    fd=os.open(path,os.O_CREAT|os.O_EXCL|os.O_WRONLY|os.O_NOFOLLOW,0o600)
+    try:
+        os.write(fd,lines.encode('ascii'));os.fsync(fd)
+    finally:os.close(fd)
+claim(state/'.first-install-intent',
+      f"/opt/.server-connect-initial.QA123456\n{prefix.stat().st_dev}:{prefix.stat().st_ino}\nunsigned\n")
+claim(state/'.first-release-intent',
+      f"/opt/.server-connect-release.QA123456\n{release.stat().st_dev}:{release.stat().st_ino}\n{release.name}\nunsigned\n")
+fd=os.open(state,os.O_RDONLY|os.O_DIRECTORY)
+try:os.fsync(fd)
+finally:os.close(fd)
+print('GUEST_COMMITTED_RECEIPT_FIXTURE=PASS (original owner/target/inodes; root-private)')
+PY_COMMITTED_FIXTURE
+# Before either unlink, the actual Installer must recognize the installed
+# service as already committed instead of deleting/replacing it.
+run_offline first-retirement-reconciled --offline
+verify_direct_install
+docker exec "$container" /bin/sh -c '
+  set -eu
+  test ! -e /var/lib/server-connect/.first-install-intent
+  test ! -e /var/lib/server-connect/.first-release-intent
+'
+echo 'INSTALLED_FULL_TWO_INTENT_RECONCILE=PASS (full installed footprint preserved)'
+assert_network_unchanged first-retirement-reconciled "$offline_before"
+verify_host_services first-retirement-reconciled
+# Recreate the exact two claims on the same verified service to simulate
+# an abrupt SIGKILL in the tiny post-first-unlink/pre-second-unlink window.
+docker exec -i "$container" /usr/bin/python3 -I -S - <<'PY_COMMITTED_WINDOW'
+import os,pathlib
+state=pathlib.Path('/var/lib/server-connect')
+prefix=pathlib.Path('/opt/server-connect')
+release=prefix/(prefix/'current').readlink()
+for name,contents in (
+ ('.first-install-intent',f"/opt/.server-connect-initial.QA123456\n{prefix.stat().st_dev}:{prefix.stat().st_ino}\nunsigned\n"),
+ ('.first-release-intent',f"/opt/.server-connect-release.QA123456\n{release.stat().st_dev}:{release.stat().st_ino}\n{release.name}\nunsigned\n")
+):
+    fd=os.open(state/name,os.O_CREAT|os.O_EXCL|os.O_WRONLY|os.O_NOFOLLOW,0o600)
+    try:os.write(fd,contents.encode('ascii'));os.fsync(fd)
+    finally:os.close(fd)
+print('GUEST_COMMIT_RETIREMENT_WINDOW_ARMED=PASS')
+PY_COMMITTED_WINDOW
+run_offline first-retirement-verify-only --verify-only
+if docker exec "$container" /bin/sh -c '
+  set -eu
+  test -f /var/lib/server-connect/.first-install-intent
+  test -f /var/lib/server-connect/.first-release-intent
+  rm /var/lib/server-connect/.first-install-intent
+  kill -KILL $$
+' >"$scratch/first-retirement-kill.out" 2>"$scratch/first-retirement-kill.err";then
+  echo 'First-claim retirement injection unexpectedly survived SIGKILL' >&2
+  exit 1
+else
+  killed_status=$?
+  [[ $killed_status == 137 ]] || { echo "Unexpected retirement SIGKILL status $killed_status" >&2;exit 1; }
+fi
+docker exec "$container" /bin/sh -c '
+ set -eu
+ test ! -e /var/lib/server-connect/.first-install-intent
+ test "$(stat -c "%u:%a:%h" /var/lib/server-connect/.first-release-intent)" = 0:600:1
+ systemctl is-enabled server-connect.service | grep -Fx disabled
+ test -f /opt/server-connect/current/manifest.json
+'
+echo 'ACTUAL_COMMIT_RECEIPT_RETIREMENT_SIGKILL=PASS (first unlinked, second intact, valid installed service)'
+assert_network_unchanged first-retirement-kill "$offline_before"
+verify_host_services first-retirement-kill
+# Real uninstall must validate/reconcile the release-only orphan while it
+# still has the corresponding installed bytes. It must NOT retire a marker
+# merely because it has a familiar filename.
+run_offline first-retirement-uninstall --uninstall
+verify_clean_uninstall
+docker exec "$container" test ! -e /var/lib/server-connect/.first-release-intent
+assert_network_unchanged first-retirement-uninstall "$offline_before"
+verify_host_services first-retirement-uninstall
+# A distinct source/version, not only an identical retry, must now install
+# and uninstall without seeing a stale receipt from the previous release.
+run_offline first-retirement-different-release --offline /root/server-connect-update
+verify_direct_install
+docker exec "$container" /bin/sh -c '
+ set -eu
+ test ! -e /var/lib/server-connect/.first-release-intent
+ test ! -e /var/lib/server-connect/.first-install-intent
+ current=$(readlink /opt/server-connect/current)
+ checksum=$(sha256sum /root/server-connect-update/checksums.sha256 | cut -c1-16)
+ test "$current" = "releases/0.1.0-dev-$checksum"
+'
+assert_network_unchanged first-retirement-different-release "$offline_before"
+verify_host_services first-retirement-different-release
+run_offline first-retirement-different-release-uninstall --uninstall /root/server-connect-update
+verify_clean_uninstall
+assert_network_unchanged first-retirement-different-release-uninstall "$offline_before"
+verify_host_services first-retirement-different-release-uninstall
+echo 'REAL_COMMITTED_RECEIPT_SIGKILL_NEW_RELEASE_REINSTALL=PASS (both Debian versions)'
+
+# Kill the *actual unmodified installer* at two observable filesystem
+# transitions in an isolated Debian systemd guest. A distinct Python
+# supervisor owns the PID; no system binary, source file or trust receipt is
+# modified for fault injection. This is not a claim of physical host safety.
+for kill_stage in payload-copy release-publication; do
+  echo "=== Observed actual initial-installer SIGKILL: $kill_stage ==="
+  docker exec -i "$container" /usr/bin/python3 -I -S - "$kill_stage" <<'PY_WATCH_INSTALL'
+import os, pathlib, signal, subprocess, sys, time
+stage = sys.argv[1]
+prefix = pathlib.Path("/opt/server-connect")
+state = pathlib.Path("/var/lib/server-connect")
+assert stage in ("payload-copy", "release-publication")
+assert not prefix.exists() and not prefix.is_symlink()
+assert not (state / ".first-install-intent").exists()
+assert not (state / ".first-release-intent").exists()
+argv = ["/bin/sh", "/root/server-connect/install.sh", "--offline"]
+proc = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE, text=True, start_new_session=True,
+                        env={"PATH":"/usr/sbin:/usr/bin:/sbin:/bin","HOME":"/root","LC_ALL":"C"})
+witness = None
+deadline = time.monotonic() + 15
+while time.monotonic() < deadline:
+    release_ready = (prefix / "releases").is_dir() and any(
+        child.name.startswith("0.1.0-dev-") for child in (prefix / "releases").iterdir()
+    )
+    receipt_ready = (state / ".first-install-intent").is_file() and (
+        state / ".first-release-intent").is_file()
+    if stage == "payload-copy" and receipt_ready and not release_ready:
+        for candidate in pathlib.Path("/opt").glob(".server-connect-release.*"):
+            if ((candidate / "bin/server-connect").is_file()
+                    and (candidate / "bin/sing-box").is_file()):
+                witness = "partially or fully copied release Stage " + candidate.name
+                break
+    elif stage == "release-publication" and receipt_ready and release_ready:
+        witness = "atomically published release directory before full commit"
+    if witness:
+        try:
+            os.kill(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            witness = None
+        break
+    if proc.poll() is not None:
+        break
+    time.sleep(0.001)
+if witness is None and proc.poll() is None:
+    os.kill(proc.pid, signal.SIGKILL)
+try:
+    out, err = proc.communicate(timeout=18)
+except subprocess.TimeoutExpired:
+    proc.kill()
+    out, err = proc.communicate(timeout=10)
+if witness is None or proc.returncode != -signal.SIGKILL:
+    print("FAILED actual installer interruption: desired stage=", stage,
+          "witness=", witness, "exit=", proc.returncode, file=sys.stderr)
+    print("stdout:", out[-1800:], "stderr:", err[-2400:], file=sys.stderr)
+    sys.exit(1)
+assert (state / ".first-install-intent").is_file()
+assert (state / ".first-release-intent").is_file()
+if stage == "payload-copy":
+    assert not (pathlib.Path("/etc/systemd/system") / "server-connect.service").exists()
+    assert not release_ready
+else:
+    assert any((prefix / "releases").glob("0.1.0-dev-*"))
+assert not pathlib.Path("/usr/local/bin/server-connect").exists()
+print(f"ACTUAL_INITIAL_INSTALL_SIGKILL_{stage}=PASS: {witness}; "
+      f"PID={proc.pid} exit={proc.returncode}, no service or command")
+PY_WATCH_INSTALL
+  assert_network_unchanged "first-kill-$kill_stage" "$offline_before"
+  verify_host_services "first-kill-$kill_stage"
+  run_offline "first-retry-$kill_stage" --offline
+  verify_direct_install
+  docker exec "$container" /bin/sh -c '
+    set -eu
+    test ! -e /var/lib/server-connect/.first-install-intent
+    test ! -e /var/lib/server-connect/.first-release-intent
+    test -z "$(find /opt -maxdepth 1 -name ".server-connect-release.*" -print)"
+  '
+  assert_network_unchanged "first-retry-$kill_stage" "$offline_before"
+  verify_host_services "first-retry-$kill_stage"
+  run_offline "first-retry-$kill_stage-uninstall" --uninstall
+  verify_clean_uninstall
+  assert_network_unchanged "first-retry-$kill_stage-uninstall" "$offline_before"
+  verify_host_services "first-retry-$kill_stage-uninstall"
+done
+echo 'INITIAL_INSTALL_REAL_SIGKILL_COPY_AND_PUBLISH_RETRY=PASS (both Debian versions, Direct, SSH/HTTP)'
 echo 'DISCONNECTED_OFFLINE_CYCLE=PASS'
 if [[ $qa_version == 13 ]]; then
 echo 'LIMITATION: Proxy Only WordPress/PHP-FPM used guest loopback with QA-only WP_PROXY_*; transparent TUN WordPress used no application proxy and synthetic egress; physical host/foreign field acceptance is NOT_RUN'
@@ -1828,6 +2078,177 @@ python3 -I -B release-auth.py sign-local-qa \
   --archive /root/qa-release-trust/archive.tar.gz --bundle /root/server-connect
 QASIGN
 signed_before=$(network_digest)
+# R3-01: real Signed first-install receipt creation, interrupted by SIGKILL
+# at the two formerly ambiguous auth publication boundaries. A fresh,
+# unmodified installer must cryptographically inspect/cleanup each stage and
+# re-install the *same* Signed bundle. This runs in root Debian 12 and 13,
+# never on the host or runner.
+docker cp "$root/scripts/qa/signed-first-interruption.py" "$container:/root/qa-signed-first-interruption.py"
+for signed_kill in before after; do
+  docker exec "$container" /usr/bin/python3 -I -S /root/qa-signed-first-interruption.py \
+    "$signed_kill" "$qa_version"
+  assert_network_unchanged "signed-first-kill-$signed_kill" "$signed_before"
+  verify_host_services "signed-first-kill-$signed_kill"
+  # A real interrupted Signed first install cannot be resumed with keyless
+  # or local QA trust even if authentication.json was never published.
+  for different_mode in unsigned local-qa; do
+    case "$different_mode" in
+      unsigned) mode_args='' ;;
+      local-qa) mode_args='--local-qa' ;;
+    esac
+    if docker exec "$container" /usr/bin/env -i HOME=/root \
+         PATH=/usr/sbin:/usr/bin:/sbin:/bin LC_ALL=C \
+         /bin/sh /root/server-connect/install.sh --offline $mode_args \
+         >"$scratch/signed-$signed_kill-$different_mode.stdout" \
+         2>"$scratch/signed-$signed_kill-$different_mode.stderr";then
+      echo 'Interrupted Signed install accepted implicit trust change' >&2
+      exit 1
+    fi
+    grep -F 'original first-install trust selection changed' \
+      "$scratch/signed-$signed_kill-$different_mode.stderr" >/dev/null || {
+      cat "$scratch/signed-$signed_kill-$different_mode.stderr" >&2
+      exit 1
+    }
+    docker exec "$container" /bin/sh -c '
+      set -eu
+      test -f /var/lib/server-connect/.first-install-intent
+      test -f /var/lib/server-connect/.first-release-intent
+      test ! -e /opt/server-connect/current
+      test ! -e /usr/local/bin/server-connect
+      test ! -e /etc/systemd/system/server-connect.service
+    '
+  done
+  echo 'SIGNED_FIRST_DOWNGRADE_AND_LOCAL_QA_REFUSED=PASS'
+  if [[ $signed_kill == before ]]; then
+    # An alternative signature over IDENTICAL metadata is cryptographically
+    # valid, but the original selected publisher may not be replaced.
+    docker exec "$container" /bin/sh -c '
+      set -eu
+      cd /root/qa-release-trust
+      openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 \
+        -out qa-other-private.pem >/dev/null 2>&1
+      openssl pkey -in qa-other-private.pem -pubout \
+        -out qa-other-public.pem >/dev/null 2>&1
+      openssl dgst -sha256 -sign qa-other-private.pem \
+        -out qa-other.sig release.json
+      openssl dgst -sha256 -verify qa-other-public.pem \
+        -signature qa-other.sig release.json | grep -Fx "Verified OK"
+    '
+    docker exec "$container" /usr/bin/python3 -I -S \
+      /root/server-connect/release-auth.py verify \
+      --metadata /root/qa-release-trust/release.json \
+      --signature /root/qa-release-trust/qa-other.sig \
+      --publisher-key /root/qa-release-trust/qa-other-public.pem \
+      --version 0.1.0-dev --target "debian-$qa_version-amd64" \
+      --bundle /root/server-connect >/dev/null
+    if docker exec "$container" /usr/bin/env -i HOME=/root \
+         PATH=/usr/sbin:/usr/bin:/sbin:/bin LC_ALL=C \
+         /bin/sh /root/server-connect/install.sh --offline \
+         --metadata-file /root/qa-release-trust/release.json \
+         --signature-file /root/qa-release-trust/qa-other.sig \
+         --publisher-key /root/qa-release-trust/qa-other-public.pem \
+         --version 0.1.0-dev --target "debian-$qa_version-amd64" \
+         >"$scratch/signed-other-key.stdout" \
+         2>"$scratch/signed-other-key.stderr";then
+      echo 'Changed but valid Signed authority accepted by retry' >&2
+      exit 1
+    fi
+    grep -F 'original first-install trust selection changed' \
+      "$scratch/signed-other-key.stderr" >/dev/null || {
+      cat "$scratch/signed-other-key.stderr" >&2
+      exit 1
+    }
+    docker exec "$container" /bin/rm -- \
+      /root/qa-release-trust/qa-other-private.pem \
+      /root/qa-release-trust/qa-other-public.pem \
+      /root/qa-release-trust/qa-other.sig
+    echo 'SIGNED_FIRST_VALID_ALTERNATE_PUBLISHER_REFUSED=PASS'
+  fi
+  assert_network_unchanged "signed-first-downgrade-$signed_kill" "$signed_before"
+  verify_host_services "signed-first-downgrade-$signed_kill"
+  docker exec "$container" /usr/bin/strace -ff -qq -yy -s 128 \
+    -e trace=%network,%process -o "/root/qa-strace/signed-first-retry-$signed_kill" \
+    /usr/bin/env -i HOME=/root PATH=/usr/sbin:/usr/bin:/sbin:/bin LC_ALL=C \
+    /bin/sh /root/server-connect/install.sh --offline \
+    --metadata-file /root/qa-release-trust/release.json \
+    --signature-file /root/qa-release-trust/release.sig \
+    --publisher-key /root/qa-release-trust/independent-public.pem \
+    --version 0.1.0-dev --target "debian-$qa_version-amd64"
+  assert_no_offline_fetch "signed-first-retry-$signed_kill"
+  verify_direct_install
+  # A completed Signed installation cannot be abandoned through the
+  # incomplete-only command: neither its service nor release may change.
+  if docker exec "$container" /usr/bin/env -i HOME=/root        PATH=/usr/sbin:/usr/bin:/sbin:/bin LC_ALL=C        /bin/sh /root/server-connect/install.sh --offline --abandon-incomplete        >"$scratch/signed-committed-abandon.stdout"        2>"$scratch/signed-committed-abandon.stderr";then
+    echo 'Explicit incomplete abandonment unexpectedly accepted committed Signed install' >&2
+    exit 1
+  fi
+  grep -F 'no exactly owned incomplete first installation to abandon'     "$scratch/signed-committed-abandon.stderr" >/dev/null || {
+    cat "$scratch/signed-committed-abandon.stderr" >&2
+    exit 1
+  }
+  verify_direct_install
+  docker exec "$container" /bin/sh -c '
+    set -eu
+    test ! -e /var/lib/server-connect/.first-install-intent
+    test ! -e /var/lib/server-connect/.first-release-intent
+    test -z "$(find /opt -maxdepth 1 -name ".server-connect-release.*" -print)"
+    test ! -e /opt/server-connect/releases/.stage.AUTHPRE0
+    test ! -e /opt/server-connect/releases/.stage.AUTHPOST
+    test -f /opt/server-connect/current/authentication.json
+    test "$(stat -c "%u:%a:%h" /opt/server-connect/current/authentication.json)" = 0:600:1
+  '
+  assert_network_unchanged "signed-first-retry-$signed_kill" "$signed_before"
+  verify_host_services "signed-first-retry-$signed_kill"
+  run_offline "signed-first-retry-$signed_kill-uninstall" --uninstall
+  verify_clean_uninstall
+  assert_network_unchanged "signed-first-retry-$signed_kill-uninstall" "$signed_before"
+  verify_host_services "signed-first-retry-$signed_kill-uninstall"
+done
+echo 'SIGNED_FIRST_INSTALL_REAL_SIGKILL_ANONYMOUS_PUBLICATION_RETRY=PASS (Debian12/13, crypto and Direct verified)'
+# Explicit abandonment is a DIFFERENT command, never an unsigned retry.
+docker exec "$container" /usr/bin/python3 -I -S /root/qa-signed-first-interruption.py before "$qa_version"
+docker exec "$container" /usr/bin/touch /opt/server-connect/releases/.stage.AUTHPRE0/foreign-abandon-marker
+if docker exec "$container" /usr/bin/env -i HOME=/root PATH=/usr/sbin:/usr/bin:/sbin:/bin LC_ALL=C \
+    /bin/sh /root/server-connect/install.sh --offline --abandon-incomplete \
+    >"$scratch/signed-abandon-foreign.stdout" 2>"$scratch/signed-abandon-foreign.stderr";then
+  echo 'Explicit abandonment adopted foreign staged data' >&2;exit 1
+fi
+docker exec "$container" /bin/sh -c '
+ set -eu
+ test -e /opt/server-connect/releases/.stage.AUTHPRE0/foreign-abandon-marker
+ test -f /var/lib/server-connect/.first-release-intent
+ test -f /var/lib/server-connect/.first-install-intent
+'
+docker exec "$container" /bin/rm -- /opt/server-connect/releases/.stage.AUTHPRE0/foreign-abandon-marker
+docker exec "$container" /usr/bin/strace -ff -qq -yy -s 128 \
+  -e trace=%network,%process -o /root/qa-strace/signed-explicit-abandon \
+  /usr/bin/env -i HOME=/root PATH=/usr/sbin:/usr/bin:/sbin:/bin LC_ALL=C \
+  /bin/sh /root/server-connect/install.sh --offline --abandon-incomplete
+assert_no_offline_fetch signed-explicit-abandon
+docker exec "$container" /bin/sh -c '
+ set -eu
+ test ! -e /opt/server-connect
+ test ! -e /usr/local/bin/server-connect
+ test ! -e /var/lib/server-connect/.first-install-intent
+ test ! -e /var/lib/server-connect/.first-release-intent
+ test -z "$(find /opt -maxdepth 1 -name ".server-connect-release.*" -print)"
+'
+assert_network_unchanged signed-explicit-abandon "$signed_before"
+verify_host_services signed-explicit-abandon
+echo 'SIGNED_FIRST_EXPLICIT_VERIFIED_ABANDON=PASS (foreign refusal, no install)'
+run_offline first-retry-signed-abandon-keyless --offline
+verify_direct_install
+docker exec "$container" /bin/sh -c '
+ set -eu
+ test -f /opt/server-connect/current/integrity.sha256
+ test ! -e /opt/server-connect/current/authentication.json
+'
+assert_network_unchanged signed-abandon-fresh-keyless "$signed_before"
+verify_host_services signed-abandon-fresh-keyless
+run_offline signed-abandon-keyless-uninstall --uninstall
+verify_clean_uninstall
+assert_network_unchanged signed-abandon-keyless-uninstall "$signed_before"
+verify_host_services signed-abandon-keyless-uninstall
 docker exec "$container" /usr/bin/strace -ff -qq -yy -s 128 \
   -e trace=%network,%process -o /root/qa-strace/signed-offline-install \
   /usr/bin/env -i HOME=/root PATH=/usr/sbin:/usr/bin:/sbin:/bin LC_ALL=C \

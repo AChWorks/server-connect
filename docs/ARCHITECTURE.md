@@ -7,7 +7,7 @@
 The Owner selected **simplifying this same Server Connect product**: use the
 **official sing-box native Linux TUN, routing, DNS, and rule-set facilities**
 instead of extending the experimental custom Go route/RPDB/nftables ownership
-stack. Keep the existing CLI, stored profiles/rules, three modes, signed
+stack. Keep the existing CLI, stored profiles/rules, three modes, integrity-verified
 official/mirror/offline distribution, and the canonical product requirements.
 Retire old QA-only native machinery only after replacement acceptance, rather
 than breaking Direct/Proxy Only or deleting negative safety evidence.
@@ -348,6 +348,6 @@ The connector must not change aaPanel/Nginx virtual hosts, intercept another tun
 
 ## Packaging and host targets
 
-Target only **tested** Linux OS/kernel/architecture/sing-box combinations with systemd and the required TUN/network capabilities. Acquire immutable verified bytes via official online, operator-hosted HTTPS mirror, or manual offline upload; all invoke one shared installer. Keep host-specific package, signature and installation rules in [OFFLINE-DISTRIBUTION.md](OFFLINE-DISTRIBUTION.md).
+Target only **tested** Linux OS/kernel/architecture/sing-box combinations with systemd and the required TUN/network capabilities. Acquire immutable verified bytes via official online, operator-hosted HTTPS mirror, or manual offline upload; all invoke one shared installer. Keep host-specific package, source-trust and installation rules in [OFFLINE-DISTRIBUTION.md](OFFLINE-DISTRIBUTION.md).
 
 Operational safety details live in [SAFETY-RECOVERY.md](SAFETY-RECOVERY.md); real scenario coverage and known limits in [ACCEPTANCE.md](ACCEPTANCE.md).
