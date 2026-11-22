@@ -632,6 +632,39 @@ func (m *Manager) withNativeTransition(fn func() error) error {
 	defer syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
 	return fn()
 }
+
+// Operator Disconnect must publish a truthful stopping phase while the
+// owned Core/TUN still exists. It must never overwrite an already persisted
+// Health-driven stop cause, and never mutate a missing/foreign health receipt.
+// Caller holds .lock; the outbound shutdown barrier has already been armed.
+func (m *Manager) markNativeOperatorStoppingLocked() error {
+	state, err := m.load()
+	if err != nil || state.Desired != "smart" {
+		return err
+	}
+	claim, err := m.readNativeSession()
+	if err != nil {
+		return err
+	}
+	health, err := m.readNativeHealth()
+	if errors.Is(err, os.ErrNotExist) {
+		return nil // partial initial connection before Health is staged
+	}
+	if err != nil {
+		return err
+	}
+	if health.OperationID != claim.HealthOperationID || health.ConfigSHA256 != claim.ConfigSHA256 {
+		return Fault("guard_pending", "native shutdown health identity mismatch")
+	}
+	if health.Phase == "stopping" {
+		return nil
+	}
+	health.Phase, health.Reason = "stopping", "operator_disconnect"
+	health.RestartInFlight = false
+	health.RestartOriginalPID = 0
+	return m.saveNativeHealth(health)
+}
+
 func (m *Manager) stopNativeHealthOperation(id, reason string) (bool, error) {
 	return m.stopNativeHealthOperationExpected(id, reason, nil)
 }
@@ -812,6 +845,19 @@ func (m *Manager) RunNativeHealthRound() (NativeHealthState, error) {
 		s.Phase, s.Reason = "off", reason
 		return s, nil
 	}
+	// The lifetime output guard is necessary even with a healthy native
+	// route: a Core SIGKILL may erase TUN before ExecStopPost runs.
+	if e := m.verifyNativeLiveOutputGuard(claim); e != nil {
+		stopped, stopErr := m.stopNativeHealthOperation(s.OperationID, "native_output_guard_unverified")
+		if stopErr != nil {
+			return s, stopErr
+		}
+		if !stopped {
+			return s, Fault("guard_pending", "native output guard belongs to old session")
+		}
+		s.Phase, s.Reason = "off", "native_output_guard_unverified"
+		return s, nil
+	}
 	if e := requireNativeReplyGuardClaim(context.Background(), nativeHealthKernelReader{}, claim.ReplyGuardHandle, claim.ReplyGuardFingerprint); e != nil {
 		stopped, stopErr := m.stopNativeHealthOperation(s.OperationID, "native_reply_guard_unverified")
 		if stopErr != nil {
@@ -880,6 +926,9 @@ func (m *Manager) RunNativeHealthRound() (NativeHealthState, error) {
 		}
 		if e = nativeHealthGuardRoles(); e != nil {
 			return Fault("guard_unavailable", "native guard lost during probe round")
+		}
+		if e = m.verifyNativeLiveOutputGuard(claim); e != nil {
+			return Fault("guard_unavailable", "native lifetime OUTPUT guard changed during selected-path probe")
 		}
 		if e = requireNativeReplyGuardClaim(context.Background(), nativeHealthKernelReader{}, claim.ReplyGuardHandle, claim.ReplyGuardFingerprint); e != nil {
 			return Fault("guard_unavailable", "native reply guard changed during selected-path probe")

@@ -769,8 +769,26 @@ func (m *Manager) NativeRecoverInstalled() error {
 		if err := m.nativeCoreRecoveryQuiescent(); err != nil {
 			return err
 		}
+		// ExecStopPost may run after an unexpected Core exit, without an
+		// operator/Health stop prearm. Restore the exact outbound barrier
+		// before any remaining kernel teardown, including SIGKILL recovery.
+		if err := m.ensureNativeStopBarrierLocked(); err != nil {
+			return err
+		}
+		// A repaired preparing/releasing receipt must be reread: kernel CAS
+		// cleanup may only use its *current* committed table handle.
+		session, err = m.readNativeSession()
+		if err != nil {
+			return err
+		}
 		if err := recoverNativeNetworkWithReceipt(context.Background(),
 			nativeSystemRunner{}, nativeSystemRunner{}, session, health, boot); err != nil {
+			return err
+		}
+		// Only the exact network restoration can authorize desired=direct.
+		// Publish that state while the output barrier is STILL effective;
+		// releasing it first leaks public SYNs through the recovered routes.
+		if err := m.commitNativeDirectAfterKernelRestoreLocked(); err != nil {
 			return err
 		}
 		if err := m.recoverNativeStartupWithSession(context.Background(), nativeSystemRunner{}, session); err != nil {
@@ -795,24 +813,36 @@ func (m *Manager) NativeRecoverInstalled() error {
 	})
 }
 
-// Called under the native lifecycle lock only AFTER recoverNativeRedirect has
-// proved the exact owned RPDB, route and nftables objects are absent. Save
-// Direct before retiring the one-use receipt: a crash between these writes
-// leaves either a retryable receipt or a verified Direct session, never an
-// unproven Smart session with no recovery identity.
-func (m *Manager) finalizeNativeRecoveryLocked() error {
+// Called ONLY after the exact owned TUN/rules and reply hook were verified
+// absent. This state write must precede releasing the rearmed OUTPUT barrier,
+// otherwise the recovered Direct route leaks public traffic while desired=smart.
+// A failure retains the one-use receipt and barrier for an explicit retry.
+func (m *Manager) commitNativeDirectAfterKernelRestoreLocked() error {
 	state, err := m.load()
 	if err != nil {
 		return err
 	}
 	if state.Desired != "smart" && state.Desired != "direct" {
-		return Fault("guard_pending", "native cleanup cannot finalize an unrelated desired mode")
+		return Fault("guard_pending", "native cleanup cannot commit an unrelated mode")
 	}
 	if state.Desired == "smart" {
 		state.Desired = "direct"
-		if err := m.save(state); err != nil {
-			return err
-		}
+		return m.save(state)
+	}
+	return nil
+}
+
+// Finalize the receipt only after Direct was durably committed AND the exact
+// operation-bound OUTPUT barrier has been independently removed. A failed
+// release leaves the claim for retry; ordinary Direct/off is never announced
+// as fully restored solely because the network route table is empty.
+func (m *Manager) finalizeNativeRecoveryLocked() error {
+	state, err := m.load()
+	if err != nil {
+		return err
+	}
+	if state.Desired != "direct" {
+		return Fault("guard_pending", "native recovery cannot retire its claim before Direct commitment and barrier release")
 	}
 	if health, e := m.readNativeHealth(); e == nil {
 		session, sessionErr := m.readNativeSession()
@@ -1082,8 +1112,9 @@ func (m *Manager) connectNativeSmartRoutingUnlocked(opts NativePolicyOptions) (N
 		}
 		return result, Fault("guard_unavailable", "early native reply guard failed; Direct restored")
 	}
-	// This short-lived nft OUTPUT gate is effective BEFORE the Core can
-	// start; a systemd Type=exec success must never expose a Direct SYN gap.
+	// One operation-bound nft OUTPUT gate is effective BEFORE the Core
+	// starts and remains installed while Smart is desired, including Core
+	// crash and auto-restart windows. It is retired only AFTER verified Off.
 	if err := m.prepareNativeStartupBarrierBeforeCoreStart(); err != nil {
 		if cleanup := m.disconnectNativeSmartRoutingUnlocked(); cleanup != nil {
 			return result, Fault("guard_pending", "native outbound containment failed and recovery is uncertain")
@@ -1123,16 +1154,9 @@ func (m *Manager) connectNativeSmartRoutingUnlocked(opts NativePolicyOptions) (N
 				return result, Fault("guard_unavailable", "native reply guard changed; Direct restored")
 			}
 			if e = m.nativeReadyKernelPolicy(session, "internet_https"); e == nil {
-				e = m.releaseNativeStartupAfterReady(session)
-				if e == nil {
-					e = m.finishNativeStartupRelease(session)
-				}
-				if e != nil {
-					if cleanup := m.disconnectNativeSmartRoutingUnlocked(); cleanup != nil {
-						return result, Fault("guard_pending", "native startup barrier release failed and recovery remains uncertain")
-					}
-					return result, Fault("guard_unavailable", "native startup barrier release failed; Direct restored")
-				}
+				// The verified late OUTPUT guard is *never* released merely
+				// because the Core is ready. Without this persistent receipt,
+				// SIGKILL can remove TUN before ExecStopPost rearms anything.
 				result.Observed = "active"
 				result.ReplyGuardVerified = true
 				return result, nil
@@ -1161,6 +1185,18 @@ func (m *Manager) connectNativeSmartRoutingUnlocked(opts NativePolicyOptions) (N
 }
 func (m *Manager) disconnectNativeSmartRoutingUnlocked() error {
 	if err := m.nativeUnitOwnership(); err != nil {
+		return err
+	}
+	// Stop-time OUTPUT containment is committed BEFORE systemctl stop may
+	// remove the TUN. The same path is used for manual Disconnect, Health
+	// exhaustion, and a failed initial Connect, with no new resource owner.
+	// A foreign or changed nft table blocks the stop rather than leaking.
+	if err := m.withLock(func() error {
+		if err := m.ensureNativeStopBarrierLocked(); err != nil {
+			return err
+		}
+		return m.markNativeOperatorStoppingLocked()
+	}); err != nil {
 		return err
 	}
 	// A matching active service can always be stopped independently of stale
@@ -1341,9 +1377,9 @@ func (m *Manager) NativeStatus() (NativeConnectionStatus, error) {
 		if err := requireNativeReplyGuardClaim(context.Background(), nativeSystemRunner{}, session.ReplyGuardHandle, session.ReplyGuardFingerprint); err != nil {
 			return err
 		}
-		// Do not advertise an active, usable TUN before the independent
-		// kernel interception has been verified and its pre-TUN barrier
-		// has been released.
+		// A live Core remains guarded throughout Smart. Do not infer
+		// traffic readiness from the parent process or the nft guard alone:
+		// independent policy, selected-child and health proof still apply.
 		if session.StartupGuardName != "" {
 			plan, e := m.readNativeStartupPlan(session)
 			if e != nil {
@@ -1355,14 +1391,35 @@ func (m *Manager) NativeStatus() (NativeConnectionStatus, error) {
 				if e != nil || present {
 					return Fault("guard_pending", "released native startup barrier remains or is unobservable")
 				}
-			case "armed", "releasing":
+			case "armed":
 				if e = requireNativeStartupGuardClaim(context.Background(), nativeSystemRunner{}, plan, session.StartupGuardHandle); e != nil {
 					return e
 				}
-				result.Observed = "starting"
-				result.ReplyGuardVerified = true
-				result.GuardVerified = true
+				result.ReplyGuardVerified, result.GuardVerified = true, true
+				if health.Phase == "recovering" || health.Phase == "stopping" {
+					result.Observed = health.Phase
+					return nil
+				}
+				// A persistent output gate is not a state of perpetual
+				// "starting": actual Core identity and kernel interception
+				// must be independently checked for healthy/degraded phases.
+				if health.Phase != "healthy" && health.Phase != "degraded" {
+					result.Observed = "starting"
+					return nil
+				}
+				if _, _, e := m.nativeCoreChildIdentity(); e != nil {
+					return Fault("guard_unavailable", "native Core child process unverified")
+				}
+				if e := m.nativeReadyKernelPolicy(session, health.ProbeScope); e != nil {
+					return e
+				}
+				// A persistent guard alone is not native policy proof. Report
+				// verification only after the independent live Core/kernel check.
+				result.NativePolicyVerified = true
+				result.SelectedVPNPathProof = nativeSelectedHTTPSProof(health, s.Desired, observed, now)
 				return nil
+			case "releasing":
+				return Fault("guard_pending", "Native active session is unexpectedly releasing its output containment")
 			default:
 				return Fault("guard_pending", "native startup containment not committed")
 			}

@@ -50,18 +50,22 @@ Connect/Disconnect lifecycle. The Manager uses one shared state/journal lock
 to read the saved profile and rules, validates the compiled official sing-box
 config, checks free policy slots, and stages a private digest-bound recovery
 claim before requesting systemd activation. No second Go router is created.
-The short-lived Native startup OUTPUT containment is one additional
-**admission/rollback guard**, not a second traffic classifier: after
-the independent timers and accepted-reply guard are armed, it blocks
-new unmarked public egress **across interfaces** until the Core has
-installed its TUN/policy. Only official-Core-marked bootstrap sockets,
-proven accepted replies and connected/private destinations are exempt.
-There is no blanket public OS DNS or selected peer-IP/port bypass.
-Only then may the manager report Smart active and
-remove the exact receipt-bound containment table. Crucially,
-`desired=smart` is persisted **after** that barrier is installed and
-independently verified; otherwise an application may emit Direct packets
-while Smart has been requested but the TUN is not yet effective.
+The one-operation Native nft OUTPUT containment is an
+**admission/lifetime/recovery guard**, not a second traffic classifier:
+it is installed **before** `desired=smart` is published and stays
+installed throughout Smart, including healthy selected egress, recovery,
+unexpected Core death and TUN teardown. Its filter priority 200 runs
+after official-Core native redirect hooks. The Core's selected mark 0x2023,
+official bootstrap/direct mark 0x2024, existing connection replies and
+protected/connected destinations are permitted; **new unmarked public
+egress is rejected across all interfaces**. The selected and Direct Iran
+routes themselves remain entirely Core-owned. There is no blanket public
+OS DNS or selected peer-IP/port bypass. A live selected route and verified
+Core identity, not mere existence of this guard, determine readiness.
+The guard is removed **only after** verified kernel restoration and
+durable `desired=direct` commitment, so a Core SIGKILL cannot create
+a Direct bypass window before ExecStopPost runs. There is no Off-mode
+blocking or permanent post-session kill switch.
 
 The current official-Core native TUN config uses a 9000-byte **virtual**
 MTU, not a statement about the physical underlay MTU. The previous 1400-byte
@@ -79,9 +83,21 @@ start or unexpected Core termination. The fixed native table/rule indices are
 not enough for SIGKILL recovery: official sing-tun's auto_redirect separately
 creates a random route table and priority-1 lookup. Recovery validates native
 resources before removing them. Unknown foreign objects are retained and
-reported uncertain for operator repair/retry. Only after exact kernel
-restoration is verified does the native stop hook persist Direct and retire
-its recovery receipt. A mismatched or unverified receipt remains intact for
+reported uncertain for operator repair/retry. For deliberate Disconnect,
+exhausted Health recovery and unexpected Core SIGKILL, the **already-active**
+one-operation OUTPUT guard is independently verified before further
+kernel cleanup. The stop hook first verifies restoration of Core/route/reply
+resources, **durably commits desired=direct while OUTPUT still blocks
+unmarked public egress**, and only then removes its exact barrier by
+generation-checked ownership. The operation receipt is retired last.
+A failure to verify the kernel, persist Direct, or remove its owned filter
+returns pending/uncertain rather than declaring clean Off. The temporary
+filter has no permanent Direct-mode role and protects established inbound
+SSH/HTTP replies and Core bootstrap by the same narrowly verified rules as
+at startup. Tests must prove both no Direct leak *before* this commit and
+no leftover VPN-only block *after* it.
+
+A mismatched or unverified receipt remains intact for
 operator investigation; a private inactive Core config may remain until the
 next explicit Disconnect. Connect starts the owned native unit without
 enabling it for future boots: a reboot never blindly reapplies unconfirmed
@@ -167,27 +183,23 @@ the existing cumulative-flapping cutoff) enters `recovering` only while the
 remain effective, the selected kernel capture is intact, and its original
 one-use operation receipt still owns the session.
 
-The installed Native systemd unit now runs a **small managed supervisor as
+The installed Native systemd unit runs a **small managed supervisor as
 MainPID**, with official sing-box as its direct child. An authenticated
 operation-bound `SIGUSR1` request is checked against the current persisted
 restart attempt, Core PID, current boot, owned service/guard identities and
-the exact installed nft OUTPUT containment barrier **before and after**
-stopping the old child. The barrier is installed **before** any intentional
-Core process exit and remains effective while the new child and its native
-TUN/kernel interception are established. After independently verifying a
-**distinct Core PID/start time** and effective TUN, RPDB and redirect policy,
-the manager releases the **exact receipt-owned temporary barrier**; the
-restored Core-owned interception then protects the selected path while
-fresh selected HTTPS is reprobed. Only positive selected-path proof changes
-Health to `healthy`. Failed reproof remains `recovering` under independently
-verified interception and the bounded retry budget, or triggers owned
-Direct/off recovery when its safety or budget conditions fail. The temporary
-barrier is **not** retained through selected HTTPS reproof. The existing
-`ExecStopPost=native-recover`, `Restart=no`, independently scheduled guards
-and one-use owned kernel cleanup are **not** bypassed. An unexpected Core exit
-without an already committed barrier is fatal and proceeds to owned
-Direct/off recovery; a blind `systemctl restart` or `SIGHUP` is not a safe
-fallback.
+the **already-committed lifetime** nft OUTPUT containment **before and after**
+stopping the old child. The same guard remains effective while the new child
+and TUN/kernel interception are established. After independently verifying
+a **distinct Core PID/start time** and effective TUN/RPDB/redirect policy,
+fresh selected HTTPS is reprobed **without removing the guard**.
+Only positive selected-path proof changes Health to `healthy`. Failed
+reproof remains `recovering` under independently verified interception and
+the bounded retry budget, or triggers verified Direct/off recovery.
+The existing `ExecStopPost=native-recover`, `Restart=no`, independently
+scheduled guards and one-use owned kernel cleanup are **not** bypassed.
+An unexpected Core exit must encounter the **preexisting** live guard:
+post-crash rearming alone is too late because the TUN may disappear before
+ExecStopPost executes. No blind `systemctl restart` or `SIGHUP` fallback.
 
 `connect-smart` selects at most **3 Core-process restarts per activation**
 by default, an initial **1000 ms** exponential backoff (bounded at 30 seconds)

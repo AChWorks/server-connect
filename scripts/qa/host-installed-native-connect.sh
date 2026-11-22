@@ -157,12 +157,31 @@ print(r["data"]["id"])'
       native_installed_diagnostic
       return 1
     }
+  python3 - /run/sc-qa-installed-native-connect.json <<'PYQA_CONNECT'
+import json,sys
+with open(sys.argv[1],encoding="utf-8") as f:
+    r=json.load(f)
+assert r["ok"] and r["data"]["desired"]=="smart",r
+assert r["data"]["observed"]=="active",r
+PYQA_CONNECT
+  # Connect proves that Core/TUN/kernel interception is ready, not that the
+  # independent HTTPS Health executor has already completed its first round.
+  # While the one-operation OUTPUT barrier remains armed, native-status
+  # accurately reports "starting" until Health enters healthy/degraded.
+  # Never accept absent/changed guard or an unexpected phase as readiness.
   "$sc" --json native-status | python3 -c '
 import json,sys
 r=json.load(sys.stdin)
-assert r["ok"] and r["data"]["desired"]=="smart" and r["data"]["observed"]=="active",r
-assert r["data"]["recovery_claim_present"] and r["data"]["runtime_guard_verified"],r
-assert r["data"]["inbound_reply_guard_verified"],r
+assert r["ok"],r
+d=r["data"]
+assert d["desired"]=="smart" and d["recovery_claim_present"],r
+assert d["runtime_guard_verified"] and d["inbound_reply_guard_verified"],r
+if d["health_phase"]=="starting":
+    assert d["observed"]=="starting" and not d["native_policy_verified"],r
+elif d["health_phase"] in ("healthy","degraded"):
+    assert d["observed"]=="active" and d["native_policy_verified"],r
+else:
+    raise AssertionError(r)
 ' || return 1
   test -e /sys/class/net/sctunqa0 || return 1
   test "$(systemctl show server-connect-native-tun.service -p ActiveState --value)" = active || return 1
@@ -196,6 +215,46 @@ assert r["data"]["inbound_reply_guard_verified"],r
     }
   echo 'INSTALLED_NATIVE_SELECTED_PATH=PASS (installed Core, selected TCP/UDP/DNS, manual Direct, foreign hosting, independent no-leak counters)'
 
+  # This network-disconnected guest has no authenticated PUBLIC HTTPS peer.
+  # After the bounded 20s Health startup grace, its first independent failed
+  # round must become degraded while the working synthetic VPN path stays
+  # active and the lifetime output/reply guards remain independently proven.
+  # A permanent "starting" or a premature Off is a real product failure.
+  native_installed_health_degraded=no
+  for attempt in $(seq 1 45); do
+    if "$sc" --json native-status | python3 -c '
+import json,sys
+r=json.load(sys.stdin)
+assert r["ok"],r
+d=r["data"]
+assert d["desired"]=="smart" and d["recovery_claim_present"],r
+assert d["runtime_guard_verified"] and d["inbound_reply_guard_verified"],r
+if d["health_phase"]=="degraded":
+    assert d["observed"]=="active" and d["native_policy_verified"],r
+    assert d["health_rounds"]>=1 and d["health_failures"]>=1,r
+    assert d["selected_vpn_path_proof"]=="not_run",r
+    sys.exit(0)
+if d["health_phase"]=="starting":
+    assert d["observed"]=="starting" and not d["native_policy_verified"],r
+    sys.exit(3)
+raise AssertionError(r)
+'; then
+      native_installed_health_degraded=yes
+      break
+    else
+      native_installed_status_rc=$?
+      if [ "$native_installed_status_rc" -ne 3 ]; then
+        echo 'INSTALLED_NATIVE_HEALTH_TRANSITION=FAIL (unexpected status or guard defect)' >&2
+        return 1
+      fi
+    fi
+    sleep 1
+  done
+  test "$native_installed_health_degraded" = yes || {
+    echo 'INSTALLED_NATIVE_HEALTH_TRANSITION=FAIL (bounded startup-to-degraded transition absent)' >&2
+    return 1
+  }
+  echo 'INSTALLED_NATIVE_HEALTH_TRANSITION=PASS (guarded starting to independently probed degraded, observed active, policy verified)'
   native_installed_cleanup || return 1
   echo 'INSTALLED_NATIVE_EXPLICIT_OFF=PASS (installed lifecycle, five exact inventories, independent guards inert)'
 

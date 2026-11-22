@@ -98,36 +98,56 @@ Runtime status and health independently attest the same table, hook,
 rules, tuple sets and fingerprint. Merely seeing an active Core never
 establishes selected-path health.
 
-**Native startup packet admission (unmerged candidate):** An observed
-release-blocking Direct TCP SYN escaped while `desired=smart` and the
-systemd Core unit was already `active` but the TUN did not yet exist. The
-manager must install a distinct, one-operation `inet sc_pre_<operation-id>`
-nft OUTPUT filter **before publishing `desired=smart`**, not merely
-before `systemctl start`. The independent Health/Recovery roles and narrow
-accepted-reply guard are prearmed first; the temporary filter blocks new
-unmarked public egress on **all** host interfaces. Only the official Core's
-output-marked sockets (`0x2024`), proven accepted-session replies,
-loopback and validated connected/private destinations are exempt. There is
-**no** public operating-system DNS exception and **no** general IP/port
-exception for the VPN peer: either could allow unrelated applications
-to bypass VPN-required startup containment. A precommitted private
-digest-bound plan,
-exact rule/chain/handle receipt, and generation-conditional deletion
-prevent name-only cleanup or adoption of a foreign table. It is **not**
-a permanent kill switch, second router, or an off-mode block.
+**Native Smart-lifetime packet admission:** An earlier packet witness
+showed a Direct TCP SYN before TUN activation; a later independent SIGKILL
+witness showed another leak **after TUN disappeared but before ExecStopPost
+rearmed** the startup barrier. A single one-operation
+`inet sc_pre_<operation-id>` nft OUTPUT filter must be installed **before
+publishing `desired=smart`** and remain installed **until verified Direct/off
+is committed**. At filter priority 200 (after official-Core native redirects),
+it allows selected-Core-marked packets (`0x2023`), trusted Core bootstrap
+and Direct packets (`0x2024`), existing accepted replies, loopback, and
+validated connected/private traffic. It rejects other new unmarked public
+egress across **all** interfaces; it does not grant blanket public DNS
+exceptions or foreign peer-IP/port exemptions. The country estimate and
+operator Direct policy remain in the selected Core, not a second classifier.
+The guard is **not** a permanent kill switch or an off-mode block.
 
-A `Type=exec`/PID-active Core does **not** release the filter. Admission
-requires independent actual TUN, kernel RPDB, marked selected route and
-official-Core redirect proof; status remains starting while the filter is
-armed. On failed start or unverified release the owned recovery path
-must first restore exact Direct/off and remove precisely its own filter
-alongside Core and reply guard resources. The guard retains a bounded
-pre-Core grace only while the real packet filter is independently
-verified. A post-CLI check alone misses the earlier state-commit gap;
+Its precommitted private digest-bound plan, exact nft rule/chain/handle
+receipt and generation-conditional deletion prevent foreign adoption.
+Neither a `Type=exec` Core MainPID nor the existence of this guard
+alone proves the VPN is usable: readiness requires independent real TUN,
+kernel RPDB, marked selected route, official redirect and fresh selected
+HTTPS evidence. A failed start or unhealthy Core may only retire the
+guard **after** exact owned network restoration and durable Direct commit.
+The bounded pre-Core grace is valid only while the guard is independently
+verified. A post-CLI check misses the earlier state-commit gap;
 the disposable VM packet-capture regression is
 [`native-startup-concurrent-syn.py`](../scripts/qa/native-startup-concurrent-syn.py).
 No physical-server/no-leak or public release conclusion follows from VM
 observations alone.
+
+**Native shutdown boundary:** packet captures on both an installed VM
+and nonproduction IRPT-101 reproduced new, unmarked selected-foreign Direct
+SYNs during TUN teardown while the saved desired state was still Smart.
+The normal stop path, finite Health exhaustion and unexpected Core
+termination therefore all reuse the **already-effective operation-bound**
+OUTPUT filter. A post-crash-only rearm is insufficient.
+ExecStopPost rechecks its committed nft receipt, preserves foreign
+owners/accepted inbound replies, verifies the Core-owned kernel footprint
+is gone, saves Direct durably **before** removing the barrier by exact
+generation-checked ownership, and retires the one-use receipt last.
+Before its final nft deletion, the exact verified operation durably records
+`releasing` with the original plan digest and table handle. After an
+interruption, a missing guard is acceptable only with that prior release
+intent and independently reverified owned network restoration; an absent
+`armed` guard or changed/foreign table remains an explicit refusal.
+Intermediate errors retain an uncertain/pending recovery rather than
+claiming Off. The guard cannot make arbitrary external/kernel failures
+atomic; the required assurance is bounded to actual selected, Direct,
+managed-stop, recovery and SIGKILL packet witnesses.
+The disposable-VM [shutdown packet regression](../scripts/qa/native-stop-concurrent-syn.py)
+exercises this interval; independently observed field tests remain distinct.
 
 The Debian 12 (`nftables` 1.0.6) installed-Core candidate exposed a
 real version-specific enumeration difference: it lists `table,set,set,chain,rule,rule,rule`,
