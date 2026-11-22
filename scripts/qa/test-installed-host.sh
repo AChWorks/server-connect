@@ -490,8 +490,44 @@ verify_host_services missing-core
 
 assert_no_offline_fetch missing-core
 echo 'OFFLINE_MISSING_CORE_FAIL_CLOSED=PASS (installer NOT applied)'
+# Exercise a genuine root-owned interrupted first installation on the
+# disposable Debian guest: the exact bundle's source helpers publish the
+# initial directory and .owner atomically, then this shell exits without
+# installing a service or cleaning up. The normal next installer call must
+# prove the private inode-bound receipt, safely resume and complete.
+docker exec -i "$container" /bin/sh -s <<'QA_FIRST_PREFIX_INTERRUPT'
+set -eu
+umask 077
+PREFIX=/opt/server-connect
+STATE=/var/lib/server-connect
+[ ! -e "$PREFIX" ] && [ ! -L "$PREFIX" ]
+[ ! -e "$STATE" ] && [ ! -L "$STATE" ]
+install -d -m 0700 "$STATE"
+say() { printf 'Server Connect: %s\n' "$*"; }
+die() { say "ERROR: $*" >&2; exit 1; }
+check_root_file() {
+ [ -f "$1" ] && [ ! -L "$1" ] && [ "$(stat -c %u "$1")" = 0 ]
+}
+check_root_dir() {
+ [ -d "$1" ] && [ ! -L "$1" ] && [ "$(stat -c %u "$1")" = 0 ]
+}
+sed -n '/^FIRST_INSTALL_INTENT=/,/^# Inspect the \*effective\*/p'  /root/server-connect/install.sh > /root/qa-prefix-helpers.sh
+. /root/qa-prefix-helpers.sh
+first_install_publish
+first_install_claimed_prefix
+[ -f "$PREFIX/.owner" ] && [ ! -e "$PREFIX/releases" ]
+[ ! -e /etc/systemd/system/server-connect.service ]
+[ -f "$FIRST_INSTALL_INTENT" ]
+rm -f -- /root/qa-prefix-helpers.sh
+echo 'REAL_FIRST_INSTALL_INTERRUPTED_AFTER_ATOMIC_OWNER=PASS'
+QA_FIRST_PREFIX_INTERRUPT
 run_offline first-install --offline
-docker exec "$container" /bin/sh -c 'test -f /opt/server-connect/current/integrity.sha256 && test ! -e /opt/server-connect/current/authentication.json'
+docker exec "$container" /bin/sh -c '
+ set -eu
+ test ! -e /var/lib/server-connect/.first-install-intent
+ test -f /opt/server-connect/current/integrity.sha256
+ test ! -e /opt/server-connect/current/authentication.json
+'
 verify_direct_install
 # Run the newly installed operator overview on BOTH target OS lanes. The
 # installed service is verified inactive above; no host-route or VPN proof

@@ -145,6 +145,23 @@ func nativeFreshSSHSession(issuedMS int64) error {
 	return nil
 }
 
+// A Health round may snapshot a pending confirmation, perform a network probe,
+// and then publish after the SSH acknowledgement. That acknowledgement is not
+// a new Core, policy, boot or Health generation. All other session changes
+// must continue invalidating in-flight observations.
+func nativeConfirmationOnlyUpgrade(before, after NativeSession) bool {
+	if before.ConfirmationAccepted || before.ConfirmationTokenSHA256 == "" ||
+		before.ConfirmationIssuedMS <= 0 || after.ConfirmationTokenSHA256 != "" ||
+		!after.ConfirmationAccepted || after.ConfirmationIssuedMS != before.ConfirmationIssuedMS ||
+		after.ConfirmationDeadlineMS != before.ConfirmationDeadlineMS ||
+		after.ConfirmationBootID != before.ConfirmationBootID {
+		return false
+	}
+	before.ConfirmationTokenSHA256 = ""
+	before.ConfirmationAccepted = true
+	return before == after
+}
+
 func (m *Manager) issueNativeConfirmation(tokenHash string) (int64, error) {
 	var remaining int64
 	err := m.withLock(func() error {

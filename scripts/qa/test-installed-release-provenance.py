@@ -583,5 +583,110 @@ class ReleasePayloadTests(unittest.TestCase):
         self.audit(release, expected=21)
 
 
+
+class FirstInstallIntentTests(unittest.TestCase):
+    """Exercise the actual atomic first-prefix helpers in an isolated fake /opt.
+
+    This is intentionally not a stand-in for the privileged installed-host
+    matrix. It distinguishes after-directory-publish SIGKILL from foreign
+    owner-marker lookalikes and verifies safe retry/refusal without root.
+    """
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix="sc-first-intent-")
+        self.addCleanup(self.temp.cleanup)
+        self.home = Path(self.temp.name)
+        self.opt = self.home / "opt"
+        self.state = self.home / "state"
+        self.prefix = self.opt / "server-connect"
+        self.opt.mkdir()
+        self.state.mkdir(mode=0o700)
+        self.functions = extract(
+            "FIRST_INSTALL_INTENT=$STATE/.first-install-intent\n",
+            "\n# Inspect the *effective* systemd identity before ANY stop/disable/enable or",
+        )
+        # Substitute the real root-owned /opt path only inside this private
+        # hermetic source copy; do not change the shipped installer.
+        self.functions = self.functions.replace("/opt", str(self.opt))
+        self.prelude = (
+            "set -eu\n"
+            f'PREFIX="{self.prefix}"\n'
+            f'STATE="{self.state}"\n'
+            'say() { printf "%s\\n" "$*"; }\n'
+            'die() { printf "REFUSED:%s\\n" "$*" >&2; exit 21; }\n'
+            'check_root_file() { [ -f "$1" ] && [ ! -L "$1" ]; }\n'
+            'check_root_dir() { [ -d "$1" ] && [ ! -L "$1" ]; }\n'
+        )
+
+    def run_first(self, command, exit_expected=0):
+        result = subprocess.run(
+            ["/bin/sh", "-c", self.prelude + self.functions + "\n" + command],
+            capture_output=True, text=True, timeout=15,
+        )
+        self.assertEqual(result.returncode, exit_expected,
+                         f"stdout={result.stdout} stderr={result.stderr}")
+        return result
+
+    def test_atomic_initial_publish_then_safe_resume_after_interrupt(self):
+        self.run_first("first_install_publish\n")
+        self.assertEqual((self.prefix / ".owner").read_text(),
+                         "AChWorks/server-connect\n")
+        receipt = self.state / ".first-install-intent"
+        self.assertTrue(receipt.is_file())
+        original_inode = self.prefix.stat().st_ino
+        self.run_first("first_install_claimed_prefix\n")
+        # Emulates SIGKILL immediately after owner publication and a second
+        # SIGKILL after making just the empty releases directory.
+        (self.prefix / "releases").mkdir()
+        self.run_first("first_install_claimed_prefix\n")
+        self.assertEqual(original_inode, self.prefix.stat().st_ino)
+        self.assertTrue(receipt.exists())
+
+    def test_crash_before_rename_reconciles_only_exact_staging(self):
+        stage = self.opt / ".server-connect-initial.QA123456"
+        stage.mkdir()
+        (stage / ".owner").write_text("AChWorks/server-connect\n")
+        receipt = self.state / ".first-install-intent"
+        receipt.write_text(
+            f"{stage}\n{stage.stat().st_dev}:{stage.stat().st_ino}\n"
+        )
+        receipt.chmod(0o600)
+        self.run_first("first_install_reconcile_abandoned_stage\n")
+        self.assertFalse(stage.exists())
+        self.assertFalse(receipt.exists())
+        self.run_first("first_install_publish\n")
+        self.assertTrue(self.prefix.is_dir())
+        self.run_first("first_install_claimed_prefix\n")
+
+    def test_foreign_prefix_and_changed_inode_never_adopted(self):
+        self.run_first("first_install_publish\n")
+        quarantined = self.opt / "old-staging-identity"
+        self.prefix.rename(quarantined)
+        self.prefix.mkdir()
+        (self.prefix / ".owner").write_text("AChWorks/server-connect\n")
+        self.run_first("first_install_claimed_prefix\n", exit_expected=1)
+        self.assertTrue((self.prefix / ".owner").is_file())
+        self.assertTrue(quarantined.is_dir())
+        self.run_first("first_install_reconcile_abandoned_stage\n",
+                       exit_expected=21)
+        self.assertTrue(self.prefix.is_dir())
+
+    def test_unrecognized_foreign_file_blocks_recovery(self):
+        self.run_first("first_install_publish\n")
+        foreign = self.prefix / "unknown-client-data"
+        foreign.write_text("never delete\n")
+        self.run_first("first_install_claimed_prefix\n", exit_expected=1)
+        self.assertEqual(foreign.read_text(), "never delete\n")
+        foreign.unlink()
+        self.run_first("first_install_claimed_prefix\n")
+
+    def test_preexisting_prefix_never_replaced(self):
+        self.prefix.mkdir()
+        (self.prefix / "foreign").write_text("untouched\n")
+        self.run_first("first_install_publish\n", exit_expected=21)
+        self.assertEqual((self.prefix / "foreign").read_text(), "untouched\n")
+        self.assertFalse((self.state / ".first-install-intent").exists())
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

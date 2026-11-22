@@ -203,6 +203,92 @@ class LocalHTTPHandler(SimpleHTTPRequestHandler):
         return super().do_GET()
 
 
+
+class BootstrapBeforeAPTTests(unittest.TestCase):
+    """The actual no-Python POSIX acquisition preflight gates any APT call."""
+
+    @classmethod
+    def setUpClass(cls):
+        source = BOOTSTRAP.read_text()
+        a = source.index("bootstrap_preflight_source_url() {\n")
+        b = source.index("\n}\n", a) + len("\n}\n")
+        cls.preflight = source[a:b]
+        a = source.index("bootstrap_parse_acquisition_mode() {\n")
+        b = source.index("\n}\n", a) + len("\n}\n")
+        cls.preflight += "\n" + source[a:b]
+        a = source.index("# Admission BEFORE any package transaction.")
+        b = source.index("\nset --\n", a)
+        cls.admission = source[a:b].replace(
+            '$(/usr/bin/uname -m)', '"$SC_QA_ARCH"'
+        )
+
+    def attempt(self, source_url, *, arch="x86_64", os_version="13",
+                local_qa="no", source_kind="", target=""):
+        with tempfile.TemporaryDirectory(prefix="sc-early-apt-") as tmp:
+            marker = Path(tmp) / "APT_WOULD_HAVE_RUN"
+            # The native tools were verified immediately before this block.
+            # Mock only CPU and OS identity to exercise unsupported-host paths
+            # on the same runner as positive Debian12/13 tests.
+            program = (
+                "set -eu\n"
+                f"SC_QA_ARCH={shlex.quote(arch)}\n"
+                f"SC_QA_OS={shlex.quote(os_version)}\n"
+                f"url={shlex.quote(source_url)}\n"
+                f'local_qa={shlex.quote(local_qa)}\n'
+                f'source_kind={shlex.quote(source_kind)}\n'
+                f'target={shlex.quote(target)}\n'
+                'bootstrap_read_os_version() { case "$SC_QA_OS" in 12|13) echo "$SC_QA_OS" ;; *) return 1 ;; esac; }\n'
+                + self.preflight + "\n"
+                + self.admission + "\n"
+                + f'printf APT_WOULD_RUN > {shlex.quote(str(marker))}\n'
+            )
+            completed = subprocess.run(
+                ["/bin/sh", "-c", program],
+                capture_output=True, text=True, timeout=6,
+            )
+            return completed, marker.exists()
+
+    def test_unsupported_os_arch_and_url_reject_before_apt(self):
+        scenarios = [
+            ("https://mirror.example/server-connect/release-index.json", "aarch64", "13", "no", ""),
+            ("https://mirror.example/server-connect/release-index.json", "x86_64", "11", "no", ""),
+            ("https://mirror.example@foreign.example/index", "x86_64", "13", "no", ""),
+            ("https://mirror.example:bad/index", "x86_64", "13", "no", ""),
+            ("https://mirror.example:0/index", "x86_64", "13", "no", ""),
+            ("https://mirror.example/#fragment", "x86_64", "13", "no", ""),
+            ("http://outside.invalid/index", "x86_64", "13", "yes", ""),
+            ("https://[bad-addr]/index", "x86_64", "13", "no", ""),
+            ("https://[0:0:0:0:0:0:0]/index", "x86_64", "13", "no", ""),
+        ]
+        for url, arch, os_version, local, kind in scenarios:
+            with self.subTest(url=url, arch=arch, os_version=os_version):
+                result, apt = self.attempt(url, arch=arch, os_version=os_version,
+                                           local_qa=local, source_kind=kind)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertFalse(apt, "invalid host/source crossed APT boundary")
+
+    def test_supported_debian12_debian13_and_qa_loopback_admit(self):
+        for version in ("12", "13"):
+            for url, local, kind in [
+                ("https://mirror.example/server-connect/release-index.json", "no", "mirror"),
+                ("http://127.0.0.1:19179/bundle.tar.gz", "yes", ""),
+            ]:
+                with self.subTest(version=version, url=url):
+                    result, apt = self.attempt(url, os_version=version, local_qa=local,
+                                               source_kind=kind)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertTrue(apt, "valid supported host blocked before optional APT")
+
+    def test_target_selection_must_match_host_before_apt(self):
+        result, apt = self.attempt(
+            "https://mirror.example/release-index.json",
+            os_version="13", source_kind="mirror", target="debian-12-amd64",
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(apt)
+
+
+
 class BootstrapIdentityParserTest(unittest.TestCase):
     """Execute only the actual pure parser; never read or replace host identity."""
 
@@ -761,6 +847,21 @@ class SignedReleaseTest(unittest.TestCase):
             def do_GET(self):
                 self.http_started = True
                 self.server.requests.append((self.path, self.connection.version()))
+                if self.path.endswith("/bootstrap-online.sh"):
+                    response = getattr(self.server, "bootstrap_response", "")
+                    if response == "redirect":
+                        self.send_response(302)
+                        self.send_header("Location", "https://outside.invalid/foreign-bootstrap")
+                        self.end_headers()
+                        return
+                    if response == "truncated":
+                        self.send_response(200)
+                        self.send_header("Content-Length", "1000000")
+                        self.end_headers()
+                        self.wfile.write(b"#!/bin/sh\necho partial\n")
+                        self.wfile.flush()
+                        self.close_connection = True
+                        return
                 if self.path == "/https-downgrade":
                     self.send_response(302)
                     self.send_header("Location", f"http://127.0.0.1:{cls.server.server_port}/redirect-sentinel")
@@ -1629,6 +1730,87 @@ os.execv(sys.argv[1], sys.argv[1:])
         rejected = self.unsigned_bootstrap()
         self.assertNotEqual(rejected.returncode, 0)
         self.assertIn('Local release identity unavailable', rejected.stderr)
+
+
+    def documented_entrypoint(self, channel, *, trusted=True):
+        import re
+        docs = (ROOT / "docs" / "OFFLINE-DISTRIBUTION.md").read_text()
+        if channel == "mirror":
+            section = docs.split("**Operator-hosted HTTPS mirror", 1)[1].split("**Completely offline", 1)[0]
+            server = self.https_servers[1][0]
+        else:
+            section = docs.split("**Official GitHub release channel", 1)[1].split("**Operator-hosted HTTPS mirror", 1)[0]
+            server = self.https_servers[0][0]
+        command = re.search(r"```sh\n(.*?)\n```", section, re.S).group(1)
+        command = command.replace("sudo /usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin ", "")
+        command = command.replace(
+            "/root/.server-connect-entry.XXXXXXXX",
+            str(self.case / ".server-connect-entry.XXXXXXXX"),
+        )
+        base = f"https://localhost:{server.server_port}/{self.case.name}/"
+        if channel == "mirror":
+            command = command.replace("https://mirror.example/server-connect/", base)
+        else:
+            command = command.replace(
+                "https://github.com/AChWorks/server-connect/releases/latest/download/bootstrap-online.sh",
+                base + "bootstrap-online.sh",
+            )
+        env = os.environ.copy()
+        if trusted:
+            env["CURL_CA_BUNDLE"] = str(self.ca)
+        else:
+            env.pop("CURL_CA_BUNDLE", None)
+        return subprocess.run(["/bin/sh", "-eu", "-c", command],
+                              capture_output=True, text=True, timeout=17, env=env)
+
+    def test_documented_bootstrap_download_stages_full_bytes_before_execution(self):
+        for channel, index in (("official", 0), ("mirror", 1)):
+            with self.subTest(channel=channel):
+                server = self.https_servers[index][0]
+                source = self.case / "bootstrap-online.sh"
+                executed = self.case / "BOOTSTRAP_ENTRY_RAN"
+                source.write_text("#!/bin/sh\nprintf 'ok' > "+shlex.quote(str(executed))+"\n# SERVER_CONNECT_BOOTSTRAP_END\n")
+                try:
+                    server.bootstrap_response = ""
+                    server.requests.clear()
+                    good = self.documented_entrypoint(channel)
+                    self.assertEqual(good.returncode, 0, good.stderr)
+                    self.assertEqual(executed.read_text(), "ok")
+                    self.assertEqual([path for path, _ in server.requests],
+                                     [f"/{self.case.name}/bootstrap-online.sh"])
+                    self.assertFalse(list(self.case.glob(".server-connect-entry.*")))
+                    executed.unlink()
+                    # TLS failure, redirect, truncated transfer, complete-but-
+                    # unfinished source: none may execute the fetched script.
+                    server.requests.clear()
+                    rejected = self.documented_entrypoint(channel, trusted=False)
+                    self.assertNotEqual(rejected.returncode, 0)
+                    self.assertFalse(executed.exists())
+                    self.assertEqual(server.requests, [])
+                    server.bootstrap_response = "truncated"
+                    rejected = self.documented_entrypoint(channel)
+                    self.assertNotEqual(rejected.returncode, 0)
+                    self.assertFalse(executed.exists())
+                    self.assertFalse(list(self.case.glob(".server-connect-entry.*")))
+                    server.bootstrap_response = "redirect"
+                    rejected = self.documented_entrypoint(channel)
+                    if channel == "mirror":
+                        self.assertNotEqual(rejected.returncode, 0)
+                        self.assertNotIn("foreign-bootstrap", rejected.stdout)
+                    # Official supports redirects; the untrusted foreign host
+                    # is deliberately unreachable, so this fixture also fails.
+                    self.assertNotEqual(rejected.returncode, 0)
+                    self.assertFalse(executed.exists())
+                    server.bootstrap_response = ""
+                    source.write_text("#!/bin/sh\nprintf bad > "+shlex.quote(str(executed))+"\n")
+                    rejected = self.documented_entrypoint(channel)
+                    self.assertNotEqual(rejected.returncode, 0)
+                    self.assertIn("Incomplete bootstrap", rejected.stderr)
+                    self.assertFalse(executed.exists())
+                finally:
+                    server.bootstrap_response = ""
+                    source.unlink(missing_ok=True)
+                    executed.unlink(missing_ok=True)
 
     def test_keyless_https_requires_real_tls_and_no_signature(self):
         server = self.https_servers[0][0]

@@ -320,6 +320,111 @@ verify_payload() {
  core=$($SOURCE_DIR/bin/sing-box version 2>/dev/null | head -n 1) || die 'candidate sing-box not executable'
  [ "$core" = 'sing-box version 1.14.3' ] || die 'unexpected sing-box core version'
 }
+# A first-install claim is created inside the already root-only STATE and
+# bound to the *directory inode* published at PREFIX. Never infer ownership
+# from a familiar path or a freely copyable .owner text marker alone.
+FIRST_INSTALL_INTENT=$STATE/.first-install-intent
+first_install_read_intent() {
+ first_stage=''
+ first_inode=''
+ [ -f "$FIRST_INSTALL_INTENT" ] && [ ! -L "$FIRST_INSTALL_INTENT" ] || return 1
+ check_root_file "$FIRST_INSTALL_INTENT"
+ [ "$(stat -c '%a:%h' "$FIRST_INSTALL_INTENT")" = 600:1 ] || return 1
+ [ "$(wc -l < "$FIRST_INSTALL_INTENT")" -eq 2 ] || return 1
+ first_stage=$(sed -n '1p' "$FIRST_INSTALL_INTENT")
+ first_inode=$(sed -n '2p' "$FIRST_INSTALL_INTENT")
+ case "$first_stage" in /opt/.server-connect-initial.[a-zA-Z0-9]*) ;; *) return 1 ;; esac
+ case "$first_inode" in ''|*[!0123456789:]*|:*|*:) return 1 ;; esac
+ return 0
+}
+first_install_is_empty_owned_dir() {
+ candidate=$1
+ expected_inode=$2
+ [ -d "$candidate" ] && [ ! -L "$candidate" ] || return 1
+ check_root_dir "$candidate"
+ [ "$(stat -c '%d:%i' "$candidate")" = "$expected_inode" ] || return 1
+ check_root_file "$candidate/.owner"
+ [ "$(cat "$candidate/.owner")" = 'AChWorks/server-connect' ] || return 1
+ for child in "$candidate"/* "$candidate"/.[!.]* "$candidate"/..?*; do
+  [ -e "$child" ] || [ -L "$child" ] || continue
+  case "$child" in
+   "$candidate/.owner") ;;
+   "$candidate/releases")
+    [ -d "$child" ] && [ ! -L "$child" ] || return 1
+    for nested in "$child"/* "$child"/.[!.]* "$child"/..?*; do
+     [ -e "$nested" ] || [ -L "$nested" ] || continue
+     return 1
+    done
+    ;;
+   *) return 1 ;;
+  esac
+ done
+ return 0
+}
+first_install_claimed_prefix() {
+ first_install_read_intent || return 1
+ first_install_is_empty_owned_dir "$PREFIX" "$first_inode"
+}
+# Called only under the existing product lifecycle flock. The stage was
+# never installed; its exact inode and empty file-set are required for cleanup.
+first_install_reconcile_abandoned_stage() {
+ [ -e "$FIRST_INSTALL_INTENT" ] || [ -L "$FIRST_INSTALL_INTENT" ] || return 0
+ first_install_read_intent || die 'first-install claim invalid; preserve for console inspection'
+ [ ! -e "$PREFIX" ] && [ ! -L "$PREFIX" ] ||
+  die 'first-install claim exists with unexpected installed prefix; preserve foreign resources'
+ if [ -e "$first_stage" ] || [ -L "$first_stage" ];then
+  first_install_is_empty_owned_dir "$first_stage" "$first_inode" ||
+   die 'first-install staging identity changed; preserve for console inspection'
+  rm -f -- "$first_stage/.owner" || die 'cannot remove verified empty initial stage owner'
+  rmdir "$first_stage" || die 'cannot remove verified empty initial stage'
+ fi
+ rm -f -- "$FIRST_INSTALL_INTENT" || die 'cannot retire abandoned initial claim'
+}
+first_install_publish() {
+ check_root_dir /opt
+ [ ! -e "$PREFIX" ] && [ ! -L "$PREFIX" ] ||
+  die 'refusing to publish first install over an existing prefix'
+ [ ! -e "$FIRST_INSTALL_INTENT" ] && [ ! -L "$FIRST_INSTALL_INTENT" ] ||
+  die 'unreconciled first-install claim'
+ first_stage=$(mktemp -d /opt/.server-connect-initial.XXXXXXXX) ||
+  die 'unable to create private first-install stage'
+ printf 'AChWorks/server-connect\n' > "$first_stage/.owner" || die 'cannot stage root owner marker'
+ chmod 0644 "$first_stage/.owner" || die 'cannot protect root owner marker'
+ chmod 0755 "$first_stage" || die 'cannot set normal product prefix permissions'
+ first_inode=$(stat -c '%d:%i' "$first_stage") || die 'cannot identify first-install directory'
+ first_temp=$(mktemp "$STATE/.first-install-intent.XXXXXXXX") ||
+  die 'cannot stage durable first-install intent'
+ printf '%s\n%s\n' "$first_stage" "$first_inode" > "$first_temp" ||
+  die 'cannot write first-install intent'
+ chmod 0600 "$first_temp" || die 'cannot protect first-install intent'
+ ln "$first_temp" "$FIRST_INSTALL_INTENT" ||
+  die 'another first-install intent exists; refusing overwrite'
+ rm -f -- "$first_temp" || die 'cannot finalize initial intent'
+ # Flush the owner marker, intent and their parents before atomic publication.
+ # Linux renameat2(NO_REPLACE) avoids replacing an independently created
+ # foreign prefix, even during the last pre-rename scheduling window.
+ python3 -I -S - "$first_stage" "$PREFIX" "$FIRST_INSTALL_INTENT" "$STATE" <<'SC_FIRST_INSTALL_RENAME'
+import ctypes,errno,os,sys
+src,dst,intent,state=sys.argv[1:]
+def sync(path):
+    fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW)
+    try: os.fsync(fd)
+    finally: os.close(fd)
+for path in (src+'/.owner',src,intent,state):
+    sync(path)
+libc=ctypes.CDLL(None,use_errno=True)
+renameat2=getattr(libc,'renameat2',None)
+if renameat2 is None: raise OSError(errno.ENOSYS,'atomic noreplace rename unavailable')
+renameat2.argtypes=[ctypes.c_int,ctypes.c_char_p,ctypes.c_int,ctypes.c_char_p,ctypes.c_uint]
+if renameat2(-100,os.fsencode(src),-100,os.fsencode(dst),1)!=0:
+    error=ctypes.get_errno()
+    raise OSError(error,os.strerror(error),dst)
+sync('/opt')
+SC_FIRST_INSTALL_RENAME
+ # The intent survives SIGKILL after publication. Retry recognizes only the
+ # exact inode + owner + empty prefix; it never adopts foreign files.
+}
+
 # Inspect the *effective* systemd identity before ANY stop/disable/enable or
 # replacement. No local unit path does not mean there is no vendor/transient
 # unit of the same name in another directory.
@@ -337,9 +442,13 @@ check_service_owner() {
    [ -z "$enabled" ] || die 'conflicting or stale same-name systemd unit; refusing mutation'
   [ ! -e "$UNIT" ] && [ ! -L "$UNIT" ] ||
    die 'systemd does not recognize existing local unit; repair via console'
-  [ ! -e "$PREFIX" ] && [ ! -L "$PREFIX" ] ||
-   die 'partial product installation lacks a verified loaded unit; repair via console'
-  unit_identity=absent
+  if [ -e "$PREFIX" ] || [ -L "$PREFIX" ]; then
+   [ "$ACTION" = --offline ] && first_install_claimed_prefix ||
+    die 'partial or foreign product prefix without loaded unit; preserve for inspection'
+   unit_identity=partial_initial
+  else
+   unit_identity=absent
+  fi
   ;;
  loaded)
   [ "$fragment" = "$UNIT" ] && [ -z "$dropins" ] && [ "$transient" = no ] ||
@@ -562,6 +671,10 @@ if [ "$unit_identity" = owned ]; then
  "$SOURCE_DIR/bin/server-connect" installer-check-service >/dev/null ||
   die 'effective installed systemd unit provenance conflict'
 fi
+if [ "$unit_identity" = partial_initial ];then
+ first_install_claimed_prefix ||
+  die 'first-install prefix identity changed before locked recovery'
+fi
 
 if [ "$ACTION" = --uninstall ]; then
  normalize_idle_health_failure
@@ -757,11 +870,20 @@ rollback_candidate() {
   fi
  fi
  if [ "$failed" = no ] && [ "$prefix_created" = yes ];then
-  remove_backup
-  # Fresh install failed: no previous release/command/unit was present.
-  rm -f -- "$PREFIX/.owner" || failed=yes
-  rmdir "$PREFIX/releases" "$PREFIX" 2>/dev/null ||
-    { say 'RECOVERY_REQUIRED: new installation directory retained';failed=yes; }
+  # Never remove even an empty-looking foreign directory: the private
+  # persistent first-install claim must still match the inode and owner.
+  if first_install_claimed_prefix;then
+   remove_backup
+   rm -f -- "$PREFIX/.owner" || failed=yes
+   [ ! -d "$PREFIX/releases" ] || rmdir "$PREFIX/releases" || failed=yes
+   rmdir "$PREFIX" || { say 'RECOVERY_REQUIRED: first-install prefix retained';failed=yes; }
+   if [ "$failed" = no ];then
+    rm -f -- "$FIRST_INSTALL_INTENT" || failed=yes
+   fi
+  else
+   say 'RECOVERY_REQUIRED: first-install claim changed; foreign prefix preserved'
+   failed=yes
+  fi
  fi
  if [ "$failed" = yes ];then
   say 'RECOVERY_REQUIRED: prior service state could not be completely restored; inspect systemd and owned paths from console'
@@ -788,9 +910,11 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 
 if [ ! -d "$PREFIX" ];then
- install -d -m 0755 "$PREFIX"
- printf 'AChWorks/server-connect\n' > "$PREFIX/.owner"
- chmod 0644 "$PREFIX/.owner"
+ first_install_reconcile_abandoned_stage
+ prefix_created=yes
+ first_install_publish
+elif [ "$unit_identity" = partial_initial ];then
+ first_install_claimed_prefix || die 'first-install recovery identity invalid'
  prefix_created=yes
 fi
 check_root_dir "$PREFIX"
@@ -930,6 +1054,13 @@ else
   systemctl reset-failed server-connect.service ||
    die 'cannot reconcile historical owned service failure state'
  fi
+fi
+# Retire only the receipt for the exact installed prefix. Interrupted
+# operations retain the private claim for a bounded verified retry.
+if [ "$prefix_created" = yes ];then
+ first_install_read_intent && [ "$(stat -c '%d:%i' "$PREFIX")" = "$first_inode" ] ||
+  die 'completed initial installation lost its ownership claim'
+ rm -f -- "$FIRST_INSTALL_INTENT" || die 'cannot retire completed first-install intent'
 fi
 operation_done=yes
 rollback_needed=no

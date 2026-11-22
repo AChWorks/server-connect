@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"sync"
 	"testing"
 )
 
@@ -101,5 +102,91 @@ func TestNativeLinuxClockSource(t *testing.T) {
 	hz, err := nativeClockTicks()
 	if err != nil || hz < 10 {
 		t.Fatalf("kernel auxv clock: hz=%d err=%v", hz, err)
+	}
+}
+
+func TestNativeConfirmationInFlightHealthProbeCompatibility(t *testing.T) {
+	pending := NativeSession{
+		Version: 1, Selected: "provider", InterfaceName: "sc0", UnderlayIF: "eth0",
+		HealthOperationID: "operation-1", ConfigSHA256: "config-1",
+		ConfirmationTokenSHA256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		ConfirmationIssuedMS:    1000, ConfirmationDeadlineMS: 601000,
+		ConfirmationBootID: "boot-1", StartupGuardName: "sc-output", StartupGuardHandle: 44,
+	}
+	confirmed := pending
+	confirmed.ConfirmationAccepted = true
+	confirmed.ConfirmationTokenSHA256 = ""
+	// A synthetic in-flight result snapshots pending before a legal new-SSH
+	// receipt is atomically committed. Its later publication must still match.
+	started := make(chan struct{})
+	resume := make(chan NativeSession)
+	done := make(chan bool, 1)
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		snapshot := pending
+		close(started)
+		current := <-resume
+		done <- nativeConfirmationOnlyUpgrade(snapshot, current)
+	}()
+	<-started
+	resume <- confirmed
+	if !<-done {
+		t.Fatal("valid SSH confirmation invalidated in-flight Health probe")
+	}
+	wg.Wait()
+	if pending == confirmed || !nativeConfirmationOnlyUpgrade(pending, confirmed) {
+		t.Fatal("confirmation generation not treated as compatible")
+	}
+	changed := confirmed
+	changed.ConfigSHA256 = "foreign-config"
+	if nativeConfirmationOnlyUpgrade(pending, changed) {
+		t.Fatal("foreign config adopted")
+	}
+	changed = confirmed
+	changed.HealthOperationID = "new-operation"
+	if nativeConfirmationOnlyUpgrade(pending, changed) {
+		t.Fatal("new Health operation adopted")
+	}
+	changed = confirmed
+	changed.StartupGuardHandle++
+	if nativeConfirmationOnlyUpgrade(pending, changed) {
+		t.Fatal("new kernel guard adopted")
+	}
+	changed = confirmed
+	changed.ConfirmationDeadlineMS++
+	if nativeConfirmationOnlyUpgrade(pending, changed) {
+		t.Fatal("tampered expiry adopted")
+	}
+	changed = confirmed
+	changed.ConfirmationAccepted = false
+	if nativeConfirmationOnlyUpgrade(pending, changed) {
+		t.Fatal("unconfirmed session accepted")
+	}
+}
+
+func TestNativeConfirmationStaleSupervisorExpiryRecheck(t *testing.T) {
+	health := NativeHealthState{OperationID: "op-1", ConfigSHA256: "sha", BootID: "boot-1", StartedMS: 1000}
+	pending := NativeSession{HealthOperationID: "op-1", ConfigSHA256: "sha", ConfirmationBootID: "boot-1",
+		ConfirmationIssuedMS: 2000, ConfirmationDeadlineMS: 602000,
+		ConfirmationTokenSHA256: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}
+	staleReason := nativeConfirmationTimeoutReason(pending, health, "boot-1", 602000)
+	if staleReason != "activation_confirmation_expired" {
+		t.Fatalf("initial expiry not visible: %s", staleReason)
+	}
+	confirmed := pending
+	confirmed.ConfirmationTokenSHA256 = ""
+	confirmed.ConfirmationAccepted = true
+	if now := nativeConfirmationTimeoutReason(confirmed, health, "boot-1", 602001); now == staleReason || now != "" {
+		t.Fatalf("a legal confirmation must invalidate a stale stop proposal: %s", now)
+	}
+	if now := nativeConfirmationTimeoutReason(pending, health, "boot-1", 602002); now != staleReason {
+		t.Fatal("genuinely expired pending operation must still stop")
+	}
+	replaced := health
+	replaced.OperationID = "op-2"
+	if replaced.OperationID == pending.HealthOperationID {
+		t.Fatal("foreign operation unexpectedly matched")
 	}
 }

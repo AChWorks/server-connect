@@ -423,7 +423,7 @@ On confirmed failure, prevent **unobserved** Direct bypass while the Smart Routi
 
 **Initial reconnect candidate, subject to field calibration:** at most **3 automatic attempts per confirmed outage incident**, with short increasing delays and an overall recovery deadline; allow operator adjustment of the bounded attempt/time budget. Flapping must not reset the incident budget into an endless loop; reconnect only the selected VPN transport, **never replay interrupted application requests or arbitrary host operations**. Exhaustion triggers verified `restore_direct` and **no further automatic retries until an explicit new enable action**. Critical guard, ownership or protected-host-access failures bypass the retry delay and restore the safest available host baseline immediately. Report the failure cause, attempt count, last result and true current mode in status and credential-safe local logs. **Optional outage/recovery notifications are Owner-deferred**; no mandatory external alerting service, delivery dependency or separate notification worker in the first release. **Cloudflare Tunnel**, if separately enabled, has its own connector health: an unselected/failed website-origin check must not tear down healthy outbound Smart Routing.
 
-### Current Native guarded Core-process candidate (Draft PR #126)
+### Native guarded Core-process lifecycle and bounded recovery
 
 The original sing-box Core now executes as a directly supervised child inside
 its existing managed systemd unit. The supervisor is **not** an unguarded

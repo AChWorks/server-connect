@@ -120,6 +120,87 @@ bootstrap_read_os_version() (
  printf '%s\n' "$os_identity_version"
 )
 
+# Validate the acquisition authority with POSIX shell *before* APT, even on
+# minimal Debian without Python/curl. The full Python URL parser below runs
+# again after missing prerequisites are acquired. This rejects ambiguous
+# authorities rather than modifying OS packages to inspect a bad source.
+bootstrap_preflight_source_url() {
+ source_url=$1
+ case "$source_url" in
+  *[![:print:]]*|*' '*|*'\'*|*'#'*) return 1 ;;
+  https://*) source_scheme=https ;;
+  http://*) [ "$local_qa" = yes ] || return 1; source_scheme=http ;;
+  *) return 1 ;;
+ esac
+ source_remainder=${source_url#*://}
+ source_authority=${source_remainder%%/*}
+ source_authority=${source_authority%%\?*}
+ case "$source_authority" in ''|*'@'*|*'%'*) return 1 ;; esac
+ source_host=''
+ source_port=''
+ case "$source_authority" in
+  \[*)
+   # IPv6 literal parsing needs the exact Python inet_pton-based URL parser.
+   # Do not modify OS packages merely to examine an uncertain literal.
+   command -v python3 >/dev/null 2>&1 || return 1
+   source_host=${source_authority#\[}
+   case "$source_host" in *\]*) ;; *) return 1 ;; esac
+   source_suffix=${source_host#*\]}
+   source_host=${source_host%%\]*}
+   case "$source_host" in ''|*[!0123456789abcdefABCDEF:.]*) return 1 ;; esac
+   ;;
+  *)
+   source_host=${source_authority%%:*}
+   source_suffix=${source_authority#"$source_host"}
+   case "$source_host" in ''|*[!abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.-]*) return 1 ;; esac
+   ;;
+ esac
+ case "$source_suffix" in
+  '') ;;
+  :*)
+   source_port=${source_suffix#:}
+   case "$source_port" in ''|*[!0123456789]*) return 1 ;; esac
+   [ "${#source_port}" -le 5 ] && [ "$source_port" -gt 0 ] && [ "$source_port" -le 65535 ] || return 1
+   ;;
+  *) return 1 ;;
+ esac
+ if [ "$source_scheme" = http ];then
+  case "$source_host" in 127.0.0.1|localhost) [ -n "$source_port" ] || return 1 ;; *) return 1 ;; esac
+ fi
+ return 0
+}
+
+# Use the same strict URL parser both before APT (when Python already exists)
+# and after package acquisition. There is exactly one authority policy.
+bootstrap_parse_acquisition_mode() {
+ python3 -I -S - "$1" <<'PYURL'
+import sys
+from urllib.parse import urlsplit
+
+url = sys.argv[1]
+try:
+    if len(url) > 4096 or any(ord(c) < 33 or ord(c) > 126 or c == "\\" for c in url):
+        raise ValueError("unsafe URL")
+    parsed = urlsplit(url)
+    if (parsed.scheme not in ("https", "http") or not parsed.netloc
+            or parsed.username is not None or parsed.password is not None
+            or "@" in parsed.netloc or "%" in parsed.netloc or parsed.fragment):
+        raise ValueError("unsupported URL authority")
+    host = parsed.hostname
+    port = parsed.port
+    if not host or len(host) > 253 or port == 0:
+        raise ValueError("invalid host/port")
+    if parsed.scheme == "http":
+        if host not in ("127.0.0.1", "localhost") or port is None:
+            raise ValueError("HTTP must use actual loopback")
+        print("http_localhost:" + str(port) if host == "localhost" else "http_loopback")
+    else:
+        print("https")
+except ValueError:
+    sys.exit(1)
+PYURL
+}
+
 url=''
 source_base=''
 source_kind=''
@@ -242,6 +323,33 @@ for native_tool in id sed sha256sum stat timeout mktemp rm wc cut head readlink;
   exit 1
  fi
 done
+# Admission BEFORE any package transaction. A source's URL/authority, actual
+# CPU and canonical Debian identity cannot be deferred until curl/Python is
+# installed. Only genuinely supported hosts can acquire prerequisites.
+host_target=''
+if [ -n "$url" ];then
+ if ! bootstrap_preflight_source_url "$url";then
+  echo 'Unsupported URL: unsafe acquisition authority (before APT)' >&2;exit 2
+ fi
+ [ "$(/usr/bin/uname -m)" = x86_64 ] || {
+  echo 'Only Debian 12/13 amd64 is supported; no APT attempted' >&2;exit 1;
+ }
+ host_os=$(bootstrap_read_os_version) || {
+  echo 'Verified Debian 12/13 host identity required before APT' >&2;exit 1;
+ }
+ host_target=debian-$host_os-amd64
+ # If Python already exists, perform the complete URL parser before any
+ # package changes. A minimal host without Python may acquire it only for
+ # authorities the earlier portable shell preflight can fully classify.
+ if command -v python3 >/dev/null 2>&1;then
+  bootstrap_parse_acquisition_mode "$url" >/dev/null || {
+   echo 'Unsupported URL: invalid parsed authority before APT' >&2;exit 2;
+  }
+ fi
+ if [ -n "$source_kind" ] && [ -n "$target" ] && [ "$target" != "$host_target" ];then
+  echo 'Release target differs from actual host; no APT attempted' >&2;exit 2
+ fi
+fi
 set --
 if [ -n "$url" ]; then
  command -v curl >/dev/null 2>&1 || set -- "$@" curl
@@ -328,33 +436,9 @@ command -v timeout >/dev/null 2>&1 || { echo 'timeout is required for bounded ON
 # URL credentials, encoded authority, fragments and unsafe bytes are refused.
 acquisition_mode=offline
 if [ -n "$url" ]; then
-acquisition_mode=$(python3 -I -S - "$url" <<'PYURL'
-import sys
-from urllib.parse import urlsplit
-
-url = sys.argv[1]
-try:
-    if len(url) > 4096 or any(ord(c) < 33 or ord(c) > 126 or c == "\\" for c in url):
-        raise ValueError("unsafe URL")
-    parsed = urlsplit(url)
-    if (parsed.scheme not in ("https", "http") or not parsed.netloc
-            or parsed.username is not None or parsed.password is not None
-            or "@" in parsed.netloc or "%" in parsed.netloc or parsed.fragment):
-        raise ValueError("unsupported URL authority")
-    host = parsed.hostname
-    port = parsed.port
-    if not host or len(host) > 253 or port == 0:
-        raise ValueError("invalid host/port")
-    if parsed.scheme == "http":
-        if host not in ("127.0.0.1", "localhost") or port is None:
-            raise ValueError("HTTP must use actual loopback")
-        print("http_localhost:" + str(port) if host == "localhost" else "http_loopback")
-    else:
-        print("https")
-except ValueError:
-    sys.exit(1)
-PYURL
-) || { echo 'Unsupported URL: HTTPS required except for strict loopback HTTP test host' >&2;exit 2; }
+ acquisition_mode=$(bootstrap_parse_acquisition_mode "$url") || {
+  echo 'Unsupported URL: HTTPS required except for strict loopback HTTP test host' >&2;exit 2;
+ }
 fi
 # Privileged installation requires root-owned staging from the first download.
 # Root authority is acquired before network acquisition, never after a user
@@ -447,15 +531,8 @@ download() {
 # Select the exact supported target from verified Debian 12/13 host data;
 # the index is strict bounded JSON. No shell evaluation of metadata fields.
 if [ -n "$source_kind" ]; then
- [ "$(uname -m)" = x86_64 ] || { echo 'Only Debian 12/13 amd64 is supported' >&2;exit 1; }
- detected_os=$(bootstrap_read_os_version) || {
-  echo 'Release index selection requires Debian 12/13 with valid host identity' >&2;exit 1;
- }
- detected_target=debian-$detected_os-amd64
- if [ -n "$target" ] && [ "$target" != "$detected_target" ];then
-  echo 'Release target does not match actual host' >&2;exit 2
- fi
- target=$detected_target
+ [ -n "$host_target" ] || { echo 'Release host preflight missing; no install' >&2;exit 1; }
+ target=$host_target
  download "$url" "$work/release-index.json" 16384 || {
   echo 'Release index unavailable from the selected HTTPS source; nothing installed' >&2;exit 1;
  }
@@ -837,3 +914,4 @@ elif [ "$authenticated" = integrity ];then
 else
  sh "$work/server-connect/install.sh" --offline --local-qa
 fi
+# SERVER_CONNECT_BOOTSTRAP_END
