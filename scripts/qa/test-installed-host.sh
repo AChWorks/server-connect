@@ -15,7 +15,9 @@ if [[ $(printenv GITHUB_ACTIONS || true) != true || $(printenv CI || true) != tr
   echo 'Only ephemeral GitHub Actions runners may execute this QA harness' >&2
   exit 2
 fi
-if [[ ( $# != 4 && $# != 5 ) || ! -f $1 || ! -f $2 || ! -f $3 || ! -f $4 || ( $# == 5 && ! -f $5 ) ]]; then
+if [[ $# != 4 && $# != 5 ]] ||
+   [[ ! -f $1 || ! -f $2 || ! -f $3 || ! -f $4 ]] ||
+   [[ $# == 5 && ! -f ${5:-} ]]; then
   echo 'Usage: test-installed-host.sh BASE.tar.gz BOOTSTRAP.sh UPDATE.tar.gz BAD-UPDATE.tar.gz [STABLE.tar.gz]' >&2
   exit 2
 fi
