@@ -607,7 +607,8 @@ from pathlib import Path
 import sys
 out=Path(sys.argv[1]).read_text()
 err=Path(sys.argv[2]).read_text()
-assert "NOT approved for general-host/production use" in out
+assert "This development build is NOT RELEASE-READY for general-host use." in out
+assert "Initial activation is provisional until confirmed from a freshly opened SSH session." in out
 assert "Not completed:" in out
 assert "Core started under native guards" not in out
 assert "Error [" in err and "State:" in err and "Next:" in err
