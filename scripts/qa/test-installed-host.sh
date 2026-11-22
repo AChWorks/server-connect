@@ -311,15 +311,19 @@ run_offline() {
   local label=$1 action=$2 source_dir=/root/server-connect
   if [[ $# -ge 3 ]]; then source_dir=$3; fi
   echo "=== Disconnected offline $label ==="
-  local -a flags=(--local-qa)
-  # First install exercises the actual first-Stable no-key offline contract.
-  # Subsequent explicit QA updates preserve separate historical QA coverage.
-  if [[ $label == first-install ]]; then flags=(); fi
+  # First install exercises the no-key Offline contract. Retained explicit
+  # LOCAL QA updates preserve the historical receipt regression path.
+  # This script is Bash-executed, but the trusted workflow also runs sh -n.
+  if [[ $label == first-install ]]; then
+    set --
+  else
+    set -- --local-qa
+  fi
   docker exec "$container" /usr/bin/strace -ff -qq -yy -s 128 \
     -e trace=%network,%process \
     -o "/root/qa-strace/$label" /usr/bin/env -i \
     HOME=/root PATH=/usr/sbin:/usr/bin:/sbin:/bin LC_ALL=C \
-    /bin/sh "$source_dir/install.sh" "$action" "${flags[@]}"
+    /bin/sh "$source_dir/install.sh" "$action" "$@"
   assert_no_offline_fetch "$label"
 }
 # An active proxy is intentionally permitted to open its existing loopback
