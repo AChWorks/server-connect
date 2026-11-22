@@ -665,7 +665,7 @@ class FirstInstallIntentTests(unittest.TestCase):
         (stage / ".owner").write_text("AChWorks/server-connect\n")
         receipt = self.state / ".first-install-intent"
         receipt.write_text(
-            f"{stage}\n{stage.stat().st_dev}:{stage.stat().st_ino}\n"
+            f"{stage}\n{stage.stat().st_dev}:{stage.stat().st_ino}\nunsigned\n"
         )
         receipt.chmod(0o600)
         self.run_first("first_install_reconcile_abandoned_stage\n")

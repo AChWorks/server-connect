@@ -1605,14 +1605,15 @@ module.main()
         self.assertFalse((stage / "authentication.json").exists())
         self.assertEqual(list(stage.glob(".authentication.*")), [])
 
-    def signed_first_recovery_fixture(self):
+    def signed_first_recovery_fixture(self, *, published=True):
         # Execute the actual installer first-transaction scanner using the
         # original real Signed crypto and inode-bound rootless directory
         # layout. Only the hardcoded /opt and systemd path are substituted
         # inside this disposable fixture; no installed host is modified.
         runtime = self.receipt_runtime()
         stage = self.receipt_stage("authsign")
-        self.receipt_action("install-receipt", stage)
+        if published:
+            self.receipt_action("install-receipt", stage)
         release_name="0.1.0-dev-"+self.identity["checksums_sha256"][:16]
         release=stage.parent/release_name
         stage.rename(release)
@@ -1623,10 +1624,15 @@ module.main()
         private.mkdir(mode=0o700)
         outer=self.case/".server-connect-release.authsign"
         first=self.case/".server-connect-initial.ABCDE123"
+        canonical=subprocess.run(["/usr/bin/openssl","pkey","-pubin",
+                                  "-in",str(self.public),"-pubout"],
+                                  check=True,capture_output=True,timeout=15).stdout
+        binding="signed:"+":".join(hashlib.sha256(v).hexdigest()
+               for v in (self.metadata.read_bytes(),self.signature.read_bytes(),canonical))
         (private/".first-install-intent").write_text(
-            f"{first}\n{prefix.stat().st_dev}:{prefix.stat().st_ino}\n")
+            f"{first}\n{prefix.stat().st_dev}:{prefix.stat().st_ino}\n{binding}\n")
         (private/".first-release-intent").write_text(
-            f"{outer}\n{release.stat().st_dev}:{release.stat().st_ino}\n{release_name}\n")
+            f"{outer}\n{release.stat().st_dev}:{release.stat().st_ino}\n{release_name}\n{binding}\n")
         for intent in private.iterdir():intent.chmod(0o600)
         source=self.case/"signed-source"
         source.mkdir()
@@ -1666,11 +1672,14 @@ module.main()
             'die() { printf "REFUSED:%s\n" "$*" >&2; exit 21; }\n'
             +functions+"\n"
         )
-        def reconcile(action,trust="signed",public=None):
+        def reconcile(action,trust="signed",public=None,signature=None):
             args=prolog.replace('trust_kind=signed\n','trust_kind='+trust+'\n')
             if public is not None:
                 args=args.replace('publisher_key='+shlex.quote(str(self.public))+'\n',
                                   'publisher_key='+shlex.quote(str(public))+'\n')
+            if signature is not None:
+                args=args.replace('signature_file='+shlex.quote(str(self.signature))+'\n',
+                                  'signature_file='+shlex.quote(str(signature))+'\n')
             return subprocess.run(["/bin/sh","-c",args+
                 "first_install_reconcile_transaction "+action+"\n"],
                 capture_output=True,text=True,timeout=40)
@@ -1718,6 +1727,98 @@ module.main()
         self.assertFalse(release.exists())
         self.assertFalse((private/".first-release-intent").exists())
         self.assertFalse((private/".first-install-intent").exists())
+
+    def test_signed_prelink_first_install_never_downgrades_implicitly(self):
+        reconcile, release, private = self.signed_first_recovery_fixture(published=False)
+        receipt = private / ".first-release-intent"
+        source_identity = receipt.read_bytes()
+        self.assertFalse((release / "authentication.json").exists())
+        self.assertEqual(reconcile("inspect").returncode, 0)
+        for kind in ("unsigned", "local-qa"):
+            with self.subTest(trust=kind):
+                rejected = reconcile("inspect", trust=kind)
+                self.assertNotEqual(rejected.returncode, 0)
+                self.assertIn("original", rejected.stderr)
+                self.assertEqual(receipt.read_bytes(), source_identity)
+                self.assertTrue(release.exists(), "partial Signed release was adopted")
+                self.assertFalse((release / "integrity.sha256").exists())
+        # A second, cryptographically valid independent publisher cannot
+        # silently replace the original operator-selected signer even when
+        # payload bytes and signed release metadata are identical.
+        new_private = self.case / "alternate-signing-private.pem"
+        new_public = self.case / "alternate-signing-public.pem"
+        new_signature = self.case / "alternate-release.sig"
+        subprocess.run(["/usr/bin/openssl", "genpkey", "-algorithm", "RSA",
+                        "-pkeyopt", "rsa_keygen_bits:2048", "-out", str(new_private)],
+                       check=True, capture_output=True, timeout=30)
+        subprocess.run(["/usr/bin/openssl", "pkey", "-in", str(new_private),
+                        "-pubout", "-out", str(new_public)],
+                       check=True, capture_output=True, timeout=15)
+        subprocess.run(["/usr/bin/openssl", "dgst", "-sha256", "-sign",
+                        str(new_private), "-out", str(new_signature),
+                        str(self.metadata)],
+                       check=True, capture_output=True, timeout=15)
+        valid = subprocess.run(["/usr/bin/openssl", "dgst", "-sha256",
+                                "-verify", str(new_public), "-signature",
+                                str(new_signature), str(self.metadata)],
+                               capture_output=True, text=True, timeout=15)
+        self.assertEqual(valid.returncode, 0, valid.stderr)
+        other = reconcile("inspect", public=new_public, signature=new_signature)
+        self.assertNotEqual(other.returncode, 0)
+        self.assertIn("original", other.stderr)
+        self.assertEqual(receipt.read_bytes(), source_identity)
+        # One explicit, owned, *cleanup-only* action may abandon the
+        # incomplete Signed operation when the operator no longer has its key.
+        self.assertEqual(reconcile("inspect-abandon", trust="unsigned").returncode, 0)
+        self.assertTrue(release.exists(), "inspection must not mutate")
+        self.assertEqual(reconcile("abandon", trust="unsigned").returncode, 0)
+        self.assertFalse(release.exists())
+        self.assertFalse(private.joinpath(".first-install-intent").exists())
+        self.assertFalse(receipt.exists())
+
+    def test_signed_prelink_abandon_preserves_foreign_and_swapped_inodes(self):
+        reconcile, release, private = self.signed_first_recovery_fixture(published=False)
+        foreign = release / "unowned-resource"
+        foreign.write_bytes(b"preserve foreign")
+        denied = reconcile("abandon", trust="unsigned")
+        self.assertNotEqual(denied.returncode, 0)
+        self.assertEqual(foreign.read_bytes(), b"preserve foreign")
+        self.assertTrue(private.joinpath(".first-release-intent").exists())
+        foreign.unlink()
+        displaced = self.case / "original-signed-release"
+        release.rename(displaced)
+        release.mkdir()
+        denied = reconcile("abandon", trust="unsigned")
+        self.assertNotEqual(denied.returncode, 0)
+        self.assertTrue(release.exists())
+        self.assertTrue(displaced.exists())
+        self.assertTrue(private.joinpath(".first-release-intent").exists())
+
+    def test_signed_published_explicit_abandon_checks_original_receipt_digest(self):
+        reconcile, release, private = self.signed_first_recovery_fixture(published=True)
+        claim = private / ".first-release-intent"
+        raw = claim.read_bytes()
+        # Embedded Signed material cannot be replaced even if the operator
+        # explicitly chooses only to abandon an interrupted stage.
+        claim.write_bytes(raw.replace(b"signed:", b"signed:0", 1))
+        self.assertNotEqual(reconcile("abandon", trust="unsigned").returncode, 0)
+        self.assertTrue(release.exists())
+        claim.write_bytes(raw)
+        self.assertEqual(reconcile("inspect-abandon", trust="unsigned").returncode, 0)
+        self.assertEqual(reconcile("abandon", trust="unsigned").returncode, 0)
+        self.assertFalse(release.exists())
+
+    def test_signed_prefix_claim_alone_preserves_original_trust(self):
+        reconcile, release, private = self.signed_first_recovery_fixture(published=False)
+        current=release.parent.parent / "current"
+        current.unlink()
+        shutil.rmtree(release)
+        stage=private / ".first-release-intent"
+        stage.unlink()
+        self.assertEqual(reconcile("inspect", trust="signed").returncode, 0)
+        self.assertNotEqual(reconcile("inspect", trust="unsigned").returncode, 0)
+        self.assertEqual(reconcile("abandon", trust="unsigned").returncode, 0)
+        self.assertFalse(private.joinpath(".first-install-intent").exists())
 
     def installer_receipt_harness(self, command, *, source=None):
         body = INSTALLER.read_text()

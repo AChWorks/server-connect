@@ -22,6 +22,7 @@ ACTION=${1:---offline}
 local_qa=no
 retained_auth=no
 unsigned_release=no
+abandon_incomplete=no
 publisher_key=''
 metadata_file=''
 signature_file=''
@@ -327,14 +328,22 @@ FIRST_INSTALL_INTENT=$STATE/.first-install-intent
 first_install_read_intent() {
  first_stage=''
  first_inode=''
+ first_trust=''
  [ -f "$FIRST_INSTALL_INTENT" ] && [ ! -L "$FIRST_INSTALL_INTENT" ] || return 1
  check_root_file "$FIRST_INSTALL_INTENT"
  [ "$(stat -c '%a:%h' "$FIRST_INSTALL_INTENT")" = 600:1 ] || return 1
- [ "$(wc -l < "$FIRST_INSTALL_INTENT")" -eq 2 ] || return 1
+ [ "$(wc -l < "$FIRST_INSTALL_INTENT")" -eq 3 ] || return 1
  first_stage=$(sed -n '1p' "$FIRST_INSTALL_INTENT")
  first_inode=$(sed -n '2p' "$FIRST_INSTALL_INTENT")
+ first_trust=$(sed -n '3p' "$FIRST_INSTALL_INTENT")
  case "$first_stage" in /opt/.server-connect-initial.[a-zA-Z0-9]*) ;; *) return 1 ;; esac
  case "$first_inode" in ''|*[!0123456789:]*|:*|*:) return 1 ;; esac
+ case "$first_trust" in
+  unsigned|local-qa) ;;
+  signed:*) printf '%s\n' "$first_trust" |
+   grep -Eq '^signed(:[0-9a-f]{64}){3}$' || return 1 ;;
+  *) return 1 ;;
+ esac
  return 0
 }
 first_install_is_empty_owned_dir() {
@@ -403,6 +412,8 @@ first_install_publish() {
   die 'refusing to publish first install over an existing prefix'
  [ ! -e "$FIRST_INSTALL_INTENT" ] && [ ! -L "$FIRST_INSTALL_INTENT" ] ||
   die 'unreconciled first-install claim'
+ first_trust=$(first_install_trust_binding) ||
+  die 'unable to bind initial installation to original source trust'
  first_stage=$(mktemp -d /opt/.server-connect-initial.XXXXXXXX) ||
   die 'unable to create private first-install stage'
  printf 'AChWorks/server-connect\n' > "$first_stage/.owner" || die 'cannot stage root owner marker'
@@ -411,7 +422,7 @@ first_install_publish() {
  first_inode=$(stat -c '%d:%i' "$first_stage") || die 'cannot identify first-install directory'
  first_temp=$(mktemp "$STATE/.first-install-intent.XXXXXXXX") ||
   die 'cannot stage durable first-install intent'
- printf '%s\n%s\n' "$first_stage" "$first_inode" > "$first_temp" ||
+ printf '%s\n%s\n%s\n' "$first_stage" "$first_inode" "$first_trust" > "$first_temp" ||
   die 'cannot write first-install intent'
  chmod 0600 "$first_temp" || die 'cannot protect first-install intent'
  first_install_noreplace "$first_temp" "$FIRST_INSTALL_INTENT" ||
@@ -444,6 +455,36 @@ SC_FIRST_INSTALL_RENAME
 # Inspect the complete root-private first-install transaction before cleanup.
 # This is the only exception to normal *committed* service/receipt preflights.
 FIRST_RELEASE_INTENT=$STATE/.first-release-intent
+# Persist the originally selected trust decision with the release-stage
+# inode *before* copying its first payload member. Only hashes are retained,
+# never a private key, raw signature or publisher material. Normal keyless
+# installations remain keyless; explicit Signed first-install retries must
+# reproduce their original selected authority.
+first_install_trust_binding() {
+ case "$trust_kind" in
+  unsigned|local-qa) printf '%s\n' "$trust_kind" ;;
+  signed)
+   check_root_file "$metadata_file"
+   check_root_file "$signature_file"
+   check_root_file "$publisher_key"
+   metadata_digest=$(sha256sum "$metadata_file" | cut -d ' ' -f1) ||
+    die 'original Signed metadata identity unavailable'
+   signature_digest=$(sha256sum "$signature_file" | cut -d ' ' -f1) ||
+    die 'original Signed signature identity unavailable'
+   canonical_key=$(openssl pkey -pubin -in "$publisher_key" -pubout 2>/dev/null) ||
+    die 'original Signed publisher key unavailable'
+   [ -n "$canonical_key" ] || die 'original Signed publisher key empty'
+   key_digest=$(printf '%s\n' "$canonical_key" | sha256sum | cut -d ' ' -f1) ||
+    die 'original Signed publisher key identity unavailable'
+   for digest in "$metadata_digest" "$signature_digest" "$key_digest"; do
+    case "$digest" in ''|*[!0123456789abcdef]*) die 'malformed Signed authority digest' ;; esac
+    [ "${#digest}" -eq 64 ] || die 'incorrect Signed authority digest length'
+   done
+   printf 'signed:%s:%s:%s\n' "$metadata_digest" "$signature_digest" "$key_digest"
+   ;;
+  *) die 'unknown first-install trust selection' ;;
+ esac
+}
 first_install_reconcile_transaction() {
  python3 -I -S - "$SOURCE_DIR" "$PREFIX" "$STATE" /etc/systemd/system "$COMMAND" "$release_name" "$1" "$trust_kind" "$metadata_file" "$signature_file" "$publisher_key" <<'PY_FIRST_INSTALL_RECOVER'
 # Embedded in the already-verified root-only installer. Never execute this
@@ -463,7 +504,8 @@ import sys
 if trust_kind not in ("signed", "local-qa", "unsigned"):
     raise ValueError("first-install source trust mode invalid")
 source, prefix, state, unitdir, command = map(Path, (source, prefix, state, unitdir, command))
-assert action in ("inspect", "recover")
+assert action in ("inspect", "recover", "inspect-abandon", "abandon")
+abandon = action in ("inspect-abandon", "abandon")
 uid = os.geteuid()
 owned_state = state.lstat()
 if not stat.S_ISDIR(owned_state.st_mode) or owned_state.st_uid != uid or stat.S_IMODE(owned_state.st_mode) != 0o700:
@@ -512,7 +554,8 @@ def receipt(path, count):
 def identity(info):
     return f"{info.st_dev}:{info.st_ino}"
 
-first = receipt(initial,2)
+first = receipt(initial,3)
+original_first_trust = first[2]
 if not re.fullmatch(r"\.server-connect-initial\.[A-Za-z0-9]{8}",Path(first[0]).name) or Path(first[0]).parent != prefix.parent:
     refuse("unexpected initial stage location")
 if not re.fullmatch(r"[0-9]+:[0-9]+",first[1]):
@@ -551,6 +594,30 @@ allowed_files.update({".owner":None,"checksums.sha256":None,
                       "authentication.json":None})
 allowed_dirs = {"bin","THIRD-PARTY-LICENSES"}
 
+def expected_trust_binding():
+    if trust_kind in ("unsigned", "local-qa"):
+        return trust_kind
+    try:
+        meta = Path(metadata_file).read_bytes()
+        signature = Path(signature_file).read_bytes()
+        result = subprocess.run(("/usr/bin/openssl", "pkey", "-pubin", "-in",
+                                 publisher_key, "-pubout"),
+                                capture_output=True, timeout=20, check=True,
+                                env={"PATH":"/usr/sbin:/usr/bin:/sbin:/bin",
+                                     "LC_ALL":"C","OPENSSL_CONF":"/dev/null"})
+    except (OSError, subprocess.SubprocessError) as exc:
+        refuse("original Signed authority cannot be recovered: "+str(exc))
+    return "signed:"+":".join(hashlib.sha256(v).hexdigest()
+                              for v in (meta, signature, result.stdout))
+
+recorded_trust = None
+if original_first_trust not in ("unsigned", "local-qa") and not re.fullmatch(
+        r"signed(?::[0-9a-f]{64}){3}", original_first_trust):
+    refuse("malformed or missing first-prefix original trust binding")
+if not abandon and original_first_trust != expected_trust_binding():
+    refuse("original first-install trust selection changed; retry with the original Signed "
+           "publisher inputs or run --offline --abandon-incomplete for verified cleanup only")
+
 def check_signed_receipt(root):
     # An interrupted signed first-install may leave a single final name
     # after O_TMPFILE/linkat. Cryptographically check the receipt and bind it
@@ -559,12 +626,12 @@ def check_signed_receipt(root):
     info = node(auth, "file")
     if info is None:
         return
-    if trust_kind != "signed" or root not in (owned_inner, release):
-        refuse("signed receipt cannot be adopted without original signed source")
+    if recorded_trust is None or not recorded_trust.startswith("signed:") or root not in (owned_inner, release):
+        refuse("signed receipt cannot be adopted without an original Signed claim")
     if stat.S_IMODE(info.st_mode) != 0o600:
         refuse("signed receipt is not root-private")
-    if not all((metadata_file, signature_file, publisher_key)):
-        refuse("original signed authority inputs absent")
+    if not abandon and not all((metadata_file, signature_file, publisher_key)):
+        refuse("original Signed authority inputs absent")
     check = subprocess.run(
         (sys.executable, "-I", "-S", str(source / "release-auth.py"),
          "verify-installed", "--bundle", str(root)),
@@ -579,17 +646,15 @@ def check_signed_receipt(root):
         original_metadata = base64.b64decode(material["metadata_b64"], validate=True)
         original_signature = base64.b64decode(material["signature_b64"], validate=True)
         original_public_key = base64.b64decode(material["publisher_key_b64"], validate=True)
-        canonical = subprocess.run(
-            ("/usr/bin/openssl", "pkey", "-pubin", "-in", publisher_key, "-pubout"),
-            capture_output=True, timeout=20, check=True,
-            env={"PATH":"/usr/sbin:/usr/bin:/sbin:/bin", "LC_ALL":"C",
-                 "OPENSSL_CONF":"/dev/null"}).stdout
     except (ValueError, KeyError, OSError, subprocess.SubprocessError) as exc:
         refuse("signed receipt binding cannot be established: " + str(exc))
-    if (original_metadata != Path(metadata_file).read_bytes()
-            or original_signature != Path(signature_file).read_bytes()
-            or original_public_key != canonical):
-        refuse("signed receipt does not match originally selected publisher authority")
+    embedded = "signed:"+":".join(hashlib.sha256(v).hexdigest() for v in
+                                  (original_metadata, original_signature,
+                                   original_public_key))
+    if embedded != recorded_trust:
+        refuse("published Signed receipt differs from durable original authority")
+    if not abandon and expected_trust_binding() != recorded_trust:
+        refuse("Signed receipt differs from currently selected original authority")
 
 def scan_release(root):
     if node(root,"dir") is None:
@@ -610,6 +675,13 @@ def scan_release(root):
                 refuse("foreign release file: "+relative)
             node(base / filename,"file")
             observed.append(base / filename)
+    for name, kind in (("authentication.json", "signed"),
+                       ("integrity.sha256", "unsigned"),
+                       ("local-qa.sha256", "local-qa")):
+        candidate = root / name
+        if candidate.exists() or candidate.is_symlink():
+            if recorded_trust is None or recorded_trust.split(":", 1)[0] != kind:
+                refuse("trust receipt conflicts with durable first-install selection")
     if (root / "authentication.json").exists() or (root / "authentication.json").is_symlink():
         check_signed_receipt(root)
     return observed
@@ -618,7 +690,16 @@ outside=None
 owned_inner=None
 published=None
 if stage_intent.exists() or stage_intent.is_symlink():
-    stage_receipt=receipt(stage_intent,3)
+    stage_receipt=receipt(stage_intent,4)
+    recorded_trust=stage_receipt[3]
+    if recorded_trust not in ("unsigned", "local-qa") and not re.fullmatch(
+            r"signed(?::[0-9a-f]{64}){3}", recorded_trust):
+        refuse("malformed or missing original first-install trust binding")
+    if recorded_trust != original_first_trust:
+        refuse("prefix and release-stage original trust claims disagree")
+    if not abandon and recorded_trust != expected_trust_binding():
+        refuse("interrupted first install has a different original trust selection; "
+               "retry with the original Signed inputs or run --offline --abandon-incomplete")
     outside=Path(stage_receipt[0])
     if outside.parent != prefix.parent or not re.fullmatch(
             r"\.server-connect-release\.[A-Za-z0-9]{8}",outside.name):
@@ -698,7 +779,7 @@ for name in names:
         if props.get("ActiveState")!="inactive" or props.get("UnitFileState") in ("enabled","enabled-runtime","linked","linked-runtime"):
             refuse("active or enabled unit must be examined from console: "+name)
 
-if action=="inspect":
+if action in ("inspect", "inspect-abandon"):
     print("INITIAL_CLAIM_INSPECTION_PASS")
     sys.exit(0)
 
@@ -748,9 +829,11 @@ first_install_stage_receipt() {
  [ ! -e "$FIRST_RELEASE_INTENT" ] && [ ! -L "$FIRST_RELEASE_INTENT" ] ||
   die 'unreconciled first-release stage claim'
  first_release_inode=$(stat -c '%d:%i' "$stage") || die 'cannot identify first-release stage'
+ original_trust=$(first_install_trust_binding) ||
+  die 'unable to bind first release to original source trust'
  first_release_temp=$(mktemp "$STATE/.first-release-intent.XXXXXXXX") ||
   die 'cannot create private first-release receipt'
- printf '%s\n%s\n%s\n' "$stage" "$first_release_inode" "$release_name" > "$first_release_temp" ||
+ printf '%s\n%s\n%s\n%s\n' "$stage" "$first_release_inode" "$release_name" "$original_trust" > "$first_release_temp" ||
   die 'cannot persist first-release identity'
  chmod 0600 "$first_release_temp" || die 'cannot protect first-release identity'
  first_install_noreplace "$first_release_temp" "$FIRST_RELEASE_INTENT" ||
@@ -806,8 +889,8 @@ def identity(info):
 state_info=node(state,"dir")
 if stat.S_IMODE(state_info.st_mode)!=0o700:
     fail("private state mode changed")
-initial=file_lines(state/".first-install-intent",2)
-release_claim=file_lines(state/".first-release-intent",3)
+initial=file_lines(state/".first-install-intent",3)
+release_claim=file_lines(state/".first-release-intent",4)
 if initial is None and release_claim is None:
     fail("no outstanding first-install receipt")
 # A first-prefix-only claim is still pre-commit; never classify it as a
@@ -821,14 +904,19 @@ node(owner,"file")
 if owner.read_bytes()!=b"AChWorks/server-connect\n":
     fail("installed owner marker changed")
 if initial is not None:
-    original, prefix_identity=initial
+    original, prefix_identity, first_trust=initial
     first_path=Path(original)
     if (first_path.parent!=prefix.parent or not re.fullmatch(
         r"\.server-connect-initial\.[A-Za-z0-9]{8}",first_path.name)
             or not re.fullmatch(r"[0-9]+:[0-9]+",prefix_identity)
             or prefix_identity!=identity(prefix_info) or first_path.exists()):
         fail("installed prefix no longer matches first-install identity")
-stage,stage_identity,release_name=release_claim
+stage,stage_identity,release_name,original_trust=release_claim
+if original_trust not in ("unsigned", "local-qa") and not re.fullmatch(
+        r"signed(?::[0-9a-f]{64}){3}",original_trust):
+    fail("committed original source trust receipt malformed")
+if initial is not None and first_trust != original_trust:
+    fail("committed prefix/release original trust claims disagree")
 stage_path=Path(stage)
 if (stage_path.parent!=prefix.parent or not re.fullmatch(
     r"\.server-connect-release\.[A-Za-z0-9]{8}",stage_path.name)
@@ -1120,11 +1208,13 @@ check_owned() {
 if [ "$ACTION" = --help ]; then
  say 'Use a trusted HTTPS bootstrap or uploaded local bundle; no publisher key is required.'
  say 'Actions: --offline | --verify-only | --uninstall; optional historical signed QA remains supported.'
+ say 'For interrupted initial installs only: --offline --abandon-incomplete (verified cleanup ONLY; does not install).'
  exit 0
 fi
 while [ "$#" -gt 0 ]; do
  case "$1" in
   --local-qa) [ "$local_qa" = no ] || die 'duplicate local QA flag';local_qa=yes;shift;;
+  --abandon-incomplete) [ "$abandon_incomplete" = no ] || die 'duplicate abandon-incomplete flag';abandon_incomplete=yes;shift;;
   --publisher-key) [ "$#" -ge 2 ] && [ -z "$publisher_key" ] || die 'invalid publisher key option';publisher_key=$2;shift 2;;
   --metadata-file) [ "$#" -ge 2 ] && [ -z "$metadata_file" ] || die 'invalid metadata option';metadata_file=$2;shift 2;;
   --signature-file) [ "$#" -ge 2 ] && [ -z "$signature_file" ] || die 'invalid signature option';signature_file=$2;shift 2;;
@@ -1147,6 +1237,8 @@ else
   die 'publisher verification is required; use trusted bootstrap or explicitly select --local-qa'
 fi
 case "$ACTION" in --offline|--verify-only|--uninstall) ;; *) die 'only --offline, --verify-only, --uninstall supported; online bootstrap fetches a verified bundle first' ;; esac
+[ "$abandon_incomplete" = no ] || [ "$ACTION" = --offline ] ||
+ die '--abandon-incomplete requires --offline; it never performs a new installation'
 require_root
 check_source_ancestry
 check_platform
@@ -1166,13 +1258,20 @@ pending_first=no
 pending_committed=no
 if [ -e "$FIRST_INSTALL_INTENT" ] || [ -L "$FIRST_INSTALL_INTENT" ];then
  if first_install_is_committed;then
+  [ "$abandon_incomplete" = no ] ||
+   die 'cannot abandon a committed installation; use ordinary --uninstall'
   pending_committed=yes
   check_owned
   check_service_owner
   check_guard_units
  elif [ "$ACTION" = --offline ];then
-  first_install_reconcile_transaction inspect ||
-   die 'unrecognized interrupted initial installation; preserve for inspection'
+  if [ "$abandon_incomplete" = yes ];then
+   first_install_reconcile_transaction inspect-abandon ||
+    die 'incomplete installation is not exactly owned; abandon refused'
+  else
+   first_install_reconcile_transaction inspect ||
+    die 'unrecognized interrupted initial installation or changed original trust; preserve for inspection'
+  fi
   pending_first=yes
  else
   die 'first-install intent not committed; verification/uninstall cannot adopt incomplete state'
@@ -1188,6 +1287,9 @@ else
  fi
 fi
 
+if [ "$abandon_incomplete" = yes ] && [ "$pending_first" != yes ];then
+ die 'no exactly owned incomplete first installation to abandon; committed or foreign resources preserved'
+fi
 if [ "$ACTION" = --verify-only ]; then say 'bundle integrity, selected trust policy and owned-resource preflight PASS'; exit 0;fi
 
 # The installer and all manager state changes coordinate through one flock.
@@ -1206,6 +1308,14 @@ flock -w 30 -x 9 || die 'another Server Connect operation holds the lifecycle lo
 if [ "$pending_committed" = yes ];then
  first_install_retire_committed_claims
 elif [ "$pending_first" = yes ];then
+ if [ "$abandon_incomplete" = yes ];then
+  first_install_reconcile_transaction inspect-abandon ||
+   die 'incomplete first-install ownership changed before explicit abandonment'
+  first_install_reconcile_transaction abandon ||
+   die 'explicit incomplete first-install abandonment refused; original resources preserved'
+  say 'exactly owned incomplete first installation abandoned; no new installation attempted'
+  exit 0
+ fi
  first_install_reconcile_transaction inspect ||
   die 'interrupted initial installation changed under lifecycle lock'
  first_install_reconcile_transaction recover ||

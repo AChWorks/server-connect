@@ -66,10 +66,19 @@ def claim(path: Path, content: str) -> None:
         os.fsync(fd)
     finally:
         os.close(fd)
+public = subprocess.run(
+    ["/usr/bin/openssl", "pkey", "-pubin",
+     "-in", str(trust / "independent-public.pem"), "-pubout"],
+    check=True, capture_output=True, timeout=15).stdout
+original_trust = "signed:" + ":".join(
+    hashlib.sha256(raw).hexdigest() for raw in (
+        (trust / "release.json").read_bytes(),
+        (trust / "release.sig").read_bytes(),
+        public))
 claim(state / ".first-install-intent",
-      f"/opt/.server-connect-initial.{suffix}\n{prefix.stat().st_dev}:{prefix.stat().st_ino}\n")
+      f"/opt/.server-connect-initial.{suffix}\n{prefix.stat().st_dev}:{prefix.stat().st_ino}\n{original_trust}\n")
 claim(state / ".first-release-intent",
-      f"{outer}\n{inner.stat().st_dev}:{inner.stat().st_ino}\n{name}\n")
+      f"{outer}\n{inner.stat().st_dev}:{inner.stat().st_ino}\n{name}\n{original_trust}\n")
 for path in (inner, inner.parent, prefix, state):
     fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     try:

@@ -1737,9 +1737,9 @@ def claim(path, lines):
         os.write(fd,lines.encode('ascii'));os.fsync(fd)
     finally:os.close(fd)
 claim(state/'.first-install-intent',
-      f"/opt/.server-connect-initial.QA123456\n{prefix.stat().st_dev}:{prefix.stat().st_ino}\n")
+      f"/opt/.server-connect-initial.QA123456\n{prefix.stat().st_dev}:{prefix.stat().st_ino}\nunsigned\n")
 claim(state/'.first-release-intent',
-      f"/opt/.server-connect-release.QA123456\n{release.stat().st_dev}:{release.stat().st_ino}\n{release.name}\n")
+      f"/opt/.server-connect-release.QA123456\n{release.stat().st_dev}:{release.stat().st_ino}\n{release.name}\nunsigned\n")
 fd=os.open(state,os.O_RDONLY|os.O_DIRECTORY)
 try:os.fsync(fd)
 finally:os.close(fd)
@@ -1765,8 +1765,8 @@ state=pathlib.Path('/var/lib/server-connect')
 prefix=pathlib.Path('/opt/server-connect')
 release=prefix/(prefix/'current').readlink()
 for name,contents in (
- ('.first-install-intent',f"/opt/.server-connect-initial.QA123456\n{prefix.stat().st_dev}:{prefix.stat().st_ino}\n"),
- ('.first-release-intent',f"/opt/.server-connect-release.QA123456\n{release.stat().st_dev}:{release.stat().st_ino}\n{release.name}\n")
+ ('.first-install-intent',f"/opt/.server-connect-initial.QA123456\n{prefix.stat().st_dev}:{prefix.stat().st_ino}\nunsigned\n"),
+ ('.first-release-intent',f"/opt/.server-connect-release.QA123456\n{release.stat().st_dev}:{release.stat().st_ino}\n{release.name}\nunsigned\n")
 ):
     fd=os.open(state/name,os.O_CREAT|os.O_EXCL|os.O_WRONLY|os.O_NOFOLLOW,0o600)
     try:os.write(fd,contents.encode('ascii'));os.fsync(fd)
@@ -2083,6 +2083,83 @@ for signed_kill in before after; do
     "$signed_kill" "$qa_version"
   assert_network_unchanged "signed-first-kill-$signed_kill" "$signed_before"
   verify_host_services "signed-first-kill-$signed_kill"
+  # A real interrupted Signed first install cannot be resumed with keyless
+  # or local QA trust even if authentication.json was never published.
+  for different_mode in unsigned local-qa; do
+    case "$different_mode" in
+      unsigned) mode_args='' ;;
+      local-qa) mode_args='--local-qa' ;;
+    esac
+    if docker exec "$container" /usr/bin/env -i HOME=/root \
+         PATH=/usr/sbin:/usr/bin:/sbin:/bin LC_ALL=C \
+         /bin/sh /root/server-connect/install.sh --offline $mode_args \
+         >"$scratch/signed-$signed_kill-$different_mode.stdout" \
+         2>"$scratch/signed-$signed_kill-$different_mode.stderr";then
+      echo 'Interrupted Signed install accepted implicit trust change' >&2
+      exit 1
+    fi
+    grep -F 'original first-install trust selection changed' \
+      "$scratch/signed-$signed_kill-$different_mode.stderr" >/dev/null || {
+      cat "$scratch/signed-$signed_kill-$different_mode.stderr" >&2
+      exit 1
+    }
+    docker exec "$container" /bin/sh -c '
+      set -eu
+      test -f /var/lib/server-connect/.first-install-intent
+      test -f /var/lib/server-connect/.first-release-intent
+      test ! -e /opt/server-connect/current
+      test ! -e /usr/local/bin/server-connect
+      test ! -e /etc/systemd/system/server-connect.service
+    '
+  done
+  echo 'SIGNED_FIRST_DOWNGRADE_AND_LOCAL_QA_REFUSED=PASS'
+  if [[ $signed_kill == before ]]; then
+    # An alternative signature over IDENTICAL metadata is cryptographically
+    # valid, but the original selected publisher may not be replaced.
+    docker exec "$container" /bin/sh -c '
+      set -eu
+      cd /root/qa-release-trust
+      openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 \
+        -out qa-other-private.pem >/dev/null 2>&1
+      openssl pkey -in qa-other-private.pem -pubout \
+        -out qa-other-public.pem >/dev/null 2>&1
+      openssl dgst -sha256 -sign qa-other-private.pem \
+        -out qa-other.sig release.json
+      openssl dgst -sha256 -verify qa-other-public.pem \
+        -signature qa-other.sig release.json | grep -Fx "Verified OK"
+    '
+    docker exec "$container" /usr/bin/python3 -I -S \
+      /root/server-connect/release-auth.py verify \
+      --metadata /root/qa-release-trust/release.json \
+      --signature /root/qa-release-trust/qa-other.sig \
+      --publisher-key /root/qa-release-trust/qa-other-public.pem \
+      --version 0.1.0-dev --target "debian-$qa_version-amd64" \
+      --bundle /root/server-connect >/dev/null
+    if docker exec "$container" /usr/bin/env -i HOME=/root \
+         PATH=/usr/sbin:/usr/bin:/sbin:/bin LC_ALL=C \
+         /bin/sh /root/server-connect/install.sh --offline \
+         --metadata-file /root/qa-release-trust/release.json \
+         --signature-file /root/qa-release-trust/qa-other.sig \
+         --publisher-key /root/qa-release-trust/qa-other-public.pem \
+         --version 0.1.0-dev --target "debian-$qa_version-amd64" \
+         >"$scratch/signed-other-key.stdout" \
+         2>"$scratch/signed-other-key.stderr";then
+      echo 'Changed but valid Signed authority accepted by retry' >&2
+      exit 1
+    fi
+    grep -F 'original first-install trust selection changed' \
+      "$scratch/signed-other-key.stderr" >/dev/null || {
+      cat "$scratch/signed-other-key.stderr" >&2
+      exit 1
+    }
+    docker exec "$container" /bin/rm -- \
+      /root/qa-release-trust/qa-other-private.pem \
+      /root/qa-release-trust/qa-other-public.pem \
+      /root/qa-release-trust/qa-other.sig
+    echo 'SIGNED_FIRST_VALID_ALTERNATE_PUBLISHER_REFUSED=PASS'
+  fi
+  assert_network_unchanged "signed-first-downgrade-$signed_kill" "$signed_before"
+  verify_host_services "signed-first-downgrade-$signed_kill"
   docker exec "$container" /usr/bin/strace -ff -qq -yy -s 128 \
     -e trace=%network,%process -o "/root/qa-strace/signed-first-retry-$signed_kill" \
     /usr/bin/env -i HOME=/root PATH=/usr/sbin:/usr/bin:/sbin:/bin LC_ALL=C \
@@ -2092,6 +2169,17 @@ for signed_kill in before after; do
     --publisher-key /root/qa-release-trust/independent-public.pem \
     --version 0.1.0-dev --target "debian-$qa_version-amd64"
   assert_no_offline_fetch "signed-first-retry-$signed_kill"
+  verify_direct_install
+  # A completed Signed installation cannot be abandoned through the
+  # incomplete-only command: neither its service nor release may change.
+  if docker exec "$container" /usr/bin/env -i HOME=/root        PATH=/usr/sbin:/usr/bin:/sbin:/bin LC_ALL=C        /bin/sh /root/server-connect/install.sh --offline --abandon-incomplete        >"$scratch/signed-committed-abandon.stdout"        2>"$scratch/signed-committed-abandon.stderr";then
+    echo 'Explicit incomplete abandonment unexpectedly accepted committed Signed install' >&2
+    exit 1
+  fi
+  grep -F 'no exactly owned incomplete first installation to abandon'     "$scratch/signed-committed-abandon.stderr" >/dev/null || {
+    cat "$scratch/signed-committed-abandon.stderr" >&2
+    exit 1
+  }
   verify_direct_install
   docker exec "$container" /bin/sh -c '
     set -eu
@@ -2111,6 +2199,50 @@ for signed_kill in before after; do
   verify_host_services "signed-first-retry-$signed_kill-uninstall"
 done
 echo 'SIGNED_FIRST_INSTALL_REAL_SIGKILL_ANONYMOUS_PUBLICATION_RETRY=PASS (Debian12/13, crypto and Direct verified)'
+# Explicit abandonment is a DIFFERENT command, never an unsigned retry.
+docker exec "$container" /usr/bin/python3 -I -S /root/qa-signed-first-interruption.py before "$qa_version"
+docker exec "$container" /usr/bin/touch /opt/server-connect/releases/.stage.AUTHPRE0/foreign-abandon-marker
+if docker exec "$container" /usr/bin/env -i HOME=/root PATH=/usr/sbin:/usr/bin:/sbin:/bin LC_ALL=C \
+    /bin/sh /root/server-connect/install.sh --offline --abandon-incomplete \
+    >"$scratch/signed-abandon-foreign.stdout" 2>"$scratch/signed-abandon-foreign.stderr";then
+  echo 'Explicit abandonment adopted foreign staged data' >&2;exit 1
+fi
+docker exec "$container" /bin/sh -c '
+ set -eu
+ test -e /opt/server-connect/releases/.stage.AUTHPRE0/foreign-abandon-marker
+ test -f /var/lib/server-connect/.first-release-intent
+ test -f /var/lib/server-connect/.first-install-intent
+'
+docker exec "$container" /bin/rm -- /opt/server-connect/releases/.stage.AUTHPRE0/foreign-abandon-marker
+docker exec "$container" /usr/bin/strace -ff -qq -yy -s 128 \
+  -e trace=%network,%process -o /root/qa-strace/signed-explicit-abandon \
+  /usr/bin/env -i HOME=/root PATH=/usr/sbin:/usr/bin:/sbin:/bin LC_ALL=C \
+  /bin/sh /root/server-connect/install.sh --offline --abandon-incomplete
+assert_no_offline_fetch signed-explicit-abandon
+docker exec "$container" /bin/sh -c '
+ set -eu
+ test ! -e /opt/server-connect
+ test ! -e /usr/local/bin/server-connect
+ test ! -e /var/lib/server-connect/.first-install-intent
+ test ! -e /var/lib/server-connect/.first-release-intent
+ test -z "$(find /opt -maxdepth 1 -name ".server-connect-release.*" -print)"
+'
+assert_network_unchanged signed-explicit-abandon "$signed_before"
+verify_host_services signed-explicit-abandon
+echo 'SIGNED_FIRST_EXPLICIT_VERIFIED_ABANDON=PASS (foreign refusal, no install)'
+run_offline first-retry-signed-abandon-keyless --offline
+verify_direct_install
+docker exec "$container" /bin/sh -c '
+ set -eu
+ test -f /opt/server-connect/current/integrity.sha256
+ test ! -e /opt/server-connect/current/authentication.json
+'
+assert_network_unchanged signed-abandon-fresh-keyless "$signed_before"
+verify_host_services signed-abandon-fresh-keyless
+run_offline signed-abandon-keyless-uninstall --uninstall
+verify_clean_uninstall
+assert_network_unchanged signed-abandon-keyless-uninstall "$signed_before"
+verify_host_services signed-abandon-keyless-uninstall
 docker exec "$container" /usr/bin/strace -ff -qq -yy -s 128 \
   -e trace=%network,%process -o /root/qa-strace/signed-offline-install \
   /usr/bin/env -i HOME=/root PATH=/usr/sbin:/usr/bin:/sbin:/bin LC_ALL=C \
