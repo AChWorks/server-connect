@@ -7,6 +7,8 @@ binaries are inert and every HTTP invocation passes --verify-only.
 from __future__ import annotations
 
 import base64
+import errno
+import signal
 import contextlib
 import gzip
 import importlib.util
@@ -1511,7 +1513,7 @@ class SignedReleaseTest(unittest.TestCase):
         runtime = self.receipt_runtime()
         stage = self.receipt_stage()
         receipt = stage / "authentication.json"
-        with mock.patch.object(runtime.os, "link", side_effect=OSError("injected publish failure")):
+        with mock.patch.object(runtime, "link_anonymous_receipt", side_effect=OSError("injected publish failure")):
             with self.assertRaises(OSError):
                 self.receipt_action("install-receipt", stage)
         self.assertFalse(receipt.exists())
@@ -1538,6 +1540,184 @@ class SignedReleaseTest(unittest.TestCase):
                 self.receipt_action("install-receipt", stage)
         self.receipt_action("install-receipt", stage)
         self.receipt_action("verify-installed", stage)
+
+    def test_real_sigkill_inside_anonymous_signed_receipt_publication(self):
+        # Test the actual Signed receipt helper in a separate OS process;
+        # SIGKILL bypasses Python finally and can never be mistaken for a
+        # caught exception or a successful write. No signed auth bytes may be
+        # published before linkat; after linkat only one inode/name exists.
+        script = """
+import importlib.util, os, signal, sys
+helper, when, bundle, metadata, signature, key = sys.argv[1:]
+spec = importlib.util.spec_from_file_location("real_signed_receipt_sigkill", helper)
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+module.INSTALLED_RELEASES = __import__("pathlib").Path(bundle).parent
+original = module.link_anonymous_receipt
+def interrupt(fd, directory):
+    if when == "before":
+        os.kill(os.getpid(), signal.SIGKILL)
+    original(fd, directory)
+    os.kill(os.getpid(), signal.SIGKILL)
+module.link_anonymous_receipt = interrupt
+sys.argv = [helper, "install-receipt", "--bundle", bundle, "--metadata", metadata,
+            "--signature", signature, "--publisher-key", key,
+            "--version", "0.1.0-dev", "--target", "debian-13-amd64"]
+module.main()
+"""
+        for when in ("before", "after"):
+            with self.subTest(interruption=when):
+                stage = self.receipt_stage("sigbefor" if when=="before" else "sigafter")
+                child = subprocess.run(
+                    [sys.executable, "-I", "-S", "-c", script, str(self.auth),
+                     when, str(stage), str(self.metadata),
+                     str(self.signature), str(self.public)],
+                    capture_output=True, text=True, timeout=25)
+                self.assertEqual(child.returncode, -signal.SIGKILL,
+                                 child.stdout + child.stderr)
+                receipt = stage / "authentication.json"
+                self.assertEqual(list(stage.glob(".authentication.*")), [])
+                if when == "before":
+                    self.assertFalse(receipt.exists(), "anonymous prep became visible")
+                    self.receipt_action("install-receipt", stage)
+                else:
+                    self.assertTrue(receipt.is_file(), "atomic link was not published")
+                    self.assertEqual(receipt.stat().st_nlink, 1)
+                    self.assertEqual(receipt.stat().st_mode & 0o777, 0o600)
+                self.receipt_action("verify-installed", stage)
+                self.receipt_action("install-receipt", stage)
+                self.assertEqual(receipt.stat().st_nlink, 1)
+                self.assertEqual(list(stage.glob(".authentication.*")), [])
+
+    def test_anonymous_signed_receipt_rejects_filesystem_without_support(self):
+        runtime = self.receipt_runtime()
+        stage = self.receipt_stage("notsuprt")
+        original_open = runtime.os.open
+
+        def reject_anonymous(path, flags, *args, **kwargs):
+            if flags & os.O_TMPFILE == os.O_TMPFILE:
+                raise OSError(errno.EOPNOTSUPP, "anonymous temp unsupported")
+            return original_open(path, flags, *args, **kwargs)
+
+        with mock.patch.object(runtime.os, "open", side_effect=reject_anonymous):
+            with self.assertRaisesRegex(ValueError, "anonymous installed authentication staging unavailable"):
+                self.receipt_action("install-receipt", stage)
+        self.assertFalse((stage / "authentication.json").exists())
+        self.assertEqual(list(stage.glob(".authentication.*")), [])
+
+    def signed_first_recovery_fixture(self):
+        # Execute the actual installer first-transaction scanner using the
+        # original real Signed crypto and inode-bound rootless directory
+        # layout. Only the hardcoded /opt and systemd path are substituted
+        # inside this disposable fixture; no installed host is modified.
+        runtime = self.receipt_runtime()
+        stage = self.receipt_stage("authsign")
+        self.receipt_action("install-receipt", stage)
+        release_name="0.1.0-dev-"+self.identity["checksums_sha256"][:16]
+        release=stage.parent/release_name
+        stage.rename(release)
+        prefix=runtime.INSTALLED_RELEASES.parent
+        (prefix/".owner").write_text("AChWorks/server-connect\n")
+        (prefix/"current").symlink_to("releases/"+release_name)
+        private=self.case/"first-private"
+        private.mkdir(mode=0o700)
+        outer=self.case/".server-connect-release.authsign"
+        first=self.case/".server-connect-initial.ABCDE123"
+        (private/".first-install-intent").write_text(
+            f"{first}\n{prefix.stat().st_dev}:{prefix.stat().st_ino}\n")
+        (private/".first-release-intent").write_text(
+            f"{outer}\n{release.stat().st_dev}:{release.stat().st_ino}\n{release_name}\n")
+        for intent in private.iterdir():intent.chmod(0o600)
+        source=self.case/"signed-source"
+        source.mkdir()
+        for name,raw in self.payload.items():
+            path=source/name.removeprefix("server-connect/")
+            path.parent.mkdir(parents=True,exist_ok=True)
+            path.write_bytes(raw)
+        helper=source/"release-auth.py"
+        written=helper.read_text()
+        assert 'INSTALLED_RELEASES = Path("/opt/server-connect/releases")' in written
+        helper.write_text(written.replace(
+            'INSTALLED_RELEASES = Path("/opt/server-connect/releases")',
+            f'INSTALLED_RELEASES = Path({str(runtime.INSTALLED_RELEASES)!r})'))
+        unitdir=self.case/"units";unitdir.mkdir()
+        source_code=INSTALLER.read_text()
+        begin=source_code.index("FIRST_INSTALL_INTENT=$STATE/.first-install-intent\n")
+        end=source_code.index(
+            "# Inspect the *effective* systemd identity before ANY stop/disable/enable or",
+            begin)
+        functions=source_code[begin:end]
+        functions=functions.replace("/opt",str(self.case))
+        functions=functions.replace(
+            '/etc/systemd/system "$COMMAND" "$release_name"',
+            f'{unitdir} "$COMMAND" "$release_name"')
+        prolog=(
+            "set -eu\n"
+            f'PREFIX={shlex.quote(str(prefix))}\n'
+            f'STATE={shlex.quote(str(private))}\n'
+            f'SOURCE_DIR={shlex.quote(str(source))}\n'
+            f'COMMAND={shlex.quote(str(self.case/"absent-bin"))}\n'
+            f'release_name={shlex.quote(release_name)}\n'
+            f'metadata_file={shlex.quote(str(self.metadata))}\n'
+            f'signature_file={shlex.quote(str(self.signature))}\n'
+            f'publisher_key={shlex.quote(str(self.public))}\n'
+            'trust_kind=signed\n'
+            'say() { printf "%s\n" "$*"; }\n'
+            'die() { printf "REFUSED:%s\n" "$*" >&2; exit 21; }\n'
+            +functions+"\n"
+        )
+        def reconcile(action,trust="signed",public=None):
+            args=prolog.replace('trust_kind=signed\n','trust_kind='+trust+'\n')
+            if public is not None:
+                args=args.replace('publisher_key='+shlex.quote(str(self.public))+'\n',
+                                  'publisher_key='+shlex.quote(str(public))+'\n')
+            return subprocess.run(["/bin/sh","-c",args+
+                "first_install_reconcile_transaction "+action+"\n"],
+                capture_output=True,text=True,timeout=40)
+        return reconcile,release,private
+
+    def test_signed_first_recovery_requires_exact_receipt_and_selected_authority(self):
+        reconcile,release,private=self.signed_first_recovery_fixture()
+        valid=reconcile("inspect")
+        self.assertEqual(valid.returncode,0,valid.stderr)
+        with self.subTest("downgrade"):
+            refused=reconcile("inspect",trust="unsigned")
+            self.assertNotEqual(refused.returncode,0)
+            self.assertTrue(release.exists())
+        with self.subTest("wrong publisher"):
+            refused=reconcile("inspect",public=self.wrong_public)
+            self.assertNotEqual(refused.returncode,0)
+            self.assertTrue(release.exists())
+        original=self.signature.read_bytes()
+        self.signature.write_bytes(original+b"foreign")
+        with self.subTest("changed signer input"):
+            refused=reconcile("recover")
+            self.assertNotEqual(refused.returncode,0)
+            self.assertTrue(release.exists())
+        self.signature.write_bytes(original)
+        auth=release/"authentication.json"
+        real=auth.read_bytes()
+        auth.write_bytes(real.replace(b'"owner":"AChWorks/server-connect"',
+                                          b'"owner":"foreign-project"'))
+        with self.subTest("conflicting final receipt"):
+            refused=reconcile("recover")
+            self.assertNotEqual(refused.returncode,0)
+            self.assertTrue(auth.exists())
+        auth.write_bytes(real)
+        shadow=release/".authentication.foreign"
+        os.link(auth,shadow)
+        with self.subTest("foreign hardlink"):
+            refused=reconcile("recover")
+            self.assertNotEqual(refused.returncode,0)
+            self.assertTrue(shadow.exists())
+            self.assertEqual(auth.stat().st_nlink,2)
+        shadow.unlink()
+        self.assertEqual(reconcile("inspect").returncode,0)
+        completed=reconcile("recover")
+        self.assertEqual(completed.returncode,0,completed.stderr)
+        self.assertFalse(release.exists())
+        self.assertFalse((private/".first-release-intent").exists())
+        self.assertFalse((private/".first-install-intent").exists())
 
     def installer_receipt_harness(self, command, *, source=None):
         body = INSTALLER.read_text()

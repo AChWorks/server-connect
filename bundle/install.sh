@@ -445,10 +445,12 @@ SC_FIRST_INSTALL_RENAME
 # This is the only exception to normal *committed* service/receipt preflights.
 FIRST_RELEASE_INTENT=$STATE/.first-release-intent
 first_install_reconcile_transaction() {
- python3 -I -S - "$SOURCE_DIR" "$PREFIX" "$STATE" /etc/systemd/system "$COMMAND" "$release_name" "$1" <<'PY_FIRST_INSTALL_RECOVER'
+ python3 -I -S - "$SOURCE_DIR" "$PREFIX" "$STATE" /etc/systemd/system "$COMMAND" "$release_name" "$1" "$trust_kind" "$metadata_file" "$signature_file" "$publisher_key" <<'PY_FIRST_INSTALL_RECOVER'
 # Embedded in the already-verified root-only installer. Never execute this
 # against arbitrary prefixes or without the private first-install receipt.
+import base64
 import hashlib
+import json
 import os
 from pathlib import Path
 import re
@@ -456,7 +458,10 @@ import stat
 import subprocess
 import sys
 
-source, prefix, state, unitdir, command, release_name, action = sys.argv[1:]
+(source, prefix, state, unitdir, command, release_name, action, trust_kind,
+ metadata_file, signature_file, publisher_key) = sys.argv[1:]
+if trust_kind not in ("signed", "local-qa", "unsigned"):
+    raise ValueError("first-install source trust mode invalid")
 source, prefix, state, unitdir, command = map(Path, (source, prefix, state, unitdir, command))
 assert action in ("inspect", "recover")
 uid = os.geteuid()
@@ -546,6 +551,46 @@ allowed_files.update({".owner":None,"checksums.sha256":None,
                       "authentication.json":None})
 allowed_dirs = {"bin","THIRD-PARTY-LICENSES"}
 
+def check_signed_receipt(root):
+    # An interrupted signed first-install may leave a single final name
+    # after O_TMPFILE/linkat. Cryptographically check the receipt and bind it
+    # to the *original operator-selected* signed inputs before deleting it.
+    auth = root / "authentication.json"
+    info = node(auth, "file")
+    if info is None:
+        return
+    if trust_kind != "signed" or root not in (owned_inner, release):
+        refuse("signed receipt cannot be adopted without original signed source")
+    if stat.S_IMODE(info.st_mode) != 0o600:
+        refuse("signed receipt is not root-private")
+    if not all((metadata_file, signature_file, publisher_key)):
+        refuse("original signed authority inputs absent")
+    check = subprocess.run(
+        (sys.executable, "-I", "-S", str(source / "release-auth.py"),
+         "verify-installed", "--bundle", str(root)),
+        capture_output=True, text=True, timeout=30,
+        env={"PATH":"/usr/sbin:/usr/bin:/sbin:/bin","LC_ALL":"C",
+             "OPENSSL_CONF":"/dev/null"})
+    if check.returncode:
+        refuse("signed receipt failed existing cryptographic verifier: " +
+               check.stderr[-300:])
+    try:
+        material = json.loads(auth.read_text("ascii"))
+        original_metadata = base64.b64decode(material["metadata_b64"], validate=True)
+        original_signature = base64.b64decode(material["signature_b64"], validate=True)
+        original_public_key = base64.b64decode(material["publisher_key_b64"], validate=True)
+        canonical = subprocess.run(
+            ("/usr/bin/openssl", "pkey", "-pubin", "-in", publisher_key, "-pubout"),
+            capture_output=True, timeout=20, check=True,
+            env={"PATH":"/usr/sbin:/usr/bin:/sbin:/bin", "LC_ALL":"C",
+                 "OPENSSL_CONF":"/dev/null"}).stdout
+    except (ValueError, KeyError, OSError, subprocess.SubprocessError) as exc:
+        refuse("signed receipt binding cannot be established: " + str(exc))
+    if (original_metadata != Path(metadata_file).read_bytes()
+            or original_signature != Path(signature_file).read_bytes()
+            or original_public_key != canonical):
+        refuse("signed receipt does not match originally selected publisher authority")
+
 def scan_release(root):
     if node(root,"dir") is None:
         return []
@@ -565,6 +610,8 @@ def scan_release(root):
                 refuse("foreign release file: "+relative)
             node(base / filename,"file")
             observed.append(base / filename)
+    if (root / "authentication.json").exists() or (root / "authentication.json").is_symlink():
+        check_signed_receipt(root)
     return observed
 
 outside=None
@@ -715,6 +762,137 @@ for path in sys.argv[1:]:
     try: os.fsync(fd)
     finally: os.close(fd)
 PY_FIRST_RELEASE_SYNC
+}
+
+# A committed first install and its last two root-private receipts are
+# separate from an incomplete installation. A crash between receipt unlinks
+# must not force a second install or strand the old release receipt across
+# uninstall/reinstall. Verify the *installed* release (not the new source
+# candidate) and exact inode-bound transaction before retiring either name.
+first_install_committed_identity() {
+ python3 -I -S - "$STATE" "$PREFIX" "$COMMAND" "$UNIT" <<'PY_FIRST_COMMITTED_IDENTITY'
+import os, re, stat, sys
+from pathlib import Path
+
+state, prefix, command, unit = map(Path, sys.argv[1:])
+uid=os.geteuid()
+def fail(message):
+    raise ValueError("committed first-install claim refused: "+message)
+def file_lines(path, count):
+    try: info=path.lstat()
+    except FileNotFoundError: return None
+    if (not stat.S_ISREG(info.st_mode) or info.st_uid!=uid
+            or stat.S_IMODE(info.st_mode)!=0o600 or info.st_nlink!=1):
+        fail("malformed or foreign private receipt: "+str(path))
+    raw=path.read_bytes()
+    try: lines=raw.decode("ascii").splitlines(keepends=True)
+    except UnicodeDecodeError: fail("non-ASCII private receipt")
+    if len(lines)!=count or any(not line.endswith("\n") for line in lines):
+        fail("malformed private receipt length")
+    return [line[:-1] for line in lines]
+def node(path, kind):
+    try: info=path.lstat()
+    except FileNotFoundError: fail("missing committed object: "+str(path))
+    if info.st_uid != uid or (kind!="link" and info.st_mode & 0o022):
+        fail("unowned committed object: "+str(path))
+    if (kind=="file" and not stat.S_ISREG(info.st_mode)) or (
+        kind=="dir" and not stat.S_ISDIR(info.st_mode)) or (
+        kind=="link" and not stat.S_ISLNK(info.st_mode)):
+        fail("wrong committed object type: "+str(path))
+    return info
+def identity(info):
+    return f"{info.st_dev}:{info.st_ino}"
+
+state_info=node(state,"dir")
+if stat.S_IMODE(state_info.st_mode)!=0o700:
+    fail("private state mode changed")
+initial=file_lines(state/".first-install-intent",2)
+release_claim=file_lines(state/".first-release-intent",3)
+if initial is None and release_claim is None:
+    fail("no outstanding first-install receipt")
+# A first-prefix-only claim is still pre-commit; never classify it as a
+# completed install. A release-only claim is the original (pre-fix) crash
+# window after first-intent retirement, not an ownership-free shortcut.
+if release_claim is None:
+    fail("first-release claim missing from completed first install")
+prefix_info=node(prefix,"dir")
+owner=prefix/".owner"
+node(owner,"file")
+if owner.read_bytes()!=b"AChWorks/server-connect\n":
+    fail("installed owner marker changed")
+if initial is not None:
+    original, prefix_identity=initial
+    first_path=Path(original)
+    if (first_path.parent!=prefix.parent or not re.fullmatch(
+        r"\.server-connect-initial\.[A-Za-z0-9]{8}",first_path.name)
+            or not re.fullmatch(r"[0-9]+:[0-9]+",prefix_identity)
+            or prefix_identity!=identity(prefix_info) or first_path.exists()):
+        fail("installed prefix no longer matches first-install identity")
+stage,stage_identity,release_name=release_claim
+stage_path=Path(stage)
+if (stage_path.parent!=prefix.parent or not re.fullmatch(
+    r"\.server-connect-release\.[A-Za-z0-9]{8}",stage_path.name)
+        or not re.fullmatch(r"[0-9]+:[0-9]+",stage_identity)
+        or not re.fullmatch(r"0\.1\.0-dev-[0-9a-f]{16}",release_name)):
+    fail("first-release receipt identity malformed")
+release_dir=prefix/"releases"
+node(release_dir,"dir")
+selected=release_dir/release_name
+if identity(node(selected,"dir"))!=stage_identity:
+    fail("completed release directory inode changed")
+if stage_path.exists() or (release_dir/(".stage."+stage_path.name.rsplit(".",1)[-1])).exists():
+    fail("first-release staging still present")
+current=prefix/"current"
+node(current,"link")
+if os.readlink(current)!="releases/"+release_name:
+    fail("committed release is no longer current")
+node(unit,"file")
+node(prefix/"unit.sha256","file")
+node(command,"link")
+if os.readlink(command)!=str(prefix/"current/bin/server-connect"):
+    fail("installed command identity changed")
+for name in ("server-connect-activation-recover.service",
+             "server-connect-activation-recover.timer",
+             "server-connect-native-tun.service",
+             "server-connect-smart-health.service",
+             "server-connect-smart-health.timer"):
+    node(Path("/etc/systemd/system")/name,"file")
+    node(prefix/(name+".sha256"),"file")
+print("FIRST_INSTALL_COMMITTED_IDENTITY_PASS")
+PY_FIRST_COMMITTED_IDENTITY
+}
+first_install_is_committed() (
+ first_install_committed_identity >/dev/null 2>&1 || return 1
+ check_owned >/dev/null 2>&1 || return 1
+ check_service_owner >/dev/null 2>&1 || return 1
+ [ "$unit_identity" = owned ] || return 1
+ check_guard_units >/dev/null 2>&1 || return 1
+ "$SOURCE_DIR/bin/server-connect" installer-check-service >/dev/null 2>&1 || return 1
+)
+first_install_retire_committed_claims() {
+ first_install_is_committed ||
+  die 'committed first-install claim changed; preserve for console inspection'
+ # After the original successful install, retiring FIRST_INSTALL_INTENT
+ # before FIRST_RELEASE_INTENT is safe *only because* a release-only orphan
+ # now has the same full committed-identity check on the next invocation.
+ # No foreign or stale receipt may be deleted by name alone.
+ if [ -e "$FIRST_INSTALL_INTENT" ] || [ -L "$FIRST_INSTALL_INTENT" ];then
+  rm -- "$FIRST_INSTALL_INTENT" ||
+   die 'cannot retire verified committed first-prefix claim'
+ fi
+ if [ -e "$FIRST_RELEASE_INTENT" ] || [ -L "$FIRST_RELEASE_INTENT" ];then
+  # Revalidate release-only identity immediately after the first unlink.
+  first_install_is_committed ||
+   die 'committed first-release identity changed during retirement'
+  rm -- "$FIRST_RELEASE_INTENT" ||
+   die 'cannot retire verified committed first-release claim'
+ fi
+ python3 -I -S - "$STATE" <<'PY_COMMIT_SYNC'
+import os,sys
+fd=os.open(sys.argv[1],os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+try:os.fsync(fd)
+finally:os.close(fd)
+PY_COMMIT_SYNC
 }
 
 # Fresh service files are created completely before an atomic, no-replace
@@ -973,17 +1151,41 @@ require_root
 check_source_ancestry
 check_platform
 verify_payload
+# A signed interrupted release cannot be retried with unsigned/local QA
+# source trust; use the original signer, metadata and signature when present.
+if [ "$local_qa" = yes ];then
+ trust_kind=local-qa
+elif [ "${unsigned_release:-no}" = yes ];then
+ trust_kind=unsigned
+else
+ trust_kind=signed
+fi
 # Bind an interrupted initial install to the same verified source digest.
 release_name="0.1.0-dev-$(sha256sum "$SOURCE_DIR/checksums.sha256" | cut -c 1-16)"
 pending_first=no
-if [ "$ACTION" = --offline ] && [ -e "$FIRST_INSTALL_INTENT" ];then
- first_install_reconcile_transaction inspect ||
-  die 'unrecognized interrupted initial installation; preserve for inspection'
- pending_first=yes
+pending_committed=no
+if [ -e "$FIRST_INSTALL_INTENT" ] || [ -L "$FIRST_INSTALL_INTENT" ];then
+ if first_install_is_committed;then
+  pending_committed=yes
+  check_owned
+  check_service_owner
+  check_guard_units
+ elif [ "$ACTION" = --offline ];then
+  first_install_reconcile_transaction inspect ||
+   die 'unrecognized interrupted initial installation; preserve for inspection'
+  pending_first=yes
+ else
+  die 'first-install intent not committed; verification/uninstall cannot adopt incomplete state'
+ fi
 else
  check_owned
  check_service_owner
  check_guard_units
+ if [ -e "$FIRST_RELEASE_INTENT" ] || [ -L "$FIRST_RELEASE_INTENT" ];then
+  first_install_is_committed ||
+   die 'orphan first-release receipt invalid; preserve foreign state'
+  pending_committed=yes
+ fi
 fi
 
 if [ "$ACTION" = --verify-only ]; then say 'bundle integrity, selected trust policy and owned-resource preflight PASS'; exit 0;fi
@@ -1001,7 +1203,11 @@ chmod 0600 "$STATE/.lock"
 flock -w 30 -x 9 || die 'another Server Connect operation holds the lifecycle lock'
 "$SOURCE_DIR/bin/server-connect" installer-check-guard-clear >/dev/null ||
  die 'pending, uncertain or invalid activation journal; refuse installer mutation'
-if [ "$pending_first" = yes ];then
+if [ "$pending_committed" = yes ];then
+ first_install_retire_committed_claims
+elif [ "$pending_first" = yes ];then
+ first_install_reconcile_transaction inspect ||
+  die 'interrupted initial installation changed under lifecycle lock'
  first_install_reconcile_transaction recover ||
   die 'interrupted initial installation cannot be reconciled safely'
 fi
@@ -1440,13 +1646,13 @@ fi
 # Retire only the receipt for the exact installed prefix. Interrupted
 # operations retain the private claim for a bounded verified retry.
 if [ "$prefix_created" = yes ];then
- first_install_read_intent && [ "$(stat -c '%d:%i' "$PREFIX")" = "$first_inode" ] ||
-  die 'completed initial installation lost its ownership claim'
- # Retire the initial claim first so a crash here cannot convert a committed,
- # valid installed service into an apparently uncommitted transaction.
+ # Completion is recognized by the exact installed release+systemd ownership
+ # and matching initial-prefix/release-inode receipts, never by a name alone.
+ # Any SIGKILL between unlinks is an idempotently recoverable committed state.
+ first_install_is_committed ||
+  die 'completed installation identity cannot be proven; preserve claims'
  operation_done=yes
- rm -f -- "$FIRST_INSTALL_INTENT" || die 'cannot retire completed first-install intent'
- rm -f -- "$FIRST_RELEASE_INTENT" || die 'cannot retire completed first-release receipt'
+ first_install_retire_committed_claims
 fi
 operation_done=yes
 rollback_needed=no

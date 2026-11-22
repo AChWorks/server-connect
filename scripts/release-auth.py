@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import ctypes
 import hashlib
 import json
 import os
@@ -248,6 +249,25 @@ def read_receipt(bundle):
     return raw, receipt, material
 
 
+def link_anonymous_receipt(fd, directory):
+    """Publish one fully fsynced inode under its final name, without a link gap.
+
+    Named temporary files and link+unlink create SIGKILL windows in which
+    the original first-install inode-bound recovery cannot distinguish an
+    incomplete receipt from an unexpected file or an extra hardlink. Linux
+    O_TMPFILE keeps the preparation unlinked; AT_EMPTY_PATH adds precisely
+    one name with no replace semantics. These Linux features are already
+    part of this native-only installed-host contract.
+    """
+    linkat = ctypes.CDLL(None, use_errno=True).linkat
+    linkat.argtypes = [ctypes.c_int, ctypes.c_char_p,
+                       ctypes.c_int, ctypes.c_char_p, ctypes.c_int]
+    linkat.restype = ctypes.c_int
+    if linkat(fd, b"", directory, b"authentication.json", 0x1000) != 0:
+        number = ctypes.get_errno()
+        raise OSError(number, os.strerror(number), RECEIPT_NAME)
+
+
 def persist_receipt(bundle, metadata, raw, signature, public_key, fingerprint):
     root = receipt_location(bundle, metadata)
     if (root / "local-qa.sha256").exists() or (root / "local-qa.sha256").is_symlink():
@@ -281,34 +301,37 @@ def persist_receipt(bundle, metadata, raw, signature, public_key, fingerprint):
         finally:
             os.close(fd)
         return
-    # The installer calls this in its fresh owned release stage before
-    # publishing it. Link is an atomic no-replace publication, unlike rename
-    # over a pathname that another actor could have created.
-    fd, temporary = tempfile.mkstemp(prefix=".authentication.", dir=root)
+    # No *named* temporary receipt exists before successful publication.
+    # Interrupted preparation discards the anonymous inode automatically;
+    # an interruption after linkat leaves exactly one already fsynced,
+    # complete authentication.json (not two hardlinks). An unsupported
+    # filesystem fails explicitly rather than exposing a weaker write path.
     try:
-        with os.fdopen(fd, "wb") as output:
-            os.fchmod(output.fileno(), 0o600)
-            output.write(encoded)
-            output.flush()
-            os.fsync(output.fileno())
-        os.link(temporary, destination, follow_symlinks=False)
+        fd = os.open(root, os.O_RDWR | os.O_TMPFILE | os.O_CLOEXEC, 0o600)
+    except OSError as exc:
+        fail(f"anonymous installed authentication staging unavailable: {exc}")
+    try:
+        os.fchmod(fd, 0o600)
+        remaining = memoryview(encoded)
+        while remaining:
+            count = os.write(fd, remaining)
+            if count <= 0:
+                raise OSError("incomplete anonymous authentication receipt write")
+            remaining = remaining[count:]
+        os.fsync(fd)
         directory = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
         try:
-            os.fsync(directory)
-            os.unlink(temporary)
+            link_anonymous_receipt(fd, directory)
+            # A failure after the single atomic link is not a success claim:
+            # the next invocation re-verifies the complete signed receipt
+            # and fsyncs it again before accepting it.
             os.fsync(directory)
         finally:
             os.close(directory)
-        if read_receipt(root)[0] != encoded:
-            fail("persisted authentication receipt did not match verified inputs")
     finally:
-        # Only our exact unprivileged-inaccessible temporary filename. Never
-        # remove a destination on uncertain publication; the caller's owned
-        # staging rollback retains responsibility for that outcome.
-        try:
-            os.unlink(temporary)
-        except FileNotFoundError:
-            pass
+        os.close(fd)
+    if read_receipt(root)[0] != encoded:
+        fail("persisted authentication receipt did not match verified inputs")
 
 
 def main():
