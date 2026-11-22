@@ -49,6 +49,31 @@ func TestOperatorMenuIsReadOnlyOnFirstUseAndHidesLegacyUntilAdvanced(t *testing.
 	}
 }
 
+func TestStableVersionMenuHasNoDevelopmentQADisclaimer(t *testing.T) {
+	previous := managerVersion
+	managerVersion = "0.1.0"
+	defer func() { managerVersion = previous }()
+	m := sc.New(filepath.Join(t.TempDir(), "uninitialized"), "", 0)
+	for _, width := range []int{42, 78} {
+		var out bytes.Buffer
+		p := operatorPresenter{out: &out, width: width}
+		p.menu(m, false)
+		text := out.String()
+		for _, expected := range []string{"Server Connect  0.1.0", "21 Smart Routing (guarded)",
+			"initial activation requires fresh SSH confirmation", "7 Disconnect / Return to Direct"} {
+			if !strings.Contains(text, expected) {
+				t.Fatalf("stable menu width %d missing %q: %s", width, expected, text)
+			}
+		}
+		if strings.Contains(text, "guarded QA") || strings.Contains(text, "NOT RELEASE-READY") {
+			t.Fatalf("stable build still advertises development-only mode: %s", text)
+		}
+	}
+	if _, err := os.Lstat(m.Dir); !os.IsNotExist(err) {
+		t.Fatal("stable first-use menu created private state")
+	}
+}
+
 func TestOperatorPresenterNoANSIForPipesAndRedirects(t *testing.T) {
 	t.Setenv("TERM", "xterm-256color")
 	t.Setenv("COLUMNS", "40")

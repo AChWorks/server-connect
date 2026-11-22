@@ -135,6 +135,22 @@ class PackageArgumentTests(unittest.TestCase):
                 self.assertIn("Unsupported package target", result.stderr)
                 self.assertNotIn("Pinned upstream core archive digest mismatch", result.stderr)
 
+    def test_release_candidate_version_arguments(self):
+        for version in ("0.1.0", "0.1.1-rc.1"):
+            with self.subTest(version=version):
+                result = self.invoke("debian-12-amd64", "--version", version)
+                # Clean source is required before any expensive Core read; on
+                # a working branch this may fail earlier for dirty source.
+                self.assertEqual(result.returncode, 1, result.stderr)
+                self.assertTrue(
+                    "Pinned upstream core archive digest mismatch" in result.stderr
+                    or "Release candidate requires an exact clean committed source tree" in result.stderr)
+        for version in ("../stable", "v0.1.0", "0.1.0/../../x", "0.1.0-", "0.1.0+" + "z"*100):
+            with self.subTest(rejected=version):
+                result = self.invoke("debian-13-amd64", "--version", version)
+                self.assertEqual(result.returncode, 2, result.stderr)
+                self.assertIn("Invalid release version", result.stderr)
+
     def test_extra_target_arguments_are_not_silently_ignored(self):
         result = self.invoke("debian-12-amd64", "debian-13-amd64")
         self.assertEqual(result.returncode, 2, result.stderr)
@@ -153,7 +169,7 @@ class InstallerTargetOrderingTests(unittest.TestCase):
             path = self.bundle / name
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(b"INERT QA ONLY\n")
-        (self.bundle / "manifest.json").write_text(json.dumps({"target": "debian-12-amd64"}) + "\n")
+        (self.bundle / "manifest.json").write_text(json.dumps({"schema": 1, "manager": "0.1.0-dev", "target": "debian-12-amd64"}) + "\n")
         # These are deliberately inert test executables, not substitutes for
         # ROOT's real Go target-parser tests or exact installed candidate QA.
         (self.bundle / "bin/server-connect").write_text(r"""#!/bin/sh
@@ -166,7 +182,7 @@ case "$1" in
   ;;
  version)
   [ "$#" -eq 2 ] && [ "$2" = --json ] || exit 92
-  printf '%s\n' '{"ok":true,"data":{"sing_box":"1.14.3"}}'
+  printf '%s\n' '{"ok":true,"data":{"manager":"0.1.0-dev","sing_box":"1.14.3"}}'
   ;;
  *) exit 93 ;;
 esac
@@ -189,8 +205,11 @@ printf '%s\n' 'sing-box version 1.14.3'
         helper_end = body.index("\n}\n", helper_start) + len("\n}\n")
         verifier_start = body.index("verify_release_payload() (\n")
         verifier_end = body.index("\n)\n", verifier_start) + len("\n)\n")
+        version_start = body.index("bundle_release_version() {\n")
+        version_end = body.index("\n}\n", version_start) + len("\n}\n")
         self.function = (body[helper_start:helper_end] + "\n" +
                          body[verifier_start:verifier_end] + "\n" +
+                         body[version_start:version_end] + "\n" +
                          body[begin:end])
 
     def tearDown(self):
@@ -242,6 +261,28 @@ check_root_dir() { [ -d "$1" ] && [ ! -L "$1" ] || die 'fixture directory missin
         self.assertEqual(result.returncode, 1, result.stderr)
         self.assertIn("Server Connect: ERROR: bundle target does not match this supported host", result.stderr)
         self.assertEqual(calls, ["installer-check-target"])
+
+    def test_version_mismatch_refuses_before_core_execution(self):
+        path = self.bundle / "manifest.json"
+        changed = json.loads(path.read_text())
+        changed["manager"] = "0.1.0"
+        path.write_text(json.dumps(changed) + "\n")
+        self.write_checksums()
+        result, calls = self.invoke(0)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("candidate manager binary and immutable manifest disagree", result.stderr)
+        self.assertEqual(calls, ["installer-check-target", "version"])
+
+    def test_invalid_manifest_version_refuses_before_core_execution(self):
+        path = self.bundle / "manifest.json"
+        changed = json.loads(path.read_text())
+        changed["manager"] = "0.1.0/../../spoof"
+        path.write_text(json.dumps(changed) + "\n")
+        self.write_checksums()
+        result, calls = self.invoke(0)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("bundle manifest version is not supported", result.stderr)
+        self.assertEqual(calls, ["installer-check-target", "version"])
 
     def test_accepted_target_precedes_manager_and_core_version_checks(self):
         result, calls = self.invoke(0)

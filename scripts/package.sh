@@ -1,20 +1,49 @@
 #!/bin/sh
-# Build a LOCAL QA candidate bundle. Does not download a core or publish assets.
+# Build versioned, exact-source release-candidate or default LOCAL QA bundles. Never publish.
 set -eu
 umask 077
-CORE_ARCHIVE=${1:-}
-[ "$#" -ge 1 ] && [ "$#" -le 2 ] && [ -n "$CORE_ARCHIVE" ] && [ -f "$CORE_ARCHIVE" ] || {
- echo 'Usage: scripts/package.sh /trusted/path/sing-box-1.14.3-linux-amd64.tar.gz [debian-12-amd64|debian-13-amd64]' >&2
+usage() {
+ echo 'Usage: scripts/package.sh /trusted/path/sing-box-1.14.3-linux-amd64.tar.gz [debian-12-amd64|debian-13-amd64] [--version VERSION]' >&2
  exit 2
 }
-package_target=${2-debian-13-amd64}
+[ "$#" -ge 1 ] || usage
+CORE_ARCHIVE=$1
+shift
+[ -f "$CORE_ARCHIVE" ] || usage
+package_target=debian-13-amd64
+if [ "$#" -gt 0 ] && [ "$1" != --version ]; then
+ package_target=$1
+ shift
+fi
+package_version=0.1.0-dev
+if [ "$#" -gt 0 ]; then
+ [ "$#" -eq 2 ] && [ "$1" = --version ] || usage
+ package_version=$2
+fi
+printf '%s\n' "$package_version" | LC_ALL=C grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9][A-Za-z0-9.+-]*)?$' || {
+ echo 'Invalid release version (use a semantic version without v prefix)' >&2;exit 2;
+}
+[ "${#package_version}" -le 64 ] || { echo 'Invalid release version length' >&2;exit 2; }
+case "$package_version" in
+ *-dev|*-dev.*) package_kind=qa ;;
+ *) package_kind=release-candidate ;;
+esac
 case "$package_target" in
  debian-12-amd64) artifact_target=debian12-amd64 ;;
  debian-13-amd64) artifact_target=debian13-amd64 ;;
  *) echo 'Unsupported package target; choose debian-12-amd64 or debian-13-amd64' >&2;exit 2 ;;
 esac
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)
-artifact="$ROOT/dist/server-connect-0.1.0-dev-$artifact_target-local-qa.tar.gz"
+if [ "$package_kind" = qa ]; then
+ artifact="$ROOT/dist/server-connect-$package_version-$artifact_target-local-qa.tar.gz"
+ redistribution='not authorized; local QA only'
+else
+ artifact="$ROOT/dist/server-connect-$package_version-$artifact_target.tar.gz"
+ redistribution='Owner-attested sources; publication is a separate Owner decision'
+ [ -z "$(git -C "$ROOT" status --porcelain)" ] || {
+  echo 'Release candidate requires an exact clean committed source tree' >&2;exit 1;
+ }
+fi
 [ ! -e "$artifact.sig" ] && [ ! -L "$artifact.sig" ] || {
  echo 'Refusing to overwrite an already signed QA artifact; use a fresh output checkout' >&2;exit 1;
 }
@@ -32,7 +61,7 @@ tar -xzf "$CORE_ARCHIVE" -C "$work/extract"
 up="$work/extract/sing-box-1.14.3-linux-amd64"
 [ -f "$up/sing-box" ] && [ -f "$up/libcronet.so" ] && [ -f "$up/LICENSE" ] || { echo 'Expected upstream binary/library/license missing' >&2;exit 1; }
 [ "$(uname -m)" = x86_64 ] || { echo 'This local builder currently supports linux/amd64 only' >&2;exit 1; }
-GOTOOLCHAIN=local GOPROXY=off CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -buildvcs=false -trimpath -ldflags '-s -w' -o "$work/server-connect/bin/server-connect" ./cmd/server-connect
+GOTOOLCHAIN=local GOPROXY=off CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -buildvcs=false -trimpath -ldflags "-s -w -X main.managerVersion=$package_version" -o "$work/server-connect/bin/server-connect" ./cmd/server-connect
 cp "$up/sing-box" "$work/server-connect/bin/sing-box"
 cp "$up/libcronet.so" "$work/server-connect/bin/libcronet.so"
 cp "$up/LICENSE" "$work/server-connect/THIRD-PARTY-LICENSES/sing-box-LICENSE"
@@ -81,14 +110,23 @@ cp scripts/release-auth.py "$work/server-connect/release-auth.py"
 cp LICENSE "$work/server-connect/LICENSE"
 chmod 0755 "$work/server-connect/install.sh" "$work/server-connect/bin/server-connect" "$work/server-connect/bin/sing-box"
 source_revision=$(git rev-parse HEAD)
+[ "$package_kind" = qa ] || [ -z "$(git status --porcelain)" ] || {
+ echo 'Release candidate source tree changed during compilation' >&2;exit 1;
+}
 if git diff --quiet && git diff --cached --quiet && [ -z "$(git ls-files --others --exclude-standard)" ]; then source_state=clean;else source_state=dirty;fi
-printf '{"schema":1,"manager":"0.1.0-dev","core":"sing-box 1.14.3","core_archive_sha256":"%s","source_revision":"%s","source_state":"%s","target":"%s","redistribution":"not authorized; local QA only"}\n' "$EXPECTED" "$source_revision" "$source_state" "$package_target" > "$work/server-connect/manifest.json"
+printf '{"schema":1,"manager":"%s","core":"sing-box 1.14.3","core_archive_sha256":"%s","source_revision":"%s","source_state":"%s","target":"%s","redistribution":"%s"}\n' "$package_version" "$EXPECTED" "$source_revision" "$source_state" "$package_target" "$redistribution" > "$work/server-connect/manifest.json"
 (
  cd "$work/server-connect"
 
  sha256sum bin/server-connect bin/sing-box bin/libcronet.so server-connect.service server-connect-activation-recover.service server-connect-activation-recover.timer server-connect-native-tun.service server-connect-smart-health.service server-connect-smart-health.timer install.sh release-auth.py LICENSE THIRD-PARTY-LICENSES/sing-box-LICENSE THIRD-PARTY-LICENSES/golang.org-x-net-LICENSE THIRD-PARTY-LICENSES/publicsuffix-LICENSE THIRD-PARTY-LICENSES/publicsuffix-list.dat THIRD-PARTY-LICENSES/chocolate4u-LICENSE THIRD-PARTY-LICENSES/chocolate4u-geoip-ir.json THIRD-PARTY-LICENSES/dbip-ATTRIBUTION.txt THIRD-PARTY-LICENSES/dbip-iran-prefixes.json manifest.json > checksums.sha256
  sha256sum --quiet -c checksums.sha256
- ./bin/server-connect version --json
+ ./bin/server-connect version --json | python3 -I -S -c '
+import json,sys
+try:
+    data=json.load(sys.stdin)
+    assert data["ok"] is True and data["data"]=={"manager":sys.argv[1],"sing_box":"1.14.3"}
+except (AssertionError,KeyError,ValueError,TypeError):sys.exit(1)
+' "$package_version" || { echo 'Versioned manager binary failed manifest identity preflight' >&2;exit 1; }
  ./bin/sing-box version | head -n 1
 )
 # Normalize archive order, ownership and timestamps. A QA reviewer can
@@ -100,9 +138,12 @@ archive_digest=$(sha256sum "$artifact" | cut -d' ' -f1)
 checksums_digest=$(sha256sum "$work/server-connect/checksums.sha256" | cut -d' ' -f1)
 manifest_digest=$(sha256sum "$work/server-connect/manifest.json" | cut -d' ' -f1)
 # This unsigned sidecar describes exact immutable inputs. Creating it never
-# chooses a publisher key or grants redistribution permission.
-printf '{"schema":1,"purpose":"server-connect-release","version":"0.1.0-dev","target":"%s","archive_sha256":"%s","checksums_sha256":"%s","manifest_sha256":"%s","source_revision":"%s","source_state":"%s","core":"sing-box 1.14.3","core_archive_sha256":"%s"}\n' \
- "$package_target" "$archive_digest" "$checksums_digest" "$manifest_digest" "$source_revision" "$source_state" "$EXPECTED" > "$artifact.release.json"
+# chooses a publisher key or grants publication permission.
+printf '{"schema":1,"purpose":"server-connect-release","version":"%s","target":"%s","archive_sha256":"%s","checksums_sha256":"%s","manifest_sha256":"%s","source_revision":"%s","source_state":"%s","core":"sing-box 1.14.3","core_archive_sha256":"%s"}\n' \
+ "$package_version" "$package_target" "$archive_digest" "$checksums_digest" "$manifest_digest" "$source_revision" "$source_state" "$EXPECTED" > "$artifact.release.json"
 sha256sum "$artifact"
-echo 'LOCAL QA ONLY: first-party MPL-2.0 included; no publisher identity or third-party/public release authorization.'
-echo 'Explicit local QA signatures may be tested with scripts/release-auth.py sign-local-qa and an ephemeral key.'
+if [ "$package_kind" = qa ]; then
+ echo 'LOCAL QA ONLY: artifact is not public Stable; optional signed-QA verification is available.'
+else
+ echo 'UNPUBLISHED RELEASE CANDIDATE: exact clean-source artifact generated; public release and mirror synchronization need separate Owner approval.'
+fi

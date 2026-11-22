@@ -1224,6 +1224,7 @@ class SignedReleaseTest(unittest.TestCase):
         functions = []
         for start, end in (("release_payload_files() {\n", "\n}\n"),
                            ("verify_release_payload() (\n", "\n)\n"),
+                           ("bundle_release_version() {\n", "\n}\n"),
                            ("verify_payload() {\n", "\n}\n")):
             position = body.index(start)
             finish = body.index(end, position) + len(end)
@@ -1829,6 +1830,7 @@ module.main()
             ("release_trust_file() (\n", "\n)\n"),
             ("verify_release_trust() (\n", "\n)\n"),
             ("verify_installed_release() (\n", "\n)\n"),
+            ("bundle_release_version() {\n", "\n}\n"),
             ("verify_payload() {\n", "\n}\n"),
             ("rollback_candidate() {\n", "\n}\n"),
         ):
@@ -1865,7 +1867,7 @@ except (ValueError, OSError):
             "say() { printf '%s\\n' \"$*\"; }\n"
             "die() { say \"$*\" >&2; exit 1; }\n"
             "need() { command -v \"$1\" >/dev/null; }\n"
-            "python3() { /usr/bin/python3 -B -I -S -c \"$SC_QA_AUTH_BRIDGE\" \"$@\"; }\n"
+            "python3() { if [ \"$1\" = -I ] && [ \"$2\" = -S ] && { [ \"$3\" = - ] || [ \"$3\" = -c ]; }; then /usr/bin/python3 \"$@\"; else /usr/bin/python3 -B -I -S -c \"$SC_QA_AUTH_BRIDGE\" \"$@\"; fi; }\n"
             "remove_backup() { :; }\n"
             "PREFIX=" + shlex.quote(str(prefix)) + "\n"
             "SOURCE_DIR=" + shlex.quote(str(source or self.case / "source")) + "\n"
@@ -1956,7 +1958,7 @@ except (ValueError, OSError):
         self.payload["server-connect/bin/server-connect"] = (
             b'#!/bin/sh\ncase "$1" in\n'
             b'installer-check-target) exit 0;;\n'
-            b'version) printf \'%s\\n\' \'{"sing_box":"1.14.3"}\';;\n'
+            b'version) printf \'%s\\n\' \'{"ok":true,"data":{"manager":"0.1.0-dev","sing_box":"1.14.3"}}\';;\n'
             b'*) exit 97;;\nesac\n'
         )
         self.payload["server-connect/bin/sing-box"] = (
