@@ -500,6 +500,11 @@ set -eu
 umask 077
 PREFIX=/opt/server-connect
 STATE=/var/lib/server-connect
+# This disposable first-prefix-only fixture intentionally models the
+# original keyless trust choice before the regular installer entrypoint.
+# The real entrypoint sets trust_kind after payload preflight; the isolated
+# function harness must supply that already-established precondition.
+trust_kind=unsigned
 [ ! -e "$PREFIX" ] && [ ! -L "$PREFIX" ]
 [ ! -e "$STATE" ] && [ ! -L "$STATE" ]
 install -d -m 0700 "$STATE"
@@ -518,6 +523,7 @@ first_install_claimed_prefix
 [ -f "$PREFIX/.owner" ] && [ ! -e "$PREFIX/releases" ]
 [ ! -e /etc/systemd/system/server-connect.service ]
 [ -f "$FIRST_INSTALL_INTENT" ]
+[ "$(sed -n '3p' "$FIRST_INSTALL_INTENT")" = unsigned ]
 rm -f -- /root/qa-prefix-helpers.sh
 echo 'REAL_FIRST_INSTALL_INTERRUPTED_AFTER_ATOMIC_OWNER=PASS'
 QA_FIRST_PREFIX_INTERRUPT
