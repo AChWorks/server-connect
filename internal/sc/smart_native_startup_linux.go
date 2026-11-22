@@ -2,12 +2,13 @@
 
 package sc
 
-// A short-lived, operation-bound OUTPUT admission barrier closes the gap
-// between systemd Type=exec reporting success and sing-box installing its TUN
-// and auto_redirect policy. It is NOT a second router or a Direct/off kill switch.
-// The barrier never authorizes routing: it temporarily rejects new unmarked
-// public underlay egress while preserving reply, local/on-link and only
-// officially marked Core bootstrap traffic. Only exact, receipt-bound nft objects are removed.
+// One operation-bound OUTPUT containment is installed before publishing Smart
+// and remains effective until exact Core/kernel recovery commits Direct.
+// It is not a router and never persists after verified Off: the filter runs
+// after Core's own auto_redirect hooks to allow authenticated selected TUN
+// traffic (0x2023), Core-marked Direct/underlay (0x2024), replies and protected
+// destinations, while rejecting new unmarked public fallback even if Core dies
+// and the TUN disappears before ExecStopPost can run.
 import (
 	"context"
 	"crypto/sha256"
@@ -26,7 +27,7 @@ import (
 
 const nativeStartupFile = "native-startup.json"
 const nativeStartupChain = "output"
-const nativeStartupPriority = -100
+const nativeStartupPriority = 200
 
 var nativeStartupTablePattern = regexp.MustCompile("^sc_pre_[0-9a-f]{32}$")
 
@@ -80,6 +81,10 @@ func nativeStartupRules(p nativeStartupPlan) ([]nativeStartupRule, error) {
 	}
 	r := []nativeStartupRule{
 		{"ct direction reply accept", []any{nativeStartupMatch(map[string]any{"ct": map[string]any{"key": "direction"}}, "reply"), nativeStartupAccept()}},
+		// Core's route/redirect hooks run before this later OUTPUT admission.
+		// Ordinary application packets can therefore reach the selected TUN,
+		// while Core-originated public Direct/underlay still uses mark 0x2024.
+		{"meta mark 0x2023 accept", []any{nativeStartupMeta("mark", nativeSelectedMark), nativeStartupAccept()}},
 		{"meta mark 0x2024 accept", []any{nativeStartupMeta("mark", NativePolicyOutputMark), nativeStartupAccept()}},
 		{"oifname \"lo\" accept", []any{nativeStartupMeta("oifname", "lo"), nativeStartupAccept()}},
 	}
@@ -367,6 +372,21 @@ func nativeStartupRecover(ctx context.Context, r nativeReplyGuardCASRunner,
 	return nil
 }
 
+// A healthy or degraded Native session must retain its operation-bound
+// public egress containment until the same session commits Direct/off.
+// A table name alone cannot satisfy this check: verify every rule and its
+// original handle before publishing any further selected-path health proof.
+func (m *Manager) verifyNativeLiveOutputGuard(session NativeSession) error {
+	if session.StartupGuardPhase != "armed" || session.StartupGuardHandle == 0 {
+		return Fault("guard_pending", "native lifetime OUTPUT guard is not armed")
+	}
+	plan, err := m.readNativeStartupPlan(session)
+	if err != nil {
+		return err
+	}
+	return requireNativeStartupGuardClaim(context.Background(), nativeSystemRunner{}, plan, session.StartupGuardHandle)
+}
+
 // Every deliberate terminal stop must restore the *existing* operation-bound
 // packet barrier before Core or its TUN can disappear. The same guard is used
 // for supervised child replacement. During a partial startup/rearm, a
@@ -454,52 +474,6 @@ func (m *Manager) ensureNativeStopBarrierLocked() error {
 	default:
 		return Fault("guard_pending", "native shutdown containment phase invalid")
 	}
-}
-
-// A manager may only release containment after the exact independent Core
-// interception witness is present. A first selected HTTPS check can follow;
-// application traffic must never race ahead of effective kernel routing.
-func (m *Manager) releaseNativeStartupAfterReady(session NativeSession) error {
-	return m.withLock(func() error {
-		current, e := m.readNativeSession()
-		if e != nil {
-			return e
-		}
-		if current != session || current.StartupGuardPhase != "armed" || current.StartupGuardHandle == 0 {
-			return Fault("guard_pending", "native startup session changed during readiness")
-		}
-		current.StartupGuardPhase = "releasing"
-		raw, e := json.Marshal(current)
-		if e != nil {
-			return e
-		}
-		return put(filepath.Join(m.Dir, nativeSessionFile), raw)
-	})
-}
-func (m *Manager) finishNativeStartupRelease(session NativeSession) error {
-	plan, e := m.readNativeStartupPlan(session)
-	if e != nil {
-		return e
-	}
-	if e = nativeStartupRecover(context.Background(), nativeSystemRunner{}, plan, session.StartupGuardHandle, "releasing"); e != nil {
-		return e
-	}
-	return m.withLock(func() error {
-		current, e := m.readNativeSession()
-		if e != nil {
-			return e
-		}
-		if current.StartupGuardName != session.StartupGuardName || current.StartupGuardPhase != "releasing" ||
-			current.HealthOperationID != session.HealthOperationID {
-			return Fault("guard_pending", "native startup operation changed while releasing")
-		}
-		current.StartupGuardPhase = "released"
-		raw, e := json.Marshal(current)
-		if e != nil {
-			return e
-		}
-		return put(filepath.Join(m.Dir, nativeSessionFile), raw)
-	})
 }
 
 // Used by recovery after exact Core-owned routing teardown. No generic

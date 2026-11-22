@@ -845,6 +845,19 @@ func (m *Manager) RunNativeHealthRound() (NativeHealthState, error) {
 		s.Phase, s.Reason = "off", reason
 		return s, nil
 	}
+	// The lifetime output guard is necessary even with a healthy native
+	// route: a Core SIGKILL may erase TUN before ExecStopPost runs.
+	if e := m.verifyNativeLiveOutputGuard(claim); e != nil {
+		stopped, stopErr := m.stopNativeHealthOperation(s.OperationID, "native_output_guard_unverified")
+		if stopErr != nil {
+			return s, stopErr
+		}
+		if !stopped {
+			return s, Fault("guard_pending", "native output guard belongs to old session")
+		}
+		s.Phase, s.Reason = "off", "native_output_guard_unverified"
+		return s, nil
+	}
 	if e := requireNativeReplyGuardClaim(context.Background(), nativeHealthKernelReader{}, claim.ReplyGuardHandle, claim.ReplyGuardFingerprint); e != nil {
 		stopped, stopErr := m.stopNativeHealthOperation(s.OperationID, "native_reply_guard_unverified")
 		if stopErr != nil {
@@ -913,6 +926,9 @@ func (m *Manager) RunNativeHealthRound() (NativeHealthState, error) {
 		}
 		if e = nativeHealthGuardRoles(); e != nil {
 			return Fault("guard_unavailable", "native guard lost during probe round")
+		}
+		if e = m.verifyNativeLiveOutputGuard(claim); e != nil {
+			return Fault("guard_unavailable", "native lifetime OUTPUT guard changed during selected-path probe")
 		}
 		if e = requireNativeReplyGuardClaim(context.Background(), nativeHealthKernelReader{}, claim.ReplyGuardHandle, claim.ReplyGuardFingerprint); e != nil {
 			return Fault("guard_unavailable", "native reply guard changed during selected-path probe")

@@ -40,7 +40,7 @@ func nativeStartupFixture(t *testing.T) (nativeStartupPlan, nativeStartupFake) {
 	rows := []any{
 		map[string]any{"table": map[string]any{"family": "inet", "name": p.Name, "handle": uint64(5)}},
 		map[string]any{"chain": map[string]any{"family": "inet", "table": p.Name, "name": "output",
-			"handle": uint64(1), "type": "filter", "hook": "output", "prio": -100, "policy": "accept"}},
+			"handle": uint64(1), "type": "filter", "hook": "output", "prio": nativeStartupPriority, "policy": "accept"}},
 	}
 	for i, r := range rules {
 		rows = append(rows, map[string]any{"rule": map[string]any{"family": "inet", "table": p.Name,
@@ -58,8 +58,9 @@ func TestNativeStartupBarrierHasEarlyOutboundRejectAndNarrowExceptions(t *testin
 	if e != nil {
 		t.Fatal(e)
 	}
-	if !strings.Contains(script, "type filter hook output priority -100;") ||
+	if !strings.Contains(script, "type filter hook output priority 200;") ||
 		!strings.Contains(script, "ct direction reply accept") ||
+		!strings.Contains(script, "meta mark 0x2023 accept") ||
 		!strings.Contains(script, "meta mark 0x2024 accept") ||
 		strings.Contains(script, "204.11.2.217") ||
 		strings.Contains(script, " dport 53 accept") ||

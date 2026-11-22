@@ -80,16 +80,19 @@ snapshot, SSH and five original IPv4/IPv6 route/rule/nft inventories.
 Prearm its independent failback; make a real selected HTTPS request using
 unproxied curl while the official VLESS Core/TUN is active; continually
 issue **new unmarked foreign TCP SYNs** throughout healthy, stopping and
-TUN removal. A passive Underlay tcpdump must first capture a positive
-Direct-mode SYN for the pinned foreign destination, then **zero** Direct
-SYNs while desired Smart remains persisted, including after TUN vanishes.
-Require actual Core stop and Direct commit, no lingering OUTPUT barrier,
-working SSH, and exact restored inventories. Report the phase-timestamped
-packet and mode witness, not only a final status response. Also verify
-automatic Health-exhaustion shutdown and manually requested Disconnect
-during degraded recovery on the same exact candidate. Preserve the
-distinct Real-VM/foreign-provider/physical-host evidence grades and never
-call unsupported combinations PASS.
+TUN removal. Test both `--stop-mode manual` and `--stop-mode sigkill`
+(exact authenticated systemd Native MainPID only). A passive Underlay
+tcpdump must first capture a positive Direct-mode SYN for the pinned
+foreign destination, then **zero** selected Direct SYNs while desired
+Smart remains persisted, including after TUN vanishes. Confirm the same
+receipt-bound nft OUTPUT filter is active during **healthy Smart** and
+Core recovery and is absent only after durable Direct/off. Require actual
+Core stop, working SSH and exact restored inventories; report both
+phase-bound packet evidence and native status. Also independently verify
+automatic Health-exhaustion shutdown and manual Disconnect while degraded
+on the same exact candidate; successful TCP-only witnesses do not prove
+all UDP/IPv6/PMTUD corner cases. Distinguish VM, external packet peer,
+physical-host and production evidence; never upgrade NOT_RUN to PASS.
 
 ### Concurrent Native startup packet-leak regression
 

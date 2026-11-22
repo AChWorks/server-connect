@@ -71,6 +71,8 @@ def main():
     parser.add_argument("--evidence-dir", type=Path, required=True)
     parser.add_argument("--foreign-exit-ip", required=True)
     parser.add_argument("--target-host", default="api.ipify.org")
+    parser.add_argument("--stop-mode", choices=["manual", "sigkill"], default="manual",
+                        help="manual Disconnect or unexpected owned systemd MainPID SIGKILL")
     parser.add_argument("--authorized-disposable-vm-with-console", action="store_true")
     args = parser.parse_args()
     if os.geteuid() != 0 or not args.authorized_disposable_vm_with_console:
@@ -149,9 +151,51 @@ def main():
                         "https://" + args.target_host, timeout=23)
         if probe.returncode or probe.stdout.strip() != args.foreign_exit_ip:
             raise RuntimeError("actual selected external egress not verified")
+        # Healthy Smart must retain its *same* operation-scoped OUTPUT
+        # guard; a transient rearm only at shutdown cannot protect SIGKILL.
+        claim = json.loads((STATE / "native-session.json").read_text())
+        name = claim.get("startup_guard_name", "")
+        if (claim.get("startup_guard_phase") != "armed" or
+                not name.startswith("sc_pre_") or
+                execute("nft", "list", "table", "inet", name).returncode != 0):
+            raise RuntimeError("healthy Smart has no effective lifetime OUTPUT guard")
         time.sleep(.45)
         before_stop = time.time()
-        off = manager("disconnect")
+        if args.stop_mode == "manual":
+            off = manager("disconnect")
+        else:
+            # Only the exact installed native service parent may be killed.
+            # Never kill an arbitrary PID and never use a host-wide signal.
+            observed = execute("systemctl", "show", "server-connect-native-tun.service",
+                               "-p", "MainPID", "--value")
+            try:
+                pid = int(observed.stdout.strip())
+            except ValueError:
+                pid = 0
+            if pid <= 2 or not os.path.samefile(
+                "/proc/" + str(pid) + "/exe", "/opt/server-connect/current/bin/server-connect"
+            ):
+                raise RuntimeError("native service MainPID is not the installed manager")
+            killed = execute("systemctl", "kill", "--signal=SIGKILL",
+                             "--kill-whom=main", "server-connect-native-tun.service")
+            if killed.returncode:
+                raise RuntimeError("verified native service SIGKILL refused")
+            deadline = time.monotonic() + 38
+            off = None
+            while time.monotonic() < deadline:
+                state = execute(MANAGER, "--json", "status", timeout=5)
+                try:
+                    value = json.loads(state.stdout)
+                except json.JSONDecodeError:
+                    value = {}
+                if value.get("ok") and value.get("data", {}).get("desired") == "direct" and (
+                    value["data"].get("observed") == "inactive"
+                ):
+                    off = value["data"]
+                    break
+                time.sleep(.1)
+            if off is None:
+                raise RuntimeError("unexpected Core exit did not verify Direct within bounded deadline")
         after_stop = time.time()
         if manager("status")["desired"] != "direct":
             raise RuntimeError("Direct was not committed")
@@ -183,11 +227,13 @@ def main():
             if i >= 0 and snapshots[i]["desired"] == "smart" and p["at"]-times[i] <= .065:
                 leaks.append({**p, **{k: snapshots[i][k] for k in ["phase", "tun", "desired"]}})
         result = {
-            "installed_source_sha": source.get("source_revision"), "selected_exit": probe.stdout.strip(),
+            "installed_source_sha": source.get("source_revision"), "stop_mode": args.stop_mode,
+            "lifetime_output_guard": name,
+            "selected_exit": probe.stdout.strip(),
             "target_ip": destination, "direct_positive_syns": positive,
             "smart_samples": len(smart_attempts), "stop_smart_samples": len(during_stop),
             "stop_seconds": round(after_stop-before_stop, 3),
-            "leaked_direct_sns_while_smart": leaks,
+            "leaked_direct_syns_while_smart": leaks,
             "recovery": off, "pass": not leaks}
         # Preserve the actual filtered tcpdump timestamps for subsequent
         # independent packet/phase inspection, not merely the PASS counter.

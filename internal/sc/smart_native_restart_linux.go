@@ -26,18 +26,22 @@ func nativeRestartDelay(s NativeHealthState) int64 {
 	return delay
 }
 
-// Reuse the operation-bound startup plan for both a supervised Core
-// replacement and terminal shutdown. The old nft table was removed after
-// readiness; its old handle is never authority to adopt a new one. Persist
-// preparing before nft creation so ExecStopPost can recover an interrupted
-// rearm by verifying the original plan and exact kernel object.
+// Verify the same lifetime OUTPUT receipt before supervised Core replacement.
+// The released branch only repairs an interrupted earlier transitional receipt;
+// a healthy Smart session must retain its operation-bound guard continuously.
 func (m *Manager) rearmNativeOperationBarrierLocked(session NativeSession) error {
-	if session.StartupGuardName == "" || session.StartupGuardPhase != "released" {
-		return Fault("guard_pending", "Core restart requires a fully released initial startup barrier")
+	if session.StartupGuardName == "" {
+		return Fault("guard_pending", "Core restart requires an operation-bound output barrier")
 	}
 	plan, err := m.readNativeStartupPlan(session)
 	if err != nil {
 		return err
+	}
+	if session.StartupGuardPhase == "armed" {
+		return requireNativeStartupGuardClaim(context.Background(), nativeSystemRunner{}, plan, session.StartupGuardHandle)
+	}
+	if session.StartupGuardPhase != "released" {
+		return Fault("guard_pending", "Core restart containment is not in a recoverable phase")
 	}
 	present, err := nativeStartupPresent(context.Background(), nativeSystemRunner{}, plan.Name)
 	if err != nil || present {
@@ -226,12 +230,9 @@ func (m *Manager) nativeRestartWaitOrVerifyUnlocked(s NativeHealthState, claim N
 		})
 		return s, err
 	}
-	// The exact new process and kernel interception are independently
-	// established before removing the temporary OUTPUT barrier.
-	if err := m.releaseNativeStartupAfterReady(claim); err != nil {
-		return s, err
-	}
-	if err := m.finishNativeStartupRelease(claim); err != nil {
+	// The new child has genuine kernel interception. Keep the lifetime
+	// OUTPUT guard armed while it runs and through any further Core crash.
+	if err := requireNativeStartupGuardClaim(context.Background(), nativeSystemRunner{}, plan, claim.StartupGuardHandle); err != nil {
 		return s, err
 	}
 	outcome := runNativeHealthProbes(context.Background(), claim.InterfaceName, s.ProbeScope, targets, probeNativeHTTPS)
@@ -253,7 +254,7 @@ func (m *Manager) nativeRestartWaitOrVerifyUnlocked(s NativeHealthState, claim N
 			return e
 		}
 		if latest != s || latest.OperationID != current.HealthOperationID ||
-			current.StartupGuardPhase != "released" {
+			current.StartupGuardPhase != "armed" || current.StartupGuardHandle != claim.StartupGuardHandle {
 			return Fault("guard_pending", "native selected recovery result belongs to old operation")
 		}
 		if e := nativeHealthGuardRoles(); e != nil {
