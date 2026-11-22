@@ -2061,7 +2061,7 @@ os.execv(sys.argv[1], sys.argv[1:])
         import re
         docs = (ROOT / "docs" / "OFFLINE-DISTRIBUTION.md").read_text()
         if channel == "mirror":
-            section = docs.split("**Operator-hosted HTTPS mirror", 1)[1].split("**Completely offline", 1)[0]
+            section = docs.split("**Operator-hosted HTTPS mirror", 1)[1].split("**Locally uploaded release archive", 1)[0]
             server = self.https_servers[1][0]
         else:
             section = docs.split("**Official GitHub release channel", 1)[1].split("**Operator-hosted HTTPS mirror", 1)[0]

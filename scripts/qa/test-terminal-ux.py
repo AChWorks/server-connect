@@ -52,9 +52,11 @@ def run_pty(argv, input_text, *, width=40, height=24, term="xterm-256color", no_
                     break
             waited, result = os.waitpid(child, os.WNOHANG)
             if waited:
+                # A child can exit while its final output is still readable.
+                # Reaping it is final; waiting again on the next iteration
+                # raises ChildProcessError instead of finishing this test.
                 status = result
-                if not ready:
-                    break
+                break
         if status is None:
             # EIO on the PTY master means the slave was closed, but the
             # process can still be exiting; allow its exit status to settle.
@@ -244,14 +246,26 @@ class BootstrapUXTests(unittest.TestCase):
         a = BOOTSTRAP.index("\nset --\nif [ -n \"$url\" ]; then")
         b = BOOTSTRAP.index("\nif [ \"$#\" -gt 0 ]; then", a)
         cls.prerequisites = BOOTSTRAP[a:b]
+        a = BOOTSTRAP.index('\nif [ "$#" -gt 0 ]; then', b)
+        b = BOOTSTRAP.index('\nif [ -n "$url" ]; then\n command -v curl', a)
+        cls.apt_transaction = BOOTSTRAP[a:b]
 
     def test_only_missing_installed_capabilities_are_selected(self):
-        for missing, expected in (("", []), ("curl", ["curl"]),
-                                  ("ip nft", ["nftables", "iproute2"]),
-                                  ("curl python3 nft ip", ["curl", "python3", "nftables", "iproute2"])):
-            with self.subTest(missing=missing):
+        cases = (
+            ("online", "no", "", []),
+            ("online", "no", "curl", ["curl"]),
+            ("local", "no", "curl", []),
+            ("local", "no", "nft ip", ["nftables", "iproute2"]),
+            ("online", "no", "curl python3 nft ip", ["curl", "python3", "nftables", "iproute2"]),
+            ("local", "no", "curl python3 nft ip", ["python3", "nftables", "iproute2"]),
+            ("local", "yes", "curl python3 nft ip", ["python3"]),
+        )
+        for source, verify_only, missing, expected in cases:
+            with self.subTest(source=source, verify_only=verify_only, missing=missing):
+                url = 'http://127.0.0.1:1/' if source == 'online' else ''
                 program = ("set -eu\n" + "SC_MISSING=' " + missing + " '\n" +
-                           "url=http://127.0.0.1:1/\nverify_only=no\nauthenticated=integrity\n" +
+                           'url=' + repr(url) + "\nverify_only=" + verify_only +
+                           "\nauthenticated=integrity\n" +
                            "command() { [ \"$1\" = -v ] || return 1; " +
                            "case \"$SC_MISSING\" in *\" $2 \"*) return 1;; *) return 0;; esac; }\n" +
                            self.prerequisites + "\nprintf 'ARG:%s\\n' \"$@\"\n")
@@ -260,6 +274,48 @@ class BootstrapUXTests(unittest.TestCase):
                 self.assertEqual(result.returncode, 0, result.stderr)
                 actual = [] if result.stdout.strip() == "ARG:" else [x[4:] for x in result.stdout.splitlines()]
                 self.assertEqual(actual, expected)
+
+    def test_configured_apt_failure_gives_operator_action_and_no_install(self):
+        # Exercise the exact native prerequisite APT transaction with only its
+        # absolute apt command replaced by a recording function. No actual APT.
+        transaction = self.apt_transaction.replace('DEBIAN_FRONTEND=noninteractive /usr/bin/apt-get',
+                                                     'DEBIAN_FRONTEND=noninteractive qa_apt')
+        for stage, expect_calls in (("success", 2), ("update", 1), ("install", 2),
+                                    ("verify_only", 0), ("apt_missing", 0)):
+            with self.subTest(stage=stage):
+                with tempfile.TemporaryDirectory(prefix='sc-apt-mirror-') as temp:
+                    marker = Path(temp) / 'apt-calls'
+                    code = ("set -eu\n"
+                            + 'verify_only=' + ('yes' if stage == 'verify_only' else 'no') + '\n'
+                            + "set -- python3 nftables iproute2\n"
+                            + "bootstrap_read_os_version() { printf '13\\n'; }\n"
+                            + "qa_apt() { printf '%s\\n' \"$*\" >> " + repr(str(marker)) + "; "
+                            + "case '" + stage + "' in "
+                            + "update) case \"$*\" in *' update') return 23;; esac;; "
+                            + "install) case \"$*\" in *' install -y --no-remove --no-install-recommends python3 nftables iproute2') return 24;; esac;; "
+                            + "esac; return 0; }\n")
+                    step = transaction
+                    if stage == 'apt_missing':
+                        step = step.replace('[ -x /usr/bin/apt-get ] ||', 'false ||')
+                    result = subprocess.run(['/bin/sh', '-c', code + step], text=True,
+                                            capture_output=True, timeout=5)
+                    calls = marker.read_text().splitlines() if marker.exists() else []
+                    self.assertEqual(len(calls), expect_calls, (result.stdout, result.stderr))
+                    if stage == 'success':
+                        self.assertEqual(result.returncode, 0, result.stderr)
+                        self.assertTrue(calls[0].endswith('update'))
+                        self.assertTrue(calls[1].endswith('install -y --no-remove --no-install-recommends python3 nftables iproute2'))
+                    else:
+                        self.assertNotEqual(result.returncode, 0, (stage, result.stderr))
+                        if stage == 'update':
+                            self.assertIn('Cannot refresh existing Debian APT sources', result.stderr)
+                        elif stage == 'install':
+                            self.assertIn('APT could not install missing packages', result.stderr)
+                        elif stage == 'verify_only':
+                            self.assertIn('--verify-only never installs packages', result.stderr)
+                        elif stage == 'apt_missing':
+                            self.assertIn('Native Debian APT is unavailable', result.stderr)
+                        self.assertIn('python3 nftables iproute2', result.stderr)
 
     def test_documented_outer_https_fetch_installs_only_missing_tools(self):
         docs = (ROOT / "docs/OFFLINE-DISTRIBUTION.md").read_text()

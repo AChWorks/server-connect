@@ -39,7 +39,7 @@ One complete, versioned, integrity-verified bundle and **one shared installer** 
 
 - **Official online** installation and update.
 - **Operator-hosted online mirror**, including a static Iranian web host holding the same verified release bytes.
-- **Manual upload and fully offline** installation and update, with no network downloads on the target.
+- **Manual upload without international project downloads** for installation/update: all Server Connect/Core/rules assets are local; missing OS prerequisites may be fetched only through the host's already configured trusted Debian APT sources (including domestic mirrors). With dependencies present, no APT traffic occurs; `--verify-only` never changes packages. Missing/unreachable APT is explained rather than silently switching project download sources.
 
 Operators should manage compatible profiles, routing rules, connection state, diagnostics, safe Disconnect, updates, and recovery through one understandable menu and stable CLI. **Profiles and operator routing settings remain saved while disconnected** and are revalidated and reapplied on the next guarded Smart Routing activation; users must not configure them again merely because the VPN was switched off. In **Direct/off**, ordinary applications return to the host's original network paths, with **no Server Connect-owned VPN-only routing or blocking rules left active**. Avoid mandatory cloud management, additional background services while unused, and unnecessary resource consumption.
 

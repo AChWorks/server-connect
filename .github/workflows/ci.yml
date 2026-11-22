@@ -504,7 +504,7 @@ jobs:
             os_refusal_exit=$?
           fi
           test "$os_refusal_exit" -eq 1
-          grep -Fx 'Verified Debian 12 or Debian 13 OS identity is required for automatic online prerequisites' \
+          grep -Fx 'Verified Debian 12 or Debian 13 OS identity is required before automatic prerequisites' \
             /tmp/sc-native-qa-os-mode.log
           test ! -e "$apt_marker"
           for path in /opt/server-connect /var/lib/server-connect /usr/local/bin/server-connect \
@@ -522,33 +522,59 @@ jobs:
           ! command -v curl
           printf 'DEBIAN%s_DAMAGED_NATIVE_BASE_PRE_APT=PASS (zero APT attempts)\n' "$SC_QA_DEBIAN_VERSION"
 
-      - name: Missing prerequisites are no-op for verify-only but acquired for real online install
+      - name: Local archive installs missing OS tools from host APT, then online acquires only curl
         run: |
           set -euo pipefail
           digest=0000000000000000000000000000000000000000000000000000000000000000
           archive=https://127.0.0.1:19/qa-no-listener
-          # --verify-only is a strict nonmutating path even when root.
+          local_archive=/root/sc-local-archive-inert-qa.tar.gz
+          # This tiny deliberately invalid local artifact cannot reach the
+          # product installer, and tests OS package acquisition separately.
+          printf 'invalid local QA archive\n' > "$local_archive"
+          chmod 0600 "$local_archive"
+          # Verify-only must refuse missing Python without any APT traffic.
           if /usr/bin/env -i HOME=/root PATH=/usr/sbin:/usr/bin:/sbin:/bin LC_ALL=C \
-            /bin/sh scripts/bootstrap-online.sh --local-qa --archive-url "$archive" --sha256 "$digest" \
-            --verify-only > /tmp/sc-pre-verify.log 2>&1; then
-            echo 'Missing Python unexpectedly passed --verify-only' >&2; exit 1
+            /bin/sh scripts/bootstrap-online.sh --local-qa --archive-file "$local_archive" \
+            --sha256 "$digest" --verify-only > /tmp/sc-pre-verify.log 2>&1; then
+            echo 'Missing Python unexpectedly passed offline --verify-only' >&2; exit 1
           fi
-          grep -F 'no packages installed' /tmp/sc-pre-verify.log
+          grep -F 'Verification needs existing prerequisites: python3' /tmp/sc-pre-verify.log
           ! command -v python3
           ! command -v curl
-          # Actual root online mode acquires the native prerequisites.
-          # Curl must fail at the deliberately closed loopback port AFTER
-          # the prerequisite and bounded archive prerequisites are ready.
+          # Local archive may use the configured Debian APT mirror for ONLY
+          # missing OS tools, without trying any foreign project download.
+          if /usr/bin/env -i HOME=/root PATH=/usr/sbin:/usr/bin:/sbin:/bin LC_ALL=C \
+            /bin/sh scripts/bootstrap-online.sh --local-qa --archive-file "$local_archive" \
+            --sha256 "$digest" > /tmp/sc-local-pre-actual.log 2>&1; then
+            echo 'Invalid local archive unexpectedly installed' >&2; exit 1
+          fi
+          grep -F "Installing only missing Debian $SC_QA_DEBIAN_VERSION prerequisites via existing APT sources:" /tmp/sc-local-pre-actual.log
+          grep -F 'Independent artifact digest mismatch' /tmp/sc-local-pre-actual.log
+          command -v python3
+          command -v nft
+          command -v ip
+          ! command -v curl
+          # With now-complete local prerequisites, even invalid local input
+          # fails its digest without another package-index refresh.
+          if /usr/bin/env -i HOME=/root PATH=/usr/sbin:/usr/bin:/sbin:/bin LC_ALL=C \
+            /bin/sh scripts/bootstrap-online.sh --local-qa --archive-file "$local_archive" \
+            --sha256 "$digest" > /tmp/sc-local-pre-repeat.log 2>&1; then
+            echo 'Repeated invalid local archive unexpectedly installed' >&2; exit 1
+          fi
+          grep -F 'Independent artifact digest mismatch' /tmp/sc-local-pre-repeat.log
+          ! grep -F 'Installing only missing Debian' /tmp/sc-local-pre-repeat.log
+          # Online mode has the other tools; it should need only curl.
           if /usr/bin/env -i HOME=/root PATH=/usr/sbin:/usr/bin:/sbin:/bin LC_ALL=C \
             /bin/sh scripts/bootstrap-online.sh --local-qa --archive-url "$archive" --sha256 "$digest" \
-            > /tmp/sc-pre-actual.log 2>&1; then
-            echo 'Nonexistent archive unexpectedly installed' >&2; exit 1
+            > /tmp/sc-pre-online.log 2>&1; then
+            echo 'Nonexistent online archive unexpectedly installed' >&2; exit 1
           fi
-          grep -F "Installing missing Debian $SC_QA_DEBIAN_VERSION online-bootstrap prerequisites" /tmp/sc-pre-actual.log
-          grep -F 'Online acquisition failed or exceeded the transfer ceiling' /tmp/sc-pre-actual.log
-          command -v python3
+          grep -F "Installing only missing Debian $SC_QA_DEBIAN_VERSION prerequisites via existing APT sources: curl" /tmp/sc-pre-online.log
+          grep -F 'Online acquisition failed or exceeded the transfer ceiling' /tmp/sc-pre-online.log
           command -v curl
           python3 -I -S -c 'import resource, tarfile, urllib.parse'
           test ! -e /usr/local/bin/server-connect
+          test ! -e /opt/server-connect
           test -z "$(find /root -maxdepth 1 -name '.server-connect-bootstrap.*' -print)"
-          printf 'DEBIAN%s_MINIMAL_ONLINE_PREREQUISITES=PASS (no product installation)\n' "$SC_QA_DEBIAN_VERSION"
+          rm -f -- "$local_archive"
+          printf 'DEBIAN%s_LOCAL_ASSET_APT_AND_MISSING_ONLY=PASS (no product install, no foreign project download)\n' "$SC_QA_DEBIAN_VERSION"
