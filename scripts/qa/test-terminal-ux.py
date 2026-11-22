@@ -330,7 +330,7 @@ class BootstrapUXTests(unittest.TestCase):
 
     def run_prefetch_fixture(self, block, *, missing_curl=False, missing_ca=False,
                              symlink=False, relative_link=False, unsafe_link=False, unsafe_mode=False,
-                             unsafe_owner=False, invalid_os=False, unsupported_arch=False,
+                             malformed_link=False, unsafe_owner=False, invalid_os=False, unsupported_arch=False,
                              apt_stage="success", apt_available=True):
         with tempfile.TemporaryDirectory(prefix="sc-outer-fetch-") as temp:
             root = Path(temp)
@@ -341,7 +341,9 @@ class BootstrapUXTests(unittest.TestCase):
                        else "ID=debian\nVERSION_ID=\"13\"\n")
             usr_os.write_text(os_text)
             if symlink:
-                if unsafe_link:
+                if malformed_link:
+                    etc_os.symlink_to("../usr/lib/os-release\n")
+                elif unsafe_link:
                     alien = root / "foreign-os-release"
                     alien.write_text(os_text)
                     etc_os.symlink_to(alien)
@@ -414,6 +416,7 @@ class BootstrapUXTests(unittest.TestCase):
         for channel, fragment in enumerate(self.prefetch_blocks):
             for setup in ({}, {"symlink": True}, {"symlink": True, "relative_link": True},
                           {"unsafe_link": True, "symlink": True},
+                          {"malformed_link": True, "symlink": True},
                           {"unsafe_mode": True}, {"unsafe_mode": True, "symlink": True},
                           {"unsafe_owner": True}, {"invalid_os": True},
                           {"unsupported_arch": True}):

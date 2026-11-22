@@ -38,8 +38,10 @@ sudo /usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin TERM="${TERM:-dumb}" /bi
     [ "$(/usr/bin/stat -c %u -- /etc/os-release)" = 0 ] || return 1
     fetch_os=/etc/os-release
     if [ -L /etc/os-release ]; then
-      case "$(/usr/bin/readlink -n -- /etc/os-release)" in
-        ../usr/lib/os-release|/usr/lib/os-release) ;;
+      # Preserve terminal newlines: command substitution alone would trim them.
+      fetch_link=$(/usr/bin/readlink -n -- /etc/os-release && printf .) || return 1
+      case "$fetch_link" in
+        ../usr/lib/os-release.|/usr/lib/os-release.) ;;
         *) return 1;;
       esac
       for fetch_dir in /usr /usr/lib; do fetch_trusted_path "$fetch_dir" || return 1; done
@@ -125,8 +127,10 @@ sudo /usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin TERM="${TERM:-dumb}" /bi
     [ "$(/usr/bin/stat -c %u -- /etc/os-release)" = 0 ] || return 1
     fetch_os=/etc/os-release
     if [ -L /etc/os-release ]; then
-      case "$(/usr/bin/readlink -n -- /etc/os-release)" in
-        ../usr/lib/os-release|/usr/lib/os-release) ;;
+      # Preserve terminal newlines: command substitution alone would trim them.
+      fetch_link=$(/usr/bin/readlink -n -- /etc/os-release && printf .) || return 1
+      case "$fetch_link" in
+        ../usr/lib/os-release.|/usr/lib/os-release.) ;;
         *) return 1;;
       esac
       for fetch_dir in /usr /usr/lib; do fetch_trusted_path "$fetch_dir" || return 1; done
