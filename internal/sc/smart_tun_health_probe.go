@@ -49,7 +49,17 @@ func smartTUNHealthExchangeWithDeadline(ctx context.Context, connection net.Conn
 		}
 	}()
 	deadline, ok := ctx.Deadline()
-	if !ok || connection.SetDeadline(deadline) != nil {
+	if !ok {
+		return SmartTUNHTTPSResult{Result: "deadline_unavailable"}
+	}
+	if err := connection.SetDeadline(deadline); err != nil {
+		// Context cancellation may close the socket *before* SetDeadline.
+		// That is a normal teardown, not an unavailable deadline facility.
+		// Without this check, an already-canceled Health probe can be falsely
+		// classified as a transport/guard failure under a loaded scheduler.
+		if ctx.Err() != nil {
+			return SmartTUNHTTPSResult{Result: "canceled"}
+		}
 		return SmartTUNHTTPSResult{Result: "deadline_unavailable"}
 	}
 	return exchangeSmartTUNHTTPSHealth(ctx, connection, probe, nonce)
