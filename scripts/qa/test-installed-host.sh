@@ -1712,83 +1712,73 @@ verify_clean_uninstall
 assert_network_unchanged uninstall "$offline_before"
 verify_host_services uninstall
 
-# Test actual first-install SIGKILL after a partial payload copy and after
-# atomic release publication, with a real retry on each disconnected Debian
-# systemd guest. The wrappers are guest-local; never change the CI runner.
+# Kill the *actual unmodified installer* at two observable filesystem
+# transitions in an isolated Debian systemd guest. A distinct Python
+# supervisor owns the PID; no system binary, source file or trust receipt is
+# modified for fault injection. This is not a claim of physical host safety.
 for kill_stage in payload-copy release-publication; do
-  echo "=== First-install SIGKILL test: $kill_stage ==="
-  docker exec "$container" /bin/sh -s "$kill_stage" <<'QA_KILL_SETUP'
-set -eu
-stage=$1
-test ! -e /opt/server-connect && test ! -L /opt/server-connect
-test ! -e /var/lib/server-connect/.first-install-intent
-test ! -e /var/lib/server-connect/.first-release-intent
-if [ "$stage" = payload-copy ]; then
-  test ! -e /usr/bin/install.scqa-held
-  mv /usr/bin/install /usr/bin/install.scqa-held
-  cat > /usr/bin/install <<'QA_KILL_INSTALL'
-#!/bin/sh
-/usr/bin/install.scqa-held "$@" || exit $?
-for destination do
-  case "$destination" in
-   /opt/.server-connect-release.*/bin/server-connect)
-    : >/root/scqa-copy-sigkill-witness
-    kill -KILL "$PPID"
-    exit 137 ;;
-  esac
-done
-QA_KILL_INSTALL
-  chmod 0755 /usr/bin/install
-else
-  test ! -e /usr/bin/mv.scqa-held
-  /usr/bin/mv /usr/bin/mv /usr/bin/mv.scqa-held
-  cat > /usr/bin/mv <<'QA_KILL_MV'
-#!/bin/sh
-/usr/bin/mv.scqa-held "$@" || exit $?
-for destination do
-  case "$destination" in
-   /opt/server-connect/releases/0.1.0-dev-*)
-    : >/root/scqa-release-sigkill-witness
-    kill -KILL "$PPID"
-    exit 137 ;;
-  esac
-done
-QA_KILL_MV
-  chmod 0755 /usr/bin/mv
-fi
-QA_KILL_SETUP
-  if docker exec "$container" /usr/bin/env -i HOME=/root     PATH=/usr/sbin:/usr/bin:/sbin:/bin LC_ALL=C     /bin/sh /root/server-connect/install.sh --offline     >"$scratch/first-kill-$kill_stage.stdout" 2>"$scratch/first-kill-$kill_stage.stderr"; then
-    echo "Installer incorrectly survived $kill_stage SIGKILL" >&2
-    cat "$scratch/first-kill-$kill_stage.stdout" >&2
-    cat "$scratch/first-kill-$kill_stage.stderr" >&2
-    docker exec "$container" /bin/sh -c 'ls -la /opt/.server-connect-release.* /var/lib/server-connect/.first-* 2>&1 || :'
-    exit 1
-  fi
-  docker exec "$container" /bin/sh -s "$kill_stage" <<'QA_KILL_RESTORE'
-set -eu
-stage=$1
-if [ "$stage" = payload-copy ]; then
-  test -f /root/scqa-copy-sigkill-witness
-  /usr/bin/mv /usr/bin/install.scqa-held /usr/bin/install
-  rm /root/scqa-copy-sigkill-witness
-else
-  test -f /root/scqa-release-sigkill-witness
-  /usr/bin/mv.scqa-held /usr/bin/mv.scqa-held /usr/bin/mv
-  rm /root/scqa-release-sigkill-witness
-fi
-test -f /var/lib/server-connect/.first-install-intent
-test -f /var/lib/server-connect/.first-release-intent
-test "$(stat -c %a /var/lib/server-connect/.first-install-intent)" = 600
-test "$(stat -c %a /var/lib/server-connect/.first-release-intent)" = 600
-test "$(systemctl show server-connect.service -p LoadState --value)" = not-found
-test ! -e /usr/local/bin/server-connect
-if [ "$stage" = payload-copy ]; then
-  test -n "$(find /opt -maxdepth 1 -type d -name '.server-connect-release.*' -print -quit)"
-else
-  test -n "$(find /opt/server-connect/releases -mindepth 1 -maxdepth 1 -type d -name '0.1.0-dev-*' -print -quit)"
-fi
-echo "ACTUAL_INITIAL_SIGKILL_$stage=PASS (original identity and no service)"
-QA_KILL_RESTORE
+  echo "=== Observed actual initial-installer SIGKILL: $kill_stage ==="
+  docker exec -i "$container" /usr/bin/python3 -I -S - "$kill_stage" <<'PY_WATCH_INSTALL'
+import os, pathlib, signal, subprocess, sys, time
+stage = sys.argv[1]
+prefix = pathlib.Path("/opt/server-connect")
+state = pathlib.Path("/var/lib/server-connect")
+assert stage in ("payload-copy", "release-publication")
+assert not prefix.exists() and not prefix.is_symlink()
+assert not (state / ".first-install-intent").exists()
+assert not (state / ".first-release-intent").exists()
+argv = ["/bin/sh", "/root/server-connect/install.sh", "--offline"]
+proc = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE, text=True, start_new_session=True,
+                        env={"PATH":"/usr/sbin:/usr/bin:/sbin:/bin","HOME":"/root","LC_ALL":"C"})
+witness = None
+deadline = time.monotonic() + 15
+while time.monotonic() < deadline:
+    release_ready = (prefix / "releases").is_dir() and any(
+        child.name.startswith("0.1.0-dev-") for child in (prefix / "releases").iterdir()
+    )
+    receipt_ready = (state / ".first-install-intent").is_file() and (
+        state / ".first-release-intent").is_file()
+    if stage == "payload-copy" and receipt_ready and not release_ready:
+        for candidate in pathlib.Path("/opt").glob(".server-connect-release.*"):
+            if ((candidate / "bin/server-connect").is_file()
+                    and (candidate / "bin/sing-box").is_file()):
+                witness = "partially or fully copied release Stage " + candidate.name
+                break
+    elif stage == "release-publication" and receipt_ready and release_ready:
+        witness = "atomically published release directory before full commit"
+    if witness:
+        try:
+            os.kill(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            witness = None
+        break
+    if proc.poll() is not None:
+        break
+    time.sleep(0.001)
+if witness is None and proc.poll() is None:
+    os.kill(proc.pid, signal.SIGKILL)
+try:
+    out, err = proc.communicate(timeout=18)
+except subprocess.TimeoutExpired:
+    proc.kill()
+    out, err = proc.communicate(timeout=10)
+if witness is None or proc.returncode != -signal.SIGKILL:
+    print("FAILED actual installer interruption: desired stage=", stage,
+          "witness=", witness, "exit=", proc.returncode, file=sys.stderr)
+    print("stdout:", out[-1800:], "stderr:", err[-2400:], file=sys.stderr)
+    sys.exit(1)
+assert (state / ".first-install-intent").is_file()
+assert (state / ".first-release-intent").is_file()
+if stage == "payload-copy":
+    assert not (pathlib.Path("/etc/systemd/system") / "server-connect.service").exists()
+    assert not release_ready
+else:
+    assert any((prefix / "releases").glob("0.1.0-dev-*"))
+assert not pathlib.Path("/usr/local/bin/server-connect").exists()
+print(f"ACTUAL_INITIAL_INSTALL_SIGKILL_{stage}=PASS: {witness}; "
+      f"PID={proc.pid} exit={proc.returncode}, no service or command")
+PY_WATCH_INSTALL
   assert_network_unchanged "first-kill-$kill_stage" "$offline_before"
   verify_host_services "first-kill-$kill_stage"
   run_offline "first-retry-$kill_stage" --offline
@@ -1806,7 +1796,7 @@ QA_KILL_RESTORE
   assert_network_unchanged "first-retry-$kill_stage-uninstall" "$offline_before"
   verify_host_services "first-retry-$kill_stage-uninstall"
 done
-echo 'INITIAL_INSTALL_REAL_SIGKILL_PAYLOAD_AND_RELEASE_RECOVERY=PASS (Debian 12/13, Direct, SSH/HTTP, zero acquisition)'
+echo 'INITIAL_INSTALL_REAL_SIGKILL_COPY_AND_PUBLISH_RETRY=PASS (both Debian versions, Direct, SSH/HTTP)'
 echo 'DISCONNECTED_OFFLINE_CYCLE=PASS'
 if [[ $qa_version == 13 ]]; then
 echo 'LIMITATION: Proxy Only WordPress/PHP-FPM used guest loopback with QA-only WP_PROXY_*; transparent TUN WordPress used no application proxy and synthetic egress; physical host/foreign field acceptance is NOT_RUN'
