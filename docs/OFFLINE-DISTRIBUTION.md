@@ -21,8 +21,28 @@ script. One pasteable command (the root-owned temporary file is removed on
 every exit):
 
 ```sh
-sudo /usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin /bin/sh -eu -c '
+sudo /usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin TERM="${TERM:-dumb}" /bin/sh -eu -c '
   umask 077
+  # Native signed Debian APT bootstraps the HTTPS downloader only when absent.
+  # The full Server Connect bootstrap then checks its remaining prerequisites.
+  fetch_missing=""
+  command -v curl >/dev/null 2>&1 || fetch_missing="curl"
+  [ -r /etc/ssl/certs/ca-certificates.crt ] || fetch_missing="$fetch_missing ca-certificates"
+  if [ -n "$fetch_missing" ]; then
+    [ -x /usr/bin/apt-get ] && [ "$(/usr/bin/uname -m)" = x86_64 ] &&
+      [ -r /etc/os-release ] && [ "$(/usr/bin/stat -c %u /etc/os-release)" = 0 ] || {
+      echo "Trusted Debian 12/13 APT is required for missing HTTPS fetch tools" >&2; exit 1;
+    }
+    os_id=$(/usr/bin/sed -n "s/^ID=//p" /etc/os-release)
+    os_ver=$(/usr/bin/sed -n "s/^VERSION_ID=//p" /etc/os-release)
+    case "$os_id" in debian|\"debian\") ;; *) echo "Unsupported OS; no APT attempted" >&2; exit 1;; esac
+    case "$os_ver" in 12|13|\"12\"|\"13\") ;; *) echo "Unsupported Debian version; no APT attempted" >&2; exit 1;; esac
+    DEBIAN_FRONTEND=noninteractive /usr/bin/apt-get -o APT::Get::AllowUnauthenticated=false \
+      -o APT::Update::Error-Mode=any update
+    # Only fixed missing names enter this list; never a user-supplied package.
+    DEBIAN_FRONTEND=noninteractive /usr/bin/apt-get -o APT::Get::AllowUnauthenticated=false \
+      install -y --no-remove --no-install-recommends $fetch_missing
+  fi
   bootstrap=$(mktemp /root/.server-connect-entry.XXXXXXXX)
   trap "rm -f -- $bootstrap" 0
   curl --fail --silent --show-error --location --max-redirs 5 \
@@ -44,8 +64,30 @@ first executable download; it never silently falls back to GitHub or a foreign
 host. A complete HTTPS transfer is required before any execution:
 
 ```sh
-sudo /usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin /bin/sh -eu -c '
+sudo /usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin TERM="${TERM:-dumb}" /bin/sh -eu -c '
   umask 077
+  case "$1" in https://?*) ;; *) echo "HTTPS mirror base is required" >&2; exit 2;; esac
+  case "$1" in *[![:print:]]*|*\@*|*\%*|*\?*|*\#*|*\\*|*\ * ) echo "Unsafe Mirror URL" >&2; exit 2;; esac
+  # Native signed Debian APT bootstraps the HTTPS downloader only when absent.
+  # The full Server Connect bootstrap then checks its remaining prerequisites.
+  fetch_missing=""
+  command -v curl >/dev/null 2>&1 || fetch_missing="curl"
+  [ -r /etc/ssl/certs/ca-certificates.crt ] || fetch_missing="$fetch_missing ca-certificates"
+  if [ -n "$fetch_missing" ]; then
+    [ -x /usr/bin/apt-get ] && [ "$(/usr/bin/uname -m)" = x86_64 ] &&
+      [ -r /etc/os-release ] && [ "$(/usr/bin/stat -c %u /etc/os-release)" = 0 ] || {
+      echo "Trusted Debian 12/13 APT is required for missing HTTPS fetch tools" >&2; exit 1;
+    }
+    os_id=$(/usr/bin/sed -n "s/^ID=//p" /etc/os-release)
+    os_ver=$(/usr/bin/sed -n "s/^VERSION_ID=//p" /etc/os-release)
+    case "$os_id" in debian|\"debian\") ;; *) echo "Unsupported OS; no APT attempted" >&2; exit 1;; esac
+    case "$os_ver" in 12|13|\"12\"|\"13\") ;; *) echo "Unsupported Debian version; no APT attempted" >&2; exit 1;; esac
+    DEBIAN_FRONTEND=noninteractive /usr/bin/apt-get -o APT::Get::AllowUnauthenticated=false \
+      -o APT::Update::Error-Mode=any update
+    # Only fixed missing names enter this list; never a user-supplied package.
+    DEBIAN_FRONTEND=noninteractive /usr/bin/apt-get -o APT::Get::AllowUnauthenticated=false \
+      install -y --no-remove --no-install-recommends $fetch_missing
+  fi
   bootstrap=$(mktemp /root/.server-connect-entry.XXXXXXXX)
   trap "rm -f -- $bootstrap" 0
   # curl --fail alone accepts 3xx without following it. Require HTTP 200
@@ -70,7 +112,9 @@ sudo /bin/sh /root/sc-upload/bootstrap-online.sh \
   --archive-file /root/sc-upload/server-connect-<version>-<target>.tar.gz
 ```
 
-The offline archive's identity file must exist at `<archive>.release.json`. The offline entrypoint performs **no DNS, HTTP, package download, APT or other network dependency request**, even if prerequisites are missing. Existing Debian system packages must supply the required native tooling; missing prerequisites produce actionable errors. For online installations only, missing fixed Debian prerequisites can be installed through the host's already trusted signed APT policy. A separate `--verify-only` option performs full acquisition/extraction checks but never installs packages or the product. Advanced explicit `--archive-url` and `--archive-file` are retained for controlled verification/QA. There is no GitHub fallback in mirror mode.
+The offline archive's identity file must exist at `<archive>.release.json`. The offline entrypoint performs **no DNS, HTTP, package download, APT or other network dependency request**, even if prerequisites are missing. Existing Debian system packages must supply the required native tooling; missing prerequisites produce actionable errors. For online installations only, the bootstrap checks each required capability and uses the host's existing signed APT policy to install **only missing** `curl`, `python3`, `nftables`, `iproute2`, CA certificates, or legacy signed-QA `openssl` as needed. It does not force a particular installed package version, refresh indexes when nothing is missing, or intentionally reinstall/upgrade an already available tool; APT may still resolve dependencies for newly installed tools. The bundled official sing-box Core version remains an independently pinned **product binary contract**, not an APT prerequisite version pin. Essential trusted Debian bootstrap/coreutils and actual systemd are required for a supported installation; a stripped or incompatible image produces a specific error rather than an unsafe partial repair. A separate `--verify-only` option performs full acquisition/extraction checks but never installs packages or the product. Advanced explicit `--archive-url` and `--archive-file` are retained for controlled verification/QA. There is no GitHub fallback in mirror mode.
+
+**Interactive completion:** The Official and Mirror launch commands preserve **only the terminal type** (`TERM`) alongside a fixed clean `PATH` across the privileged `env -i` boundary; all other ambient shell/loader variables remain excluded. Without this explicit `TERM` transfer a trusted `env -i` installation would never start the full-screen UI. After a successful shared-bootstrap **install or update**, a real TTY (including a normal SSH terminal) opens the Server Connect full-screen menu automatically *after* the installer returns and releases its lifecycle lock. Menu exit restores the operator's terminal. Noninteractive/redirected/`TERM=dumb` execution never waits for menu input and prints `sudo server-connect` as the next action. Use `--no-menu` on any Official, Mirror or Offline bootstrap command to suppress the automatic menu for automation. Direct developer-only `bundle/install.sh` invocation remains a noninteractive low-level installer; launch `sudo server-connect` manually in that case. `--verify-only` never opens a menu or installs packages. The menu text is English, while data/terminal colors are always optional.
 
 **Trust before execution:** Both online launchers stage complete root-owned bootstrap bytes, check a terminal completeness marker and execute only after a successful HTTPS download; no executable script is piped directly from curl. This protects against incomplete transfers, but the marker is **not** a publisher signature: the operator still trusts the selected HTTPS source. HTTPS validates the server's certificate. The bounded downloader permits HTTPS redirects for GitHub, refuses redirects for an operator Mirror (to keep all project assets on the selected mirror), and refuses plaintext except explicit loopback-only QA. The bootstrap validates the restricted release index, source/target/version, exact archive SHA256 and gzip/tar member layout **before executing any extracted script**; a second check binds metadata to the extracted package manifest and all checksummed members. The shared local installer repeats checksum, manager/Core, OS target, ownership and active guard preflights before changing units or releases. Symlinks/traversal/duplicate members, malformed JSON, unlisted files, decompression bombs, wrong target, modified data and partial downloads fail closed. Update and failed installation use narrowly owned state and rollback. On a first install the complete owner marker is staged before atomic no-replace publication of `/opt/server-connect`; root-private inode-bound intents under `/var/lib/server-connect/` identify the exact first prefix and release stage, including a partially copied release, its atomically reparented `.stage.*` path inside the original managed signed-receipt namespace, and the finally published release. On a retry, while holding the lifecycle lock, the installer verifies its full original file/service footprint and recovers exactly owned partial resources before a fresh install. Unexpected files, changed ownership/inodes, foreign services or active units are preserved and refused, never silently adopted or deleted. After successful initial installation, the release is verified against its inode-bound first-install receipts, current-link identity and effective managed systemd units before those receipts are retired. If interrupted between receipt removals, the remaining private receipt is revalidated and retired under the same lifecycle lock before a subsequent verify, update or uninstall; neither an uncommitted install nor a foreign/malformed receipt is silently adopted. The optional Signed receipt is prepared as an anonymous, fsynced inode and atomically linked once under its final filename, avoiding named temporary files or two-hardlink interruption windows. An interrupted Signed first install can be reconciled only after verification against the original signed publisher inputs, never by silently falling back to integrity-only trust. Uncertain foreign network/kernel resources are preserved for operator recovery.
 

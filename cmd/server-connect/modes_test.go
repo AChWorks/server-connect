@@ -188,16 +188,21 @@ func TestModeOverviewCLIAndMenuShareReadOnlySurface(t *testing.T) {
 	os.Stdin = input
 	code, menuOut, menuErr := hostDriftCapturedOutput(t, func() int { return menu(m) })
 	os.Stdin = old
-	if code != 0 || !strings.Contains(menuOut, "18 Mode Overview") ||
-		!strings.Contains(menuOut, `"general_host_activation": false`) ||
-		!strings.Contains(menuOut, `"vpn_path_proof": "not_run"`) ||
-		strings.Contains(menuOut, `"observed_mode": "smart_routing"`) {
-		t.Fatalf("menu cannot explain non-admitted mode: exit=%d out=%s err=%s", code, menuOut, menuErr)
+	// Common interactive pages are human-readable; the explicit CLI keeps
+	// structured JSON and the same underlying honest status semantics.
+	for _, part := range []string{"18 Mode Overview", "Available modes", "Smart host-wide permission is NOT automatically established",
+		"Selected VPN path proof: not_run", "Host Direct path proof: not_run"} {
+		if !strings.Contains(menuOut, part) {
+			t.Fatalf("interactive mode overview missing %q: code=%d out=%s err=%s", part, code, menuOut, menuErr)
+		}
+	}
+	if strings.Contains(menuOut, `"general_host_activation"`) || strings.Contains(menuOut, `"observed_mode": "smart_routing"`) {
+		t.Fatalf("human menu dumped raw machine JSON or fabricated native success: %s", menuOut)
 	}
 	_, cliOut, _ := hostDriftCapturedOutput(t, func() int { return run(false, m, []string{"mode-overview"}) })
 	for _, part := range []string{`"availability": "candidate_not_field_verified"`, `"host_direct_path_proof": "not_run"`, `"observed_mode": "unknown"`} {
-		if !strings.Contains(menuOut, part) || !strings.Contains(cliOut, part) {
-			t.Fatalf("CLI/menu mode drift: %s\nmenu=%s\nCLI=%s", part, menuOut, cliOut)
+		if !strings.Contains(cliOut, part) {
+			t.Fatalf("machine CLI lost %q: %s", part, cliOut)
 		}
 	}
 }

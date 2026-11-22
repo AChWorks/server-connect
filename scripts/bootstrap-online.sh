@@ -220,6 +220,7 @@ target=''
 local_qa=no
 digest=''
 verify_only=no
+auto_menu=yes
 # Official pinned core 1.14.3 is 31,678,266 compressed / 93,255,156
 # expanded bytes. These conservative QA bundle caps allow manager/metadata
 # headroom without permitting multi-GiB disk consumption on hosting servers.
@@ -241,8 +242,9 @@ while [ "$#" -gt 0 ]; do
   --local-qa) [ "$local_qa" = no ] || exit 2; local_qa=yes;shift;;
   --sha256) [ "$#" -ge 2 ] && [ -z "$digest" ] || exit 2; digest=$2;shift 2;;
   --verify-only)verify_only=yes;shift;;
+  --no-menu)auto_menu=no;shift;;
   --max-download-bytes) [ "$#" -ge 2 ] || exit 2; max_download_bytes=$2;shift 2;;
-  *) echo 'Usage: bootstrap-online.sh (--official | --mirror-base HTTPS_BASE | --archive-url HTTPS_URL | --archive-file ABSOLUTE_FILE) [--verify-only]; optional legacy signed QA --publisher-key; digest-pinned local QA --local-qa --sha256 SHA256' >&2;exit 2;;
+  *) echo 'Usage: bootstrap-online.sh (--official | --mirror-base HTTPS_BASE | --archive-url HTTPS_URL | --archive-file ABSOLUTE_FILE) [--verify-only] [--no-menu]; optional legacy signed QA --publisher-key; digest-pinned local QA --local-qa --sha256 SHA256' >&2;exit 2;;
  esac
 done
 # Ordinary Official, operator Mirror and Offline use release metadata and
@@ -367,6 +369,9 @@ command -v python3 >/dev/null 2>&1 || set -- "$@" python3
 # --verify-only never installs packages and offline remains fail-closed.
 if [ "$verify_only" != yes ] && [ -n "$url" ]; then
  command -v nft >/dev/null 2>&1 || set -- "$@" nftables
+ # Native Smart Routing also uses iproute2. Accept any already working ip
+ # executable; acquire only a missing capability, never upgrade it by policy.
+ command -v ip >/dev/null 2>&1 || set -- "$@" iproute2
 fi
 if [ "$authenticated" = yes ]; then
  command -v openssl >/dev/null 2>&1 || set -- "$@" openssl
@@ -920,4 +925,28 @@ elif [ "$authenticated" = integrity ];then
 else
  sh "$work/server-connect/install.sh" --offline --local-qa
 fi
+# The complete verified archive is no longer needed once the shared installer
+# finishes. Release task-owned staging before entering a potentially long
+# interactive session; retain the EXIT trap as a fallback on cleanup failure.
+if ! rm -rf -- "$work"; then
+ echo 'Installation complete, but temporary bootstrap staging cleanup failed; inspect root-owned staging.' >&2
+fi
+# When an actual operator has a usable controlling terminal, enter the
+# interactive manager after the completed install/update (and after the
+# installer releases its lifecycle locks). A piped bootstrap reads its script
+# from stdin; /dev/tty is a *separate* input stream for the operator. Never
+# consume stdin or prompt a noninteractive CI/cron/SSH pipeline. Failed menu
+# launch is reported but does not relabel a completed installation as failed.
+bootstrap_finish_with_menu() {
+ if [ "$auto_menu" = yes ] && [ -t 1 ] && [ "${TERM:-}" != '' ] && [ "${TERM:-}" != dumb ] &&
+    [ -r /dev/tty ] && [ -w /dev/tty ] && [ -x /opt/server-connect/current/bin/server-connect ]; then
+  echo 'Installation completed. Opening Server Connect (press q to exit).' > /dev/tty
+  if ! /opt/server-connect/current/bin/server-connect menu < /dev/tty > /dev/tty 2>&1; then
+   echo 'Installation succeeded but the interactive menu could not start; run sudo server-connect manually.' >&2
+  fi
+ else
+  echo 'Installation complete. Open the menu with: sudo server-connect' >&2
+ fi
+}
+bootstrap_finish_with_menu
 # SERVER_CONNECT_BOOTSTRAP_END

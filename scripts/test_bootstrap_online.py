@@ -472,6 +472,12 @@ class BootstrapSecurityTest(unittest.TestCase):
         result = self.bootstrap()
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_no_menu_opt_out_preserves_verify_only(self):
+        result = self.bootstrap(extra=("--no-menu",))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Installation was not attempted", result.stdout)
+        self.assertNotIn("Opening Server Connect", result.stdout)
+
     def test_verify_only_does_not_admit_targets_or_execute_payloads(self):
         # Target admission belongs to the shared installer. These archives
         # prove only acquisition/layout verification, including when their

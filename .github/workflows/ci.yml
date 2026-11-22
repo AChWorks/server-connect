@@ -68,6 +68,9 @@ jobs:
           set -euo pipefail
           go vet ./...
           go test ./... -count=1 -timeout=100s -v
+          # Exercise the real Linux PTY menu and interactive post-install
+          # finalizer without installing anything or changing host networking.
+          PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/qa/test-terminal-ux.py
           # Report explicit PASS results for both security objectives. These
           # Linux tests now FAIL rather than SKIP on missing/unsafe systemctl.
           go test ./internal/sc -run '^(TestSystemctlCommandIgnoresPATHShadow|TestSystemctlCommandPinsNativeAndSanitizesEnvironment)$' -count=1 -v
