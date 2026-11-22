@@ -2345,6 +2345,7 @@ if [[ -n $stable_bundle ]]; then
       test ! -e /opt/server-connect/current/authentication.json
       /usr/local/bin/server-connect version --json | python3 -I -S -c "import json,sys;r=json.load(sys.stdin);assert r[\"ok\"] is True and r[\"data\"]=={\"manager\":\"0.1.0\",\"sing_box\":\"1.14.3\"}"
       /usr/local/bin/server-connect --json status | python3 -I -S -c "import json,sys;r=json.load(sys.stdin);assert r[\"ok\"] is True and r[\"data\"][\"desired\"]==\"direct\" and r[\"data\"][\"observed\"]==\"inactive\""
+      /usr/local/bin/server-connect --json mode-overview | python3 -I -S -c "import json,sys;r=json.load(sys.stdin);d=r[\"data\"];assert r[\"ok\"] is True and d[\"modes\"][2]=={\"id\":\"smart_routing\",\"availability\":\"guarded_operator_confirmation\",\"general_host_activation\":False} and d[\"vpn_path_proof\"]==\"not_run\""
     '
   }
   stable_install() {

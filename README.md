@@ -23,14 +23,14 @@ The versioned offline datasets are the Owner-approved [DB-IP Country Lite](https
 Inspect without enabling host-wide Smart Routing:
 
 ```sh
-server-connect --json status
-server-connect --json mode-overview
-server-connect --json native-status
-server-connect --json smart-routing-data
-server-connect --json smart-routing-rules list
+sudo server-connect --json status
+sudo server-connect --json mode-overview
+sudo server-connect --json native-status
+sudo server-connect --json smart-routing-data
+sudo server-connect --json smart-routing-rules list
 ```
 
-Use `server-connect` for the terminal menu or `server-connect help` for current CLI flags. Keep VPN credentials in a private file or stdin; do not place them in shell command arguments or logs:
+Use `sudo server-connect` for the terminal menu or `server-connect help` for current CLI flags. Privileged state inspection requires root; these read-only commands do not enable Smart Routing. Keep VPN credentials in a private file or stdin; do not place them in shell command arguments or logs:
 
 ```sh
 sudo server-connect --json import --file /private/profile-link.txt

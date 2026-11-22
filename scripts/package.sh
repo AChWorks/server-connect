@@ -43,6 +43,13 @@ else
  [ -z "$(git -C "$ROOT" status --porcelain)" ] || {
   echo 'Release candidate requires an exact clean committed source tree' >&2;exit 1;
  }
+ # The release channel is immutable. Do not silently replace already-built
+ # archive or sidecar bytes with different contents under the same filename.
+ for target_file in "$artifact" "$artifact.release.json"; do
+  [ ! -e "$target_file" ] && [ ! -L "$target_file" ] || {
+   echo 'Versioned release-candidate artifact already exists; use an isolated clean checkout' >&2;exit 1;
+  }
+ done
 fi
 [ ! -e "$artifact.sig" ] && [ ! -L "$artifact.sig" ] || {
  echo 'Refusing to overwrite an already signed QA artifact; use a fresh output checkout' >&2;exit 1;
