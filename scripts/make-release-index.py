@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Create an inspectable release-channel index from BOTH immutable bundles.
 
-LOCAL QA until independently reviewed, licensed and explicitly published by
-Owner. Never uploads, signs, overwrites or contacts a remote host.
+LOCAL QA/index staging until the source-bound candidate passes applicable
+checks and receives explicit Owner publication approval. Never uploads,
+signs, overwrites or contacts a remote host.
 """
 from __future__ import annotations
 
@@ -142,7 +143,7 @@ def main():
         parser.error(str(error))
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(index, sort_keys=True, separators=(',', ':')) + '\n')
-    print('LOCAL INDEX ONLY: both target archives match the same exact source; publication requires Owner review and license clearance')
+    print('UNPUBLISHED INDEX ONLY: both target archives match the exact source; Owner must authorize public release and Mirror sync')
 
 
 if __name__ == '__main__':

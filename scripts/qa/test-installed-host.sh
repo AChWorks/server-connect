@@ -15,8 +15,10 @@ if [[ $(printenv GITHUB_ACTIONS || true) != true || $(printenv CI || true) != tr
   echo 'Only ephemeral GitHub Actions runners may execute this QA harness' >&2
   exit 2
 fi
-if [[ $# != 4 || ! -f $1 || ! -f $2 || ! -f $3 || ! -f $4 ]]; then
-  echo 'Usage: test-installed-host.sh BASE.tar.gz BOOTSTRAP.sh UPDATE.tar.gz BAD-UPDATE.tar.gz' >&2
+if [[ $# != 4 && $# != 5 ]] ||
+   [[ ! -f $1 || ! -f $2 || ! -f $3 || ! -f $4 ]] ||
+   [[ $# == 5 && ! -f ${5:-} ]]; then
+  echo 'Usage: test-installed-host.sh BASE.tar.gz BOOTSTRAP.sh UPDATE.tar.gz BAD-UPDATE.tar.gz [STABLE.tar.gz]' >&2
   exit 2
 fi
 qa_version=${SC_QA_DEBIAN_VERSION:-13}
@@ -30,6 +32,14 @@ bundle=$(realpath -- "$1")
 bootstrap=$(realpath -- "$2")
 update_bundle=$(realpath -- "$3")
 bad_update_bundle=$(realpath -- "$4")
+stable_bundle=''
+if [[ $# == 5 ]]; then
+  stable_bundle=$(realpath -- "$5")
+  [[ -f $stable_bundle.release.json && ! -L $stable_bundle.release.json ]] || {
+    echo 'Versioned stable acceptance requires the exact release sidecar' >&2
+    exit 2
+  }
+fi
 digest=$(sha256sum "$bundle" | cut -d' ' -f1)
 update_digest=$(sha256sum "$update_bundle" | cut -d' ' -f1)
 bad_update_digest=$(sha256sum "$bad_update_bundle" | cut -d' ' -f1)
@@ -597,7 +607,8 @@ from pathlib import Path
 import sys
 out=Path(sys.argv[1]).read_text()
 err=Path(sys.argv[2]).read_text()
-assert "NOT approved for general-host/production use" in out
+assert "This development build is NOT RELEASE-READY for general-host use." in out
+assert "Initial activation is provisional until confirmed from a freshly opened SSH session." in out
 assert "Not completed:" in out
 assert "Core started under native guards" not in out
 assert "Error [" in err and "State:" in err and "Next:" in err
@@ -2301,6 +2312,86 @@ docker exec "$container" /bin/sh -c '
   rmdir /root/qa-release-trust
 '
 echo 'SIGNED_OFFLINE_INSTALL_RETAINED_AUTH_UNINSTALL=PASS (ephemeral QA key; original sidecars and key removed)'
+
+# The optional fifth input allows a normal trusted candidate workflow to
+# continue running its 4-argument QA harness while a new PR is under review.
+# After this workflow change reaches main, both Debian guests additionally
+# exercise the same exact first-Stable candidate with the real installer.
+if [[ -n $stable_bundle ]]; then
+  echo '=== Unpublished versioned Stable candidate: offline acquisition and lifecycle ==='
+  stable_digest=$(sha256sum "$stable_bundle" | cut -d' ' -f1)
+  docker cp "$stable_bundle" "$container:/root/qa-stable.tar.gz"
+  docker cp "$stable_bundle.release.json" "$container:/root/qa-stable.tar.gz.release.json"
+  [[ $(docker exec "$container" sha256sum /root/qa-stable.tar.gz | cut -d' ' -f1) == "$stable_digest" ]]
+  stable_network_before=$(network_digest)
+  # The first pass may verify but must not install anything at all.
+  docker exec "$container" /usr/bin/strace -ff -qq -yy -s 128 \
+    -e trace=%network,%process -o /root/qa-strace/stable-verify \
+    /usr/bin/env -i HOME=/root PATH=/usr/sbin:/usr/bin:/sbin:/bin LC_ALL=C \
+    /bin/sh /root/sc-qa-bootstrap.sh \
+    --archive-file /root/qa-stable.tar.gz --verify-only
+  assert_no_offline_fetch stable-verify
+  docker exec "$container" /bin/sh -c 'test ! -e /opt/server-connect'
+  assert_network_unchanged stable-verify "$stable_network_before"
+  verify_host_services stable-verify
+  stable_check_installed() {
+    docker exec "$container" /bin/sh -c '
+      set -eu
+      test "$(cat /opt/server-connect/.owner)" = AChWorks/server-connect
+      checksums=$(sha256sum /opt/server-connect/current/checksums.sha256 | cut -c 1-16)
+      test "$(readlink /opt/server-connect/current)" = "releases/0.1.0-$checksums"
+      (cd /opt/server-connect/current && sha256sum --strict --quiet -c checksums.sha256)
+      test -f /opt/server-connect/current/integrity.sha256
+      test ! -e /opt/server-connect/current/authentication.json
+      /usr/local/bin/server-connect version --json | python3 -I -S -c "import json,sys;r=json.load(sys.stdin);assert r[\"ok\"] is True and r[\"data\"]=={\"manager\":\"0.1.0\",\"sing_box\":\"1.14.3\"}"
+      /usr/local/bin/server-connect --json status | python3 -I -S -c "import json,sys;r=json.load(sys.stdin);assert r[\"ok\"] is True and r[\"data\"][\"desired\"]==\"direct\" and r[\"data\"][\"observed\"]==\"inactive\""
+      /usr/local/bin/server-connect --json mode-overview | python3 -I -S -c "import json,sys;r=json.load(sys.stdin);d=r[\"data\"];assert r[\"ok\"] is True and d[\"modes\"][2]=={\"id\":\"smart_routing\",\"availability\":\"guarded_operator_confirmation\",\"general_host_activation\":False} and d[\"vpn_path_proof\"]==\"not_run\""
+    '
+  }
+  stable_install() {
+    local label=$1
+    docker exec "$container" /usr/bin/strace -ff -qq -yy -s 128 \
+      -e trace=%network,%process -o "/root/qa-strace/$label" \
+      /usr/bin/env -i HOME=/root PATH=/usr/sbin:/usr/bin:/sbin:/bin LC_ALL=C \
+      /bin/sh /root/sc-qa-bootstrap.sh \
+      --archive-file /root/qa-stable.tar.gz
+    assert_no_offline_fetch "$label"
+    stable_check_installed
+    assert_network_unchanged "$label" "$stable_network_before"
+    verify_host_services "$label"
+  }
+  stable_uninstall() {
+    local label=$1
+    local release
+    release=$(docker exec "$container" readlink -f /opt/server-connect/current)
+    [[ $release =~ ^/opt/server-connect/releases/0\.1\.0-[a-f0-9]{16}$ ]]
+    docker exec "$container" /usr/bin/strace -ff -qq -yy -s 128 \
+      -e trace=%network,%process -o "/root/qa-strace/$label" \
+      /usr/bin/env -i HOME=/root PATH=/usr/sbin:/usr/bin:/sbin:/bin LC_ALL=C \
+      /bin/sh "$release/install.sh" --uninstall
+    assert_no_offline_fetch "$label"
+    verify_clean_uninstall
+    assert_network_unchanged "$label" "$stable_network_before"
+    verify_host_services "$label"
+  }
+  stable_install stable-first-install
+  stable_release=$(docker exec "$container" readlink -f /opt/server-connect/current)
+  docker exec "$container" /usr/bin/strace -ff -qq -yy -s 128 \
+    -e trace=%network,%process -o /root/qa-strace/stable-retained-verify \
+    /usr/bin/env -i HOME=/root PATH=/usr/sbin:/usr/bin:/sbin:/bin LC_ALL=C \
+    /bin/sh "$stable_release/install.sh" --verify-only
+  assert_no_offline_fetch stable-retained-verify
+  stable_uninstall stable-first-uninstall
+  # Also exercise the accepted upgrade path from the old pre-release QA
+  # namespace into a genuine semantic-versioned release without data loss.
+  run_offline first-retry-stable-upgrade-base --offline
+  verify_direct_install
+  stable_install stable-upgrade-from-qa
+  stable_uninstall stable-upgraded-uninstall
+  echo "DEBIAN${qa_version}_STABLE_0_1_0_OFFLINE_INSTALL_UPGRADE_UNINSTALL=PASS"
+else
+  echo 'VERSIONED_STABLE_INSTALLED_QA=NOT_RUN (candidate CI uses existing trusted-base 4-argument workflow)'
+fi
 
 # Destructive fixture tests come LAST: nothing after this block requires the
 # two independent guest-loopback services to remain available. A stopped

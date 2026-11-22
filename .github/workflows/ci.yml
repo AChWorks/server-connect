@@ -289,6 +289,49 @@ jobs:
           # Prove the same package can be built from a detached clean checkout
           # without the ignored build/ directory, and has identical bytes.
           bash scripts/qa/test-package-clean-checkout.sh "$PWD/build/ci/sing-box.tar.gz"
+          # An unpublished Stable candidate must be genuinely versioned, built
+          # from this clean source, and reproducibly accepted for BOTH targets.
+          # No CI output is uploaded as a GitHub Release or production Mirror.
+          scripts/package.sh "$PWD/build/ci/sing-box.tar.gz" debian-12-amd64 --version 0.1.0
+          scripts/package.sh "$PWD/build/ci/sing-box.tar.gz" debian-13-amd64 --version 0.1.0
+          python3 scripts/make-release-index.py --version 0.1.0 \
+            --dist-dir dist --output dist/release-index.json
+          # Immutable channel names must refuse a second build, not silently
+          # overwrite a reviewed artifact with different bytes or source.
+          if scripts/package.sh "$PWD/build/ci/sing-box.tar.gz" debian-12-amd64 --version 0.1.0 \
+            > /dev/null 2> build/ci/stable-immutable-refusal.log; then
+            echo 'Duplicate Stable archive unexpectedly overwritten' >&2
+            exit 1
+          fi
+          grep -Fq 'Versioned release-candidate artifact already exists' \
+            build/ci/stable-immutable-refusal.log
+          python3 - <<'PYSTABLE'
+          import json, pathlib, tarfile, subprocess, hashlib
+          d=pathlib.Path('dist')
+          index=json.loads((d/'release-index.json').read_text())
+          assert index['version']=='0.1.0' and set(index['artifacts'])=={'debian-12-amd64','debian-13-amd64'}
+          for target,item in index['artifacts'].items():
+              archive=d/item['archive']
+              meta=json.loads(pathlib.Path(str(archive)+'.release.json').read_text())
+              assert meta['target']==target and meta['version']=='0.1.0'
+              assert hashlib.sha256(archive.read_bytes()).hexdigest()==item['sha256']==meta['archive_sha256']
+              with tarfile.open(archive,'r:gz') as contents:
+                  manifest=json.load(contents.extractfile('server-connect/manifest.json'))
+                  manager=contents.extractfile('server-connect/bin/server-connect').read()
+              assert manifest['manager']=='0.1.0' and manifest['source_state']=='clean'
+              assert manifest['source_revision']==meta['source_revision']
+              cli=d.parent/'build/ci'/('stable-cli-'+target)
+              cli.write_bytes(manager)
+              cli.chmod(0o700)
+              response=json.loads(subprocess.check_output([str(cli),'version','--json']))
+              assert response['ok'] and response['data']=={'manager':'0.1.0','sing_box':'1.14.3'}
+          print('UNPUBLISHED_VERSIONED_STABLE_ARTIFACT_PAIR=PASS')
+          PYSTABLE
+          for version in 12 13; do
+            archive="$PWD/dist/server-connect-0.1.0-debian${version}-amd64.tar.gz"
+            scripts/bootstrap-online.sh --archive-file "$archive" --verify-only
+          done
+          echo 'STABLE_CANDIDATE_OFFLINE_ACQUISITION_BOTH_TARGETS=PASS (no install/publication)'
           mkdir -p build/ci/http
           cp dist/server-connect-0.1.0-dev-debian13-amd64-local-qa.tar.gz build/ci/http/bundle.tar.gz
           DIGEST=$(sha256sum build/ci/http/bundle.tar.gz | cut -d' ' -f1)

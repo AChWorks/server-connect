@@ -64,18 +64,26 @@ func (p operatorPresenter) menu(m *sc.Manager, advanced bool) {
 	} else {
 		fmt.Fprintln(p.out, "  "+state)
 	}
-	fmt.Fprintln(p.out, "  Smart Routing: "+p.tint("NOT RELEASE-READY for general hosts (native candidate testing)", "1;33"))
+	if strings.Contains(managerVersion, "-dev") {
+		fmt.Fprintln(p.out, "  Smart Routing: "+p.tint("NOT RELEASE-READY for general hosts (development build)", "1;33"))
+	} else {
+		fmt.Fprintln(p.out, "  Smart Routing: independently guarded; initial activation requires fresh SSH confirmation")
+	}
+	smartLabel := "Smart Routing (guarded)"
+	if strings.Contains(managerVersion, "-dev") {
+		smartLabel = "Smart Routing (guarded QA)"
+	}
 	p.section("Connection")
 	if p.width < 66 {
 		fmt.Fprintln(p.out, "  1 Status")
 		fmt.Fprintln(p.out, " 18 Mode Overview")
 		fmt.Fprintln(p.out, "  5 Connect (Proxy Only)")
-		fmt.Fprintln(p.out, " 21 Smart Routing (guarded QA)")
+		fmt.Fprintln(p.out, " 21 "+smartLabel)
 		fmt.Fprintln(p.out, "  7 Disconnect / Return to Direct")
 		fmt.Fprintln(p.out, " 22 Native Guard / Recovery Status")
 	} else {
 		fmt.Fprintln(p.out, "  1 Status         18 Mode Overview")
-		fmt.Fprintln(p.out, "  5 Connect (Proxy Only)       21 Smart Routing (guarded QA)")
+		fmt.Fprintln(p.out, "  5 Connect (Proxy Only)       21 "+smartLabel)
 		fmt.Fprintln(p.out, "  7 Disconnect / Return to Direct   22 Native Guard / Recovery Status")
 	}
 	p.section("Profiles and policy")

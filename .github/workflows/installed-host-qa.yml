@@ -155,6 +155,9 @@ jobs:
             https://github.com/SagerNet/sing-box/releases/download/v1.14.3/sing-box-1.14.3-linux-amd64.tar.gz
           printf '%s\n' 'e2bdf179c15a3652955dc44867e33ca0965c9c9b91b34267dcc5a5d639a5feee  build/installed-qa/sing-box.tar.gz' | sha256sum --check
           scripts/package.sh "$PWD/build/installed-qa/sing-box.tar.gz" "debian-${SC_QA_DEBIAN_VERSION}-amd64"
+          # Keep the original QA upgrade fixtures and add the separately
+          # versioned, unpublished first-Stable artifact for real guest QA.
+          scripts/package.sh "$PWD/build/installed-qa/sing-box.tar.gz" "debian-${SC_QA_DEBIAN_VERSION}-amd64" --version 0.1.0
           bundle="dist/server-connect-0.1.0-dev-debian${SC_QA_DEBIAN_VERSION}-amd64-local-qa.tar.gz"
           scripts/qa/make-update-fixtures.sh "$bundle" build/installed-qa
           test -f "$bundle"
@@ -170,7 +173,8 @@ jobs:
             "dist/server-connect-0.1.0-dev-debian${SC_QA_DEBIAN_VERSION}-amd64-local-qa.tar.gz" \
             scripts/bootstrap-online.sh \
             build/installed-qa/server-connect-hostqa-update-valid.tar.gz \
-            build/installed-qa/server-connect-hostqa-update-invalid-unit.tar.gz
+            build/installed-qa/server-connect-hostqa-update-invalid-unit.tar.gz \
+            "dist/server-connect-0.1.0-debian${SC_QA_DEBIAN_VERSION}-amd64.tar.gz"
 
       # Metadata-only identities for all three successful CI archives.
       # Only the normal base archive may be privately reproduced for authorized

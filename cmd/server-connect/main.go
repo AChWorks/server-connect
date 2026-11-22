@@ -16,12 +16,15 @@ import (
 )
 
 const (
-	managerVersion = "0.1.0-dev"
+	// Manager version is selected by the pinned, clean-source package build.
+	// Source/test builds retain the development identity by default.
 	// Preview and guarded Connect must derive the same default native policy.
 	nativeDefaultTunnelName = "sctun0"
 	nativeDefaultTunnelIPv4 = "172.31.99.1/30"
 	nativeDefaultTunnelIPv6 = "fd73:99::1/64"
 )
+
+var managerVersion = "0.1.0-dev"
 
 type envelope struct {
 	OK    bool      `json:"ok"`
@@ -705,8 +708,11 @@ func menuWithRunner(m *sc.Manager, dispatch func(*sc.Manager, ...string) int) in
 			// This is the same guarded native action as the CLI, not the
 			// isolated historical TUN trial. Host admission, ownership and
 			// independent recovery are validated inside connect-smart.
-			fmt.Println("Guarded native Smart Routing is a QA candidate, NOT approved for general-host/production use.")
-			fmt.Println("This may change host-wide routing. Use only on an authorized disposable host with console recovery.")
+			if strings.Contains(managerVersion, "-dev") {
+				fmt.Println("This development build is NOT RELEASE-READY for general-host use.")
+			}
+			fmt.Println("This changes host-wide routing. Have a working management connection and a console recovery path.")
+			fmt.Println("Initial activation is provisional until confirmed from a freshly opened SSH session.")
 			underlay, ok := operatorPrompt(in, "Current underlay interface (from 'ip route', or cancel): ", false)
 			if !ok {
 				continue

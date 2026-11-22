@@ -215,14 +215,39 @@ write_release_trust() (
    die 'cannot persist authenticated installation receipt'
  fi
 )
+# Version is part of the already checksum-verified immutable payload, never
+# guessed from a directory name or supplied by a caller. Reject path syntax.
+bundle_release_version() {
+ python3 -I -S - "$1/manifest.json" <<'PYVERSION'
+import json,re,sys
+try:
+    with open(sys.argv[1], 'rb') as source:
+        raw=source.read(16385)
+    if not raw or len(raw)>16384: raise ValueError('invalid manifest size')
+    def unique(pairs):
+        result={}
+        for key,value in pairs:
+            if key in result: raise ValueError('duplicate manifest key')
+            result[key]=value
+        return result
+    manifest=json.loads(raw,object_pairs_hook=unique)
+    version=manifest.get('manager')
+    if type(version) is not str or not re.fullmatch(r'[0-9]+\.[0-9]+\.[0-9]+(?:-[A-Za-z0-9][A-Za-z0-9.+-]*)?',version):
+        raise ValueError('invalid manifest release version')
+    print(version)
+except (OSError,ValueError,TypeError,AttributeError) as error:
+    print('invalid bundle release version: '+str(error),file=sys.stderr)
+    sys.exit(1)
+PYVERSION
+}
 # A missing modern manifest is NOT evidence of a legacy release. The old
 # installer used only four payload files, a .owner marker and an ID derived
 # from the manager/core binary digests. Admit exactly that format.
 verify_installed_release() (
  root=$1
  name=$(basename -- "$root") || die 'installed release name unreadable'
- case "$name" in 0.1.0-dev-*) ;; *) die 'invalid installed release name' ;; esac
- suffix=$(printf '%s' "$name" | sed 's/^0.1.0-dev-//')
+ suffix=${name##*-}
+ release_version=${name%-$suffix}
  case "$suffix" in ''|*[!0123456789abcdef]*) die 'invalid installed release digest' ;; esac
  [ "$(printf '%s' "$suffix" | wc -c)" -eq 16 ] ||
   die 'invalid installed release digest length'
@@ -236,8 +261,11 @@ verify_installed_release() (
   full_identity=$(sha256sum "$root/checksums.sha256" | cut -c 1-16) ||
    die 'installed release checksum identity unreadable'
   [ "$full_identity" = "$suffix" ] || die 'installed release full identity changed'
+  manifest_version=$(bundle_release_version "$root") || die 'installed version is not a valid release identity'
+  [ "$release_version" = "$manifest_version" ] || die 'installed release version and path mismatch'
   verify_release_trust "$root"
  else
+  [ "$release_version" = 0.1.0-dev ] || die 'unrecognized historical release version'
   check_root_dir "$root/bin"
   check_root_dir "$root/THIRD-PARTY-LICENSES"
   for path in bin/server-connect bin/sing-box bin/libcronet.so THIRD-PARTY-LICENSES/sing-box-LICENSE; do
@@ -298,7 +326,7 @@ verify_payload() {
  elif [ "$retained_auth" = yes ]; then
   # Only an already managed canonical installed release can reuse its
   # root-private trust store. No incoming bundle can supply an authority key.
-  case "$SOURCE_DIR" in "$PREFIX"/releases/0.1.0-dev-*) ;; *) die 'incoming bundles require an independently supplied publisher key' ;; esac
+  case "$SOURCE_DIR" in "$PREFIX"/releases/*) ;; *) die 'incoming bundles require an independently supplied publisher key' ;; esac
   verify_installed_release "$SOURCE_DIR" || die 'installed source authentication is unavailable'
   [ "$(release_trust_file "$SOURCE_DIR")" = authentication.json ] ||
    die 'installed source is LOCAL QA; select --local-qa explicitly'
@@ -317,7 +345,14 @@ verify_payload() {
  "$SOURCE_DIR/bin/server-connect" installer-check-target --manifest "$SOURCE_DIR/manifest.json" >/dev/null ||
   die 'bundle target does not match this supported host'
  version=$($SOURCE_DIR/bin/server-connect version --json) || die 'candidate manager fails version check'
- echo "$version" | grep -q '"sing_box":"1.14.3"' || die 'manager requires a different core version'
+ candidate_version=$(bundle_release_version "$SOURCE_DIR") || die 'bundle manifest version is not supported'
+ printf '%s\n' "$version" | python3 -I -S -c '
+import json,sys
+try:
+ data=json.load(sys.stdin)
+ assert data["ok"] is True and data["data"]=={"manager":sys.argv[1],"sing_box":"1.14.3"}
+except (ValueError,KeyError,TypeError,AssertionError):sys.exit(1)
+' "$candidate_version" || die 'candidate manager binary and immutable manifest disagree'
  core=$($SOURCE_DIR/bin/sing-box version 2>/dev/null | head -n 1) || die 'candidate sing-box not executable'
  [ "$core" = 'sing-box version 1.14.3' ] || die 'unexpected sing-box core version'
 }
@@ -917,11 +952,14 @@ if original_trust not in ("unsigned", "local-qa") and not re.fullmatch(
     fail("committed original source trust receipt malformed")
 if initial is not None and first_trust != original_trust:
     fail("committed prefix/release original trust claims disagree")
+# Admit the same semver/hash path grammar as the verified release manifest,
+# not a single development version. The surrounding inode, trust, current
+# link, full payload and manager/service checks remain mandatory.
 stage_path=Path(stage)
 if (stage_path.parent!=prefix.parent or not re.fullmatch(
     r"\.server-connect-release\.[A-Za-z0-9]{8}",stage_path.name)
         or not re.fullmatch(r"[0-9]+:[0-9]+",stage_identity)
-        or not re.fullmatch(r"0\.1\.0-dev-[0-9a-f]{16}",release_name)):
+        or not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+(?:-[A-Za-z0-9][A-Za-z0-9.+-]*)?-[0-9a-f]{16}",release_name)):
     fail("first-release receipt identity malformed")
 release_dir=prefix/"releases"
 node(release_dir,"dir")
@@ -1187,7 +1225,7 @@ check_owned() {
   existing_target=$(readlink "$PREFIX/current") ||
    die 'installed release link unreadable'
   case "$existing_target" in
-   releases/0.1.0-dev-*) ;;
+   releases/*) ;;
    *) die 'invalid current release link' ;;
   esac
   # Preserve the old canonical link contract: basename() alone accepts
@@ -1253,7 +1291,7 @@ else
  trust_kind=signed
 fi
 # Bind an interrupted initial install to the same verified source digest.
-release_name="0.1.0-dev-$(sha256sum "$SOURCE_DIR/checksums.sha256" | cut -c 1-16)"
+release_name="$candidate_version-$(sha256sum "$SOURCE_DIR/checksums.sha256" | cut -c 1-16)"
 pending_first=no
 pending_committed=no
 if [ -e "$FIRST_INSTALL_INTENT" ] || [ -L "$FIRST_INSTALL_INTENT" ];then
@@ -1405,7 +1443,7 @@ require_guard_inactive
 # Include the complete canonical checksummed payload in the installed
 # identity, not just the manager and core executables. Two distinct bundles
 # with identical binaries but different units/manifest must not collide.
-release_suffix=${release_name#0.1.0-dev-}
+release_suffix=${release_name##*-}
 case "$release_suffix" in ''|*[!0123456789abcdef]*) die 'candidate binary release digest is invalid' ;; esac
 [ "${#release_suffix}" -eq 16 ] || die 'candidate binary release digest length is invalid'
 release="$PREFIX/releases/$release_name"

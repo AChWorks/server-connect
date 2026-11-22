@@ -52,6 +52,13 @@ func modeOverviewFromStatus(status sc.Status, observationErr error) (modeOvervie
 	} else if status.Desired == "smart" {
 		desired = "smart_routing"
 	}
+	// Development builds are explicitly experimental. A versioned Stable
+	// artifact exposes guarded manual activation on supported hosts, not
+	// automatic blanket admission or proof of a verified selected VPN path.
+	smartAvailability := "candidate_not_field_verified"
+	if !strings.Contains(managerVersion, "-dev") {
+		smartAvailability = "guarded_operator_confirmation"
+	}
 	overview := modeOverview{
 		DesiredMode: desired, ObservedMode: "unknown",
 		ProxyServiceState: "unknown", StatusHealth: "not_verified",
@@ -60,7 +67,7 @@ func modeOverviewFromStatus(status sc.Status, observationErr error) (modeOvervie
 		Modes: []modeAvailability{
 			{ID: "direct", Availability: "implemented", GeneralHostActivation: true},
 			{ID: "proxy_only", Availability: "implemented", GeneralHostActivation: true},
-			{ID: "smart_routing", Availability: "candidate_not_field_verified", GeneralHostActivation: false},
+			{ID: "smart_routing", Availability: smartAvailability, GeneralHostActivation: false},
 		},
 	}
 	if status.Selected != "" {

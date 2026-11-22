@@ -72,6 +72,23 @@ func TestModeOverviewHonestServiceAndTrialStates(t *testing.T) {
 	}
 }
 
+func TestStableModeOverviewIsGuardedButNeverClaimsHostAdmissionOrPathProof(t *testing.T) {
+	previous := managerVersion
+	managerVersion = "0.1.0"
+	defer func() { managerVersion = previous }()
+
+	view, err := modeOverviewFromStatus(sc.Status{Desired: "direct", Observed: "inactive", Health: "not_tested"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if view.Modes[2] != (modeAvailability{ID: "smart_routing", Availability: "guarded_operator_confirmation", GeneralHostActivation: false}) {
+		t.Fatalf("stable mode must distinguish product support from real host and path proof: %+v", view.Modes)
+	}
+	if view.ActiveRouteVerified || view.VPNPathProof != "not_run" || view.HostDirectPathProof != "not_run" || view.ObservedMode != "unknown" {
+		t.Fatalf("stable mode cannot invent runtime evidence: %+v", view)
+	}
+}
+
 func TestModeOverviewNativeObservationNeverClaimsVPNPath(t *testing.T) {
 	for _, tc := range []struct {
 		desired, observed, health string

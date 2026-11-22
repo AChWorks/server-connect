@@ -7,6 +7,7 @@ is touched. Installed Debian12/13 guest tests separately prove real lifecycle.
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import shutil
 from pathlib import Path
@@ -30,6 +31,8 @@ FUNCTIONS = (
     + "\n"
     + extract("verify_release_trust() (\n", "\n)\n")
     + "\n"
+    + extract("bundle_release_version() {\n", "\n}\n")
+    + "\n"
     + extract("write_release_trust() (\n", "\n)\n")
     + "\n"
     + extract("verify_installed_release() (\n", "\n)\n")
@@ -45,7 +48,7 @@ STAGING = extract(
 assert 'verify_release_payload "$stage"' in STAGING
 assert 'install -m 0644 "$SOURCE_DIR/checksums.sha256"' in STAGING
 RELEASE_ASSIGNMENT = [line for line in INSTALLER.splitlines()
-                      if line.startswith('release_name="0.1.0-dev-')]
+                      if line.startswith('release_name="$candidate_version-')]
 assert len(RELEASE_ASSIGNMENT) == 1
 assert 'sha256sum "$SOURCE_DIR/checksums.sha256" | cut -c 1-16' in RELEASE_ASSIGNMENT[0]
 assert 'release_created=yes' in STAGING
@@ -118,6 +121,8 @@ class ReleasePayloadTests(unittest.TestCase):
             path = self.source / name
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(("fixture-for-" + name + "\n").encode())
+        (self.source / "manifest.json").write_text(
+            '{"schema":1,"manager":"0.1.0-dev","target":"debian-13-amd64","fixture":"original"}\n')
         self.checksums()
 
     def installed_pre_auth_release(self, excluded):
@@ -299,7 +304,8 @@ class ReleasePayloadTests(unittest.TestCase):
                   'SOURCE_DIR=$QA_SOURCE\nPREFIX=$QA_PREFIX\n'
                   'STATE=$QA_PREFIX/absent-state\n'
                   'UNIT=$QA_PREFIX/absent-unit\n'
-                  'COMMAND=$QA_PREFIX/absent-command\n' + command)
+                  'COMMAND=$QA_PREFIX/absent-command\n'
+                  'candidate_version=$(bundle_release_version "$SOURCE_DIR")\n' + command)
         result = subprocess.run(["/bin/sh", "-s"], input=script,
                                 text=True, capture_output=True,
                                 env=env, timeout=10)
@@ -314,7 +320,7 @@ class ReleasePayloadTests(unittest.TestCase):
     def publish(self):
         suffix = hashlib.sha256(
             (self.source / "checksums.sha256").read_bytes()).hexdigest()[:16]
-        name = "0.1.0-dev-" + suffix
+        name = json.loads((self.source / "manifest.json").read_text())["manager"] + "-" + suffix
         result = self.shell(
             RELEASE_ASSIGNMENT[0] + '\n'
             + 'release="$PREFIX/releases/$release_name"\n'
@@ -350,6 +356,24 @@ class ReleasePayloadTests(unittest.TestCase):
         (release / ".owner").write_text("AChWorks/server-connect\n")
         return release
 
+    def test_release_version_from_immutable_manifest_and_path_conflict(self):
+        manifest = self.source / "manifest.json"
+        data = json.loads(manifest.read_text())
+        data["manager"] = "0.1.0"
+        manifest.write_text(json.dumps(data, sort_keys=True) + "\n")
+        self.checksums()
+        suffix = hashlib.sha256((self.source / "checksums.sha256").read_bytes()).hexdigest()[:16]
+        versioned = self.prefix / "releases" / ("0.1.0-" + suffix)
+        self.shell('candidate_version=$(bundle_release_version "$SOURCE_DIR")\n' +
+                   RELEASE_ASSIGNMENT[0] + '\n' +
+                   'test "$release_name" = "0.1.0-' + suffix + '"\n')
+        versioned = self.publish()
+        self.assertEqual(versioned.name, "0.1.0-" + suffix)
+        self.installed_audit(versioned)
+        wrong_name = self.prefix / "releases" / ("0.1.1-" + suffix)
+        versioned.rename(wrong_name)
+        self.installed_audit(wrong_name, expected=21)
+
     def test_complete_bundle_retained_and_bit_identical(self):
         release = self.publish()
         self.audit(release)
@@ -380,7 +404,8 @@ class ReleasePayloadTests(unittest.TestCase):
 
     def test_manifest_change_changes_release_name_even_with_same_binaries(self):
         first = self.publish()
-        (self.source / "manifest.json").write_text("distinct manifest, same manager and core\n")
+        (self.source / "manifest.json").write_text(
+            '{"schema":1,"manager":"0.1.0-dev","target":"debian-13-amd64","fixture":"second"}\n')
         self.checksums()
         second = self.publish()
         self.assertNotEqual(first, second)
@@ -914,6 +939,48 @@ class FirstInstallIntentTests(unittest.TestCase):
 
     def run_committed(self, command, exit_expected=0):
         return self.run_first(self.committed_checks+command,exit_expected)
+
+    def test_versioned_stable_first_install_retirement_preserves_exact_owner(self):
+        # The historical QA receipt checker used to hard-code 0.1.0-dev:
+        # its real commit check rejected a freshly installed 0.1.0 despite
+        # valid inode, trust, selected symlink and managed systemd units.
+        old = self.completed_first_fixture()
+        candidate = old.with_name(old.name.replace("0.1.0-dev-", "0.1.0-", 1))
+        old.rename(candidate)
+        current = self.prefix / "current"
+        current.unlink()
+        current.symlink_to("releases/" + candidate.name)
+        receipt = self.state / ".first-release-intent"
+        recorded = receipt.read_text().splitlines(keepends=True)
+        self.assertEqual(len(recorded), 4)
+        recorded[2] = candidate.name + "\n"
+        receipt.write_text("".join(recorded))
+        receipt.chmod(0o600)
+        self.run_committed("first_install_committed_identity\n")
+        self.run_committed("first_install_retire_committed_claims\n")
+        self.assertFalse(receipt.exists())
+        self.assertFalse((self.state / ".first-install-intent").exists())
+        self.assertTrue(candidate.is_dir())
+        self.assertTrue(current.is_symlink())
+
+    def test_versioned_stable_first_install_refuses_swapped_release_claim(self):
+        old = self.completed_first_fixture()
+        candidate = old.with_name(old.name.replace("0.1.0-dev-", "0.1.0-", 1))
+        old.rename(candidate)
+        current = self.prefix / "current"
+        current.unlink()
+        current.symlink_to("releases/" + candidate.name)
+        receipt = self.state / ".first-release-intent"
+        recorded = receipt.read_text().splitlines(keepends=True)
+        self.assertEqual(len(recorded), 4)
+        recorded[2] = candidate.name.replace("0.1.0-", "0.1.1-", 1) + "\n"
+        receipt.write_text("".join(recorded))
+        receipt.chmod(0o600)
+        self.run_committed("first_install_committed_identity\n", exit_expected=1)
+        self.run_committed("first_install_retire_committed_claims\n", exit_expected=21)
+        self.assertTrue(receipt.is_file())
+        self.assertTrue(candidate.is_dir())
+        self.assertTrue(current.is_symlink())
 
     def test_interrupted_two_receipt_retirement_preserves_committed_service(self):
         release=self.completed_first_fixture()
