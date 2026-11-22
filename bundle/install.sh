@@ -441,6 +441,312 @@ SC_FIRST_INSTALL_RENAME
  # exact inode + owner + empty prefix; it never adopts foreign files.
 }
 
+# Inspect the complete root-private first-install transaction before cleanup.
+# This is the only exception to normal *committed* service/receipt preflights.
+FIRST_RELEASE_INTENT=$STATE/.first-release-intent
+first_install_reconcile_transaction() {
+ python3 -I -S - "$SOURCE_DIR" "$PREFIX" "$STATE" /etc/systemd/system "$COMMAND" "$release_name" "$1" <<'PY_FIRST_INSTALL_RECOVER'
+# Embedded in the already-verified root-only installer. Never execute this
+# against arbitrary prefixes or without the private first-install receipt.
+import hashlib
+import os
+from pathlib import Path
+import re
+import stat
+import subprocess
+import sys
+
+source, prefix, state, unitdir, command, release_name, action = sys.argv[1:]
+source, prefix, state, unitdir, command = map(Path, (source, prefix, state, unitdir, command))
+assert action in ("inspect", "recover")
+uid = os.geteuid()
+owned_state = state.lstat()
+if not stat.S_ISDIR(owned_state.st_mode) or owned_state.st_uid != uid or stat.S_IMODE(owned_state.st_mode) != 0o700:
+    raise ValueError("first-install private state directory unsafe")
+initial = state / ".first-install-intent"
+stage_intent = state / ".first-release-intent"
+release = prefix / "releases" / release_name
+names = (
+    "server-connect.service", "server-connect-activation-recover.service",
+    "server-connect-activation-recover.timer", "server-connect-native-tun.service",
+    "server-connect-smart-health.service", "server-connect-smart-health.timer",
+)
+
+def refuse(message):
+    raise ValueError("first-install recovery refused: " + message)
+
+def node(path, kind):
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return None
+    # Symlink mode bits are meaningless on Linux (normally 0777); verify
+    # their exact target separately rather than rejecting our own links.
+    if info.st_uid != uid or (kind != "link" and info.st_mode & 0o022):
+        refuse("unowned or unsafe mode: " + str(path))
+    if kind == "dir" and not stat.S_ISDIR(info.st_mode):
+        refuse("non-directory: " + str(path))
+    if kind == "file" and (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1):
+        refuse("nonregular or linked file: " + str(path))
+    if kind == "link" and not stat.S_ISLNK(info.st_mode):
+        refuse("non-symlink: " + str(path))
+    return info
+
+def entries(path):
+    return sorted(path.iterdir(), key=lambda x:x.name) if path.is_dir() else []
+
+def receipt(path, count):
+    info = node(path,"file")
+    if info is None or stat.S_IMODE(info.st_mode) != 0o600:
+        refuse("missing root-private receipt: " + str(path))
+    lines=path.read_text("ascii").splitlines()
+    if len(lines) != count:
+        refuse("malformed receipt: " + str(path))
+    return lines
+
+def identity(info):
+    return f"{info.st_dev}:{info.st_ino}"
+
+first = receipt(initial,2)
+if not re.fullmatch(r"\.server-connect-initial\.[A-Za-z0-9]{8}",Path(first[0]).name) or Path(first[0]).parent != prefix.parent:
+    refuse("unexpected initial stage location")
+if not re.fullmatch(r"[0-9]+:[0-9]+",first[1]):
+    refuse("invalid initial directory identity")
+
+root_info=node(prefix,"dir")
+if root_info is not None:
+    if identity(root_info) != first[1]:
+        refuse("installed prefix inode swapped")
+    owner=node(prefix/".owner","file")
+    if owner is not None and (prefix/".owner").read_bytes()!=b"AChWorks/server-connect\n":
+        refuse("initial owner differs")
+else:
+    # An interruption before initial-prefix publication or during exact
+    # cleanup. Only the recorded empty initial stage may be adopted.
+    if any((unitdir/name).exists() for name in names) or command.is_symlink():
+        refuse("no prefix but installed service or command exists")
+    staged=Path(first[0])
+    if node(staged,"dir") is not None:
+        if identity(node(staged,"dir")) != first[1]:
+            refuse("abandoned outer stage inode changed")
+        if {p.name for p in entries(staged)} - {".owner"}:
+            refuse("abandoned outer stage has foreign entries")
+        if node(staged/".owner","file") is not None and (staged/".owner").read_bytes()!=b"AChWorks/server-connect\n":
+            refuse("abandoned outer owner changed")
+
+allowed_files = {}
+for line in (source / "checksums.sha256").read_text("ascii").splitlines():
+    if not re.fullmatch(r"[0-9a-f]{64}  [A-Za-z0-9_.\-/]+",line):
+        refuse("invalid verified source file list")
+    digest,name=line.split("  ",1)
+    if name in allowed_files: refuse("duplicated source file")
+    allowed_files[name]=digest
+allowed_files.update({".owner":None,"checksums.sha256":None,
+                      "integrity.sha256":None,"local-qa.sha256":None,
+                      "authentication.json":None})
+allowed_dirs = {"bin","THIRD-PARTY-LICENSES"}
+
+def scan_release(root):
+    if node(root,"dir") is None:
+        return []
+    observed=[]
+    for parent, directory_names, file_names in os.walk(root,topdown=True,followlinks=False):
+        base=Path(parent)
+        relbase=base.relative_to(root)
+        for dirname in directory_names:
+            relative=(relbase / dirname).as_posix()
+            if relative not in allowed_dirs:
+                refuse("foreign release directory: "+relative)
+            node(base / dirname, "dir")
+            observed.append(base / dirname)
+        for filename in file_names:
+            relative=(relbase / filename).as_posix()
+            if relative not in allowed_files:
+                refuse("foreign release file: "+relative)
+            node(base / filename,"file")
+            observed.append(base / filename)
+    return observed
+
+outside=None
+published=None
+if stage_intent.exists() or stage_intent.is_symlink():
+    stage_receipt=receipt(stage_intent,3)
+    outside=Path(stage_receipt[0])
+    if outside.parent != prefix.parent or not re.fullmatch(
+            r"\.server-connect-release\.[A-Za-z0-9]{8}",outside.name):
+        refuse("unexpected release-stage location")
+    if not re.fullmatch(r"[0-9]+:[0-9]+",stage_receipt[1]) or stage_receipt[2] != release_name:
+        refuse("different source release or stage inode")
+    for candidate in (outside,release):
+        info=node(candidate,"dir")
+        if info is not None:
+            if identity(info) != stage_receipt[1]:
+                refuse("release stage inode replaced: "+str(candidate))
+            if published is not None:
+                refuse("two release-stage names present")
+            published=candidate
+            scan_release(candidate)
+elif release.exists() or release.is_symlink():
+    refuse("published release lacks its private inode receipt")
+
+if root_info is not None:
+    expected={"releases",".owner","current","unit.sha256"}
+    expected.update(name+".sha256" for name in names[1:])
+    for item in entries(prefix):
+        if item.name in (".owner","unit.sha256") or item.name.endswith(".sha256") and item.name in expected:
+            node(item,"file")
+        elif item.name=="releases":
+            node(item,"dir")
+            for child in entries(item):
+                if child != release or published != child:
+                    refuse("unexpected release path: "+str(child))
+        elif item.name=="current":
+            node(item,"link")
+            if os.readlink(item) != "releases/"+release_name:
+                refuse("current link points at foreign release")
+        elif re.fullmatch(r"\.current\.[0-9]+",item.name):
+            node(item,"link")
+            if os.readlink(item)!="releases/"+release_name:
+                refuse("foreign candidate link")
+        elif re.fullmatch(r"\.guard-backup\.[A-Za-z0-9]{8}",item.name):
+            node(item,"dir")
+            if entries(item):
+                refuse("unexpected first-install guard backup content")
+        else:
+            refuse("unexpected first-install file: "+str(item))
+    if (prefix/"current").is_symlink() and published != release:
+        refuse("selected release has no owned publication")
+
+if node(command,"link") is not None:
+    if os.readlink(command) != str(prefix / "current/bin/server-connect"):
+        refuse("foreign command link")
+elif command.exists():
+    refuse("foreign command")
+
+# Use the effective systemd identity, including vendor/transient/drop-in
+# units. A similarly named foreign loaded service is never taken over.
+unit_files=[]
+for name in names:
+    target=unitdir/name
+    info=node(target,"file")
+    if info is not None:
+        if hashlib.sha256(target.read_bytes()).digest() != hashlib.sha256((source/name).read_bytes()).digest():
+            refuse("foreign or partially written service unit: "+name)
+        unit_files.append(target)
+    if unitdir == Path("/etc/systemd/system"):
+        info=subprocess.run(("/usr/bin/systemctl","show",name,
+            "-p","LoadState","-p","FragmentPath","-p","DropInPaths",
+            "-p","Transient","-p","ActiveState","-p","UnitFileState"),
+            capture_output=True,text=True,timeout=10,check=True)
+        props=dict(line.split("=",1) for line in info.stdout.splitlines() if "=" in line)
+        if props.get("LoadState") not in ("not-found","loaded") or props.get("Transient") != "no" or props.get("DropInPaths"):
+            refuse("unknown effective systemd identity: "+name)
+        if props.get("LoadState")=="loaded" and props.get("FragmentPath") != str(target):
+            refuse("foreign loaded systemd unit: "+name)
+        if props.get("ActiveState")!="inactive" or props.get("UnitFileState") in ("enabled","enabled-runtime","linked","linked-runtime"):
+            refuse("active or enabled unit must be examined from console: "+name)
+
+if action=="inspect":
+    print("INITIAL_CLAIM_INSPECTION_PASS")
+    sys.exit(0)
+
+# Validate EVERYTHING above before destructive cleanup. These paths were
+# generated under the same exact initial-prefix and staged-release receipts.
+# Re-entering after SIGKILL is idempotent: partial owned inventories remain
+# a subset of the verified paths; unrecognized files abort without deletion.
+for target in unit_files:
+    target.unlink()
+if node(command,"link") is not None:
+    command.unlink()
+if root_info is not None:
+    for item in entries(prefix):
+        if item.name=="current" or item.name.startswith(".current.") or item.name.endswith(".sha256"):
+            item.unlink()
+        if item.name.startswith(".guard-backup."):
+            item.rmdir()
+for candidate in (release,outside):
+    if candidate is None or node(candidate,"dir") is None:
+        continue
+    observed=scan_release(candidate)
+    for path in sorted(observed,key=lambda p:len(p.parts),reverse=True):
+        if path.is_dir(): path.rmdir()
+        else: path.unlink()
+    candidate.rmdir()
+if root_info is not None:
+    releases=prefix/"releases"
+    if node(releases,"dir") is not None: releases.rmdir()
+    if node(prefix/".owner","file") is not None: (prefix/".owner").unlink()
+    prefix.rmdir()
+else:
+    staged=Path(first[0])
+    if node(staged,"dir") is not None:
+        if node(staged/".owner","file") is not None: (staged/".owner").unlink()
+        staged.rmdir()
+# A crash after removing the unit files but before daemon-reload must be
+# restartable while the private initial receipt still exists. Never retire
+# that receipt until the effective unit registry is reconciled as well.
+if unitdir==Path("/etc/systemd/system"):
+    subprocess.run(("/usr/bin/systemctl","daemon-reload"),check=True,timeout=15)
+if stage_intent.exists(): stage_intent.unlink()
+initial.unlink()
+print("FIRST_INSTALL_EXACT_RECOVERY_PASS")
+PY_FIRST_INSTALL_RECOVER
+}
+first_install_stage_receipt() {
+ [ ! -e "$FIRST_RELEASE_INTENT" ] && [ ! -L "$FIRST_RELEASE_INTENT" ] ||
+  die 'unreconciled first-release stage claim'
+ first_release_inode=$(stat -c '%d:%i' "$stage") || die 'cannot identify first-release stage'
+ first_release_temp=$(mktemp "$STATE/.first-release-intent.XXXXXXXX") ||
+  die 'cannot create private first-release receipt'
+ printf '%s\n%s\n%s\n' "$stage" "$first_release_inode" "$release_name" > "$first_release_temp" ||
+  die 'cannot persist first-release identity'
+ chmod 0600 "$first_release_temp" || die 'cannot protect first-release identity'
+ first_install_noreplace "$first_release_temp" "$FIRST_RELEASE_INTENT" ||
+  die 'cannot atomically publish first-release receipt'
+ python3 -I -S - "$FIRST_RELEASE_INTENT" "$STATE" "$stage" <<'PY_FIRST_RELEASE_SYNC'
+import os,sys
+for path in sys.argv[1:]:
+    fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW)
+    try: os.fsync(fd)
+    finally: os.close(fd)
+PY_FIRST_RELEASE_SYNC
+}
+
+# Fresh service files are created completely before an atomic, no-replace
+# publication. A SIGKILL during their copy cannot expose a partial final
+# unit that an interrupted first-install recovery would have to adopt.
+first_install_atomic_unit() {
+ python3 -I -S - "$1" "$2" <<'PY_INITIAL_UNIT'
+import ctypes,os,sys,tempfile
+source,target=sys.argv[1:]
+parent=os.path.dirname(target)
+fd,tmp=tempfile.mkstemp(prefix=".server-connect-initial.",dir=parent)
+try:
+    with open(source,"rb") as incoming:
+        while True:
+            piece=incoming.read(65536)
+            if not piece: break
+            os.write(fd,piece)
+    os.fchmod(fd,0o644)
+    os.fsync(fd)
+    os.close(fd)
+    fd=-1
+    libc=ctypes.CDLL(None,use_errno=True)
+    renameat2=getattr(libc,"renameat2",None)
+    if renameat2 is None: raise OSError("atomic unit publication unavailable")
+    renameat2.argtypes=[ctypes.c_int,ctypes.c_char_p,ctypes.c_int,ctypes.c_char_p,ctypes.c_uint]
+    if renameat2(-100,os.fsencode(tmp),-100,os.fsencode(target),1)!=0:
+        code=ctypes.get_errno()
+        raise OSError(code,os.strerror(code),target)
+    d=os.open(parent,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+    try: os.fsync(d)
+    finally: os.close(d)
+finally:
+    if fd>=0: os.close(fd)
+    if os.path.exists(tmp): os.unlink(tmp)
+PY_INITIAL_UNIT
+}
+
 # Inspect the *effective* systemd identity before ANY stop/disable/enable or
 # replacement. No local unit path does not mean there is no vendor/transient
 # unit of the same name in another directory.
@@ -662,9 +968,18 @@ require_root
 check_source_ancestry
 check_platform
 verify_payload
-check_owned
-check_service_owner
-check_guard_units
+# Bind an interrupted initial install to the same verified source digest.
+release_name="0.1.0-dev-$(sha256sum "$SOURCE_DIR/checksums.sha256" | cut -c 1-16)"
+pending_first=no
+if [ "$ACTION" = --offline ] && [ -e "$FIRST_INSTALL_INTENT" ];then
+ first_install_reconcile_transaction inspect ||
+  die 'unrecognized interrupted initial installation; preserve for inspection'
+ pending_first=yes
+else
+ check_owned
+ check_service_owner
+ check_guard_units
+fi
 
 if [ "$ACTION" = --verify-only ]; then say 'bundle integrity, selected trust policy and owned-resource preflight PASS'; exit 0;fi
 
@@ -681,8 +996,13 @@ chmod 0600 "$STATE/.lock"
 flock -w 30 -x 9 || die 'another Server Connect operation holds the lifecycle lock'
 "$SOURCE_DIR/bin/server-connect" installer-check-guard-clear >/dev/null ||
  die 'pending, uncertain or invalid activation journal; refuse installer mutation'
+if [ "$pending_first" = yes ];then
+ first_install_reconcile_transaction recover ||
+  die 'interrupted initial installation cannot be reconciled safely'
+fi
 check_owned
 check_service_owner
+check_guard_units
 if [ "$unit_identity" = owned ]; then
  "$SOURCE_DIR/bin/server-connect" installer-check-service >/dev/null ||
   die 'effective installed systemd unit provenance conflict'
@@ -764,7 +1084,6 @@ require_guard_inactive
 # Include the complete canonical checksummed payload in the installed
 # identity, not just the manager and core executables. Two distinct bundles
 # with identical binaries but different units/manifest must not collide.
-release_name="0.1.0-dev-$(sha256sum "$SOURCE_DIR/checksums.sha256" | cut -c 1-16)"
 release_suffix=${release_name#0.1.0-dev-}
 case "$release_suffix" in ''|*[!0123456789abcdef]*) die 'candidate binary release digest is invalid' ;; esac
 [ "${#release_suffix}" -eq 16 ] || die 'candidate binary release digest length is invalid'
@@ -799,6 +1118,15 @@ rollback_candidate() {
  set +e
  failed=no
  say 'candidate failed; attempting owned lifecycle rollback'
+ if [ "$prefix_created" = yes ] && [ -e "$FIRST_INSTALL_INTENT" ];then
+  if first_install_reconcile_transaction recover;then
+   failed=no
+  else
+   failed=yes
+   say 'RECOVERY_REQUIRED: first-install exact ownership cannot be reconciled; retain evidence'
+  fi
+  return
+ fi
  if [ "$rollback_needed" = yes ];then
   systemctl stop server-connect.service || { say 'RECOVERY_REQUIRED: owned unit stop failed';failed=yes; }
   if [ -n "$previous" ];then
@@ -954,7 +1282,15 @@ if [ -e "$release" ] || [ -L "$release" ];then
  # its original receipt and exact checksummed payload must remain intact.
  # verify_installed_release above already checked that identity.
 else
- stage=$(mktemp -d "$PREFIX/releases/.stage.XXXXXXXX") || die 'cannot stage release'
+ if [ "$prefix_created" = yes ];then
+  # Interrupted copies stay outside the already published prefix, but are
+  # owned by a private exact dev:inode receipt before any payload is copied.
+  stage=$(mktemp -d /opt/.server-connect-release.XXXXXXXX) ||
+   die 'cannot create first-release stage'
+  first_install_stage_receipt
+ else
+  stage=$(mktemp -d "$PREFIX/releases/.stage.XXXXXXXX") || die 'cannot stage release'
+ fi
  install -d -m 0755 "$stage/bin" "$stage/THIRD-PARTY-LICENSES"
  for path in $(release_payload_files "$SOURCE_DIR"); do
   mode=0644
@@ -1041,10 +1377,22 @@ if [ ! -e "$COMMAND" ] && [ ! -L "$COMMAND" ];then
  ln -s "$PREFIX/current/bin/server-connect" "$COMMAND" || die 'owned command link failed'
  command_created=yes
 fi
-install -m 0644 "$SOURCE_DIR/server-connect.service" "$UNIT" || die 'owned unit installation failed'
+if [ "$prefix_created" = yes ];then
+ first_install_atomic_unit "$SOURCE_DIR/server-connect.service" "$UNIT" ||
+  die 'atomic first service publication failed'
+else
+ install -m 0644 "$SOURCE_DIR/server-connect.service" "$UNIT" ||
+  die 'owned unit installation failed'
+fi
 sha256sum "$UNIT" | cut -d' ' -f1 > "$PREFIX/unit.sha256" || die 'owned unit digest write failed'
 for name in server-connect-activation-recover.service server-connect-activation-recover.timer server-connect-native-tun.service server-connect-smart-health.service server-connect-smart-health.timer;do
- install -m 0644 "$SOURCE_DIR/$name" "/etc/systemd/system/$name" || die 'managed unit installation failed'
+ if [ "$prefix_created" = yes ];then
+  first_install_atomic_unit "$SOURCE_DIR/$name" "/etc/systemd/system/$name" ||
+   die 'atomic first supplemental unit publication failed'
+ else
+  install -m 0644 "$SOURCE_DIR/$name" "/etc/systemd/system/$name" ||
+   die 'managed unit installation failed'
+ fi
  sha256sum "/etc/systemd/system/$name" | cut -d' ' -f1 > "$PREFIX/$name.sha256" ||
   die 'managed unit digest write failed'
  chmod 0644 "$PREFIX/$name.sha256" || die 'managed unit digest mode failed'
@@ -1076,7 +1424,11 @@ fi
 if [ "$prefix_created" = yes ];then
  first_install_read_intent && [ "$(stat -c '%d:%i' "$PREFIX")" = "$first_inode" ] ||
   die 'completed initial installation lost its ownership claim'
+ # Retire the initial claim first so a crash here cannot convert a committed,
+ # valid installed service into an apparently uncommitted transaction.
+ operation_done=yes
  rm -f -- "$FIRST_INSTALL_INTENT" || die 'cannot retire completed first-install intent'
+ rm -f -- "$FIRST_RELEASE_INTENT" || die 'cannot retire completed first-release receipt'
 fi
 operation_done=yes
 rollback_needed=no

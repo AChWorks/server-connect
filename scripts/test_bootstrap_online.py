@@ -223,7 +223,7 @@ class BootstrapBeforeAPTTests(unittest.TestCase):
         )
 
     def attempt(self, source_url, *, arch="x86_64", os_version="13",
-                local_qa="no", source_kind="", target=""):
+                local_qa="no", source_kind="", target="", python_absent=False):
         with tempfile.TemporaryDirectory(prefix="sc-early-apt-") as tmp:
             marker = Path(tmp) / "APT_WOULD_HAVE_RUN"
             # The native tools were verified immediately before this block.
@@ -237,7 +237,9 @@ class BootstrapBeforeAPTTests(unittest.TestCase):
                 f'local_qa={shlex.quote(local_qa)}\n'
                 f'source_kind={shlex.quote(source_kind)}\n'
                 f'target={shlex.quote(target)}\n'
-                'bootstrap_read_os_version() { case "$SC_QA_OS" in 12|13) echo "$SC_QA_OS" ;; *) return 1 ;; esac; }\n'
+                + ('command() { if [ "$1" = -v ] && [ "$2" = python3 ]; then return 1; fi; type "$2" >/dev/null 2>&1; }\n'
+                   if python_absent else '')
+                + 'bootstrap_read_os_version() { case "$SC_QA_OS" in 12|13) echo "$SC_QA_OS" ;; *) return 1 ;; esac; }\n'
                 + self.preflight + "\n"
                 + self.admission + "\n"
                 + f'printf APT_WOULD_RUN > {shlex.quote(str(marker))}\n'
@@ -278,6 +280,31 @@ class BootstrapBeforeAPTTests(unittest.TestCase):
                                                source_kind=kind)
                     self.assertEqual(result.returncode, 0, result.stderr)
                     self.assertTrue(apt, "valid supported host blocked before optional APT")
+
+    def test_python_absent_oversize_urls_rejected_before_any_apt(self):
+        # Distinguish URL and hostname limits from downstream DNS/curl errors:
+        # the same valid short authority must still be admitted for both OSes.
+        for version in ("12", "13"):
+            valid = "https://mirror.example/server-connect/release-index.json"
+            allowed, apt = self.attempt(valid, os_version=version, source_kind="mirror", python_absent=True)
+            self.assertEqual(allowed.returncode, 0, allowed.stderr)
+            self.assertTrue(apt)
+            for invalid in (
+                "https://mirror.example/" + "a" * 4075,
+                "https://" + "a" * 254 + ".example/bundle",
+                "https://mirror.example/" + "a" * 4096 + "#ignored",
+            ):
+                with self.subTest(version=version, size=len(invalid)):
+                    result, apt = self.attempt(invalid, os_version=version,
+                                               source_kind="mirror", python_absent=True)
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertFalse(apt, "rejected URL reached APT without Python")
+        # UTF-8 in the pathname also violates the Python parser's ASCII-only
+        # contract and must be refused before installing missing prerequisites.
+        result, apt = self.attempt("https://mirror.example/" + chr(233),
+                                   source_kind="mirror", python_absent=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(apt)
 
     def test_target_selection_must_match_host_before_apt(self):
         result, apt = self.attempt(
@@ -853,6 +880,15 @@ class SignedReleaseTest(unittest.TestCase):
                         self.send_response(302)
                         self.send_header("Location", "https://outside.invalid/foreign-bootstrap")
                         self.end_headers()
+                        return
+                    if response.startswith("redirect-complete-"):
+                        status = int(response.rsplit("-", 1)[-1])
+                        body = self.server.bootstrap_response_body
+                        self.send_response(status)
+                        self.send_header("Location", "https://outside.invalid/foreign-bootstrap")
+                        self.send_header("Content-Length", str(len(body)))
+                        self.end_headers()
+                        self.wfile.write(body)
                         return
                     if response == "truncated":
                         self.send_response(200)
@@ -1787,6 +1823,20 @@ os.execv(sys.argv[1], sys.argv[1:])
                     self.assertNotEqual(rejected.returncode, 0)
                     self.assertFalse(executed.exists())
                     self.assertEqual(server.requests, [])
+                    # A redirect with an executable and *complete* shell
+                    # body must be refused even if curl exits successfully.
+                    if channel == "mirror":
+                        server.bootstrap_response_body = source.read_bytes()
+                        for code in (302, 307, 308):
+                            server.requests.clear()
+                            server.bootstrap_response = f"redirect-complete-{code}"
+                            rejected = self.documented_entrypoint(channel)
+                            self.assertNotEqual(rejected.returncode, 0)
+                            self.assertIn(f"HTTP status {code} refused", rejected.stderr)
+                            self.assertFalse(executed.exists(), "3xx body executed")
+                            self.assertEqual([p for p, _ in server.requests],
+                                             [f"/{self.case.name}/bootstrap-online.sh"])
+                            self.assertFalse(list(self.case.glob(".server-connect-entry.*")))
                     server.bootstrap_response = "truncated"
                     rejected = self.documented_entrypoint(channel)
                     self.assertNotEqual(rejected.returncode, 0)

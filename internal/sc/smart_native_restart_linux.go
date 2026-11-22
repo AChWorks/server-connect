@@ -148,6 +148,34 @@ func (m *Manager) requestNativeCoreReplacement(id string) error {
 	})
 }
 
+// A successful new-SSH confirmation is a receipt update, not a new Core,
+// boot, operation or policy generation. No other change may be adopted.
+func nativeRecoveryClaimCompatible(claim, current NativeSession) bool {
+	return current == claim || nativeConfirmationOnlyUpgrade(claim, current)
+}
+
+// All bounded recovery wait/backoff publications share the same atomic
+// generation check while the product journal lock is held.
+func (m *Manager) publishNativeRecoveryWait(previous, next NativeHealthState, claim NativeSession) error {
+	return m.withLock(func() error {
+		latest, err := m.readNativeHealth()
+		if err != nil {
+			return err
+		}
+		if latest != previous {
+			return Fault("recovery_superseded", "Core recovery Health generation changed")
+		}
+		current, err := m.readNativeSession()
+		if err != nil {
+			return err
+		}
+		if !nativeRecoveryClaimCompatible(claim, current) {
+			return Fault("guard_pending", "Core recovery session generation changed unexpectedly")
+		}
+		return m.saveNativeHealth(next)
+	})
+}
+
 // Hold the shared transition lock across Core replacement observation,
 // barrier release and selected-path publication. A concurrent operator
 // Disconnect must not interleave stop-hook cleanup with nft removal.
@@ -164,7 +192,10 @@ func (m *Manager) nativeRestartWaitOrVerify(s NativeHealthState, claim NativeSes
 func (m *Manager) nativeRestartWaitOrVerifyUnlocked(s NativeHealthState, claim NativeSession, targets []nativeProbeTarget, now int64) (NativeHealthState, error) {
 	if err := m.withLock(func() error {
 		current, e := m.readNativeSession()
-		if e != nil || current != claim {
+		if e != nil {
+			return e
+		}
+		if !nativeRecoveryClaimCompatible(claim, current) {
 			return Fault("guard_pending", "Core restart session changed before guarded release")
 		}
 		state, e := m.load()
@@ -172,8 +203,11 @@ func (m *Manager) nativeRestartWaitOrVerifyUnlocked(s NativeHealthState, claim N
 			return Fault("guard_pending", "Core restart is no longer authorized to be routed")
 		}
 		latest, e := m.readNativeHealth()
-		if e != nil || latest != s {
-			return Fault("guard_pending", "Core restart health generation changed")
+		if e != nil {
+			return e
+		}
+		if latest != s {
+			return Fault("recovery_superseded", "Core restart Health generation changed")
 		}
 		return nil
 	}); err != nil {
@@ -199,17 +233,7 @@ func (m *Manager) nativeRestartWaitOrVerifyUnlocked(s NativeHealthState, claim N
 		previous := s
 		s.HeartbeatMS, s.Rounds = now, s.Rounds+1
 		s.RestartResult = "waiting_for_fresh_core"
-		err = m.withLock(func() error {
-			latest, e := m.readNativeHealth()
-			if e != nil || latest != previous {
-				return Fault("guard_pending", "native Core retry belongs to a superseded health operation")
-			}
-			current, e := m.readNativeSession()
-			if e != nil || current != claim {
-				return Fault("guard_pending", "native Core retry ownership changed during wait")
-			}
-			return m.saveNativeHealth(s)
-		})
+		err = m.publishNativeRecoveryWait(previous, s, claim)
 		return s, err
 	}
 	if err := m.nativeReadyKernelPolicy(claim, s.ProbeScope); err != nil {
@@ -217,17 +241,7 @@ func (m *Manager) nativeRestartWaitOrVerifyUnlocked(s NativeHealthState, claim N
 		previous := s
 		s.HeartbeatMS, s.Rounds = now, s.Rounds+1
 		s.RestartResult = "waiting_for_kernel_policy"
-		err = m.withLock(func() error {
-			latest, e := m.readNativeHealth()
-			if e != nil || latest != previous {
-				return Fault("guard_pending", "Core policy readiness belongs to a superseded restart")
-			}
-			current, e := m.readNativeSession()
-			if e != nil || current != claim {
-				return Fault("guard_pending", "Core policy receipt changed during restart")
-			}
-			return m.saveNativeHealth(s)
-		})
+		err = m.publishNativeRecoveryWait(previous, s, claim)
 		return s, err
 	}
 	// The new child has genuine kernel interception. Keep the lifetime
@@ -253,9 +267,14 @@ func (m *Manager) nativeRestartWaitOrVerifyUnlocked(s NativeHealthState, claim N
 		if e != nil {
 			return e
 		}
-		if latest != s || latest.OperationID != current.HealthOperationID ||
-			current.StartupGuardPhase != "armed" || current.StartupGuardHandle != claim.StartupGuardHandle {
-			return Fault("guard_pending", "native selected recovery result belongs to old operation")
+		if latest != s || latest.OperationID != current.HealthOperationID {
+			return Fault("recovery_superseded", "native selected recovery result belongs to old operation")
+		}
+		if !nativeRecoveryClaimCompatible(claim, current) {
+			return Fault("guard_pending", "native selected recovery session changed unexpectedly")
+		}
+		if current.StartupGuardPhase != "armed" || current.StartupGuardHandle != claim.StartupGuardHandle {
+			return Fault("guard_pending", "native selected recovery startup barrier changed")
 		}
 		if e := nativeHealthGuardRoles(); e != nil {
 			return e
@@ -327,6 +346,11 @@ func (m *Manager) advanceNativeCoreRecovery(s NativeHealthState, claim NativeSes
 	if s.RestartInFlight {
 		next, err := m.nativeRestartWaitOrVerify(s, claim, targets, now)
 		if err != nil {
+			if ErrorCode(err) == "recovery_superseded" {
+				// Another Health executor or accepted acknowledgement won;
+				// do not turn its progress into a spurious Direct/off.
+				return m.readNativeHealth()
+			}
 			return m.failNativeCoreRecovery(s, "core_restart_guard_or_policy_unverified")
 		}
 		return nativeFinishCoreReplacementRound(next, m.failNativeCoreRecovery)
@@ -345,17 +369,10 @@ func (m *Manager) advanceNativeCoreRecovery(s NativeHealthState, claim NativeSes
 		}
 		previous := s
 		s.HeartbeatMS, s.Rounds = now, s.Rounds+1
-		if err := m.withLock(func() error {
-			latest, e := m.readNativeHealth()
-			if e != nil || latest != previous {
-				return Fault("guard_pending", "recovery backoff superseded")
+		if err := m.publishNativeRecoveryWait(previous, s, claim); err != nil {
+			if ErrorCode(err) == "recovery_superseded" {
+				return m.readNativeHealth()
 			}
-			current, e := m.readNativeSession()
-			if e != nil || current != claim {
-				return Fault("guard_pending", "recovery backoff ownership changed")
-			}
-			return m.saveNativeHealth(s)
-		}); err != nil {
 			return s, err
 		}
 		return s, nil

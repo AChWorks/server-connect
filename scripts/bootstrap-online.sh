@@ -125,7 +125,12 @@ bootstrap_read_os_version() (
 # again after missing prerequisites are acquired. This rejects ambiguous
 # authorities rather than modifying OS packages to inspect a bad source.
 bootstrap_preflight_source_url() {
+ # Byte-oriented admission, including minimal Debian without Python. The
+ # post-APT Python parser uses the same <=4096 URL and <=253 hostname bounds.
+ LC_ALL=C
+ export LC_ALL
  source_url=$1
+ [ "${#source_url}" -le 4096 ] || return 1
  case "$source_url" in
   *[![:print:]]*|*' '*|*'\'*|*'#'*) return 1 ;;
   https://*) source_scheme=https ;;
@@ -155,6 +160,7 @@ bootstrap_preflight_source_url() {
    case "$source_host" in ''|*[!abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.-]*) return 1 ;; esac
    ;;
  esac
+ [ "${#source_host}" -le 253 ] || return 1
  case "$source_suffix" in
   '') ;;
   :*)

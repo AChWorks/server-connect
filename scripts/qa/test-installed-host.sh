@@ -314,7 +314,7 @@ run_offline() {
   # First install exercises the no-key Offline contract. Retained explicit
   # LOCAL QA updates preserve the historical receipt regression path.
   # This script is Bash-executed, but the trusted workflow also runs sh -n.
-  if [[ $label == first-install ]]; then
+  if [[ $label == first-install || $label == first-retry-* ]]; then
     set --
   else
     set -- --local-qa
@@ -1712,6 +1712,94 @@ verify_clean_uninstall
 assert_network_unchanged uninstall "$offline_before"
 verify_host_services uninstall
 
+# Test actual first-install SIGKILL after a partial payload copy and after
+# atomic release publication, with a real retry on each disconnected Debian
+# systemd guest. The wrappers are guest-local; never change the CI runner.
+for kill_stage in payload-copy release-publication; do
+  echo "=== First-install SIGKILL test: $kill_stage ==="
+  docker exec "$container" /bin/sh -s "$kill_stage" <<'QA_KILL_SETUP'
+set -eu
+stage=$1
+test ! -e /opt/server-connect && test ! -L /opt/server-connect
+test ! -e /var/lib/server-connect/.first-install-intent
+test ! -e /var/lib/server-connect/.first-release-intent
+if [ "$stage" = payload-copy ]; then
+  test ! -e /usr/bin/install.scqa-held
+  mv /usr/bin/install /usr/bin/install.scqa-held
+  cat > /usr/bin/install <<'QA_KILL_INSTALL'
+#!/bin/sh
+/usr/bin/install.scqa-held "$@" || exit $?
+case " $* " in
+ *" /opt/.server-connect-release."*"/bin/server-connect "*)
+  : >/root/scqa-copy-sigkill-witness
+  kill -KILL "$PPID"
+  exit 137 ;;
+esac
+QA_KILL_INSTALL
+  chmod 0755 /usr/bin/install
+else
+  test ! -e /usr/bin/mv.scqa-held
+  /usr/bin/mv /usr/bin/mv /usr/bin/mv.scqa-held
+  cat > /usr/bin/mv <<'QA_KILL_MV'
+#!/bin/sh
+/usr/bin/mv.scqa-held "$@" || exit $?
+case " $* " in
+ *"/opt/server-connect/releases/0.1.0-dev-"*)
+  : >/root/scqa-release-sigkill-witness
+  kill -KILL "$PPID"
+  exit 137 ;;
+esac
+QA_KILL_MV
+  chmod 0755 /usr/bin/mv
+fi
+QA_KILL_SETUP
+  if docker exec "$container" /usr/bin/env -i HOME=/root     PATH=/usr/sbin:/usr/bin:/sbin:/bin LC_ALL=C     /bin/sh /root/server-connect/install.sh --offline     >"$scratch/first-kill-$kill_stage.stdout" 2>"$scratch/first-kill-$kill_stage.stderr"; then
+    echo "Installer incorrectly survived $kill_stage SIGKILL" >&2
+    exit 1
+  fi
+  docker exec "$container" /bin/sh -s "$kill_stage" <<'QA_KILL_RESTORE'
+set -eu
+stage=$1
+if [ "$stage" = payload-copy ]; then
+  test -f /root/scqa-copy-sigkill-witness
+  /usr/bin/mv /usr/bin/install.scqa-held /usr/bin/install
+  rm /root/scqa-copy-sigkill-witness
+else
+  test -f /root/scqa-release-sigkill-witness
+  /usr/bin/mv.scqa-held /usr/bin/mv.scqa-held /usr/bin/mv
+  rm /root/scqa-release-sigkill-witness
+fi
+test -f /var/lib/server-connect/.first-install-intent
+test -f /var/lib/server-connect/.first-release-intent
+test "$(stat -c %a /var/lib/server-connect/.first-install-intent)" = 600
+test "$(stat -c %a /var/lib/server-connect/.first-release-intent)" = 600
+test "$(systemctl show server-connect.service -p LoadState --value)" = not-found
+test ! -e /usr/local/bin/server-connect
+if [ "$stage" = payload-copy ]; then
+  test -n "$(find /opt -maxdepth 1 -type d -name '.server-connect-release.*' -print -quit)"
+else
+  test -n "$(find /opt/server-connect/releases -mindepth 1 -maxdepth 1 -type d -name '0.1.0-dev-*' -print -quit)"
+fi
+echo "ACTUAL_INITIAL_SIGKILL_$stage=PASS (original identity and no service)"
+QA_KILL_RESTORE
+  assert_network_unchanged "first-kill-$kill_stage" "$offline_before"
+  verify_host_services "first-kill-$kill_stage"
+  run_offline "first-retry-$kill_stage" --offline
+  verify_direct_install
+  docker exec "$container" /bin/sh -c '
+    set -eu
+    test ! -e /var/lib/server-connect/.first-install-intent
+    test ! -e /var/lib/server-connect/.first-release-intent
+    test -z "$(find /opt -maxdepth 1 -name ".server-connect-release.*" -print)"
+  '
+  assert_network_unchanged "first-retry-$kill_stage" "$offline_before"
+  verify_host_services "first-retry-$kill_stage"
+  run_offline "first-retry-$kill_stage-uninstall" --uninstall
+  verify_clean_uninstall
+  assert_network_unchanged "first-retry-$kill_stage-uninstall" "$offline_before"
+  verify_host_services "first-retry-$kill_stage-uninstall"
+done
+echo 'INITIAL_INSTALL_REAL_SIGKILL_PAYLOAD_AND_RELEASE_RECOVERY=PASS (Debian 12/13, Direct, SSH/HTTP, zero acquisition)'
 echo 'DISCONNECTED_OFFLINE_CYCLE=PASS'
 if [[ $qa_version == 13 ]]; then
 echo 'LIMITATION: Proxy Only WordPress/PHP-FPM used guest loopback with QA-only WP_PROXY_*; transparent TUN WordPress used no application proxy and synthetic egress; physical host/foreign field acceptance is NOT_RUN'
