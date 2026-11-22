@@ -952,11 +952,14 @@ if original_trust not in ("unsigned", "local-qa") and not re.fullmatch(
     fail("committed original source trust receipt malformed")
 if initial is not None and first_trust != original_trust:
     fail("committed prefix/release original trust claims disagree")
+# Admit the same semver/hash path grammar as the verified release manifest,
+# not a single development version. The surrounding inode, trust, current
+# link, full payload and manager/service checks remain mandatory.
 stage_path=Path(stage)
 if (stage_path.parent!=prefix.parent or not re.fullmatch(
     r"\.server-connect-release\.[A-Za-z0-9]{8}",stage_path.name)
         or not re.fullmatch(r"[0-9]+:[0-9]+",stage_identity)
-        or not re.fullmatch(r"0\.1\.0-dev-[0-9a-f]{16}",release_name)):
+        or not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+(?:-[A-Za-z0-9][A-Za-z0-9.+-]*)?-[0-9a-f]{16}",release_name)):
     fail("first-release receipt identity malformed")
 release_dir=prefix/"releases"
 node(release_dir,"dir")
