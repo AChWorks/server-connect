@@ -139,12 +139,16 @@ class PackageArgumentTests(unittest.TestCase):
         for version in ("0.1.0", "0.1.1-rc.1"):
             with self.subTest(version=version):
                 result = self.invoke("debian-12-amd64", "--version", version)
-                # Clean source is required before any expensive Core read; on
-                # a working branch this may fail earlier for dirty source.
+                # The parser must accept clean-semver syntax and reach a safe
+                # preflight. A normal checkout can be dirty, a clean CI run
+                # may already have an immutable same-name artifact, and a
+                # separate fixture intentionally has an invalid pinned Core.
                 self.assertEqual(result.returncode, 1, result.stderr)
                 self.assertTrue(
                     "Pinned upstream core archive digest mismatch" in result.stderr
-                    or "Release candidate requires an exact clean committed source tree" in result.stderr)
+                    or "Release candidate requires an exact clean committed source tree" in result.stderr
+                    or "Versioned release-candidate artifact already exists" in result.stderr,
+                    result.stderr)
         for version in ("../stable", "v0.1.0", "0.1.0/../../x", "0.1.0-", "0.1.0+" + "z"*100):
             with self.subTest(rejected=version):
                 result = self.invoke("debian-13-amd64", "--version", version)
