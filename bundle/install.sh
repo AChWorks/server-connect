@@ -21,6 +21,7 @@ ACTION=${1:---offline}
 [ "$#" -eq 0 ] || shift
 local_qa=no
 retained_auth=no
+unsigned_release=no
 publisher_key=''
 metadata_file=''
 signature_file=''
@@ -113,12 +114,13 @@ verify_release_payload() (
  check_root_dir "$root/THIRD-PARTY-LICENSES"
 
  check_root_file "$root/checksums.sha256"
- # New archive inputs always have a complete signed-aware package layout.
+ # New archive inputs always have a complete source-verified package layout.
  # An installed 12/13/14/15-entry release can be verified under its old
  # immutable manifest; incoming packages must contain both PSL materials.
  if [ "$prior_installed" = no ]; then
-  [ -f "$root/release-auth.py" ] && [ ! -L "$root/release-auth.py" ] ||
-   die 'incoming release must contain publisher authentication helper'
+  # Publisher verification is optional for a new official, mirror or
+  # offline bundle; source trust is the selected HTTPS host/uploaded source.
+  # A previous signed QA bundle may retain its helper and signed receipt.
   check_root_file "$root/LICENSE" ||
    die 'incoming release must contain first-party MPL-2.0 license'
   check_root_file "$root/THIRD-PARTY-LICENSES/golang.org-x-net-LICENSE" ||
@@ -160,13 +162,18 @@ release_trust_file() (
  root=$1
  if [ ! -e "$root/release-auth.py" ] && [ ! -L "$root/release-auth.py" ]; then return 0;fi
  if [ -e "$root/authentication.json" ] || [ -L "$root/authentication.json" ]; then
-  [ ! -e "$root/local-qa.sha256" ] && [ ! -L "$root/local-qa.sha256" ] ||
-   die 'conflicting signed and local QA installation receipts'
+  [ ! -e "$root/local-qa.sha256" ] && [ ! -L "$root/local-qa.sha256" ] &&
+  [ ! -e "$root/integrity.sha256" ] && [ ! -L "$root/integrity.sha256" ] ||
+   die 'conflicting signed and integrity installation receipts'
   printf '%s\n' authentication.json
- else
-  [ -e "$root/local-qa.sha256" ] || [ -L "$root/local-qa.sha256" ] ||
-   die 'installed release trust receipt is missing'
+ elif [ -e "$root/local-qa.sha256" ] || [ -L "$root/local-qa.sha256" ]; then
+  [ ! -e "$root/integrity.sha256" ] && [ ! -L "$root/integrity.sha256" ] ||
+   die 'conflicting local QA and integrity receipts'
   printf '%s\n' local-qa.sha256
+ else
+  [ -e "$root/integrity.sha256" ] || [ -L "$root/integrity.sha256" ] ||
+   die 'installed release integrity receipt is missing'
+  printf '%s\n' integrity.sha256
  fi
 )
 verify_release_trust() (
@@ -183,19 +190,21 @@ verify_release_trust() (
  else
   [ "$(wc -c < "$root/$receipt")" -eq 65 ] &&
    [ "$(cat "$root/$receipt")" = "$(sha256sum "$root/checksums.sha256" | cut -d' ' -f1)" ] ||
-   die 'installed LOCAL QA receipt does not match the immutable release'
+   die 'installed integrity receipt does not match the immutable release'
  fi
 )
 write_release_trust() (
  root=$1
- if [ "$local_qa" = yes ] && [ ! -e "$root/release-auth.py" ] && [ ! -L "$root/release-auth.py" ]; then return 0;fi
- if [ "$local_qa" = yes ]; then
+ if [ "$local_qa" = yes ] || [ "${unsigned_release:-no}" = yes ]; then
   [ ! -e "$root/authentication.json" ] && [ ! -L "$root/authentication.json" ] ||
-   die 'cannot replace a signed receipt with local QA state'
-  # Fresh private stage only; noclobber refuses an unexpected same-name file.
-  (set -C; sha256sum "$root/checksums.sha256" | cut -d' ' -f1 > "$root/local-qa.sha256") ||
-   die 'cannot create the explicit LOCAL QA installation receipt'
-  chmod 0600 "$root/local-qa.sha256" || die 'cannot protect LOCAL QA receipt'
+   die 'cannot replace a signed receipt with unsigned state'
+  if [ "$local_qa" = yes ]; then receipt=local-qa.sha256;else receipt=integrity.sha256;fi
+  [ ! -e "$root/local-qa.sha256" ] && [ ! -L "$root/local-qa.sha256" ] &&
+  [ ! -e "$root/integrity.sha256" ] && [ ! -L "$root/integrity.sha256" ] ||
+   die 'cannot overwrite an existing integrity receipt'
+  (set -C; sha256sum "$root/checksums.sha256" | cut -d' ' -f1 > "$root/$receipt") ||
+   die 'cannot create immutable release integrity receipt'
+  chmod 0600 "$root/$receipt" || die 'cannot protect integrity receipt'
  else
   [ "$retained_auth" = no ] || die 'unexpected new stage from a retained installed source'
   python3 -I -S "$root/release-auth.py" install-receipt \
@@ -283,6 +292,8 @@ verify_payload() {
  # before any bundled executable or installed-service observation.
  if [ "$local_qa" = yes ]; then
   say 'LOCAL QA ONLY: publisher authentication was not requested'
+ elif [ "${unsigned_release:-no}" = yes ]; then
+  say 'Checksum-verified bundle; publisher authentication is not claimed (trust the chosen HTTPS host or uploaded source)'
  elif [ "$retained_auth" = yes ]; then
   # Only an already managed canonical installed release can reuse its
   # root-private trust store. No incoming bundle can supply an authority key.
@@ -493,8 +504,8 @@ check_owned() {
 }
 
 if [ "$ACTION" = --help ]; then
- say 'Use the independently trusted bootstrap to authenticate before executing extracted scripts.'
- say 'Actions: --offline | --verify-only | --uninstall; unsigned developer use requires --local-qa.'
+ say 'Use a trusted HTTPS bootstrap or uploaded local bundle; no publisher key is required.'
+ say 'Actions: --offline | --verify-only | --uninstall; optional historical signed QA remains supported.'
  exit 0
 fi
 while [ "$#" -gt 0 ]; do
@@ -512,7 +523,10 @@ if [ "$local_qa" = yes ]; then
  [ -z "$publisher_key$metadata_file$signature_file$pinned_version$pinned_target" ] ||
   die 'local QA and publisher trust options cannot be mixed'
 elif [ -z "$publisher_key$metadata_file$signature_file$pinned_version$pinned_target" ]; then
- retained_auth=yes
+ # Exact new source bundles use HTTPS/manual-upload trust with full SHA256
+ # integrity. Retained previous signed installations are verified by the
+ # existing receipt when they are used for update/rollback/uninstall.
+ unsigned_release=yes
 else
  [ -n "$publisher_key" ] && [ -n "$metadata_file" ] && [ -n "$signature_file" ] &&
   [ -n "$pinned_version" ] && [ -n "$pinned_target" ] ||
@@ -796,11 +810,9 @@ if [ -e "$release" ] || [ -L "$release" ];then
  done
  cmp -s "$SOURCE_DIR/checksums.sha256" "$release/checksums.sha256" ||
   die 'existing release checksum manifest differs from candidate'
- if [ "$local_qa" != yes ] && [ "$retained_auth" != yes ]; then
-  # Idempotent reuse only: an existing valid receipt must match the exact
-  # signed inputs. No trust-anchor rotation or unsigned promotion is implicit.
-  write_release_trust "$release"
- fi
+ # An existing valid release may not be silently promoted or downgraded:
+ # its original receipt and exact checksummed payload must remain intact.
+ # verify_installed_release above already checked that identity.
 else
  stage=$(mktemp -d "$PREFIX/releases/.stage.XXXXXXXX") || die 'cannot stage release'
  install -d -m 0755 "$stage/bin" "$stage/THIRD-PARTY-LICENSES"
@@ -924,6 +936,8 @@ rollback_needed=no
 say "local verified payload installed at $release; Direct preserved unless an owned proxy was already active"
 if [ "$local_qa" = yes ]; then
  say 'LOCAL QA ONLY: checksums confirm byte integrity; no publisher authenticity asserted'
+elif [ "${unsigned_release:-no}" = yes ]; then
+ say 'SHA256 integrity verified; source trust is the selected HTTPS host or manually uploaded files, not a publisher signature'
 else
- say 'Signed payload verified against the supplied independent key; public release approval remains separate'
+ say 'Signed legacy QA payload verified; public release approval remains separate'
 fi

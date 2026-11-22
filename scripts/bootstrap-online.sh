@@ -1,7 +1,8 @@
 #!/bin/sh
-# Trusted acquisition entrypoint for signed online/mirror/offline bundles.
-# No public release or production publisher identity has been approved.
-# Unsigned developer archives require explicit --local-qa and a trusted digest.
+# Shared Official/Mirror/Offline acquisition bootstrap (keyless normal mode).
+# The selected HTTPS host or manually uploaded source is the source of trust.
+# SHA256 verifies bytes, not independent publisher identity; no Stable release yet.
+# Optional historical signed QA and explicit local digest QA remain available.
 set -eu
 umask 077
 # Privileged entry must be through trusted sudo + env -i BEFORE this
@@ -120,6 +121,9 @@ bootstrap_read_os_version() (
 )
 
 url=''
+source_base=''
+source_kind=''
+index_digest=''
 archive_file=''
 metadata_file=''
 signature_file=''
@@ -138,6 +142,8 @@ max_expanded_bytes=201326592
 max_file_bytes=134217728
 while [ "$#" -gt 0 ]; do
  case "$1" in
+  --official) [ -z "$source_kind" ] || exit 2;source_kind=official;source_base='https://github.com/AChWorks/server-connect/releases/latest/download/';shift;;
+  --mirror-base) [ "$#" -ge 2 ] && [ -z "$source_kind" ] || exit 2;source_kind=mirror;source_base=$2;shift 2;;
   --archive-url) [ "$#" -ge 2 ] && [ -z "$url" ] || exit 2; url=$2;shift 2;;
   --archive-file) [ "$#" -ge 2 ] && [ -z "$archive_file" ] || exit 2; archive_file=$2;shift 2;;
   --metadata-file) [ "$#" -ge 2 ] && [ -z "$metadata_file" ] || exit 2; metadata_file=$2;shift 2;;
@@ -149,21 +155,38 @@ while [ "$#" -gt 0 ]; do
   --sha256) [ "$#" -ge 2 ] && [ -z "$digest" ] || exit 2; digest=$2;shift 2;;
   --verify-only)verify_only=yes;shift;;
   --max-download-bytes) [ "$#" -ge 2 ] || exit 2; max_download_bytes=$2;shift 2;;
-  *) echo 'Usage: bootstrap-online.sh (--archive-url HTTPS_URL | --archive-file ABSOLUTE_FILE) --publisher-key ABSOLUTE_TRUSTED_KEY --version VERSION --target TARGET [--metadata-file FILE --signature-file FILE] [--verify-only]; unsigned QA requires --local-qa --sha256 TRUSTED_DIGEST' >&2;exit 2;;
+  *) echo 'Usage: bootstrap-online.sh (--official | --mirror-base HTTPS_BASE | --archive-url HTTPS_URL | --archive-file ABSOLUTE_FILE) [--verify-only]; optional legacy signed QA --publisher-key; digest-pinned local QA --local-qa --sha256 SHA256' >&2;exit 2;;
  esac
 done
+# Ordinary Official, operator Mirror and Offline use release metadata and
+# SHA256 integrity; the selected HTTPS host/uploaded file is the trust root.
+# Historical optional signed QA is retained for auditing earlier installed
+# releases, not required for any normal acquisition.
+[ -z "$source_kind" ] || {
+ [ -z "$url$archive_file$metadata_file$signature_file$publisher_key$digest" ] || {
+  echo 'Do not mix a release channel with manual archive, key or digest options' >&2;exit 2;
+ }
+ case "$source_base" in https://?*) ;; *) echo 'Mirror base requires HTTPS' >&2;exit 2;; esac
+ case "$source_base" in *'?'*|*'#'*|*'@'*|*'\'*|*' '*) echo 'Mirror base may contain no credentials, query, fragment or escape characters' >&2;exit 2;; esac
+ case "$source_base" in */) ;; *) source_base=$source_base/;; esac
+ url=${source_base}release-index.json
+}
 if { [ -n "$url" ] && [ -n "$archive_file" ]; } ||
    { [ -z "$url" ] && [ -z "$archive_file" ]; }; then
- echo 'Choose exactly one online URL or offline archive file' >&2;exit 2
+ echo 'Choose exactly one release channel, URL or offline archive file' >&2;exit 2
 fi
-authenticated=yes
-if [ "$local_qa" = yes ] && [ -z "$publisher_key$version$target$metadata_file$signature_file" ]; then
+authenticated=integrity
+if [ "$local_qa" = yes ] && [ -z "$publisher_key" ];then
  authenticated=no
+ [ -z "$source_kind$publisher_key$version$target$metadata_file$signature_file" ] || {
+  echo 'Local QA is only for an explicit archive and independent digest' >&2;exit 2;
+ }
  [ "${#digest}" -eq 64 ] || { echo 'A trusted 64-character SHA-256 digest is required for LOCAL QA' >&2;exit 2; }
  case "$digest" in *[!0123456789abcdefABCDEF]*) echo 'Invalid digest syntax' >&2;exit 2;; esac
-else
- [ -n "$publisher_key" ] && [ -n "$version" ] && [ -n "$target" ] && [ -z "$digest" ] || {
-  echo 'Publisher key, version and target pins are required; SHA256 alone is LOCAL QA ONLY' >&2;exit 2;
+elif [ -n "$publisher_key" ];then
+ authenticated=yes
+ [ -z "$source_kind$digest" ] && [ -n "$version" ] && [ -n "$target" ] || {
+  echo 'Signed historical QA requires an explicit version and target' >&2;exit 2;
  }
  case "$publisher_key" in /*) ;; *) echo 'An independent local public-key path is required' >&2;exit 2;; esac
  [ -f "$publisher_key" ] && [ ! -L "$publisher_key" ] || {
@@ -173,12 +196,16 @@ else
   { [ -n "$metadata_file" ] && [ -n "$signature_file" ]; } || {
   echo 'Metadata and signature file overrides must be supplied together' >&2;exit 2;
  }
+else
+ [ -z "$signature_file$digest" ] || {
+  echo 'Normal installation does not take detached signatures or independent digests' >&2;exit 2;
+ }
 fi
 if [ -n "$archive_file" ]; then
  case "$archive_file" in /*) ;; *) echo 'Offline archive must use an absolute local path' >&2;exit 2;; esac
- if [ "$authenticated" = yes ] && [ -z "$metadata_file" ]; then
+ if [ -z "$metadata_file" ] && [ "$authenticated" != no ]; then
   metadata_file=$archive_file.release.json
-  signature_file=$archive_file.sig
+  if [ "$authenticated" = yes ]; then signature_file=$archive_file.sig;fi
  fi
 fi
 case "$max_download_bytes" in ''|*[!0123456789]*) echo 'Invalid download ceiling' >&2;exit 2;; esac
@@ -236,11 +263,11 @@ case "$url" in
 esac
 if [ "$#" -gt 0 ]; then
  if [ -n "$archive_file" ]; then
-  echo 'Offline verification needs preinstalled Python 3 and OpenSSL; no packages or downloads attempted' >&2
+  echo 'Offline verification needs preinstalled Python 3 (and OpenSSL only for optional signed QA); no packages or downloads attempted' >&2
   exit 1
  fi
  if [ "$verify_only" = yes ]; then
-  echo 'Online --verify-only needs existing curl, Python 3, OpenSSL for signed mode and HTTPS CA certificates; no packages installed' >&2
+  echo 'Online --verify-only needs existing curl, Python 3 and HTTPS CA certificates (OpenSSL only for signed QA); no packages installed' >&2
   exit 1
  fi
  # Read only the fixed trusted host identity. No shell evaluation or caller
@@ -396,9 +423,13 @@ with os.fdopen(fd, "rb") as src:
 PYCOPY
 }
 download() {
- # HTTPS redirects stay HTTPS; loopback QA has no redirects/proxy/DNS.
+ # HTTPS redirects stay HTTPS; mirror redirects are refused so every
+ # project/runtime asset must originate from the selected mirror itself.
  case "$acquisition_mode" in
-  https) allowed_proto='=https'; max_redirs=5; set -- "$1" "$2" "$3";;
+  https)
+   allowed_proto='=https';max_redirs=5
+   if [ "$source_kind" = mirror ];then max_redirs=0;fi
+   set -- "$1" "$2" "$3";;
   http_loopback) allowed_proto='=http'; max_redirs=0; set -- "$1" "$2" "$3";;
   http_localhost:*)
    allowed_proto='=http'; max_redirs=0
@@ -413,6 +444,59 @@ download() {
   --max-filesize "$download_limit" \
   --output "$download_output" "$download_url" 2>"$work/download.err"
 }
+# Select the exact supported target from verified Debian 12/13 host data;
+# the index is strict bounded JSON. No shell evaluation of metadata fields.
+if [ -n "$source_kind" ]; then
+ [ "$(uname -m)" = x86_64 ] || { echo 'Only Debian 12/13 amd64 is supported' >&2;exit 1; }
+ detected_os=$(bootstrap_read_os_version) || {
+  echo 'Release index selection requires Debian 12/13 with valid host identity' >&2;exit 1;
+ }
+ detected_target=debian-$detected_os-amd64
+ if [ -n "$target" ] && [ "$target" != "$detected_target" ];then
+  echo 'Release target does not match actual host' >&2;exit 2
+ fi
+ target=$detected_target
+ download "$url" "$work/release-index.json" 16384 || {
+  echo 'Release index unavailable from the selected HTTPS source; nothing installed' >&2;exit 1;
+ }
+ # Enforce the small transfer limit even if a server ignored --max-filesize.
+ [ "$(wc -c < "$work/release-index.json")" -le 16384 ] || exit 1
+ selection=$(python3 -I -S - "$work/release-index.json" "$target" <<'PYRELEASEINDEX'
+import json,re,sys
+try:
+    data=open(sys.argv[1],"rb").read(16385)
+    if len(data)>16384: raise ValueError("oversized index")
+    def unique(pairs):
+        out={}
+        for k,v in pairs:
+            if k in out: raise ValueError("duplicate release index key")
+            out[k]=v
+        return out
+    obj=json.loads(data,object_pairs_hook=unique)
+    if set(obj)!={"schema","version","artifacts"} or obj["schema"]!=1 or type(obj["version"]) is not str or not re.fullmatch(r"[0-9][0-9A-Za-z.+_-]{0,63}",obj["version"]):
+        raise ValueError("unsupported index schema")
+    artifacts=obj["artifacts"]
+    if set(artifacts)!={"debian-12-amd64","debian-13-amd64"}: raise ValueError("unsupported targets")
+    for value in artifacts.values():
+        if type(value) is not dict or set(value)!={"archive","sha256"}: raise ValueError("unsupported target entry")
+        name=value["archive"]
+        if type(name) is not str or not re.fullmatch(r"[A-Za-z0-9_.\-/]+",name) or name.startswith("/") or any(part in ("",".","..") for part in name.split("/")) or not name.endswith(".tar.gz"):
+            raise ValueError("unsafe artifact path")
+        if type(value["sha256"]) is not str or not re.fullmatch(r"[0-9a-f]{64}",value["sha256"]):
+            raise ValueError("invalid artifact hash")
+    current=artifacts[sys.argv[2]]
+    print(obj["version"])
+    print(current["archive"])
+    print(current["sha256"])
+except (ValueError,TypeError,KeyError,UnicodeDecodeError,json.JSONDecodeError):
+    sys.exit(1)
+PYRELEASEINDEX
+ ) || { echo 'Release index validation failed; no installation attempted' >&2;exit 1; }
+ version=$(printf '%s\n' "$selection" | sed -n '1p')
+ relative_archive=$(printf '%s\n' "$selection" | sed -n '2p')
+ index_digest=$(printf '%s\n' "$selection" | sed -n '3p')
+ url=$source_base$relative_archive
+fi
 if [ -n "$archive_file" ]; then
  copy_input "$archive_file" "$work/bundle.tar.gz" "$max_download_bytes" || {
   echo 'Offline archive copy rejected before installation' >&2;exit 1;
@@ -470,6 +554,54 @@ PYURLSIDECAR
  python3 -I -S "$auth_helper" verify --metadata "$work/release.json" \
   --signature "$work/release.sig" --publisher-key "$publisher_key" \
   --version "$version" --target "$target" --archive "$work/bundle.tar.gz" || exit 1
+elif [ "$authenticated" = integrity ];then
+ if [ -n "$metadata_file" ]; then
+  copy_input "$metadata_file" "$work/release.json" 16384 || {
+   echo 'Local release identity unavailable; no install' >&2;exit 1;
+  }
+ else
+  metadata_url=$(python3 -I -S - "$url" <<'PYRELEASESIDECAR'
+import sys
+from urllib.parse import urlsplit,urlunsplit
+u=urlsplit(sys.argv[1]);print(urlunsplit((u.scheme,u.netloc,u.path+'.release.json',u.query,'')))
+PYRELEASESIDECAR
+  ) || exit 1
+  download "$metadata_url" "$work/release.json" 16384 || {
+   echo 'Release identity sidecar unavailable from selected source; no install' >&2;exit 1;
+  }
+ fi
+ python3 -I -S - "$work/release.json" "$work/bundle.tar.gz" "$version" "$target" "$index_digest" <<'PYRELEASEVERIFY'
+import hashlib,json,re,sys
+try:
+    def read(path,cap):
+        with open(path,'rb') as f:
+            raw=f.read(cap+1)
+        if not raw or len(raw)>cap: raise ValueError('unbounded or empty input')
+        return raw
+    def unique(pairs):
+        value={}
+        for k,v in pairs:
+            if k in value: raise ValueError('duplicate release member')
+            value[k]=v
+        return value
+    obj=json.loads(read(sys.argv[1],16384),object_pairs_hook=unique)
+    fields={'schema','purpose','version','target','archive_sha256','checksums_sha256','manifest_sha256','source_revision','source_state','core','core_archive_sha256'}
+    if set(obj)!=fields or type(obj['schema']) is not int or obj['schema']!=1 or obj['purpose']!='server-connect-release': raise ValueError('invalid release identity schema')
+    if obj['target'] not in ('debian-12-amd64','debian-13-amd64') or not re.fullmatch(r'[0-9][0-9A-Za-z.+_-]{0,63}',obj['version']): raise ValueError('invalid version or target')
+    if (sys.argv[3] and obj['version']!=sys.argv[3]) or (sys.argv[4] and obj['target']!=sys.argv[4]): raise ValueError('release selection mismatch')
+    for field in ('archive_sha256','checksums_sha256','manifest_sha256','core_archive_sha256'):
+        if type(obj[field]) is not str or not re.fullmatch(r'[0-9a-f]{64}',obj[field]): raise ValueError('invalid checksum')
+    if type(obj['source_revision']) is not str or not re.fullmatch(r'[0-9a-f]{40}',obj['source_revision']) or obj['source_state']!='clean' or obj['core']!='sing-box 1.14.3': raise ValueError('unverified source/core identity')
+    if sys.argv[5] and obj['archive_sha256']!=sys.argv[5]: raise ValueError('index and release identity disagree')
+    h=hashlib.sha256()
+    with open(sys.argv[2],'rb') as f:
+        for part in iter(lambda:f.read(65536),b''):h.update(part)
+    if h.hexdigest()!=obj['archive_sha256']:raise ValueError('archive checksum mismatch')
+except (ValueError,KeyError,TypeError,UnicodeDecodeError,json.JSONDecodeError) as exc:
+    print('Release identity, source, target or archive integrity mismatch: '+str(exc)+'; nothing installed',file=sys.stderr)
+    sys.exit(1)
+PYRELEASEVERIFY
+ echo 'Release SHA256 integrity matches the selected source. HTTPS/upload trust is not publisher authentication.' >&2
 else
  printf '%s  %s\n' "$digest" "$work/bundle.tar.gz" |
   sha256sum --quiet --check - || { echo 'Independent artifact digest mismatch' >&2;exit 1; }
@@ -666,6 +798,29 @@ if [ "$authenticated" = yes ]; then
  python3 -I -S "$auth_helper" verify --metadata "$work/release.json" \
   --signature "$work/release.sig" --publisher-key "$publisher_key" \
   --version "$version" --target "$target" --bundle "$work/server-connect" || exit 1
+elif [ "$authenticated" = integrity ];then
+ python3 -I -S - "$work/release.json" "$work/server-connect" <<'PYRELEASEPAYLOAD'
+import hashlib,json,re,sys
+from pathlib import Path
+try:
+    root=Path(sys.argv[2]);meta=json.loads(Path(sys.argv[1]).read_bytes())
+    for filename,field in [('manifest.json','manifest_sha256'),('checksums.sha256','checksums_sha256')]:
+        if hashlib.sha256((root/filename).read_bytes()).hexdigest()!=meta[field]:
+            raise ValueError(filename+' digest mismatch')
+    manifest=json.loads((root/'manifest.json').read_bytes())
+    if (manifest['schema']!=1 or manifest['manager']!=meta['version'] or manifest['target']!=meta['target'] or manifest['source_revision']!=meta['source_revision'] or manifest['source_state']!=meta['source_state'] or manifest['core']!=meta['core'] or manifest['core_archive_sha256']!=meta['core_archive_sha256']):
+        raise ValueError('manifest identity mismatch')
+    lines=(root/'checksums.sha256').read_text('ascii').splitlines()
+    all_files=set()
+    for line in lines:
+        if not re.fullmatch(r'[0-9a-f]{64}  [A-Za-z0-9_.\-/]+',line): raise ValueError('invalid checksums manifest')
+        digest,name=line.split('  ',1)
+        if name in all_files or not (root/name).is_file() or hashlib.sha256((root/name).read_bytes()).hexdigest()!=digest: raise ValueError('file integrity mismatch')
+        all_files.add(name)
+    if set(all_files)!={str(p.relative_to(root)) for p in root.rglob('*') if p.is_file()}-{'checksums.sha256'}: raise ValueError('unlisted archive member')
+except (OSError,ValueError,KeyError,TypeError,json.JSONDecodeError):
+    print('Release file checksums or manifest identity invalid; nothing installed',file=sys.stderr);sys.exit(1)
+PYRELEASEPAYLOAD
 fi
 if [ "$verify_only" = yes ];then
  echo 'Acquisition, bounded archive and release layout verified. Installation was not attempted.'
@@ -677,6 +832,8 @@ if [ "$authenticated" = yes ]; then
  sh "$work/server-connect/install.sh" --offline \
   --publisher-key "$publisher_key" --metadata-file "$work/release.json" \
   --signature-file "$work/release.sig" --version "$version" --target "$target"
+elif [ "$authenticated" = integrity ];then
+ sh "$work/server-connect/install.sh" --offline
 else
  sh "$work/server-connect/install.sh" --offline --local-qa
 fi

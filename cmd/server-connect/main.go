@@ -229,7 +229,19 @@ func run(j bool, m *sc.Manager, args []string) int {
 			CoreRestartDeadlineMS: *coreDeadline,
 			EnableSelectedIPv6:    *selectedIPv6, IranCoverage: *iranCoverage,
 		})
+		if !j && e == nil && report.ConfirmationCommand != "" {
+			fmt.Println("Smart Routing is active provisionally. Open a NEW SSH connection and run:")
+			fmt.Println(report.ConfirmationCommand)
+			fmt.Printf("Confirm within %d seconds or Server Connect will restore Direct.\n", report.ConfirmationSeconds)
+			return 0
+		}
 		return output(j, report, e)
+	case "confirm":
+		if len(args) != 1 {
+			return output(j, nil, sc.Fault("invalid_arguments", "confirm requires exactly the one-use token"))
+		}
+		e := m.ConfirmNativeSmartRouting(args[0])
+		return output(j, map[string]bool{"activation_confirmed": e == nil}, e)
 	case "native-status":
 		if len(args) != 0 {
 			return output(j, nil, sc.Fault("invalid_arguments", "native-status takes no options"))
@@ -579,6 +591,7 @@ Commands:
                              IPv6 requires verified selected exit; default IR is two-source consensus
                              Start guarded native sing-box Smart Routing
                              Synthetic health only on isolated test hosts
+  confirm TOKEN              Confirm the pending activation from a NEW SSH login
   native-status              Read native service, guard and HTTPS health scope
   native-preflight           Installed systemd ExecStartPre only
   native-core-supervise      Installed Core MainPID supervisor only
@@ -726,7 +739,8 @@ func menuWithRunner(m *sc.Manager, dispatch func(*sc.Manager, ...string) int) in
 				continue
 			}
 			if dispatch(m, "connect-smart", "--underlay-if", underlay, "--mode", mode) == 0 {
-				fmt.Println("Core started under native guards; independently check selected VPN/Direct traffic.")
+				fmt.Println("Core started under native guards; initial activation is not confirmed.")
+				fmt.Println("Use the printed command from a newly opened SSH session; otherwise automatic rollback restores Direct.")
 				fmt.Println("Inspect option 22 (native-status), or choose option 7 to return to Direct.")
 			}
 		case "19":

@@ -311,11 +311,15 @@ run_offline() {
   local label=$1 action=$2 source_dir=/root/server-connect
   if [[ $# -ge 3 ]]; then source_dir=$3; fi
   echo "=== Disconnected offline $label ==="
+  local -a flags=(--local-qa)
+  # First install exercises the actual first-Stable no-key offline contract.
+  # Subsequent explicit QA updates preserve separate historical QA coverage.
+  if [[ $label == first-install ]]; then flags=(); fi
   docker exec "$container" /usr/bin/strace -ff -qq -yy -s 128 \
     -e trace=%network,%process \
     -o "/root/qa-strace/$label" /usr/bin/env -i \
     HOME=/root PATH=/usr/sbin:/usr/bin:/sbin:/bin LC_ALL=C \
-    /bin/sh "$source_dir/install.sh" "$action" --local-qa
+    /bin/sh "$source_dir/install.sh" "$action" "${flags[@]}"
   assert_no_offline_fetch "$label"
 }
 # An active proxy is intentionally permitted to open its existing loopback
@@ -417,22 +421,23 @@ verify_clean_uninstall() {
   '
 }
 
-# The field driver explicitly selects --local-qa for unsigned, digest-pinned
-# candidates. A fresh extracted archive without that choice must still fail.
+# New normal mode does not require a publisher key, while --verify-only
+# must remain mutation-free and offline even on a complete Debian 12 bundle.
 if [[ $qa_version == 12 ]]; then
-  if docker exec "$container" /usr/bin/env -i \
-    HOME=/root PATH=/usr/sbin:/usr/bin:/sbin:/bin LC_ALL=C \
+  docker exec "$container" /usr/bin/strace -ff -qq -yy -s 128 \
+    -e trace=%network,%process -o /root/qa-strace/keyless-verify \
+    /usr/bin/env -i HOME=/root PATH=/usr/sbin:/usr/bin:/sbin:/bin LC_ALL=C \
     /bin/sh /root/server-connect/install.sh --verify-only \
-    >"$scratch/debian12-implicit-auth.log" 2>&1; then
-    echo 'Unexpected implicit authentication of a fresh LOCAL QA archive' >&2
-    exit 1
-  fi
-  grep -F 'incoming bundles require an independently supplied publisher key' \
-    "$scratch/debian12-implicit-auth.log" >/dev/null
+    >"$scratch/debian12-keyless-verify.log" 2>&1 || {
+      echo 'Debian 12 checksum-verified no-key install preflight failed' >&2
+      cat "$scratch/debian12-keyless-verify.log" >&2
+      exit 1
+    }
+  assert_no_offline_fetch keyless-verify
   docker exec "$container" /bin/sh -c 'test ! -e /opt/server-connect && test ! -e /var/lib/server-connect'
-  assert_network_unchanged implicit-auth-refusal "$offline_before"
-  verify_host_services implicit-auth-refusal
-  echo 'DEBIAN12_FRESH_ARCHIVE_IMPLICIT_AUTH_REFUSED=PASS'
+  assert_network_unchanged keyless-verify "$offline_before"
+  verify_host_services keyless-verify
+  echo 'DEBIAN12_KEYLESS_OFFLINE_VERIFY_NO_MUTATION=PASS'
 fi
 run_offline verify-only --verify-only
 assert_network_unchanged verify-only "$offline_before"
@@ -482,6 +487,7 @@ verify_host_services missing-core
 assert_no_offline_fetch missing-core
 echo 'OFFLINE_MISSING_CORE_FAIL_CLOSED=PASS (installer NOT applied)'
 run_offline first-install --offline
+docker exec "$container" /bin/sh -c 'test -f /opt/server-connect/current/integrity.sha256 && test ! -e /opt/server-connect/current/authentication.json'
 verify_direct_install
 # Run the newly installed operator overview on BOTH target OS lanes. The
 # installed service is verified inactive above; no host-route or VPN proof

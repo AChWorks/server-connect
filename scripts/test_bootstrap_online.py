@@ -951,7 +951,7 @@ class SignedReleaseTest(unittest.TestCase):
                  "--verify-only"], capture_output=True, text=True, timeout=5,
             )
             self.assertNotEqual(result.returncode, 0)
-            self.assertIn("Publisher key, version and target pins are required", result.stderr)
+            self.assertIn("Normal installation does not take detached signatures or independent digests", result.stderr)
         argv = self.arguments(online=True)
         argv.remove("--local-qa")
         result = subprocess.run(argv, capture_output=True, text=True, timeout=5)
@@ -1592,6 +1592,103 @@ os.execv(sys.argv[1], sys.argv[1:])
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("Publisher signature and pinned release identity verified", result.stdout)
+
+    def unsigned_bootstrap(self, *extra, url=None, mirror_base=None, ca=True):
+        if mirror_base is not None:
+            source = ['--mirror-base', mirror_base]
+        elif url is not None:
+            source = ['--archive-url', url]
+        else:
+            source = ['--archive-file', str(self.bundle)]
+        env = os.environ.copy()
+        if ca:
+            env['CURL_CA_BUNDLE'] = str(self.ca)
+        else:
+            env.pop('CURL_CA_BUNDLE', None)
+        return subprocess.run(['/bin/sh', str(self.bootstrap), *source, '--verify-only', *extra],
+                              capture_output=True, text=True, timeout=30, env=env)
+
+    def test_keyless_offline_archive_and_metadata_integrity(self):
+        result = self.unsigned_bootstrap()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('Installation was not attempted', result.stdout)
+        self.assertIn('not publisher authentication', result.stderr)
+        before = self.bundle.read_bytes()
+        self.bundle.write_bytes(before + b'tampered')
+        rejected = self.unsigned_bootstrap()
+        self.assertNotEqual(rejected.returncode, 0)
+        self.assertIn('archive integrity mismatch', rejected.stderr)
+        self.bundle.write_bytes(before)
+        before_meta = self.metadata.read_bytes()
+        self.metadata.write_bytes(before_meta.replace(b'"source_state":"clean"', b'"source_state":"dirty"'))
+        rejected = self.unsigned_bootstrap()
+        self.assertNotEqual(rejected.returncode, 0)
+        self.assertIn('nothing installed', rejected.stderr)
+        self.metadata.write_bytes(before_meta)
+        self.metadata.unlink()
+        rejected = self.unsigned_bootstrap()
+        self.assertNotEqual(rejected.returncode, 0)
+        self.assertIn('Local release identity unavailable', rejected.stderr)
+
+    def test_keyless_https_requires_real_tls_and_no_signature(self):
+        server = self.https_servers[0][0]
+        server.requests.clear()
+        url = f'https://localhost:{server.server_port}/{self.case.name}/bundle.tar.gz'
+        success = self.unsigned_bootstrap(url=url)
+        self.assertEqual(success.returncode, 0, success.stderr)
+        self.assertEqual([p for p, _ in server.requests], [
+            f'/{self.case.name}/bundle.tar.gz', f'/{self.case.name}/bundle.tar.gz.release.json',
+        ])
+        server.requests.clear()
+        untrusted = self.unsigned_bootstrap(url=url, ca=False)
+        self.assertNotEqual(untrusted.returncode, 0)
+        self.assertEqual(server.requests, [])
+        self.assertNotIn('Installation was not attempted', untrusted.stdout)
+
+    def test_keyless_mirror_index_resolves_debian_and_rejects_tamper(self):
+        if not Path('/etc/os-release').read_text().count('VERSION_ID="13"'):
+            self.skipTest('fixture has Debian 13 target; Debian 12 is exercised in installed-host CI')
+        server = self.https_servers[1][0]
+        base = f'https://localhost:{server.server_port}/{self.case.name}/'
+        index = self.case / 'release-index.json'
+        index_data = {'schema': 1, 'version': '0.1.0-dev', 'artifacts': {
+            target: {'archive': 'bundle.tar.gz', 'sha256': self.identity['archive_sha256']}
+            for target in ('debian-12-amd64', 'debian-13-amd64')
+        }}
+        index.write_text(json.dumps(index_data) + '\n')
+        server.requests.clear()
+        success = self.unsigned_bootstrap(mirror_base=base)
+        self.assertEqual(success.returncode, 0, success.stderr)
+        self.assertEqual([p for p, _ in server.requests], [
+            f'/{self.case.name}/release-index.json', f'/{self.case.name}/bundle.tar.gz',
+            f'/{self.case.name}/bundle.tar.gz.release.json',
+        ])
+        server.requests.clear()
+        index_data['artifacts']['debian-13-amd64']['sha256'] = '0' * 64
+        index.write_text(json.dumps(index_data) + '\n')
+        refused = self.unsigned_bootstrap(mirror_base=base)
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertIn('index and release identity disagree', refused.stderr)
+        self.assertFalse(self.marker.exists())
+        for value in ('../foreign.tar.gz', 'https://github.com/other.tar.gz', '/absolute.tar.gz'):
+            with self.subTest(unsafe_archive=value):
+                index_data['artifacts']['debian-13-amd64']['archive'] = value
+                index.write_text(json.dumps(index_data) + '\n')
+                server.requests.clear()
+                refused = self.unsigned_bootstrap(mirror_base=base)
+                self.assertNotEqual(refused.returncode, 0)
+                self.assertEqual([p for p, _ in server.requests], [f'/{self.case.name}/release-index.json'])
+        index.write_text('{"schema":1,"schema":1}')
+        refused = self.unsigned_bootstrap(mirror_base=base)
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertIn('Release index validation failed', refused.stderr)
+
+    def test_keyless_negative_archive_layout_even_if_index_and_digest_match(self):
+        self.fixture(abnormal='traversal')
+        rejected = self.unsigned_bootstrap()
+        self.assertNotEqual(rejected.returncode, 0)
+        self.assertIn('Archive preflight failed', rejected.stderr)
+
 
 
 if __name__ == "__main__":

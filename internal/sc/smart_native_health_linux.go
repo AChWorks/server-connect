@@ -804,6 +804,23 @@ func (m *Manager) RunNativeHealthRound() (NativeHealthState, error) {
 	if err != nil {
 		return s, err
 	}
+	// Either independently scheduled executor may enforce the initial
+	// confirmation deadline, including when the Core is in recovery.
+	if boot, be := trialBootIdentity(); be == nil {
+		if now, te := nativeUptimeMillis(); te == nil {
+			if reason := nativeConfirmationTimeoutReason(claim, s, boot, now); reason != "" {
+				stopped, e := m.stopNativeHealthOperation(s.OperationID, reason)
+				if e != nil {
+					return s, e
+				}
+				if !stopped {
+					return s, Fault("guard_pending", "confirmation timeout belongs to old session")
+				}
+				s.Phase, s.Reason = "off", reason
+				return s, nil
+			}
+		}
+	}
 	if s.Phase == "recovering" {
 		return m.advanceNativeCoreRecovery(s, claim, targets)
 	}
@@ -1012,6 +1029,8 @@ func (m *Manager) SuperviseNativeHealth() (NativeHealthState, error) {
 	reason := ""
 	if be != nil || te != nil || boot != s.BootID || now < s.StartedMS {
 		reason = "native_boot_identity_changed"
+	} else if confirmationReason := nativeConfirmationTimeoutReason(claim, s, boot, now); confirmationReason != "" {
+		reason = confirmationReason
 	} else if now-s.HeartbeatMS > nativeHealthLeaseMS {
 		reason = "native_health_executor_stale"
 	} else if s.Phase == "recovering" {

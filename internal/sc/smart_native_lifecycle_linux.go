@@ -26,19 +26,24 @@ const nativeUnitPath = "/etc/systemd/system/server-connect-native-tun.service"
 // This small persisted receipt is written before starting the official Core.
 // It authorizes only the fixed native policy slots, not global route repair.
 type NativeSession struct {
-	Version               int    `json:"version"`
-	Selected              string `json:"selected"`
-	InterfaceName         string `json:"tunnel_if"`
-	UnderlayIF            string `json:"underlay_if"`
-	ConfigSHA256          string `json:"config_sha256"`
-	HealthOperationID     string `json:"health_operation_id,omitempty"`
-	ReplyGuardHandle      uint64 `json:"reply_guard_handle,omitempty"`
-	ReplyGuardFingerprint string `json:"reply_guard_fingerprint,omitempty"`
-	CoreStartAttempted    bool   `json:"core_start_attempted,omitempty"`
-	StartupGuardName      string `json:"startup_guard_name,omitempty"`
-	StartupGuardSHA256    string `json:"startup_guard_sha256,omitempty"`
-	StartupGuardHandle    uint64 `json:"startup_guard_handle,omitempty"`
-	StartupGuardPhase     string `json:"startup_guard_phase,omitempty"`
+	Version                 int    `json:"version"`
+	Selected                string `json:"selected"`
+	InterfaceName           string `json:"tunnel_if"`
+	UnderlayIF              string `json:"underlay_if"`
+	ConfigSHA256            string `json:"config_sha256"`
+	HealthOperationID       string `json:"health_operation_id,omitempty"`
+	ConfirmationTokenSHA256 string `json:"confirmation_token_sha256,omitempty"`
+	ConfirmationBootID      string `json:"confirmation_boot_id,omitempty"`
+	ConfirmationIssuedMS    int64  `json:"confirmation_issued_uptime_ms,omitempty"`
+	ConfirmationDeadlineMS  int64  `json:"confirmation_deadline_uptime_ms,omitempty"`
+	ConfirmationAccepted    bool   `json:"confirmation_accepted,omitempty"`
+	ReplyGuardHandle        uint64 `json:"reply_guard_handle,omitempty"`
+	ReplyGuardFingerprint   string `json:"reply_guard_fingerprint,omitempty"`
+	CoreStartAttempted      bool   `json:"core_start_attempted,omitempty"`
+	StartupGuardName        string `json:"startup_guard_name,omitempty"`
+	StartupGuardSHA256      string `json:"startup_guard_sha256,omitempty"`
+	StartupGuardHandle      uint64 `json:"startup_guard_handle,omitempty"`
+	StartupGuardPhase       string `json:"startup_guard_phase,omitempty"`
 }
 type NativeConnectionStatus struct {
 	Desired              string `json:"desired"`
@@ -60,6 +65,9 @@ type NativeConnectionStatus struct {
 	CoreRestartResult    string `json:"core_restart_result,omitempty"`
 	CoreRestartFromPID   int    `json:"last_core_restart_from_pid,omitempty"`
 	CoreRestartToPID     int    `json:"last_core_restart_to_pid,omitempty"`
+	ConfirmationState    string `json:"confirmation_state,omitempty"`
+	ConfirmationSeconds  int64  `json:"confirmation_seconds_remaining,omitempty"`
+	ConfirmationCommand  string `json:"confirmation_command,omitempty"`
 }
 
 func (m *Manager) readNativeSession() (NativeSession, error) {
@@ -92,6 +100,30 @@ func (m *Manager) readNativeSession() (NativeSession, error) {
 		if _, err := hex.DecodeString(session.HealthOperationID); err != nil {
 			return NativeSession{}, Fault("invalid_state", "invalid native health operation binding")
 		}
+	}
+	// Old saved QA sessions have no confirmation receipt; only new activations
+	// issue one. A malformed or partly cleared receipt cannot be accepted.
+	if session.ConfirmationTokenSHA256 != "" || session.ConfirmationAccepted {
+		if !trialBootIDPattern.MatchString(session.ConfirmationBootID) ||
+			session.ConfirmationIssuedMS < 0 || session.ConfirmationDeadlineMS < 0 ||
+			(session.ConfirmationIssuedMS != 0 && session.ConfirmationDeadlineMS != session.ConfirmationIssuedMS+nativeConfirmationTTLMS) ||
+			(session.ConfirmationIssuedMS == 0 && session.ConfirmationDeadlineMS != 0) {
+			return NativeSession{}, Fault("invalid_state", "native confirmation receipt invalid")
+		}
+		if session.ConfirmationAccepted {
+			if session.ConfirmationTokenSHA256 != "" || session.ConfirmationIssuedMS == 0 {
+				return NativeSession{}, Fault("invalid_state", "native confirmed receipt invalid")
+			}
+		} else {
+			if len(session.ConfirmationTokenSHA256) != 64 {
+				return NativeSession{}, Fault("invalid_state", "native confirmation digest invalid")
+			}
+			if _, e := hex.DecodeString(session.ConfirmationTokenSHA256); e != nil {
+				return NativeSession{}, Fault("invalid_state", "native confirmation digest invalid")
+			}
+		}
+	} else if session.ConfirmationBootID != "" || session.ConfirmationIssuedMS != 0 || session.ConfirmationDeadlineMS != 0 {
+		return NativeSession{}, Fault("invalid_state", "native confirmation receipt incomplete")
 	}
 	if session.ReplyGuardFingerprint != "" {
 		if len(session.ReplyGuardFingerprint) != 64 {
@@ -894,6 +926,7 @@ func (m *Manager) ConnectNativeSmartRouting(opts NativePolicyOptions) (NativeCon
 func (m *Manager) connectNativeSmartRoutingUnlocked(opts NativePolicyOptions) (NativeConnectionStatus, error) {
 	result := NativeConnectionStatus{Desired: "smart", Observed: "not_started",
 		CoreUnit: nativeSmartUnit, SelectedVPNPathProof: "not_run"}
+	var confirmationToken, confirmationHash string
 	if err := m.nativeUnitOwnership(); err != nil {
 		return result, err
 	}
@@ -1069,6 +1102,12 @@ func (m *Manager) connectNativeSmartRoutingUnlocked(opts NativePolicyOptions) (N
 			return e
 		}
 		session.HealthOperationID = stagedHealth.OperationID
+		confirmationToken, confirmationHash, e = newNativeConfirmationToken()
+		if e != nil {
+			return e
+		}
+		session.ConfirmationTokenSHA256 = confirmationHash
+		session.ConfirmationBootID = stagedHealth.BootID
 		claim, err := json.Marshal(session)
 		if err != nil {
 			return err
@@ -1157,8 +1196,18 @@ func (m *Manager) connectNativeSmartRoutingUnlocked(opts NativePolicyOptions) (N
 				// The verified late OUTPUT guard is *never* released merely
 				// because the Core is ready. Without this persistent receipt,
 				// SIGKILL can remove TUN before ExecStopPost rearms anything.
+				remaining, issueErr := m.issueNativeConfirmation(confirmationHash)
+				if issueErr != nil {
+					if cleanup := m.disconnectNativeSmartRoutingUnlocked(); cleanup != nil {
+						return result, Fault("guard_pending", "native confirmation failed and recovery remains uncertain")
+					}
+					return result, Fault("guard_unavailable", "native confirmation could not be staged; Direct restored")
+				}
 				result.Observed = "active"
 				result.ReplyGuardVerified = true
+				result.ConfirmationState = "pending"
+				result.ConfirmationSeconds = remaining
+				result.ConfirmationCommand = "sudo /usr/local/bin/server-connect confirm " + confirmationToken
 				return result, nil
 			}
 			// Readiness is transient, but *only* while the verified kernel
@@ -1363,6 +1412,18 @@ func (m *Manager) NativeStatus() (NativeConnectionStatus, error) {
 		}
 		boot, bootErr := trialBootIdentity()
 		now, timeErr := nativeUptimeMillis()
+		if session.ConfirmationAccepted {
+			result.ConfirmationState = "confirmed"
+		} else if session.ConfirmationTokenSHA256 != "" {
+			result.ConfirmationState = "pending"
+			if session.ConfirmationIssuedMS > 0 {
+				if now >= session.ConfirmationDeadlineMS {
+					result.ConfirmationState = "expired"
+				} else if now >= session.ConfirmationIssuedMS {
+					result.ConfirmationSeconds = (session.ConfirmationDeadlineMS - now + 999) / 1000
+				}
+			}
+		}
 		if bootErr != nil || timeErr != nil || boot != health.BootID || now < health.HeartbeatMS || now-health.HeartbeatMS > nativeHealthLeaseMS {
 			return Fault("guard_unavailable", "native health supervision is stale or on a different boot")
 		}
